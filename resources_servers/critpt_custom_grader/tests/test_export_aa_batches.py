@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from resources_servers.critpt_custom_grader.export_aa_batches import generated_code, main
+from resources_servers.critpt_custom_grader.export_aa_batches import main
 
 
 PROBLEMS = ["synthetic_a", "synthetic_b", "synthetic_c"]
@@ -111,15 +111,18 @@ def test_full_repeats_are_written_in_the_replay_format(tmp_path, capsys):
     assert "repeat 1: 3 submissions, 1 without an answer" in capsys.readouterr().out
 
 
-def test_unscorable_missing_or_duplicate_rollouts_leave_their_repeat_unwritten(tmp_path, capsys):
+def test_unscorable_missing_or_failed_rollouts_leave_their_repeat_unwritten(tmp_path, capsys):
     unscorable = _complete_repeat(1)
     unscorable[0] = _row(0, 1, {"status": "failed", "error": {"message": "provider down"}, "output": []})
     missing = _complete_repeat(2)[1:]
-    duplicate = _complete_repeat(3) + [_row(2, 3, _finished("def answer():\n    return 3"))]
     no_response = _complete_repeat(4)
     no_response[2] = {key: value for key, value in no_response[2].items() if key != "response"}
 
-    code, out_dir = _run(tmp_path, _complete_repeat(0) + unscorable + missing + duplicate + no_response)
+    # A newer attempt of task 2 in repeat 3 failed: the failure stands over the older answer.
+    failed = {"_ng_task_index": 2, "_ng_rollout_index": 3, "_ng_attempt_index": 1, "error": "synthetic"}
+    _write(tmp_path / "rollouts_failures.jsonl", [failed])
+
+    code, out_dir = _run(tmp_path, _complete_repeat(0) + unscorable + missing + _complete_repeat(3) + no_response)
 
     assert code == 3
     assert (out_dir / "repeat-0" / "submissions.jsonl").exists()
@@ -128,7 +131,7 @@ def test_unscorable_missing_or_duplicate_rollouts_leave_their_repeat_unwritten(t
     expected = {
         "1": [{"task_index": 0, "reason": "response_incomplete"}],
         "2": [{"task_index": 0, "reason": "0 rollouts"}],
-        "3": [{"task_index": 2, "reason": "2 rollouts"}],
+        "3": [{"task_index": 2, "reason": "latest_attempt_failed"}],
         "4": [{"task_index": 2, "reason": "response_missing"}],
     }
     for repeat, problems in expected.items():
@@ -155,12 +158,88 @@ def test_inconsistent_rollouts_are_refused_before_writing(tmp_path, capsys, rows
     assert not out_dir.exists()
 
 
+def test_the_latest_attempt_of_a_rollout_is_exported(tmp_path):
+    # A recovery run appends a newer attempt after the masked one it replaces.
+    masked = {
+        **_row(2, 0, {"status": "failed", "error": {"message": "provider down"}, "output": []}),
+        "_ng_attempt_index": 0,
+    }
+    rerun = {**_row(2, 0, _finished("def answer():\n    return 3")), "_ng_attempt_index": 1}
+
+    code, out_dir = _run(tmp_path, _complete_repeat(0)[:2] + [masked, rerun])
+
+    assert code == 0
+    submissions = _read_jsonl(out_dir / "repeat-0" / "submissions.jsonl")
+    assert submissions[2]["submission"]["generated_code"] == "```python\ndef answer():\n    return 3\n```"
+
+
+def test_a_rerun_after_a_sidecar_failure_is_exported_and_non_superseding_rows_are_ignored(tmp_path):
+    # Attempt 0 failed into the sidecar; recovery's attempt 1 landed in the rollouts file.
+    failed = {"_ng_task_index": 2, "_ng_rollout_index": 0, "_ng_attempt_index": 0, "error": "synthetic"}
+    # A row the dispatch budget never started is no execution and supersedes nothing.
+    unstarted = {
+        "_ng_task_index": 1,
+        "_ng_rollout_index": 0,
+        "_ng_attempt_index": 5,
+        "_ng_omitted_rollout": True,
+        "_ng_dispatch_drained": True,
+    }
+    _write(tmp_path / "rollouts_failures.jsonl", [failed, unstarted])
+    rows = _complete_repeat(0)
+    rows[2] = {**_row(2, 0, _finished("def answer():\n    return 3")), "_ng_attempt_index": 1}
+
+    code, out_dir = _run(tmp_path, rows)
+
+    assert code == 0
+    assert len(_read_jsonl(out_dir / "repeat-0" / "submissions.jsonl")) == 3
+
+
+def test_a_task_whose_every_rollout_failed_leaves_its_repeats_unwritten(tmp_path):
+    failed = [{"_ng_task_index": 2, "_ng_rollout_index": r, "_ng_attempt_index": 0, "error": "x"} for r in (0, 1)]
+    _write(tmp_path / "rollouts_failures.jsonl", failed)
+
+    code, out_dir = _run(tmp_path, _complete_repeat(0)[:2] + _complete_repeat(1)[:2])
+
+    assert code == 3
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    for repeat in ("0", "1"):
+        assert manifest["repeats"][repeat]["problems"] == [{"task_index": 2, "reason": "latest_attempt_failed"}]
+
+
+def test_an_invalid_submission_is_not_exported(tmp_path):
+    rows = _complete_repeat(0) + _complete_repeat(1)
+    two_finishes = _finished("def answer():\n    return 1")
+    second = _finished("def answer():\n    return 2", call_id="finish-2")
+    two_finishes["output"] += second["output"]
+    rows[3] = _row(0, 1, two_finishes)
+
+    code, out_dir = _run(tmp_path, rows)
+
+    assert code == 3
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["repeats"]["1"]["problems"] == [{"task_index": 0, "reason": "submission_invalid"}]
+
+
+def test_rollouts_without_any_accepted_finish_are_refused(tmp_path, capsys):
+    no_finish = {"status": "completed", "metadata": None, "output": []}
+    code, out_dir = _run(tmp_path, [_row(task, 0, no_finish) for task in range(3)])
+
+    assert code == 2
+    assert "not the agentic recipe" in capsys.readouterr().err
+    assert not out_dir.exists()
+
+
 def test_a_line_that_is_not_an_object_is_refused(tmp_path, capsys):
     rollouts = tmp_path / "rollouts.jsonl"
     rollouts.write_text("\n[1, 2]\n")
 
     assert main(["--rollouts", str(rollouts), "--out-dir", str(tmp_path / "out")]) == 2
     assert "rollouts.jsonl:2 is not a JSON object" in capsys.readouterr().err
+    rollouts.write_text("{not json\n")
+    assert main(["--rollouts", str(rollouts), "--out-dir", str(tmp_path / "out")]) == 2
+    assert "rollouts.jsonl:1 is not valid JSON" in capsys.readouterr().err
+    assert main(["--rollouts", str(tmp_path / "absent.jsonl"), "--out-dir", str(tmp_path / "out")]) == 2
+    assert "absent.jsonl" in capsys.readouterr().err
 
 
 def test_an_earlier_export_is_never_overwritten(tmp_path, capsys):
@@ -173,8 +252,3 @@ def test_an_earlier_export_is_never_overwritten(tmp_path, capsys):
     assert code == 2
     assert "exists; export into a new directory" in capsys.readouterr().err
     assert (out_dir / "repeat-0" / "submissions.jsonl").read_bytes() == before
-
-
-def test_generated_code_wraps_sources_like_the_critpt_server():
-    assert generated_code("x = 1") == "```python\nx = 1\n```"
-    assert generated_code(None) == "```python\n```"

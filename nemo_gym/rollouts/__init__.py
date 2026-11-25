@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         SharedRolloutCollectionConfig,
         enrich_run_result,
         get_max_rollout_attempts,
+        is_non_superseding_rollout_row,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
@@ -81,6 +82,7 @@ _PUBLIC_API = {
     "clear_model_call_captures_for_rollouts": "model_calls",
     "coverage_path_for": "rollout_records",
     "get_max_rollout_attempts": "rollout_collection",
+    "is_non_superseding_rollout_row": "rollout_collection",
     "is_terminal_failure": "rollout_recovery",
     "journal_path_for": "rollout_records",
     "load_resubmit_offset": "rollout_recovery",
