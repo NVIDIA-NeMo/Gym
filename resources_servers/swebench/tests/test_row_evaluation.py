@@ -45,6 +45,7 @@ from resources_servers.swebench.row_evaluation import (
 from resources_servers.swebench.swebench_patches import (
     EVAL_SCRIPT_COMMAND,
     OPENLAYERS_CHROME_WRAPPER,
+    RESET_WORKTREE_COMMAND,
     XVFB_RUN_WRAPPER,
     run_instance,
 )
@@ -328,6 +329,21 @@ class _FakeEvalSandbox:
         pass
 
 
+class _PatchApplySandbox(_FakeEvalSandbox):
+    """A verification sandbox whose patch commands fail unless they start with one of ``succeeding``."""
+
+    def __init__(self, output: str, succeeding: tuple[str, ...]) -> None:
+        super().__init__(output)
+        self.succeeding = succeeding
+        self.commands: list[str] = []
+
+    async def exec(self, command: str, **kwargs: Any) -> SandboxExecResult:
+        self.commands.append(command)
+        if command.startswith(("git apply", "patch ")) and not command.startswith(self.succeeding):
+            return SandboxExecResult(stdout="", stderr="error: patch failed", return_code=1)
+        return await super().exec(command, **kwargs)
+
+
 class TestRunInstance:
     async def _run(self, monkeypatch: MonkeyPatch, tmp_path: Path, output: str, **overrides: Any) -> tuple[dict, str]:
         monkeypatch.chdir(tmp_path)  # run_instance writes its logs under the working directory
@@ -402,3 +418,49 @@ class TestRunInstance:
         )
         assert result["completed"] is False and result["resolved"] is False
         assert "did not execute every planned test" in result["error"]
+
+    async def _apply(self, monkeypatch: MonkeyPatch, tmp_path: Path, succeeding: tuple[str, ...]) -> tuple[dict, list]:
+        monkeypatch.chdir(tmp_path)
+        test_spec = make_server(evaluation_spec_source="row")._make_test_spec(
+            SWEBenchVerifyRequest.model_validate(ROW)
+        )
+        sandbox = _PatchApplySandbox(run_output(f"PASS {F2P} (12ms)\nPASS {P2P} (3ms)"), succeeding)
+        container = DockerContainer(id="run-id", instance_id=test_spec.instance_id)
+        container._inner_container = sandbox
+        result = await run_instance(
+            test_spec=test_spec,
+            pred={"instance_id": test_spec.instance_id, "model_patch": ROW["patch"]},
+            rm_image=False,
+            force_rebuild=False,
+            client=container,
+            run_id="run-id",
+        )
+        applying = [
+            c for c in sandbox.commands if c.startswith(("git apply", "patch ")) or c == RESET_WORKTREE_COMMAND
+        ]
+        return result, applying
+
+    async def test_a_failed_attempt_is_reset_before_the_three_way_merge(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        result, applying = await self._apply(monkeypatch, tmp_path, ("git apply --verbose --3way",))
+        assert result["resolved"] is True
+        assert applying == [
+            "git apply --verbose /tmp/patch.diff",
+            RESET_WORKTREE_COMMAND,
+            "git apply --verbose --3way /tmp/patch.diff",
+        ]
+
+    async def test_a_patch_already_in_the_tree_counts_as_applied(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        result, applying = await self._apply(monkeypatch, tmp_path, ("git apply --check --reverse",))
+        assert result["resolved"] is True and result["patch_apply_failed"] is False
+        assert "patch --batch --forward --fuzz=5 -p1 -i /tmp/patch.diff" in applying
+
+    async def test_a_patch_that_applies_nowhere_is_the_models_graded_zero(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        result, applying = await self._apply(monkeypatch, tmp_path, ())
+        assert result["patch_apply_failed"] is True and result["resolved"] is False
+        assert applying.count(RESET_WORKTREE_COMMAND) == 3

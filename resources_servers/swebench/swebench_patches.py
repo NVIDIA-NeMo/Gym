@@ -35,6 +35,17 @@ from resources_servers.swebench.row_evaluation import RowTestSpec, get_row_eval_
 # tests print on stdout before the start marker.
 EVAL_SCRIPT_COMMAND = "/bin/bash /eval.sh 2>&1"
 
+# How SWE-bench 5 applies a patch (run_evaluation.py, v5.0.1, MIT): a three-way merge before the partial --reject,
+# patch(1) only forwards, and a clean tree before each attempt. Used for rows that define their evaluation; the
+# harness path keeps the pinned harness's GIT_APPLY_CMDS.
+ROW_GIT_APPLY_CMDS = [
+    "git apply --verbose",
+    "git apply --verbose --3way",
+    "git apply --verbose --reject",
+    "patch --batch --forward --fuzz=5 -p1 -i",
+]
+RESET_WORKTREE_COMMAND = "/bin/bash -c 'git checkout -- . ; git clean -fd'"
+
 
 def eval_report_for(test_spec: TestSpec | RowTestSpec, pred: dict, test_output_path: Path) -> dict:
     """SWE-bench's report for ``pred``. A row that defines its own evaluation is graded with its own log parser and
@@ -150,7 +161,11 @@ async def run_instance(
 
         # Attempt to apply patch to container (TODO: FIX THIS)
         applied_patch = False
-        for git_apply_cmd in GIT_APPLY_CMDS:
+        row_defined = isinstance(test_spec, RowTestSpec)
+        for attempt, git_apply_cmd in enumerate(ROW_GIT_APPLY_CMDS if row_defined else GIT_APPLY_CMDS):
+            if row_defined and attempt:
+                # A failed attempt (notably --reject) leaves a partly patched tree; start the next from a clean one.
+                await container.exec_run(RESET_WORKTREE_COMMAND, workdir=DOCKER_WORKDIR, user=DOCKER_USER)
             val = await container.exec_run(
                 f"{git_apply_cmd} {DOCKER_PATCH}",
                 workdir=DOCKER_WORKDIR,
@@ -162,6 +177,14 @@ async def run_instance(
                 break
             else:
                 logger.info(f"Failed to apply patch to container: {git_apply_cmd}")
+        if not applied_patch and row_defined:
+            # The fallbacks can leave the patch fully applied while each exited non-zero.
+            reverse_check = await container.exec_run(
+                f"git apply --check --reverse {DOCKER_PATCH}", workdir=DOCKER_WORKDIR, user=DOCKER_USER
+            )
+            if reverse_check.exit_code == 0:
+                logger.info(f"{APPLY_PATCH_PASS}: verified already applied")
+                applied_patch = True
 
         # The jqlang__jq-2681 image contains dirty generated lexer files from
         # a different Flex version. Apply its golden source files only; jq's
