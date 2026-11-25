@@ -25,18 +25,20 @@ alarm of `unit_test_timeout_secs`, an overall deadline of
 
 ### Where it runs
 The shipped pairing (`code_gen_environment_server`) sets `sandbox_provider` and `sandbox_config`, which say how the
-Environment Server starts a sandbox group. Where each part runs is fixed per task; see
-[Where the agent and the verifier run](../../environment_servers/single_agent_turn/README.md#where-the-agent-and-the-verifier-run).
+Environment Server starts a sandbox group. Where each part runs is fixed per task; the rules are in
+[Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs).
 
 | Agent | Verifier | Why |
 |---|---|---|
-| Simple Agent's loop, in the Agent Server process | `separate`: a fresh group from `CODE_GEN_SANDBOX_IMAGE` with no network, started right before `/verify` | The task has no tools, and Simple Agent runs its loop without a sandbox. The verifier runs the candidate's code. |
+| Agent Server process | `separate` | No tools; the verifier runs the candidate's code (unit tests) in a group of its own. |
 
-code_gen borrows the verifier's group from the `ng_sandbox_access` field of the `/verify` body, uploads the runner and
-harness into a fresh directory, runs them, and releases its client; the Environment Server stops the group. A harness
-that cannot run its loop without a sandbox also borrows a group of its own at seed, with `sandbox_config.network`.
-`code_gen.yaml` ships `no_network`, so such a pairing sets `network: model_only` with `model_server` and a model server
-address the sandbox reaches; grading still gets a fresh group.
+With a CLI harness the Agent column is `attempt group`, which starts with `sandbox_config.network`: `code_gen.yaml`
+ships `no_network`, so such a pairing sets `network: model_only` with `model_server` and a model server address the
+sandbox reaches.
+
+The verifier's group starts from `CODE_GEN_SANDBOX_IMAGE` with no network right before `/verify`. code_gen borrows it
+from the `ng_sandbox_access` field of the `/verify` body, uploads the runner and harness into a fresh directory, runs
+them, and releases its client; the Environment Server stops the group.
 
 - The provider must apply `no_network` and lend sandboxes: Docker and OpenSandbox do. Enroot does not, so every
   attempt on it is refused at seed.
