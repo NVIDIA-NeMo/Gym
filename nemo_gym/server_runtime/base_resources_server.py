@@ -410,8 +410,6 @@ class ResourcesSeedSessionResponse(BaseModel):
     # What the attempt's sandbox group holds; the Environment Server starts it. A seed declares a group or lends a
     # sandbox (sandbox_access), never both.
     sandbox_group: SandboxGroupSpec | None = None
-    # The verifier executes nothing and calls no tools, so /verify may run without a sandbox (SandboxOptOut.verifier).
-    verifier_executes_nothing: bool = False
 
     @model_validator(mode="after")
     def _lend_or_declare(self) -> "ResourcesSeedSessionResponse":
@@ -422,14 +420,12 @@ class ResourcesSeedSessionResponse(BaseModel):
     # A return annotation would replace the model's serialization schema with that container schema.
     @model_serializer(mode="wrap")
     def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server sets no observation field and declares no sandbox fields."""
+        """Preserve the seed wire shape when the server sets no observation field and declares no sandbox group."""
         result = handler(self)
         if "observation" not in self.model_fields_set:
             result.pop("observation", None)
         if self.sandbox_group is None:
             result.pop("sandbox_group", None)
-        if not self.verifier_executes_nothing:
-            result.pop("verifier_executes_nothing", None)
         return result
 
 
@@ -709,12 +705,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # as openai or anthropic). Its verifier then saves no grading record of its own, so its trials are observed only
     # through a recorded grading operation or a saved grading artifact.
     grading_may_use_uninstrumented_model: ClassVar[bool] = False
-    # True for a server whose verifier executes nothing and calls no tools: it only reads the answer, with rules,
-    # math-verify or a judge call. Its seed reply declares it, and only then may an Environment Server run /verify
-    # without a sandbox (SandboxOptOut.verifier). A verifier that runs model output, passes model-chosen text to eval
-    # or to sympy's parse_expr, or reads state from the sandbox, leaves it False; math-verify qualifies because it
-    # parses only text its patterns limit to numbers and arithmetic operators.
-    verifier_executes_nothing: ClassVar[bool] = False
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
@@ -1220,19 +1210,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def sandbox_declaration(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
         """The seed reply's sandbox fields: ``sandbox_group``'s declaration, with ``prepare`` set when the class
-        overrides ``prepare_sandbox``, and ``verifier_executes_nothing`` from the class.
+        overrides ``prepare_sandbox``.
 
         The inherited ``seed_session`` puts them on its reply. A server that overrides ``seed_session`` and builds its
-        own reply passes them on: ``ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))``. One that
-        does not declares nothing, so its verifier cannot opt out of the sandbox.
+        own reply passes them on: ``ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))``; one that
+        does not declares no group.
         """
         group = self.sandbox_group(body)
         if self._prepares_sandbox():
             group = (group or SandboxGroupSpec()).model_copy(update={"prepare": True})
-        declaration: dict[str, Any] = {"sandbox_group": group}
-        if self.verifier_executes_nothing:
-            declaration["verifier_executes_nothing"] = True
-        return declaration
+        return {"sandbox_group": group}
 
     async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
         """Prepare the task in the attempt's sandbox group, which the Environment Server started from this seed's

@@ -169,10 +169,6 @@ class SimpleQAVerifyResponse(BaseVerifyResponse):
 class SimpleQAServer(SimpleResourcesServer):
     config: SimpleQAConfig
 
-    # verify() only formats the judge prompt, calls the judge model and parses one letter: it runs nothing the model
-    # wrote and calls no tools, so an Environment Server may run /verify without a sandbox (sandbox_opt_out.verifier).
-    verifier_executes_nothing: ClassVar[bool] = True
-
     def model_post_init(self, context):
         prompt_data = yaml.safe_load(Path(self.config.judge_prompt_path).read_text())
         self._judge_prompt_template = prompt_data["user"]

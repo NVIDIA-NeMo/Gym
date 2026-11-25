@@ -15,7 +15,6 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
-from fastapi.testclient import TestClient
 from pytest import approx, fixture
 
 from nemo_gym.client import ServerClient
@@ -26,7 +25,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_runtime import ResourcesSeedSessionResponse, ReverifyMode
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.simpleqa.app import (
     SimpleQAConfig,
     SimpleQAServer,
@@ -198,27 +197,6 @@ class TestSimpleQAServer:
     async def test_reverify_mode(self, config: SimpleQAConfig) -> None:
         resources_server = SimpleQAServer(config=config, server_client=MagicMock(spec=ServerClient))
         assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
-
-    def test_seed_reply_declares_that_the_verifier_executes_nothing(self, config: SimpleQAConfig) -> None:
-        # An Environment Server allows sandbox_opt_out.verifier only for a server whose seed reply declares this.
-        server = SimpleQAServer(config=config, server_client=MagicMock(spec=ServerClient))
-        client = TestClient(server.setup_webserver())
-
-        reply = client.post(
-            "/seed_session",
-            json={
-                "resources_session_id": "resources-session",
-                "episode_id": {"rollout_id": "rollout", "attempt": 0},
-                "task_id": {"taskset": "simpleqa", "task_id": "example_1"},
-                "task_data": {"question": "What is the capital of France?", "expected_answer": "Paris"},
-            },
-        )
-
-        assert reply.status_code == 200
-        seed = ResourcesSeedSessionResponse.model_validate(reply.json())
-        assert seed.verifier_executes_nothing is True
-        # It declares no sandbox group: the task needs nothing in one.
-        assert seed.sandbox_group is None
 
     async def test_verify_correct(self, config: SimpleQAConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)

@@ -65,7 +65,6 @@ may therefore opt out of the attempt's sandbox group, which saves sandbox capaci
 | `simpleqa.yaml` | `simpleqa_environment_server` | Agent Server process | Resources Server |
 | `simpleqa_sandboxed.yaml` | `simpleqa_sandboxed_environment_server` | The attempt's sandbox group | Resources Server |
 
-`SimpleQAServer` declares `verifier_executes_nothing`, which a verifier opt-out requires.
 `simpleqa_environment_server` sets `sandbox_opt_out: {task: true, verifier: true}` and needs no sandbox provider.
 
 `simpleqa_sandboxed_environment_server` starts one sandbox per attempt from its `sandbox_config` and lends it to the
