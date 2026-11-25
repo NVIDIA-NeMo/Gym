@@ -450,6 +450,37 @@ class TestLentSandboxVerify:
             server._semaphore.release()
         assert res.reward == 1.0
 
+    async def test_grades_in_one_lent_sandbox_run_one_at_a_time(self, monkeypatch) -> None:
+        # A /verify resent after a dropped connection must not share the sandbox's CPU with the first one.
+        running, peak = {}, {}
+
+        async def _borrow(access):
+            sandbox = _LentSandbox()
+            sandbox.sandbox_id = access.connection.descriptor["sandbox_id"]
+            return sandbox
+
+        async def _grading(*args, sandbox, **kwargs):
+            running[sandbox.sandbox_id] = running.get(sandbox.sandbox_id, 0) + 1
+            peak[sandbox.sandbox_id] = max(peak.get(sandbox.sandbox_id, 0), running[sandbox.sandbox_id])
+            await asyncio.sleep(0.05)
+            running[sandbox.sandbox_id] -= 1
+            return [True, True], None
+
+        def _request(sandbox_id: str) -> CompCodingVerifyRequest:
+            access = {**_ACCESS, "connection": {**_ACCESS["connection"], "descriptor": {"sandbox_id": sandbox_id}}}
+            body = _verify_request("n=int(input())\nprint(n*n)").model_dump(mode="json")
+            return CompCodingVerifyRequest.model_validate(body | {NG_SANDBOX_ACCESS_KEY: access})
+
+        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _grading)
+        server = _make_server()
+        await asyncio.gather(*(server.verify(_request(name)) for name in ("attempt-1", "attempt-1", "attempt-2")))
+
+        # The two grades in attempt-1's sandbox ran one after the other; attempt-2's did not wait for them.
+        assert peak == {"attempt-1": 1, "attempt-2": 1}
+        # No lock outlives the grades that held it.
+        assert len(server._lent_sandbox_locks) == 0
+
     async def test_a_runner_failure_still_releases_the_borrowed_client(self, monkeypatch) -> None:
         lent = _LentSandbox()
 
@@ -482,6 +513,15 @@ class TestLentSandboxVerify:
         assert res.reward == 1.0 and not res.mask_sample
         assert lent.disconnected == 1
         assert "could not release its client" in caplog.text
+
+    @pytest.mark.parametrize("error", [ImportError("no provider SDK"), ValueError("no provider block 'sandbox'")])
+    async def test_a_deployment_error_fails_the_request_instead_of_masking_every_sample(self, monkeypatch, error):
+        async def _borrow(access):
+            raise error
+
+        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
+        with pytest.raises(type(error)):
+            await _make_server().verify(self._lent_request())
 
     async def test_a_failed_borrow_masks_the_sample(self, monkeypatch) -> None:
         async def _borrow(access):

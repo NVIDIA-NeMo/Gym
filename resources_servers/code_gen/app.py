@@ -17,10 +17,11 @@ import base64
 import json
 import logging
 import zlib
-from asyncio import Semaphore
+from asyncio import Lock, Semaphore
 from contextlib import nullcontext
 from time import time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from weakref import WeakValueDictionary
 
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
@@ -129,6 +130,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
         self._sandbox_target: Optional[Tuple[Dict[str, Any], Dict[str, str]]] = None
+        # One grade at a time per lent sandbox: a /verify the caller resent after a dropped connection waits for the
+        # first instead of sharing the sandbox's CPU with it, which would turn per-test time limits into failures.
+        self._lent_sandbox_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
 
     def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec:
         """The attempt's sandbox group runs the unit tests, so it starts from code_gen's verifier image."""
@@ -334,26 +338,10 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             SandboxVerificationError: When no sandbox can run them; the caller masks the sample.
         """
         if access is not None:
-            try:
-                sandbox = await borrow(access)
-            except Exception as e:
-                raise SandboxVerificationError(
-                    PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}"
-                ) from e
-            try:
-                return await check_correctness_in_sandbox(
-                    *task_args,
-                    num_tests=num_tests,
-                    sandbox=sandbox,
-                    config=self.config.sandbox_config,
-                )
-            finally:
-                # Releases this server's client only: the Environment Server that lent the sandbox stops it. A failed
-                # release must not replace the grade or the error above it.
-                try:
-                    await sandbox.disconnect()
-                except Exception:
-                    LOG.warning("code_gen could not release its client of the lent sandbox", exc_info=True)
+            key = json.dumps(access.connection.model_dump(mode="json"), sort_keys=True)
+            lock = self._lent_sandbox_locks.setdefault(key, Lock())
+            async with lock:
+                return await self._run_tests_in_lent(access, task_args, num_tests=num_tests)
         provider, sandbox_metadata = self._resolve_sandbox_target()
         return await check_correctness_in_sandbox(
             *task_args,
@@ -362,6 +350,32 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             config=self.config.sandbox_config,
             metadata=sandbox_metadata,
         )
+
+    async def _run_tests_in_lent(
+        self, access: SandboxAccess, task_args: tuple[Any, ...], *, num_tests: int
+    ) -> tuple[list[bool | int], dict[str, Any] | None]:
+        """Borrow the lent sandbox, run the unit tests in it, and release the client; its owner stops it."""
+        try:
+            sandbox = await borrow(access)
+        except (ImportError, ValueError):
+            # A missing provider SDK or a provider block this server cannot resolve is a deployment error that would
+            # mask every sample, not an outage: fail the request instead.
+            raise
+        except Exception as e:
+            raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}") from e
+        try:
+            return await check_correctness_in_sandbox(
+                *task_args,
+                num_tests=num_tests,
+                sandbox=sandbox,
+                config=self.config.sandbox_config,
+            )
+        finally:
+            # A failed release must not replace the grade or the error above it.
+            try:
+                await sandbox.disconnect()
+            except Exception:
+                LOG.warning("code_gen could not release its client of the lent sandbox", exc_info=True)
 
 
 if __name__ == "__main__":

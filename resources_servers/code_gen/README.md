@@ -51,9 +51,16 @@ A caller that lends no sandbox to `/verify`, such as a re-verification, gets a f
 `sandbox_provider` and `sandbox_config`, as before. A sandbox that cannot be borrowed or runs no tests masks the
 sample as below; the tests never run on the server's host.
 
-`model_only` needs a provider that applies egress rules, such as OpenSandbox with
-`networking.enforces_network_policy: true`. Docker and Enroot refuse it at startup. For a trusted local setup,
-override the Environment Server's rule explicitly:
+The pairing needs three things the old one did not:
+
+- a provider that applies `model_only` and lends sandboxes, such as OpenSandbox with
+  `networking.enforces_network_policy: true`. Docker and Enroot refuse `model_only` at startup;
+- servers at an address the sandbox reaches (`default_host` or `use_absolute_ip`), not a loopback address;
+- an image that also runs Simple Agent's runtime, which unpacks a glibc Python build under `/tmp`. The
+  `sandbox/Dockerfile` image does.
+
+It also holds one sandbox per running attempt for the whole generation, where code_gen alone held at most
+`num_processes` short-lived ones. For a trusted local setup on Docker or Enroot, override the rule explicitly:
 
 ```yaml
 code_gen_environment_server:
@@ -64,7 +71,10 @@ code_gen_environment_server:
         model_server: null
 ```
 
-Grading keeps the egress rule the sandbox started with: providers cannot change a running sandbox's egress yet.
+Grading keeps the egress rule the sandbox started with, because providers cannot change a running sandbox's egress
+yet. Candidate code can therefore reach the model server's host during grading, where code_gen's own verifier
+sandbox allowed no egress at all. A group for the grader alone (`sandbox_opt_out.task`) starts from the same
+`sandbox_config` today.
 
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)

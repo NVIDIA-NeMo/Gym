@@ -16,8 +16,9 @@
 
 judge calls an LLM judge and routes a failed judge call to the failures sidecar (``call_judge``,
 ``judge_failsafe``); verifier_fixture runs in-process contract tests of a server's verifier; and
-sandbox_verification grades a submission in a fresh, single-use sandbox or in one the caller holds. sandbox_verification uses only the
-provider-neutral API; core sandbox APIs and providers live in :mod:`nemo_gym.sandbox`.
+sandbox_verification grades a submission in a fresh, single-use sandbox or in one the caller holds.
+sandbox_verification uses only the provider-neutral API; core sandbox APIs and providers live in
+:mod:`nemo_gym.sandbox`.
 """
 
 # Public API

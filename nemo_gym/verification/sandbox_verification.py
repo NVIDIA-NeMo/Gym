@@ -167,6 +167,10 @@ async def run_verification_in_sandbox(
     attempt's sandbox an Environment Server lends ``/verify``. The files are uploaded into a fresh subdirectory of
     ``work_dir`` and the runner runs there; the sandbox is left running, since its owner stops it.
 
+    The grade is only as trustworthy as the sandbox: ``python`` resolves there, and the result file is read back after
+    the runner exits. Use it where nothing untrusted ran before the grade, such as an agent that ran no model-written
+    code; a sandbox where a tool already ran model code can leave a process behind that forges the result.
+
     Args:
         sandbox: A started or borrowed sandbox.
         files: As for :func:`run_verification_sandbox`.
@@ -193,6 +197,9 @@ async def run_verification_in_sandbox(
             )
         for path, text in _uploads(work_dir, files, request).items():
             await upload_text(sandbox, path=path, text=text)
+    except ImportError:
+        # A missing provider SDK is a deployment error, not an outage, as in run_verification_sandbox.
+        raise
     except Exception as e:
         raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"sandbox upload failed: {e!r}") from e
     return await _grade(
