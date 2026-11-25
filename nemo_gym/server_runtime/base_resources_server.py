@@ -79,6 +79,7 @@ from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.server_runtime.attempt_sandbox import (
     PREPARE_SANDBOX_PATH,
+    VERIFIER_MODES,
     ResourcesPrepareSandboxRequest,
     ResourcesPrepareSandboxResponse,
     SandboxGroupSpec,
@@ -411,13 +412,21 @@ class ResourcesSeedSessionResponse(BaseModel):
     # What the attempt's sandbox group holds; the Environment Server starts it. A seed declares a group or lends a
     # sandbox (sandbox_access), never both.
     sandbox_group: SandboxGroupSpec | None = None
-    # Where /verify runs (VerifierMode); "none", the default, keeps it in the Resources Server with no sandbox.
+    # Where /verify runs unless the Environment Server's verifier.mode says otherwise (VerifierMode); "none", the
+    # default, keeps it in the Resources Server with no sandbox.
     verifier_mode: VerifierMode = "none"
+    # Every verifier mode this server's /verify can run in; unset, only verifier_mode.
+    supported_verifier_modes: list[VerifierMode] | None = None
 
     @model_validator(mode="after")
     def _lend_or_declare(self) -> "ResourcesSeedSessionResponse":
         if self.sandbox_access is not None and self.sandbox_group is not None:
             raise ValueError("a seed reply lends a sandbox (sandbox_access) or declares one (sandbox_group), not both")
+        if self.supported_verifier_modes is not None and self.verifier_mode not in self.supported_verifier_modes:
+            raise ValueError(
+                f"verifier_mode {self.verifier_mode!r} is not among supported_verifier_modes "
+                f"{self.supported_verifier_modes}"
+            )
         return self
 
     # A return annotation would replace the model's serialization schema with that container schema.
@@ -431,6 +440,8 @@ class ResourcesSeedSessionResponse(BaseModel):
             result.pop("sandbox_group", None)
         if self.verifier_mode == "none":
             result.pop("verifier_mode", None)
+        if self.supported_verifier_modes is None:
+            result.pop("supported_verifier_modes", None)
         return result
 
 
@@ -710,17 +721,27 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # as openai or anthropic). Its verifier then saves no grading record of its own, so its trials are observed only
     # through a recorded grading operation or a saved grading artifact.
     grading_may_use_uninstrumented_model: ClassVar[bool] = False
-    # Where this server's /verify runs, which its seed reply declares (VerifierMode): "none", in this server with no
-    # sandbox, for a verifier that executes nothing (rules, a judge call); "shared", in the group the agent borrowed;
-    # "separate", in a fresh group with no network. A verifier that runs model output, or hands it to an evaluating
-    # parser such as SymPy's, declares "shared" or "separate".
+    # Where this server's /verify runs unless the Environment Server's verifier.mode says otherwise, which its seed
+    # reply declares (VerifierMode): "none", in this server with no sandbox, for a verifier that executes nothing
+    # (rules, a judge call); "shared", in the group the agent borrowed; "separate", in a fresh group with no network.
+    # A verifier that runs model output, or hands it to an evaluating parser such as SymPy's, declares "shared" or
+    # "separate".
     verifier_mode: ClassVar[VerifierMode] = "none"
+    # Every mode this server's /verify can run in, verifier_mode among them; None, only verifier_mode. A configured
+    # verifier.mode outside them is refused at seed. A /verify that grades in a sandbox when it is lent one
+    # (NG_SANDBOX_ACCESS_KEY) and in this process otherwise supports "none" too.
+    supported_verifier_modes: ClassVar[frozenset[VerifierMode] | None] = None
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
+        if cls.supported_verifier_modes is not None and cls.verifier_mode not in cls.supported_verifier_modes:
+            raise TypeError(
+                f"{cls.__name__}.verifier_mode {cls.verifier_mode!r} is not among its supported_verifier_modes "
+                f"{sorted(cls.supported_verifier_modes)}"
+            )
         hooks = ("has_session_state", "initialize_session_state", "release_session_state")
         implemented = [name for name in hooks if getattr(cls, name) is not getattr(SimpleResourcesServer, name)]
         if not implemented:
@@ -1220,7 +1241,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def sandbox_declaration(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
         """The seed reply's sandbox fields: ``sandbox_group``'s declaration, with ``prepare`` set when the class
-        overrides ``prepare_sandbox``, and the class's ``verifier_mode``.
+        overrides ``prepare_sandbox``, and the class's ``verifier_mode`` and ``supported_verifier_modes``.
 
         The inherited ``seed_session`` puts them on its reply. A server that overrides ``seed_session`` and builds its
         own reply passes them on: ``ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))``; one that
@@ -1229,7 +1250,17 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         group = self.sandbox_group(body)
         if self._prepares_sandbox():
             group = (group or SandboxGroupSpec()).model_copy(update={"prepare": True})
-        return {"sandbox_group": group, "verifier_mode": self.verifier_mode}
+        supported = self.supported_verifier_modes
+        return {
+            "sandbox_group": group,
+            "verifier_mode": self.verifier_mode,
+            # Left off the wire when it is just verifier_mode, which the Environment Server assumes when it is unset.
+            "supported_verifier_modes": (
+                None
+                if supported is None or supported == {self.verifier_mode}
+                else [mode for mode in VERIFIER_MODES if mode in supported]
+            ),
+        }
 
     async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
         """Prepare the task in the attempt's sandbox group, which the Environment Server started from this seed's
