@@ -1,10 +1,10 @@
 # Nemotron 3.5 Super — Reward Profiling
 
-Runs a policy over configured datasets and summarizes per-task reward, so you can see which
-environments the checkpoint has saturated and which still carry signal.
+Runs the policy over every dataset in the RL training blend and summarizes per-task reward, so you
+can see which environments the checkpoint has saturated and which still carry signal.
 
-`manifests/nemotron_3_5_super.yaml` is a multi-environment sweep, run as **one** Gym deployment over
-one concatenated input. Each row carries its own `agent_ref` and
+`manifests/nemotron_3_5_super.yaml` is the full sweep: **36 environments, 726,121 source rows**, run
+as **one** Gym deployment over one concatenated input. Each row carries its own `agent_ref` and
 rollout collection dispatches per row, so judge-scored, sandbox-backed and plain environments all
 coexist in a single job. The machinery is generic and lives in `infra/` beside this file -- nothing in Gym imports it,
 so it is not part of `nemo_gym`; only the
