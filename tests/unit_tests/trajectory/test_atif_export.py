@@ -1946,14 +1946,215 @@ def test_transcript_to_atif_maps_developer_to_system_and_keeps_pending_calls_ope
         ([_function_output("call_404", "x")], "matches no pending call"),
         ([_assistant_message("m", "a"), {"role": "system", "content": "later"}], "later system or developer"),
         ([_reasoning("rs", "thinking"), {"role": "system", "content": "later"}], "later system or developer"),
-        ([{"role": "assistant", "content": "copied"}], "copied assistant context"),
-        ([_function_call("c1", "t", {}), _function_call("c1", "t", {})], "duplicate function call ID"),
+        ([_function_call("c1", "t", {}), _function_call("c1", "t", {})], "duplicate tool call ID"),
         ([{"type": "mcp_list_tools", "id": "l", "server_label": "s", "tools": []}], "unsupported transcript item"),
     ],
 )
 def test_transcript_to_atif_refuses_what_it_cannot_represent(output_items: list[dict[str, Any]], message: str) -> None:
     with pytest.raises(AtifExportError, match=message):
         _transcript([{"role": "user", "content": "go"}], output_items)
+
+
+@pytest.mark.parametrize("item_id", [None, "", "assistant-item"])
+@pytest.mark.parametrize("phase", [None, "commentary", "final_answer"])
+@pytest.mark.parametrize("content", ["Raw text\nπ", [{"type": "input_text", "text": "Raw text\nπ"}], []])
+def test_transcript_to_atif_accepts_statusless_assistant_output_without_inventing_status(
+    item_id: str | None, phase: str | None, content: str | list[dict[str, str]]
+) -> None:
+    item: dict[str, Any] = {"type": "message", "role": "assistant", "content": content}
+    if item_id is not None:
+        item["id"] = item_id
+    if phase is not None:
+        item["phase"] = phase
+    source = copy.deepcopy(item)
+    trajectory = _transcript([{"role": "user", "content": "go"}], [item])
+    answer = trajectory.steps[-1]
+    assert answer.source == "agent" and answer.message == ("" if content == [] else "Raw text\nπ")
+    extra = answer.extra["nemo_gym"]
+    assert extra["source_status_absent"] is True
+    assert extra.get("source_item_id") == item_id
+    assert ("source_item_id" in extra) == (item_id is not None)
+    assert extra.get("source_phase") == phase
+    assert "status" not in extra and "source_status" not in extra
+    assert item == source and "status" not in item
+    assert AtifTrajectoryV1_7.model_validate_json(encode_atif_trajectory(trajectory)) == trajectory
+
+
+@pytest.mark.parametrize(
+    "assistant",
+    [
+        {"role": "assistant", "content": "copied"},
+        {"id": "copied-item", "role": "assistant", "content": [], "phase": "commentary"},
+        _assistant_message("copied-item", "copied"),
+    ],
+)
+def test_transcript_to_atif_still_rejects_assistant_request_context(assistant: dict[str, Any]) -> None:
+    with pytest.raises(AtifExportError, match="copied assistant context"):
+        _transcript([{"role": "user", "content": "go"}, assistant], [_assistant_message("answer", "new")])
+
+
+@pytest.mark.parametrize("raw_input", ["*** Begin Patch\n+π\n*** End Patch\n", '{"looks": "like function JSON"}'])
+@pytest.mark.parametrize("raw_output", ["Raw result\nπ", [{"type": "input_text", "text": "Raw result\nπ"}]])
+def test_transcript_to_atif_preserves_custom_tool_payloads_and_native_call_ids(
+    raw_input: str, raw_output: str | list[dict[str, str]]
+) -> None:
+    output = [
+        _reasoning("reason", "Use both tools."),
+        _function_call("exec-call", "exec_command", {"cmd": "pwd"}),
+        {
+            "type": "custom_tool_call",
+            "id": "patch-item",
+            "call_id": "patch-call",
+            "name": "apply_patch",
+            "input": raw_input,
+        },
+        {"type": "custom_tool_call_output", "id": "patch-result", "call_id": "patch-call", "output": raw_output},
+        _function_output("exec-call", "function result"),
+        {"type": "message", "role": "assistant", "content": "done", "phase": "final_answer"},
+    ]
+    source = copy.deepcopy(output)
+    trajectory = _transcript([{"role": "user", "content": "go"}], output)
+    tools = trajectory.steps[1]
+    assert tools.reasoning_content == "Use both tools."
+    assert [call.tool_call_id for call in tools.tool_calls] == ["exec-call", "patch-call"]
+    custom = tools.tool_calls[1]
+    assert custom.function_name == "apply_patch" and custom.arguments == {"input": raw_input}
+    assert custom.extra == {
+        "nemo_gym": {"source_item_id": "patch-item", "source_item_type": "custom_tool_call", "raw_input": raw_input}
+    }
+    result = tools.observation.results[0]
+    assert result.source_call_id == "patch-call" and result.content == "Raw result\nπ"
+    assert result.extra == {
+        "nemo_gym": {
+            "source_item_id": "patch-result",
+            "source_item_type": "custom_tool_call_output",
+            "raw_output": raw_output,
+        }
+    }
+    assert tools.observation.results[1].source_call_id == "exec-call"
+    assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == []
+    assert output == source
+    assert AtifTrajectoryV1_7.model_validate_json(encode_atif_trajectory(trajectory)) == trajectory
+
+
+@pytest.mark.parametrize("provider_result", [False, True])
+def test_transcript_to_atif_accepts_both_custom_result_models(provider_result: bool) -> None:
+    from nemo_gym.core.responses_api_types import (
+        NeMoGymResponseCustomToolCall,
+        NeMoGymResponseCustomToolCallOutput,
+        NeMoGymResponseCustomToolCallOutputItem,
+    )
+
+    call = NeMoGymResponseCustomToolCall.model_validate(
+        {
+            "type": "custom_tool_call",
+            "id": "tool-item",
+            "call_id": "native-call",
+            "name": "apply_patch",
+            "namespace": "functions",
+            "status": "completed",
+            "input": "raw\npatch",
+        }
+    )
+    payload = {"type": "custom_tool_call_output", "id": "", "call_id": "native-call", "output": ""}
+    if provider_result:
+        payload["status"] = "completed"
+    result_type = NeMoGymResponseCustomToolCallOutputItem if provider_result else NeMoGymResponseCustomToolCallOutput
+    result = result_type.model_validate(payload)
+    before = [item.model_dump(mode="json") for item in (call, result)]
+
+    trajectory = _transcript([{"role": "user", "content": "go"}], [call, result])
+
+    tool = trajectory.steps[1].tool_calls[0]
+    assert tool.tool_call_id == "native-call" and tool.arguments == {"input": "raw\npatch"}
+    assert tool.extra["nemo_gym"]["source_namespace"] == "functions"
+    assert tool.extra["nemo_gym"]["source_status"] == "completed"
+    observation = trajectory.steps[1].observation.results[0]
+    assert observation.source_call_id == "native-call" and observation.content == ""
+    assert observation.extra["nemo_gym"]["source_item_id"] == ""
+    assert observation.extra["nemo_gym"]["raw_output"] == ""
+    assert observation.extra["nemo_gym"].get("source_status") == ("completed" if provider_result else None)
+    assert [item.model_dump(mode="json") for item in (call, result)] == before
+
+
+@pytest.mark.parametrize(
+    "damage", ["duplicate_call", "reused_completed_call", "unmatched_result", "duplicate_result", "wrong_result_type"]
+)
+def test_transcript_to_atif_rejects_ambiguous_custom_tool_pairs(damage: str) -> None:
+    call = {"type": "custom_tool_call", "call_id": "call-1", "name": "apply_patch", "input": "raw patch"}
+    result = {"type": "custom_tool_call_output", "call_id": "call-1", "output": "raw result"}
+    if damage == "duplicate_call":
+        output = [call, _function_call("call-1", "exec_command", {})]
+        message = "duplicate tool call ID"
+    elif damage == "reused_completed_call":
+        output = [call, result, call]
+        message = "duplicate tool call ID"
+    elif damage == "unmatched_result":
+        output = [{**result, "call_id": "missing-call"}]
+        message = "matches no pending call"
+    elif damage == "duplicate_result":
+        output = [call, result, result]
+        message = "matches no pending call"
+    else:
+        output = [call, _function_output("call-1", "wrong kind")]
+        message = "result type does not match"
+    with pytest.raises(AtifExportError, match=message):
+        _transcript([{"role": "user", "content": "go"}], output)
+
+
+def test_codex_session_output_exports_to_atif_without_rewriting_the_transcript() -> None:
+    from responses_api_agents.codex_agent.observability import codex_response_output, parse_codex_observations
+
+    items = [
+        {
+            "type": "message",
+            "id": "commentary",
+            "role": "assistant",
+            "phase": "commentary",
+            "content": [{"type": "output_text", "text": "I will edit.\nπ"}],
+        },
+        _reasoning("reason", "Apply the change."),
+        {
+            "type": "custom_tool_call",
+            "call_id": "patch-call",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch\n",
+        },
+        {"type": "custom_tool_call_output", "call_id": "patch-call", "output": "Patch result\nπ"},
+        {
+            "type": "message",
+            "id": "answer",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "Done."}],
+        },
+    ]
+    transcript = "\n".join(
+        json.dumps({"type": "response_item", "timestamp": "2026-11-19T13:00:00Z", "payload": item}, ensure_ascii=False)
+        for item in items
+    )
+    original = copy.deepcopy(items)
+    bundle = parse_codex_observations(transcript, "invocation", returncode=0, timed_out=False)
+    canonical = codex_response_output(bundle)
+    before = [item.model_dump(mode="json") for item in canonical]
+    trajectory = transcript_to_atif(
+        [{"role": "user", "content": "go"}],
+        canonical,
+        session_id="codex-episode",
+        agent_name="codex_agent",
+        agent_version="1.2.3",
+    )
+    assert trajectory.steps[1].message == "I will edit.\nπ"
+    assert trajectory.steps[1].extra["nemo_gym"]["source_item_id"] == "commentary"
+    assert trajectory.steps[1].extra["nemo_gym"]["source_phase"] == "commentary"
+    assert trajectory.steps[2].tool_calls[0].tool_call_id == "patch-call"
+    assert trajectory.steps[2].tool_calls[0].extra["nemo_gym"]["raw_input"] == items[2]["input"]
+    assert trajectory.steps[2].observation.results[0].content == "Patch result\nπ"
+    assert trajectory.steps[-1].message == "Done."
+    assert trajectory.steps[-1].extra["nemo_gym"]["source_phase"] == "final_answer"
+    assert [item.model_dump(mode="json") for item in canonical] == before
+    assert [json.loads(line)["payload"] for line in transcript.splitlines()] == original
+    assert items == original
 
 
 @pytest.mark.parametrize(

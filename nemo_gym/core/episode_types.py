@@ -21,6 +21,7 @@ from typing_extensions import Self
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.failure_records import EpisodeFailure, FailureReport
+from nemo_gym.core.harness_routing import HarnessRoutingMetadata
 
 
 _CAPTURE_KEY_ATTEMPT = re.compile(r"-a([1-9][0-9]*)$")
@@ -118,6 +119,7 @@ class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
     episode_id: EpisodeId
     task_id: TaskId
     result: EpisodeResultT | None = None
+    harness_routing: HarnessRoutingMetadata | None = Field(default=None, exclude_if=lambda value: value is None)
     failure: EpisodeFailure | None = None
     failure_report: FailureReport | None = Field(
         default=None, description="Diagnostic failures of this attempt, beside ``failure`` or a recovered result."

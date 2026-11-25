@@ -353,28 +353,37 @@ def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
     """Return the agent references in one environment server's config.
 
     An environment server can front several agents, such as a user and an assistant.
-    Any top-level field whose value has `type: responses_api_agents` references an agent.
-    So does `agent_server`, whose type may be left out.
+    A mapping with `type: responses_api_agents` references an agent, including
+    references grouped in a nested mapping. The top-level `agent_server` may omit its type.
     `scripts/add_legacy_agent_environment_servers.py` applies the same rule.
     """
-    return [
-        reference
-        for field, reference in server.items()
-        if isinstance(reference, DictConfig)
-        and (
-            reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
-            or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
-        )
-    ]
+    references: list[DictConfig] = []
+
+    def visit(config: DictConfig, *, top_level: bool) -> None:
+        items = config.items() if top_level else config.items_ex(resolve=False)
+        for field, reference in items:
+            if not isinstance(reference, DictConfig):
+                continue
+            if reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME or (
+                top_level and field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None
+            ):
+                references.append(reference)
+            else:
+                visit(reference, top_level=False)
+
+    visit(server, top_level=True)
+    return references
 
 
 def environment_server_agent_names(server: DictConfig) -> list[str]:
     """Return the names of the agents one environment server's config references."""
-    return [
-        str(reference["name"])
-        for reference in environment_server_agent_refs(server)
-        if reference.get("name") is not None
-    ]
+    return list(
+        dict.fromkeys(
+            str(reference["name"])
+            for reference in environment_server_agent_refs(server)
+            if reference.get("name") is not None
+        )
+    )
 
 
 def environment_server_attributed_agent(server: DictConfig) -> Optional[str]:

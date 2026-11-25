@@ -730,7 +730,7 @@ class ServerSupervisor:  # pragma: no cover
                 # The sidecar rewrote the model URLs in the config; a second start would point them at a stopped one.
                 sidecar_started = self._h2_ping_sidecar is not None
                 self.shutdown()
-                if attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
+                if self._processes or attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
                     raise
 
     def _move_to_a_fresh_port(self, error: BaseException) -> bool:
@@ -1232,7 +1232,11 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 f"within {_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL; "
                 "they may remain as zombies until this process exits."
             )
-        self._processes = dict()
+        self._processes = {
+            name: process
+            for name, process in self._processes.items()
+            if name in unreaped_process_names or _server_group_exists(process)
+        }
 
         # After the servers, so requests they were still finishing can drain through it. It gets its
         # own, longer grace period (`sidecar.shutdown_grace`).

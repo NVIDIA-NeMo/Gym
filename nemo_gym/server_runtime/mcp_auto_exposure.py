@@ -116,6 +116,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     mcp_session_token_serializer,
 )
 from nemo_gym.server_runtime.request_handling.session_routing import mcp_session_token
+from nemo_gym.utils.mcp_tool_names import normalize_hermes_mcp_tool_name
 
 
 LOG = logging.getLogger(__name__)
@@ -714,8 +715,10 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 
         emitted = {item.call_id: item.name for item in _function_calls(container)}
         normalized = container.model_copy(deep=True)
+        response = getattr(normalized, "response", normalized)
+        metadata = getattr(response, "metadata", None)
         for item in _function_calls(normalized):
-            item.name = server.normalize_tool_name(item.name)
+            item.name = server.normalize_tool_name(normalize_hermes_mcp_tool_name(item.name, metadata))
         kwargs[key] = normalized
 
         result = endpoint(**kwargs)

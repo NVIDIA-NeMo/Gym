@@ -4864,6 +4864,58 @@ class TestGeneralization:
         assert steps[2]["message"] == "echo hello > hello.txt"
         assert trajectory["extra"]["nemo_gym"]["conversion"]["reasons"] == ["refusal"]
 
+    async def test_codex_statusless_turn_and_custom_tools_reach_the_verifier(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        turn = agent_response().model_dump(mode="json")
+        patch = "*** Begin Patch\n+π\n*** End Patch\n"
+        turn["output"] = [
+            {
+                "type": "message",
+                "id": "commentary",
+                "role": "assistant",
+                "phase": "commentary",
+                "content": [{"type": "input_text", "text": "I will edit.\nπ"}],
+            },
+            {
+                "type": "custom_tool_call",
+                "id": "patch-item",
+                "call_id": "patch-call",
+                "name": "apply_patch",
+                "input": patch,
+            },
+            {"type": "custom_tool_call_output", "call_id": "patch-call", "output": "Patch result\nπ"},
+            {
+                "type": "message",
+                "id": "answer",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "input_text", "text": "Done."}],
+            },
+        ]
+        original = json.dumps(turn, sort_keys=True)
+        server.server_client.turn_response = turn
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.mask_sample is False and result.failure_kind is None
+        assert result.reward == 1.0 and result.verifier_rewards == {"reward": 1.0}
+        assert result.verifier_return_code == 0
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+        (trajectory_bytes,) = uploaded_file(sandbox, "trajectory.json")
+        trajectory = json.loads(trajectory_bytes)
+        commentary, tool_step, answer = trajectory["steps"][1:]
+        assert commentary["message"] == "I will edit.\nπ"
+        assert commentary["extra"]["nemo_gym"]["source_item_id"] == "commentary"
+        assert commentary["extra"]["nemo_gym"]["source_phase"] == "commentary"
+        assert tool_step["tool_calls"][0]["tool_call_id"] == "patch-call"
+        assert tool_step["tool_calls"][0]["extra"]["nemo_gym"]["raw_input"] == patch
+        assert tool_step["observation"]["results"][0]["content"] == "Patch result\nπ"
+        assert answer["message"] == "Done." and answer["extra"]["nemo_gym"]["source_phase"] == "final_answer"
+        assert json.dumps(turn, sort_keys=True) == original
+        assert sandbox.stopped and not server._sandboxes and not server._sessions
+
     async def test_terminus_shaped_transcript_exports_user_turns_as_observations(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
         turn = agent_response().model_dump(mode="json")
