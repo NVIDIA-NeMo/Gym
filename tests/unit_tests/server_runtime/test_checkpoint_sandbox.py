@@ -582,7 +582,10 @@ async def test_two_creates_for_one_key_at_once_start_one_sandbox(state_dir: Path
     assert all(box["state"] == "stopped" for box in provider.boxes.values()), "no sandbox is left unreachable"
 
 
-async def test_a_create_that_failed_or_was_cancelled_can_be_retried(state_dir: Path) -> None:
+async def test_a_create_that_failed_or_was_cancelled_can_be_retried(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(checkpoint_sandbox, "STOP_TIMEOUT_S", 0.2)
     provider = FakeSnapshotProvider()
     checkpointer = make_checkpointer(state_dir, provider)
     provider.fail[("create", "sb-1")] = RuntimeError("quota")
@@ -989,8 +992,11 @@ async def test_restore_refuses_a_state_from_another_provider_or_a_key_already_he
         await make_checkpointer(state_dir, NoSnapshotProvider()).restore({"s1": plain})
 
 
-async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_dir: Path) -> None:
+async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A restore cancelled at shutdown must not leave the forks it already made running."""
+    monkeypatch.setattr(checkpoint_sandbox, "STOP_TIMEOUT_S", 0.2)
     provider = FakeSnapshotProvider()
     states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
     # sb-1, sb-2 are the originals and snap-3, snap-4 their snapshots: the forks are sb-5, then sb-6.
