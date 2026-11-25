@@ -175,9 +175,11 @@ class SandboxSidecarSpec:
     """An extra container started with the sandbox from its own image.
 
     A sidecar that serves the sandbox names its service: ``entrypoint`` starts it and ``ports`` lists the TCP ports
-    the sandbox may reach. The provider waits for those ports before the create returns, and the sandbox reaches
-    no other port of the sidecar where the provider can enforce that. A sidecar without ``ports`` is one the sandbox
-    may not reach, such as a grader; run commands in it with ``AsyncSandbox.sidecar(name).exec``.
+    the sandbox may reach. The provider waits for the ports of a service it started before the create returns, and
+    the sandbox reaches no other port of the sidecar where the provider can enforce that. A sidecar that names
+    ``ports`` without an ``entrypoint`` starts no service: whoever creates the sandbox starts it afterwards with
+    ``AsyncSandbox.sidecar(name).exec`` and waits for it. A sidecar without ``ports`` is one the sandbox may not
+    reach, such as a grader; run commands in it the same way.
     The sidecar has its own filesystem; how the sandbox reaches it over the network is provider-specific.
     """
 

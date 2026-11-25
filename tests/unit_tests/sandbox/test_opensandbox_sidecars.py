@@ -547,6 +547,27 @@ async def test_a_create_waits_for_a_sidecars_service_to_answer_on_its_ports(prov
     assert [created["image"] for created in FakeSandbox.created] == ["tools:2", "task:1"]
 
 
+async def test_a_create_does_not_wait_for_a_service_the_owner_starts_later(provider, monkeypatch) -> None:
+    _peers(provider, monkeypatch, answers=False)
+    monkeypatch.setattr(opensandbox_provider, "SIDECAR_PORT_POLL_INTERVAL_S", 0)
+    policy = {"defaultAction": "deny", "egress": []}
+    # No entrypoint: the sidecar idles, and its owner starts the service in it once the sandbox is up.
+    later = {**_TOOLS, "ports": [8080]}
+
+    sandbox = await AsyncSandbox(
+        provider,
+        SandboxSpec(
+            image="task:1", ready_timeout_s=0.01, provider_options={"network_policy": policy}, sidecars=[later]
+        ),
+    ).start()
+
+    # Nothing answers on the port, and the create returned all the same, with the port already granted.
+    assert [created["image"] for created in FakeSandbox.created] == ["tools:2", "task:1"]
+    assert FakeSandbox.created[-1]["network_policy"]["egress"] == _reach("10.0.0.1", 8080)
+    assert sandbox.sidecar("tools").url() == "http://tools:8080"
+    await sandbox.stop()
+
+
 async def test_a_sidecars_url_names_the_hosts_entry_the_main_sandbox_resolves(provider, monkeypatch) -> None:
     hosts = _peers(provider, monkeypatch)
     sandbox = await AsyncSandbox(provider, SandboxSpec(image="task:1", sidecars=[_SERVICE])).start()

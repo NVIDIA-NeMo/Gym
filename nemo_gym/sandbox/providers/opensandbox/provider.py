@@ -3209,10 +3209,13 @@ class OpenSandboxProvider:
                 )
                 sidecars[sidecar.name] = await self._create_with_retries(_normalize_spec(sidecar_spec), sidecar=True)
             ready_timeout_s = spec.ready_timeout_s or DEFAULT_SIDECAR_READY_TIMEOUT_S
+            # Only an entrypoint starts a service at create. A sidecar that names ports without one idles until its
+            # owner starts the service in it, after the create returns, so there is nothing to wait for yet.
             await asyncio.gather(
                 *(
                     self._wait_for_sidecar_ports(sidecar.name, sidecars[sidecar.name], sidecar.ports, ready_timeout_s)
                     for sidecar in spec.sidecars
+                    if sidecar.entrypoint is not None
                 )
             )
             addresses: dict[str, str] = {}
