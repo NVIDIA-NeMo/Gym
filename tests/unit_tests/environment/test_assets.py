@@ -111,6 +111,39 @@ class TestRootOrder:
 
         assert asset_config_path("benchmark", "suite/verified") == str(config.resolve())
 
+    @pytest.mark.parametrize("flag", ["benchmark", "environment"])
+    @pytest.mark.parametrize("defect", ["wrong name", "wrong kind", "missing config"])
+    def test_a_lower_root_manifest_the_catalog_refuses_cannot_veto_a_higher_root_config(
+        self, roots: list[Path], monkeypatch: pytest.MonkeyPatch, flag: str, defect: str
+    ) -> None:
+        # The catalog skips a name a higher root already claims without reading the lower root's manifest.
+        high, low = roots
+        monkeypatch.setattr("nemo_gym.environment.registry.component_search_roots", lambda: roots)
+        tree = f"{flag}s"
+        config = _write_config(high / tree / "suite" / "config.yaml")
+        other_kind = "environment" if flag == "benchmark" else "benchmark"
+        data = {
+            "wrong name": _manifest("other", flag),
+            "wrong kind": _manifest("suite", other_kind),
+            "missing config": _manifest("suite", flag, config_path="missing.yaml"),
+        }[defect]
+        _write_manifest(low, tree, "suite", data, with_config=defect != "missing config")
+
+        catalog = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+        assert catalog[(flag, "suite")].config_path.resolve() == config.resolve()
+        assert asset_config_path(flag, "suite") == str(config.resolve())
+
+    @pytest.mark.parametrize("flag", ["benchmark", "environment"])
+    def test_a_higher_root_manifest_the_catalog_refuses_is_refused_over_a_lower_root_config(
+        self, roots: list[Path], flag: str
+    ) -> None:
+        high, low = roots
+        _write_manifest(high, f"{flag}s", "suite", _manifest("other", flag))
+        _write_config(low / f"{flag}s" / "suite" / "config.yaml")
+
+        with pytest.raises(RegistryError, match="catalog path requires 'suite'"):
+            asset_config_path(flag, "suite")
+
 
 class TestConfigPaths:
     @pytest.mark.parametrize(

@@ -288,6 +288,38 @@ class TestDiscoverBenchmarksInDir:
         # A config without a loadable manifest keeps its path name.
         assert set(result) == {"suite/verified", "suite/hermes", "draft"}
 
+    @pytest.mark.parametrize("target", ["a_canonical.yaml", "z_canonical.yaml"])  # sorts before and after config.yaml
+    def test_a_path_name_never_lists_another_config_under_a_catalog_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+    ) -> None:
+        # `suite/config.yaml` has the path name `suite`, which is also the manifest's catalog name. `--benchmark suite`
+        # selects the manifest's config, so the listing must describe that config under `suite`, whatever sorts first.
+        from nemo_gym.environment.assets import asset_config_path
+        from nemo_gym.environment.benchmarks import _discover_benchmarks_in_dir
+        from tests.unit_tests.environment.test_registry import _manifest, _write_manifest
+
+        def benchmark(agent: str, num_repeats: int) -> str:
+            return (
+                f"{agent}:\n  responses_api_agents:\n    simple_agent:\n      datasets:\n"
+                f"      - {{name: suite, type: benchmark, jsonl_fpath: data.jsonl, num_repeats: {num_repeats}}}\n"
+            )
+
+        monkeypatch.setattr("nemo_gym.environment.assets.component_search_roots", lambda: [tmp_path])
+        data = _manifest("suite", "benchmark", config_path=target)
+        manifest_path = _write_manifest(tmp_path, "benchmarks", "suite", data, with_config=False)
+        manifest_path.with_name(target).write_text(benchmark("canonical_agent", 7), encoding="utf-8")
+        manifest_path.with_name("config.yaml").write_text(benchmark("fallback_agent", 1), encoding="utf-8")
+        manifest_path.with_name("hermes.yaml").write_text(benchmark("hermes_agent", 2), encoding="utf-8")
+
+        listed = _discover_benchmarks_in_dir(tmp_path / "benchmarks")
+
+        selected = Path(asset_config_path("benchmark", "suite"))
+        suite = listed["suite"]
+        assert (suite.path.resolve(), suite.agent_name, suite.num_repeats) == (selected, "canonical_agent", 7)
+        # A variant whose path name is not a catalog name is still listed, and still selects itself.
+        assert set(listed) == {"suite", "suite/hermes"}
+        assert Path(asset_config_path("benchmark", "suite/hermes")) == listed["suite/hermes"].path.resolve()
+
     def test_suite_resolving_to_many_benchmarks_is_skipped_not_aliased(self, tmp_path: Path, capsys) -> None:
         # Resolving `config_paths` can surface several benchmark datasets even when the file itself declares
         # one. Reporting the first would publish the suite under another benchmark's name, agent, and repeat
