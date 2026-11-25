@@ -313,11 +313,19 @@ statistical edge-case warnings remain.
 
 ## Submission-config migration (November 25, 2026)
 
-The benchmark now uses Gym's Slurm submission configs for policy serving and CPU
-reverification. The CPU job retains `afterok` ordering, reads the same saved policy
-responses and materialized inputs, and uses the original prepared population for
-coverage. The Gemma profile preserves its context, top-k, parsers, and parallelism.
-Both drivers install the same published Gym revision and locked dependencies.
+**Historical evidence:** this section records checks at commit
+[`0210c1ce`](https://github.com/anushaknvidia/Indic_Gym/commit/0210c1ce63ee15b97e3dad1e04ef1fd08beed0d8).
+The commands below require that revision. The benchmark's `submit/` configs and
+their tests were later removed in `a7534a18`; use the
+[README generation and judging workflow](README.md#generation-and-judging) for the
+current setup.
+
+At that revision, the benchmark used Gym's Slurm submission configs for policy
+serving and CPU reverification. The CPU job retained `afterok` ordering, read the
+same saved policy responses and materialized inputs, and used the original prepared
+population for coverage. The Gemma profile preserved its context, top-k, parsers,
+and parallelism. Both drivers installed the same published Gym revision and locked
+dependencies.
 
 At submission-migration commit `0210c1ce`, the generation model, preflight,
 generation/judge configs, preparer, prompt templates, source checksums, summarizer,
@@ -347,6 +355,7 @@ tests and the existing CLI, generation-request, preparation, metric, judge, and
 English benchmark regressions:
 
 ```bash
+# Historical checks at commit 0210c1ce.
 RAY_TMPDIR=/tmp .venv/bin/python -m pytest -o addopts= --no-cov -q \
   tests/unit_tests/orchestration/test_indic_arena_submission.py \
   tests/unit_tests/orchestration/test_cli_eval_submit.py \
@@ -368,8 +377,15 @@ git diff --check
 
 ## Generation profile preservation (November 25, 2026)
 
-The benchmark now forwards Gym's processed request instead of rebuilding it from
-a restricted field list. Model-profile stop settings, penalties, reasoning options, direct
+**Historical evidence:** this section records checks and rollout commands at commit
+[`b3b792c1`](https://github.com/anushaknvidia/Indic_Gym/commit/b3b792c1bbe0c08a449182d6858ebe846a156426).
+The commands below require that revision, including its subsequently removed
+`submit/dataset.yaml`, submission tests, and environment-variable configuration.
+Use the [README generation and judging workflow](README.md#generation-and-judging)
+for the current configuration and commands.
+
+That change made the benchmark forward Gym's processed request instead of rebuilding
+it from a restricted field list. Model-profile stop settings, penalties, reasoning options, direct
 chat-template settings, metadata overrides, and sampling pins are preserved.
 Tokenization uses Gym's prompt-field selector so it measures the same template
 and reasoning settings sent to generation. The request's output-budget alias is
@@ -396,9 +412,10 @@ passes 188 selected cases.
 
 The benchmark/judge/submission/English regression suite passed **298 tests**;
 the focused vLLM suite passed **188 tests** (486 total). The converter AST and
-shared model/resources servers are unchanged. Commands against the final code:
+shared model/resources servers were unchanged. Commands against `b3b792c1`:
 
 ```bash
+# Historical checks at commit b3b792c1.
 RAY_TMPDIR=/tmp .venv/bin/python -m pytest -o addopts= --no-cov -q \
   tests/unit_tests/orchestration/test_indic_arena_submission.py \
   tests/unit_tests/orchestration/test_cli_eval_submit.py \
@@ -437,10 +454,11 @@ verdicts**, with zero failed tasks or invalid verdicts. Both the Gym aggregate
 metrics and offline summary reported English separately and omitted the subset
 headline. Coverage was complete for the five selected tasks.
 
-The GPU model-service job completed successfully. The CPU driver used the final
-code through `gym eval run`, `gym eval reverify`, and the benchmark summarizer:
+The GPU model-service job completed successfully. The CPU driver used `b3b792c1`
+through `gym eval run`, `gym eval reverify`, and the benchmark summarizer:
 
 ```bash
+# Historical rollout commands at commit b3b792c1.
 # RUN_DIR contains the five prepared inputs; deployment supplies the policy endpoint.
 export INPUT_JSONL="$RUN_DIR/inputs/arena_proxy_v3_benchmark.jsonl"
 export CONTEXT=131072 TOP_K=64

@@ -76,6 +76,10 @@ policy_model:
         top_k: 64
 ```
 
+The recorded Gemma Hindi comparison uses `top_k: 64` and
+`context_length: 131072`. Load this profile after `generation.yaml`, as shown
+below, so its top-k setting overrides the generic `-1` default.
+
 Set `POLICY_CONFIG` to that profile, `POLICY_MODEL` and `POLICY_BASE_URL` to the
 served model and endpoint, and `RUN_DIR` to the output directory. Configure
 `policy_api_key` through the deployment's protected config. Set `INPUT_JSONL` to
@@ -102,7 +106,8 @@ Other generation settings come from the model-server config and composed profile
 | Setting | Value |
 | --- | --- |
 | Temperature | 1.0 |
-| Top-p / top-k | 0.95 / −1; the model profile can override top-k |
+| Top-p | 0.95 |
+| Top-k | −1 generic default; **64 for the Gemma example and Hindi comparison** |
 | Seed | 42 |
 | Context window | Required from the model profile; must match the served engine |
 | Maximum output | 120,000 tokens |
