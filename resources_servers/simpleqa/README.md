@@ -57,7 +57,7 @@ gym eval run --no-serve \
 
 ## Sandboxing
 
-SimpleQA is a pure QA task with a judge grader: the model calls no tools, and the judge call executes nothing. Both
+SimpleQA is a pure QA task with a judge verifier: the model calls no tools, and the judge call executes nothing. Both
 may therefore opt out of the attempt's sandbox group, which saves sandbox capacity on large runs.
 
 | Config | Pairing | Agent loop | Judge call |
@@ -65,10 +65,11 @@ may therefore opt out of the attempt's sandbox group, which saves sandbox capaci
 | `simpleqa.yaml` | `simpleqa_environment_server` | Agent Server process | Resources Server |
 | `simpleqa_sandboxed.yaml` | `simpleqa_sandboxed_environment_server` | The attempt's sandbox group | Resources Server |
 
-`simpleqa_environment_server` sets `sandbox_opt_out: {task: true, grader: true}` and needs no sandbox provider.
+`SimpleQAServer` declares `verifier_executes_nothing`, which a verifier opt-out requires.
+`simpleqa_environment_server` sets `sandbox_opt_out: {task: true, verifier: true}` and needs no sandbox provider.
 
 `simpleqa_sandboxed_environment_server` starts one sandbox per attempt from its `sandbox_config` and lends it to the
-agent, so Simple Agent runs its loop there. Its grader still opts out. The `model_only` network rule allows only the
+agent, so Simple Agent runs its loop there. Its verifier still opts out. The `model_only` network rule allows only the
 policy model server's host, so the pairing needs:
 
 - a provider block named `sandbox` whose provider applies that rule: E2B, or OpenSandbox with

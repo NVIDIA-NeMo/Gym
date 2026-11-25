@@ -3,7 +3,7 @@
 #
 # SimpleQA with Simple Agent's loop in the attempt's sandbox group. The Environment Server starts one sandbox per
 # attempt and lends it to the agent, which runs its agent loop there; the sandbox's egress allows only the policy
-# model server's host. The judge grader executes nothing, so it still opts out and runs in the Resources Server.
+# model server's host. The judge verifier executes nothing, so it still opts out and runs in the Resources Server.
 #
 # Needs a provider block named `sandbox` whose provider applies `model_only`: E2B, or OpenSandbox with
 # `networking.enforces_network_policy: true` on a deployment that enforces it (Docker and Enroot apply only `inherit`
@@ -44,4 +44,4 @@ simpleqa_sandboxed_environment_server:
         network: model_only
         model_server: policy_model
       sandbox_opt_out:
-        grader: true
+        verifier: true

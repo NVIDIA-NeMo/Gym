@@ -33,7 +33,7 @@ simpleqa_simple_agent:
         jsonl_fpath: resources_servers/simpleqa/data/example.jsonl
         license: MIT
 
-# A pure QA task with a judge grader: the model calls no tools and the judge call executes nothing, so both opt out
+# A pure QA task with a judge verifier: the model calls no tools and the judge call executes nothing, so both opt out
 # of the attempt's sandbox group to save sandbox capacity. The agent loop runs in the Agent Server and the judge in
 # the Resources Server; no sandbox provider is needed.
 simpleqa_environment_server:
@@ -49,4 +49,4 @@ simpleqa_environment_server:
       resources_tool_transports: []
       sandbox_opt_out:
         task: true
-        grader: true
+        verifier: true
