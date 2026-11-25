@@ -62,16 +62,15 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     debug: bool
     reasoning_format_penalty: float = 0.0
     # The unit tests run in the attempt's sandbox when the Environment Server lends one to /verify. For a caller that
-    # lends none, they run in a fresh sandbox per verification from this provider: a top-level sandbox block, such as
-    # `sandbox` from nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or an inline provider mapping.
-    # Unset, a verification that is lent no sandbox is masked as an infrastructure failure: tests never run on this
-    # host.
-    sandbox_provider: str | dict[str, Any] | None = None
+    # lends none, such as a re-verification, they run in a fresh sandbox per verification from this provider: a
+    # top-level sandbox block, such as `sandbox` from nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml,
+    # or an inline provider mapping.
+    sandbox_provider: Union[str, Dict[str, Any]]
     sandbox_config: SandboxVerificationConfig = Field(default_factory=SandboxVerificationConfig)
 
     @model_validator(mode="after")
     def _require_sandbox_image(self) -> "CompCodingResourcesServerConfig":
-        if self.sandbox_provider is not None and not self.sandbox_config.image:
+        if not self.sandbox_config.image:
             raise ValueError("sandbox_config.image is required for code verification")
         return self
 
@@ -127,7 +126,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
     def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
         """Provider config and sandbox metadata, resolved once from the global config."""
-        assert self.config.sandbox_provider is not None
         if self._sandbox_target is None:
             global_config_dict = get_global_config_dict()
             provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -314,7 +312,10 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     async def _run_tests(
         self, access: SandboxAccess | None, task_args: tuple[Any, ...], *, num_tests: int
     ) -> tuple[list[bool | int], dict[str, Any] | None]:
-        """Run the unit tests in the lent sandbox, or else in a fresh sandbox of this server's own.
+        """Run the unit tests in the sandbox lent to /verify, or else in a fresh sandbox of this server's own.
+
+        A lent sandbox is borrowed: this server releases its client after the tests, and the Environment Server that
+        owns the sandbox stops it.
 
         Raises:
             SandboxVerificationError: When no sandbox can run them; the caller masks the sample.
@@ -334,10 +335,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             finally:
                 # Releases this server's client only: the Environment Server that lent the sandbox stops it.
                 await sandbox.disconnect()
-        if self.config.sandbox_provider is None:
-            raise SandboxVerificationError(
-                PROVIDER_UNAVAILABLE, "no sandbox was lent to /verify and code_gen has no sandbox_provider of its own"
-            )
         provider, sandbox_metadata = self._resolve_sandbox_target()
         return await check_correctness_in_sandbox(
             *task_args,

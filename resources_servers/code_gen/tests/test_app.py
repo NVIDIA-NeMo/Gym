@@ -409,33 +409,14 @@ class TestLentSandboxVerify:
 
         monkeypatch.setattr(code_gen_app, "borrow", _borrow)
         monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
-        # No sandbox_provider of its own: a lent sandbox is all this server needs.
-        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(self._lent_request())
+        res = await _make_server().verify(self._lent_request())
 
         assert res.reward == 1.0 and not res.mask_sample
         assert borrowed == [SandboxAccess.model_validate(_ACCESS)]
+        # The server's own provider is configured, but a lent sandbox is used instead of starting one.
         assert calls[0]["sandbox"] is lent and "provider" not in calls[0]
         assert lent.disconnected == 1
         assert NG_SANDBOX_ACCESS_KEY not in res.model_dump()
-
-    async def test_a_lent_sandbox_wins_over_this_servers_own_provider(self, monkeypatch) -> None:
-        lent = _LentSandbox()
-        calls = []
-
-        async def _borrow(access):
-            return lent
-
-        async def _passing(*args, **kwargs):
-            calls.append(kwargs)
-            return [True, True], None
-
-        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
-        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
-        server = _make_server()
-        server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "code_gen"})
-        await server.verify(self._lent_request())
-
-        assert calls[0]["sandbox"] is lent and "provider" not in calls[0]
 
     async def test_a_runner_failure_still_releases_the_borrowed_client(self, monkeypatch) -> None:
         lent = _LentSandbox()
@@ -448,7 +429,7 @@ class TestLentSandboxVerify:
 
         monkeypatch.setattr(code_gen_app, "borrow", _borrow)
         monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _failing)
-        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(self._lent_request())
+        res = await _make_server().verify(self._lent_request())
 
         assert res.mask_sample is True and res.failure_kind == VERIFIER_ERROR
         assert lent.disconnected == 1
@@ -462,20 +443,10 @@ class TestLentSandboxVerify:
 
         monkeypatch.setattr(code_gen_app, "borrow", _borrow)
         monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _never)
-        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(self._lent_request())
+        res = await _make_server().verify(self._lent_request())
 
         assert res.mask_sample is True and res.failure_kind == PROVIDER_UNAVAILABLE
         assert "cannot reconnect" in res.failure_reason
-
-    async def test_no_lent_sandbox_and_no_provider_masks_instead_of_running_on_the_host(self, monkeypatch) -> None:
-        async def _never(*args, **kwargs):
-            raise AssertionError("no tests run without a sandbox")
-
-        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _never)
-        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(_verify_request("print(9)"))
-
-        assert res.mask_sample is True and res.failure_kind == PROVIDER_UNAVAILABLE
-        assert res.reward == 0.0
 
 
 class TestProgrammaticGrading:
