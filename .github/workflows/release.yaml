@@ -38,7 +38,7 @@ on:
         default: true
         type: boolean
       version-bump-branch:
-        description: Branch for version bump
+        description: Target main or a release branch covered by Gym's [rv][0-9].[0-9].[0-9] protection rule
         required: true
         type: string
       gh-release-from-tag:
@@ -51,9 +51,7 @@ defaults:
   run:
     shell: bash -x -e -u -o pipefail {0}
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
@@ -62,6 +60,9 @@ concurrency:
 jobs:
   pre-flight:
     if: github.event_name != 'workflow_dispatch'
+    permissions:
+      contents: read
+      pull-requests: read
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@037094bcc9138c72bc125418e6e3653f9e1c4160 # v1.11.0
     with:
       workflow_ref: 037094bcc9138c72bc125418e6e3653f9e1c4160 # pragma: allowlist secret
@@ -69,6 +70,8 @@ jobs:
   previous-tag:
     if: ${{ !inputs.gh-release-from-tag }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.find.outputs.tag }}
     steps:
@@ -133,7 +136,8 @@ jobs:
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     steps:
       - name: Validate immutable release ref
         env:
@@ -141,6 +145,35 @@ jobs:
         run: |
           if [[ ! "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::release-ref must be a full 40-character commit SHA"
+            exit 1
+          fi
+
+      - name: Require dispatch from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Select the main branch when starting the release workflow."
+          exit 1
+
+      - name: Verify release commit belongs to the protected target branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.release-ref }}
+          TARGET_BRANCH: ${{ inputs.version-bump-branch }}
+        run: |
+          case "$TARGET_BRANCH" in
+            main|[rv][0-9].[0-9].[0-9]) ;;
+            *) echo "::error::Select main or a branch covered by Gym's release-branch rule."; exit 1 ;;
+          esac
+          target_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/$TARGET_BRANCH" \
+            --jq 'select(.protected == true) | .commit.sha')
+          if [[ ! "$target_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The version bump target must be a protected branch."
+            exit 1
+          fi
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_REF...$target_sha" --jq '.status')
+          if [[ "$status" != identical && "$status" != ahead ]]; then
+            echo "::error::The release commit must be on the version bump target branch."
             exit 1
           fi
 
@@ -224,7 +257,8 @@ jobs:
       gh-release-from-tag: ${{ inputs.gh-release-from-tag || needs.previous-tag.outputs.tag }}
       release-version: ${{ needs.bump.outputs.release-version || needs.build-wheel.outputs.version }}
       pypi-name: ${{ needs.build-wheel.outputs.pypi-name }}
-    secrets: inherit  # pragma: allowlist secret
+    secrets:
+      BOT_KEY: ${{ secrets.BOT_KEY }}
 
   release-summary:
     needs: [release-workflow-tests, pre-flight, previous-tag, validate-inputs, bump, build-wheel, publish-wheel, finalize]

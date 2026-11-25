@@ -37,7 +37,40 @@ permissions:
   contents: read
 
 jobs:
+  resolve-freeze-commit:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve the freeze commit on main
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FREEZE_COMMIT: ${{ inputs.freeze-commit }}
+        run: |
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Select the main branch when starting a code freeze."
+            exit 1
+          fi
+          sha=$GITHUB_SHA
+          if [[ -n "$FREEZE_COMMIT" && "$FREEZE_COMMIT" != main ]]; then
+            ref_path=$(jq -nr --arg ref "$FREEZE_COMMIT" '$ref | @uri')
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref_path" --jq '.sha')
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The freeze commit must resolve to a full commit SHA."
+              exit 1
+            fi
+            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$GITHUB_SHA" --jq '.status')
+            if [[ "$status" != identical && "$status" != ahead ]]; then
+              echo "::error::The freeze commit must be on main."
+              exit 1
+            fi
+          fi
+          echo "sha=$sha" | tee -a "$GITHUB_OUTPUT"
+
   code-freeze:
+    needs: resolve-freeze-commit
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_code_freeze.yml@fb3b45eed8585aafae60297464a004eb209fc95a # code freeze: /cherrypick PSA
     with:
       app-id: ${{ vars.BOT_ID }}
@@ -45,7 +78,7 @@ jobs:
       library-name: NeMo-Gym
       python-package: nemo_gym
       release-type: ${{ inputs.release-type }}
-      freeze-commit: ${{ inputs.freeze-commit }}
+      freeze-commit: ${{ needs.resolve-freeze-commit.outputs.sha }}
       dry-run: ${{ inputs.dry-run }}
     secrets:
       SLACK_WEBHOOK: ${{ secrets.SLACK_RELEASE_ENDPOINT }}
