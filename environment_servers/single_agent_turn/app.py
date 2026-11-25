@@ -12,7 +12,7 @@ from uuid import uuid4
 from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
@@ -55,18 +55,23 @@ from nemo_gym.core import (
     rebuild_failure,
 )
 from nemo_gym.metrics import add_perf_metrics
-from nemo_gym.sandbox import SandboxAccess, SandboxConfig
+from nemo_gym.sandbox import SandboxAccess
 from nemo_gym.server_runtime import (
+    ATTEMPT_SANDBOX_BLOCKS,
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     NG_SANDBOX_ACCESS_KEY,
+    PREPARE_SANDBOX_PATH,
+    AttemptSandbox,
+    AttemptSandboxConfig,
+    AttemptSandboxEnvironmentServerConfig,
     BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
     CleanupContext,
     CleanupHandle,
     DirectHTTPToolAccess,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ResourcesCloseSessionRequest,
+    ResourcesPrepareSandboxRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     SingleAgentTurnRequest,
@@ -94,8 +99,8 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 LOGGER = logging.getLogger(__name__)
 
-# Provider label values stay within the common 63-character limit.
-_LABEL_LIMIT = 63
+# Kept importable from here, where it was defined before the base class owned the attempt sandbox.
+__all__ = ["AttemptSandboxConfig"]
 
 
 class ToolSession(BaseModel):
@@ -120,9 +125,9 @@ class SessionHandles(BaseModel):
     # Whether the agent borrows a sandbox the resources server lent in its seed reply.
     # A restore rebuilds that sandbox under a new id, so the replacement attempt seeds both sessions again.
     borrowed_sandbox: bool = False
-    # Whether this server started the attempt's sandbox and lent it to the agent, because the Resources Server lent
-    # none.
-    attempt_sandbox: bool = False
+    # The attempt's sandbox group this server starts, and who borrows it, as decided at seed; None when it starts
+    # none, as when the Resources Server lent one or both the task and the grader opted out.
+    attempt_sandbox: AttemptSandbox | None = None
 
     @classmethod
     def new(cls, tool_servers: Sequence[str] = ()) -> "SessionHandles":
@@ -134,35 +139,12 @@ class SessionHandles(BaseModel):
         )
 
 
-class AttemptSandboxConfig(SandboxConfig):
-    """The sandbox the Environment Server starts for an attempt whose Resources Server lends none.
+class SingleAgentTurnEnvironmentServerConfig(AttemptSandboxEnvironmentServerConfig):
+    """Bind Resources and Agent Servers for one agent turn.
 
-    The agent borrows it for its turn, and the Resources Server borrows it for ``/verify``; this server stops it after
-    the episode. ``network`` must name a rule, so no attempt starts with the provider's default egress by accident:
-    ``model_only``, with ``model_server`` set to the agent's model server, for an agent that only calls the model;
-    ``model_and_tools`` with ``tool_servers`` naming every server whose tools the episode grants. A rule allows a
-    server's whole host. ``ttl_s`` must be set, so the provider reclaims a sandbox this server could not stop; it must
-    exceed the episode timeout plus the cleanup timeout.
-
-    Attributes:
-        image: The sandbox image.
-        workdir: The working directory the agent and the verifier run in.
+    ``sandbox_provider``, ``sandbox_config`` and ``sandbox_opt_out`` configure the attempt's sandbox group, which the
+    base class starts, lends and stops (see ``AttemptSandboxEnvironmentServerConfig``).
     """
-
-    image: str
-    workdir: str
-
-    @model_validator(mode="after")
-    def _explicit_network_and_lifetime(self) -> "AttemptSandboxConfig":
-        if self.network is None:
-            raise ValueError("an attempt sandbox needs a network rule, such as network: model_only")
-        if self.ttl_s is None:
-            raise ValueError("an attempt sandbox needs ttl_s, so the provider reclaims one this server cannot stop")
-        return self
-
-
-class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
-    """Bind Resources and Agent Servers for one agent turn."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -179,24 +161,6 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
     skip_verification_reward: float | None = None
-    # The provider block that starts an attempt's sandbox when the Resources Server lends none, and that sandbox's
-    # settings. Both or neither: unset, this server starts no sandbox and lends only what Resources lends.
-    sandbox_provider: str | None = None
-    sandbox_config: AttemptSandboxConfig | None = None
-
-    @model_validator(mode="after")
-    def _sandbox_provider_and_config_together(self) -> "SingleAgentTurnEnvironmentServerConfig":
-        if (self.sandbox_provider is None) != (self.sandbox_config is None):
-            raise ValueError("set sandbox_provider and sandbox_config together, or neither")
-        if self.sandbox_config is not None and self.default_episode_timeout_seconds is not None:
-            # The provider must not reclaim a sandbox while its episode, or the episode's cleanup, still uses it.
-            lifetime = self.default_episode_timeout_seconds + self.cleanup_timeout_seconds
-            if self.sandbox_config.ttl_s <= lifetime:
-                raise ValueError(
-                    f"sandbox_config.ttl_s ({self.sandbox_config.ttl_s}) must exceed default_episode_timeout_seconds "
-                    f"plus cleanup_timeout_seconds ({lifetime})"
-                )
-        return self
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -210,26 +174,32 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     # With sandbox_provider set, it lends the attempt's sandbox to the agent and to the Resources Server, so startup
     # refuses a provider no other process can connect to, such as the local provider that runs commands on this host.
     lends_sandboxes: ClassVar[bool] = True
-    # It starts the attempt sandbox from sandbox_config through self.sandboxes, so startup checks that block's network
-    # rule against sandbox_provider.
-    owned_sandbox_blocks: ClassVar[Mapping[str, str]] = {"sandbox_config": "sandbox_provider"}
+    # The base class starts the attempt sandbox from sandbox_config through self.sandboxes, so startup checks that
+    # block's network rule against sandbox_provider.
+    owned_sandbox_blocks: ClassVar[Mapping[str, str]] = ATTEMPT_SANDBOX_BLOCKS
 
     def check_sandbox_provider(self) -> None:
         """Refuse at startup an attempt sandbox the provider cannot start, apply the rule to, or lend.
 
         Beyond the base checks, the network rule must allow every server whose tools an episode grants, since a harness
-        in the sandbox calls them from there, and the provider is built now, so a bad provider block fails startup
-        instead of every attempt.
+        in the sandbox calls them from there, and a task sandbox opt-out is refused for an episode that grants tools.
 
         Raises:
             ValueError: Naming the first need the configuration or the provider cannot meet.
         """
         super().check_sandbox_provider()
         config = self.config.sandbox_config
-        if config is None:
+        if config is None and not self.config.sandbox_opt_out.task:
             return
         granted = {*([self.config.resources_server.name] if self.config.resources_tool_transports else [])}
         granted.update(self.tool_server_names)
+        if self.config.sandbox_opt_out.task and granted:
+            raise ValueError(
+                f"sandbox_opt_out.task is only for a pure QA task, but every episode grants the tools of "
+                f"{sorted(granted)}"
+            )
+        if config is None:
+            return
         # inherit leaves egress open, and hosts_only names hosts rather than servers, so neither can be checked here.
         missing = sorted(granted - set(config.tool_servers))
         if missing and config.network in ("no_network", "model_only", "model_and_tools"):
@@ -237,7 +207,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 f"sandbox_config network {config.network!r} does not allow {missing}, whose tools the episode grants; "
                 "use network: model_and_tools with these servers in tool_servers"
             )
-        self.sandboxes  # noqa: B018 - builds the provider, which raises for a bad provider block
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -365,10 +334,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             cleanup.register_cleanup(
                 f"{name} tool session", lambda name=name: self._close_tool_session(request, handles, name)
             )
-        if self.config.sandbox_provider is not None:
+        if self.starts_attempt_sandboxes:
             # Before the agent's cleanup, so cleanup closes the agent session before it stops the sandbox the agent
             # borrows; and before the seed, so a cancelled start still stops what it created.
-            cleanup.register_cleanup("attempt sandbox", lambda: self._stop_attempt_sandbox(handles))
+            cleanup.register_cleanup(
+                "attempt sandbox", lambda: self.stop_attempt_sandbox(self._attempt_sandbox_key(handles))
+            )
         closed_agent: list[AgentCloseSessionResponse] = []
 
         async def close_agent() -> None:
@@ -558,8 +529,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     ) -> CleanupHandle | None:
         """Seed the episode's resources and tool server sessions, then its agent session with what they lent.
 
-        When the resources seed lends no sandbox and ``sandbox_provider`` is set, this server starts the attempt's
-        sandbox and lends it to the agent instead.
+        Unless the resources seed lends a sandbox itself, the base class decides who borrows the attempt's sandbox
+        group (``plan_attempt_sandbox``); when the agent does, the group starts here, the Resources Server prepares
+        it if its seed declared so, and the agent is lent it.
         ``register_agent_cleanup`` runs before the agent seed, so a lost agent seed reply is still closed;
         its result is returned.
         An episode whose agent holds resources MCP grants restarts after a crash
@@ -568,51 +540,59 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         """
         seed = await self._seed_resources(request, handles)
         tool_accesses = await self._seed_tool_servers(request, handles)
+        handles.attempt_sandbox = self.plan_attempt_sandbox(
+            key=self._attempt_sandbox_key(handles),
+            lent=seed.sandbox_access,
+            group=seed.sandbox_group,
+            task_tools=self._task_tools(request, tool_accesses),
+            resources_server=repr(self.config.resources_server.name),
+        )
         sandbox_access = None
-        if seed.sandbox_access is None and self.config.sandbox_provider is not None:
-            sandbox_access = await self._start_attempt_sandbox(request, handles)
+        if handles.attempt_sandbox is not None and handles.attempt_sandbox.lend_to_agent:
+            sandbox_access = await self.start_attempt_sandbox(
+                request,
+                handles.attempt_sandbox,
+                stage="seed",
+                prepare=lambda access: self._prepare_resources_sandbox(request, handles, access),
+            )
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
         await self._seed_agent(request, handles, seed, tool_accesses, sandbox_access=sandbox_access)
         return registered
 
-    async def _start_attempt_sandbox(
-        self, request: SingleAgentTurnRequest, handles: "SessionHandles"
-    ) -> SandboxAccess:
-        """Start the attempt's sandbox from ``sandbox_config`` and return the access the agent borrows it with.
+    def _task_tools(self, request: SingleAgentTurnRequest, tool_accesses: Sequence[ToolAccess]) -> list[str]:
+        """The tools the task declares or the episode grants, which a pure QA task's sandbox opt-out refuses."""
+        names = [
+            str((tool if isinstance(tool, Mapping) else vars(tool)).get("name") or "tool")
+            for tool in request.task.task_input.responses_create_params.tools or []
+        ]
+        names += [
+            f"{self.config.resources_server.name} {transport}" for transport in self.config.resources_tool_transports
+        ]
+        names += [access.name for access in tool_accesses]
+        return names
 
-        A sandbox that cannot start, or whose provider cannot apply its network rule, fails the attempt as a
-        retryable infrastructure failure: the agent never runs, nothing runs on this host, and no reward is recorded.
-        A checkpoint cannot rebuild this sandbox, so the episode starts over after a crash.
-        """
-        config = self.config.sandbox_config
-        assert config is not None  # the config validator sets it with sandbox_provider
-        # Marked before the sandbox and the agent session exist, so no checkpoint exports an episode that holds them.
-        await self.checkpoint_restart(request)
-        key = self._attempt_sandbox_key(handles)
+    async def _prepare_resources_sandbox(
+        self, request: SingleAgentTurnRequest, handles: "SessionHandles", access: SandboxAccess
+    ) -> None:
+        """Ask the Resources Server to prepare the task in the attempt's started group, as its seed declared."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path=PREPARE_SANDBOX_PATH,
+            json=ResourcesPrepareSandboxRequest(
+                resources_session_id=handles.resources_session_id, sandbox_access=access
+            ).model_dump(mode="json"),
+            cookies=handles.resources_cookies,
+        )
+        await raise_boundary_failure(response)
+
+    async def _stop_attempt_sandbox_early(self, handles: "SessionHandles") -> None:
+        """Stop the group once nothing borrows it any more; a failed stop is left to the episode's cleanup."""
         try:
-            spec = self.sandboxes.spec(
-                config,
-                image=config.image,
-                workdir=config.workdir,
-                metadata={
-                    "task_id": request.task.task_id.task_id[:_LABEL_LIMIT],
-                    "rollout_id": request.episode_id.capture_key[:_LABEL_LIMIT],
-                },
-            )
-            await self.sandboxes.create(key, spec)
-            handles.attempt_sandbox = True
-            return await self.sandboxes.access(key, workdir=config.workdir)
+            await self.stop_attempt_sandbox(self._attempt_sandbox_key(handles))
         except Exception as error:
-            raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
-
-    async def _stop_attempt_sandbox(self, handles: "SessionHandles") -> None:
-        """Stop the attempt's sandbox; a no-op when none was started, so cleanup may repeat it.
-
-        An episode whose Resources Server lent the sandbox never builds this server's provider here.
-        """
-        owned = self._owned_sandboxes.get("sandbox_provider")
-        if owned is not None:
-            await owned.stop(self._attempt_sandbox_key(handles))
+            LOGGER.warning(
+                "The attempt sandbox of %s was not stopped yet; cleanup retries: %r", handles.agent_session_id, error
+            )
 
     @staticmethod
     def _attempt_sandbox_key(handles: "SessionHandles") -> str:
@@ -902,25 +882,31 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     ) -> SingleAgentTurnResult:
         verifier_invocations = None
         sandbox_field = {}
-        if handles.attempt_sandbox:
-            # The sandbox this server started for the attempt, lent to the verifier now that the agent has closed
-            # (NG_SANDBOX_ACCESS_KEY). A sandbox that cannot be described any more is an infrastructure
-            # failure: the attempt is retried, never graded without it.
-            try:
-                access = await self.sandboxes.access(
-                    self._attempt_sandbox_key(handles), workdir=self.config.sandbox_config.workdir
-                )
-            except Exception as error:
-                raise dependency_failure(
-                    error,
+        attempt = handles.attempt_sandbox
+        if attempt is not None and attempt.lend_to_grader:
+            # The attempt's sandbox group, lent to the verifier now that the agent has closed (NG_SANDBOX_ACCESS_KEY):
+            # the one the agent borrowed, or one started now for the grader alone, when the task opted out. A group
+            # that cannot start or be described is an infrastructure failure: the attempt is retried, never graded
+            # without it.
+            evidence = {
+                "partial_response": agent_response,
+                "agent_observations": observations,
+                "trajectory": trajectory,
+            }
+            if attempt.lend_to_agent:
+                access = await self.attempt_sandbox_access(attempt, stage="verification", **evidence)
+            else:
+                access = await self.start_attempt_sandbox(
+                    request,
+                    attempt,
                     stage="verification",
-                    terminal=False,
-                    name_error_type=True,
-                    partial_response=agent_response,
-                    agent_observations=observations,
-                    trajectory=trajectory,
-                ) from error
+                    prepare=lambda lent: self._prepare_resources_sandbox(request, handles, lent),
+                    **evidence,
+                )
             sandbox_field = {NG_SANDBOX_ACCESS_KEY: access.model_dump(mode="json")}
+        elif attempt is not None and attempt.lend_to_agent:
+            # The grader opted out and runs in the Resources Server: the group the agent borrowed is done.
+            await self._stop_attempt_sandbox_early(handles)
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
