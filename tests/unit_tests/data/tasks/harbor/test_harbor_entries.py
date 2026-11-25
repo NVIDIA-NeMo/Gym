@@ -126,7 +126,7 @@ class TestSourceKey:
         assert read_dataset_config(folder).is_empty
 
     def test_committed_entries_declare_their_sources(self):
-        """The two committed entries pin the datasets their READMEs describe; TB4 also carries one task override."""
+        """The two committed entries pin the datasets their READMEs describe; TB4 also carries three task overrides."""
         from nemo_gym import PARENT_DIR
 
         tb4 = read_dataset_config(PARENT_DIR / "environments" / "harbor" / "terminal_bench_4")
@@ -137,14 +137,20 @@ class TestSourceKey:
             "7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"  # pragma: allowlist secret
         )
         assert tb21.model_copy(update={"source": None}).is_empty
-        # The test sharding the legacy TB4 benchmark's server sets for this task, in the agent's sandbox and the
-        # separate verifier's, and nothing else.
+        # The test sharding the legacy TB4 benchmark's server sets for one task, in the agent's sandbox and the
+        # separate verifier's; the verifier's network restriction of two tasks on `[verifier]`, where the loader
+        # applies it to the separate verifier's sandbox; and nothing else.
         assert tb4.model_copy(update={"source": None, "tasks": {}}).is_empty
+        offline_verifier = GymTaskOverride(
+            verifier={"network_mode": "no-network", "environment": {"network_mode": "public"}}
+        )
         assert tb4.tasks == {
             "nextjs-performance": GymTaskOverride(
                 environment={"env": {"CIRCLE_NODE_TOTAL": "3"}},
                 verifier={"environment": {"env": {"CIRCLE_NODE_TOTAL": "3"}}},
             ),
+            "batched-eval-parity": offline_verifier,
+            "lake-temp-glm": offline_verifier,
         }
 
     def test_the_terminal_bench_science_entry_pins_its_digest_and_overrides_only_verifiers(self):
