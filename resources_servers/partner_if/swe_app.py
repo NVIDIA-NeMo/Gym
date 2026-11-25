@@ -136,13 +136,17 @@ async def _run(sandbox: AsyncSandbox, command: str, step: str) -> str:
 class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSWEResourcesServer):
     # Actor sandboxes live in worker memory, so the server runs one worker (see model_post_init) and no Ray.
     ray_enabled = False
+    # Its sessions are its own, not Scale-SWE's checkpointed ones, so its episodes start over after a crash, and a
+    # checkpoint waits for its verify, which grades with a judge.
+    checkpoint_mode = "restart_only"
+    checkpoint_verify = "wait"
 
     config: SWEIFConfig
     _seeds: dict[str, tuple[ResourcesSeedSessionRequest, SandboxAccess]] = PrivateAttr(default_factory=dict)
     # Seed, verify, close and retire hold the session's lock. A sandbox start awaits, and a close or a repeated seed
     # that ran meanwhile would leak its sandbox or start a second one.
     _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    # Separate from the inherited Scale-SWE `_fences`, whose records always name an episode.
+    # Separate from the inherited Scale-SWE `_task_session_fences`, whose records always name an episode.
     _adapter_fences: ResourcesSessionFences[EpisodeId | None] = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:

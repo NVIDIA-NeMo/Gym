@@ -280,6 +280,13 @@ def test_the_server_requires_one_worker():
         swe_server(num_workers=2)
 
 
+def test_its_episodes_restart_after_a_crash_although_scale_swe_s_sessions_are_checkpointed():
+    """Its sessions are its own, which a checkpoint of Scale-SWE's sessions would not export."""
+    server = swe_server()
+    assert server.checkpoint_mode_in_effect() == "restart_only"
+    assert server.checkpoint_verify == "wait"
+
+
 class FakeSandbox:
     """Answers every command; a command containing `failing` exits 1, and the first `failing_stops` stops fail."""
 

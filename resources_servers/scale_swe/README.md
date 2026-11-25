@@ -132,10 +132,19 @@ names the session for `/verify`, and `/close_session` ends it.
 - **Stops.** The server waits up to `sandbox_stop_timeout_seconds` (default 120) for each stop, but never cuts
   a stop short. A stop that is still running, or that failed, leaves the sandbox with the session. Close then
   raises so the caller can retry, and a retried close or shutdown waits for that stop again or starts it again.
+- **Expiry.** A session that is never closed is closed by the server once its sandbox's `ttl_s` has passed
+  (24 hours without one). A verify after that is masked with `failure_kind: session_expired`.
 - **Shutdown.** When the server shuts down, it stops every sandbox its episode sessions still hold,
   with the same bounded wait per stop. A session with a request still in
   progress gets that long to finish, and then its sandboxes are stopped anyway. A stop that fails is logged,
   and the provider's TTL reclaims the sandbox.
+- **Checkpoints.** Episode sessions take part in partial-rollout checkpoints like the other repository-task
+  servers (`resources_servers/swebench/repo_task_sessions.py`), on a sandbox provider that can snapshot. A commit
+  snapshots the agent's sandbox with the files the checkout held untracked before the agent started and the base
+  commit; once verify captured the patch, it saves the capture alone, failure included. After a crash, the
+  episode continues in a fork of the snapshot, and a verify grades the saved capture without capturing again.
+  Golden-patch mode, and a provider that cannot snapshot, run `restart_only`: those episodes start over.
 
 The cookie path that an Agent's `/run` uses is unchanged: it does not replay or mask, the stops inside its
-requests are not bounded, and the sandboxes it still holds at shutdown are left to the provider's TTL.
+requests are not bounded, and the sandboxes it still holds at shutdown are left to the provider's TTL. Its
+episodes start over after a crash.
