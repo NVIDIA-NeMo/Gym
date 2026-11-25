@@ -31,4 +31,4 @@ and pinned bases are read from them.
 | anta_rfam / anta_strand / anta_pseudo | Kleinkauf et al. 2015 (antaRNA) | stated by the authors |
 | ArchiveII-test | Mathews lab, [rna.urmc.rochester.edu](https://rna.urmc.rochester.edu/) | No licence stated by the authors. Check that site before using it. |
 
-`resources_servers/rna_design/data/example.jsonl` holds five Eterna100 v1 targets from the same files (MIT).
+`environments/rna_design/data/example.jsonl` holds five Eterna100 v1 targets from the same files (MIT).
