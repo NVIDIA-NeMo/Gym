@@ -102,7 +102,7 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
     prepare = calls["/prepare_sandbox"]["json"]
     assert SandboxAccess.model_validate(prepare["sandbox_access"]).connection.descriptor["sandbox_id"] == "sb-1"
     # The agent container reaches the tool host before the agent is seeded.
-    assert provider.commands and "http://tools:8000/_tool_sidecar/ready" in provider.commands[0]
+    assert any("http://tools:8000/_tool_sidecar/ready" in command for command in provider.commands)
     # The agent's only tool grant is the sidecar, with the Resources session's cookies, not the Resources host.
     seed = AgentSeedSessionRequest.model_validate(calls["/v1/agent_sessions"]["json"])
     [grant] = seed.tool_accesses

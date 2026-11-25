@@ -35,8 +35,7 @@ example_single_tool_call_single_agent_turn:
       sandbox_provider: sandbox
       sandbox_config:
         image: python:3.13-slim
-        # A directory the image has: the provider does not create it.
-        workdir: /tmp
+        workdir: /workspace
         # Above the episode timeout plus the cleanup timeout.
         ttl_s: 25200
         # The tools are in the group, so the agent container needs only the model server.

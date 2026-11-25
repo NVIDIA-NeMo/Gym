@@ -178,6 +178,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     # With sandbox_provider set, it lends the attempt's sandbox to the agent and to the Resources Server, so startup
     # refuses a provider no other process can connect to, such as the local provider that runs commands on this host.
     lends_sandboxes: ClassVar[bool] = True
+    # It grants the agent the tools a Resources Server serves from a sidecar of the group, and brings their state to
+    # /verify (_grant_tool_sidecar, _import_tool_sidecar_state).
+    grants_tool_sidecars: ClassVar[bool] = True
     # The base class starts the attempt sandbox from sandbox_config through self.sandboxes, so startup checks that
     # block's network rule against sandbox_provider.
     owned_sandbox_blocks: ClassVar[Mapping[str, str]] = ATTEMPT_SANDBOX_BLOCKS
