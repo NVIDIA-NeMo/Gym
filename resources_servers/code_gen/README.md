@@ -24,24 +24,28 @@ alarm of `unit_test_timeout_secs`, an overall deadline of
 `RLIMIT_STACK`, and disabled destructive builtins. The stack limit cannot exceed the provider's hard limit.
 
 ### Where it runs
-The shipped pairing (`code_gen_environment_server`) sets `sandbox_provider` and `sandbox_config`, which say how the
-Environment Server starts a sandbox group. Where each part runs is fixed per task; the rules are in
+The shipped pairing (`code_gen_environment_server`) sets `sandbox_provider` and a `verifier` block with
+`mode: separate`, and no `sandbox_config`, since the task has no sandbox. The rules are in
 [Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs).
 
 | Agent | Verifier | Why |
 |---|---|---|
 | Agent Server process | `separate` | No tools; the verifier runs the candidate's code (unit tests) in a group of its own. |
 
-With a CLI harness the Agent column is `attempt group`, which starts with `sandbox_config.network`: `code_gen.yaml`
-ships `no_network`, so such a pairing sets `network: model_only` with `model_server` and a model server address the
-sandbox reaches.
+With a CLI harness the Agent column is `attempt group`: such a pairing adds a `sandbox_config` for the agent's group,
+with `network: model_only`, `model_server`, and a model server address the sandbox reaches.
 
-The verifier's group starts from `CODE_GEN_SANDBOX_IMAGE` with no network right before `/verify`. code_gen borrows it
-from the `ng_sandbox_access` field of the `/verify` body, uploads the runner and harness into a fresh directory, runs
-them, and releases its client; the Environment Server stops the group.
+Right before `/verify`, the Environment Server starts the verifier's group from `verifier.sandbox`: the
+`CODE_GEN_SANDBOX_IMAGE` image, with no network. code_gen borrows it from the `ng_sandbox_access` field of the
+`/verify` body, uploads the runner and harness into a fresh directory, runs them, and releases its client; the
+Environment Server stops the group.
 
-- The provider must apply `no_network` and lend sandboxes: Docker and OpenSandbox do. Enroot does not, so every
-  attempt on it is refused at seed.
+- code_gen's `/verify` supports only `separate` (`supported_verifier_modes`), so a pairing that sets `verifier.mode`
+  to `none` or `shared` fails every attempt at seed.
+- The provider must apply `no_network` and lend sandboxes: Docker and OpenSandbox do. On Enroot the Environment
+  Server refuses to start.
+- `verifier.sandbox` and code_gen's own `sandbox_config` both take `CODE_GEN_SANDBOX_IMAGE` and the same resources;
+  change both together. The thread caps of a grade in the verifier's group come from code_gen's `sandbox_config`.
 - `num_processes` caps only the sandboxes code_gen starts itself. The Environment Server starts one verifier group per
   attempt that reaches `/verify`, bounded only by its `max_concurrent_episodes`, which `code_gen.yaml` leaves unset.
 - A caller that lends no sandbox to `/verify`, such as a re-verification, gets a fresh sandbox from code_gen's own
@@ -55,8 +59,9 @@ them, and releases its client; the Environment Server stops the group.
 
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)
-and a runtime image before starting the server. Both `sandbox_provider` and `sandbox_config.image`
-are required. `num_processes` caps concurrent sandboxes.
+and a runtime image before starting the server. code_gen requires `sandbox_provider` and
+`sandbox_config.image`, and its pairing the same image in `verifier.sandbox.image` (see
+[Where it runs](#where-it-runs)). `num_processes` caps the sandboxes code_gen starts itself.
 
 **Migration from Ray:** the Ray execution backend and dependency have been removed. Existing
 `app.py` configurations must supply a sandbox provider and image; there is no local-worker fallback.
@@ -107,14 +112,21 @@ Where each part runs:
          sandbox_provider: sandbox
          sandbox_config:
            image: <registry>/code-gen-verifier@sha256:<digest>
+
+   code_gen_environment_server:
+     environment_servers:
+       single_agent_turn_legacy:
+         verifier:
+           sandbox:
+             image: <registry>/code-gen-verifier@sha256:<digest>
    ```
 
    The server and parent Gym CLI do not require the `ray` extra.
 
    Keys left out keep the server's defaults below.
 
-   `num_processes` then caps concurrent sandboxes, so size it to what the provider can run at once
-   rather than to Ray CPUs. The default `sandbox_config` allows up to 1 CPU and 6 GiB of memory,
+   `num_processes` then caps the sandboxes code_gen starts itself, so size it to what the provider
+   can run at once rather than to Ray CPUs. The default `sandbox_config` allows up to 1 CPU and 6 GiB of memory,
    above the 4 GiB `RLIMIT_DATA`, so a memory-hungry candidate fails its test instead of getting the
    whole sandbox killed. Unlike a Ray task's CPU, that CPU is a limit, not a reservation, and the
    per-test time limits are wall-clock. The default `sandbox_config.provider_options.network_policy`

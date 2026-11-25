@@ -11,7 +11,7 @@ code_gen:
       unit_test_timeout_secs: 10
       debug: false
       # Configure a sandbox provider and CODE_GEN_SANDBOX_IMAGE before starting.
-      # num_processes caps concurrent sandboxes; see the README for provider setup.
+      # num_processes caps the sandboxes code_gen starts itself; see the README for provider setup.
       sandbox_provider: sandbox
       sandbox_config:
         image: ${oc.env:CODE_GEN_SANDBOX_IMAGE,null}
@@ -74,23 +74,25 @@ code_gen_environment_server:
       agent_server:
         type: responses_api_agents
         name: code_gen_simple_agent
-      # How this server starts sandbox groups; where each part runs is fixed per task (see the README). The task has no
-      # tools and Simple Agent runs its loop in its own process, so the agent borrows no group. code_gen declares
-      # verifier_mode separate: right before /verify this server starts a group from code_gen's verifier image with
-      # no network, code_gen runs the unit tests in it, and this server stops it.
+      # Where each part runs (see the README). The task has no tools and Simple Agent runs its loop in its own
+      # process, so there is no task sandbox (no sandbox_config). The verifier runs the candidate's code: right before
+      # /verify this server starts a group from verifier.sandbox, code_gen runs the unit tests in it, and this server
+      # stops it.
       sandbox_provider: sandbox
-      sandbox_config:
-        workdir: /tmp
-        # The rule of a group an agent borrows; Simple Agent borrows none here, and a separate verifier's group always
-        # starts with no_network. A harness that runs its loop in a sandbox needs model_only with model_server.
-        network: no_network
-        # Above the default episode timeout plus the cleanup timeout; the provider reclaims a sandbox this server
-        # could not stop.
-        ttl_s: 25200
-        # The same limits as code_gen's own verification sandbox; change both together, since the thread caps of a
-        # grade in a lent sandbox come from code_gen's sandbox_config.resources.
-        resources:
-          cpu: 1
-          memory_mib: 6144
-        metadata:
-          benchmark: code-gen
+      verifier:
+        mode: separate
+        # The verifier's whole group, since there is no sandbox_config. Its network is no_network.
+        sandbox:
+          # The same image as code_gen's own sandbox_config, which only a re-verification uses; change both together.
+          image: ${oc.env:CODE_GEN_SANDBOX_IMAGE,null}
+          workdir: /tmp
+          # Above the default episode timeout plus the cleanup timeout; the provider reclaims a sandbox this server
+          # could not stop.
+          ttl_s: 25200
+          # The same limits as code_gen's own sandbox_config; change both together, since the thread caps of a grade
+          # in a lent sandbox come from code_gen's sandbox_config.resources.
+          resources:
+            cpu: 1
+            memory_mib: 6144
+          metadata:
+            benchmark: code-gen

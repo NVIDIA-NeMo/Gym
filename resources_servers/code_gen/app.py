@@ -41,9 +41,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ResourcesSeedSessionRequest,
     ReverifyMode,
-    SandboxGroupSpec,
     SimpleResourcesServer,
     VerifierMode,
     borrow,
@@ -123,10 +121,13 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
     ray_enabled = False
-    # The verifier runs the candidate's code, so its tests always run in a sandbox: a fresh group with no network that
-    # the Environment Server starts right before /verify and lends it, or else, for a caller that lends none, a fresh
-    # sandbox of this server's own.
+    # The verifier runs the candidate's code, so /verify runs only in a separate group: a fresh one with no network
+    # that the Environment Server starts right before /verify and lends it. "separate" is also the mode when a pairing
+    # leaves verifier.mode unset. "shared" would grade in the agent's group, with the agent's image, network and
+    # leftovers, and "none" would leave the sandbox to this server. A caller that lends no sandbox, such as a
+    # re-verification, gets a fresh sandbox of this server's own.
     verifier_mode: ClassVar[VerifierMode] = "separate"
+    supported_verifier_modes: ClassVar[frozenset[VerifierMode]] = frozenset({"separate"})
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
@@ -135,10 +136,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # One grade at a time per lent sandbox: a /verify the caller resent after a dropped connection waits for the
         # first instead of sharing the sandbox's CPU with it, which would turn per-test time limits into failures.
         self._lent_sandbox_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
-
-    def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec:
-        """The verifier's group runs the unit tests, so it starts from code_gen's verifier image."""
-        return SandboxGroupSpec(image=self.config.sandbox_config.image)
 
     def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
         """Provider config and sandbox metadata, resolved once from the global config."""

@@ -37,7 +37,6 @@ from nemo_gym.sandbox import SandboxAccess
 from nemo_gym.server_runtime import (
     NG_SANDBOX_ACCESS_KEY,
     ResourcesSeedSessionRequest,
-    SandboxGroupSpec,
     verifier_observability,
 )
 from nemo_gym.trajectory import VerifierInvocation
@@ -399,13 +398,11 @@ class TestLentSandboxVerify:
         body = _verify_request(code).model_dump(mode="json") | {NG_SANDBOX_ACCESS_KEY: _ACCESS}
         return CompCodingVerifyRequest.model_validate(body)
 
-    def test_the_seed_declares_a_separate_verifier_from_the_verifier_image(self) -> None:
-        # The Environment Server starts a fresh group for the verifier alone, from this image, right before /verify.
+    def test_the_seed_declares_only_a_separate_verifier(self) -> None:
+        # The task has no group to declare: the pairing's verifier.sandbox gives the verifier's group, image included.
+        # Separate is the only mode /verify supports, so the seed sends no supported_verifier_modes list.
         declaration = _make_server().sandbox_declaration(MagicMock(spec=ResourcesSeedSessionRequest))
-        assert declaration == {
-            "sandbox_group": SandboxGroupSpec(image="code-gen-verifier:test"),
-            "verifier_mode": "separate",
-        }
+        assert declaration == {"sandbox_group": None, "verifier_mode": "separate", "supported_verifier_modes": None}
 
     def test_the_access_is_read_from_the_wire_key_and_never_dumped(self) -> None:
         request = self._lent_request()
