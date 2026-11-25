@@ -17,7 +17,9 @@ preflight failed is still exported. A scored no-answer (no accepted ``finish``, 
 budget, a wall-clock stop) is exported as the empty code block the CritPt server submits for one; the recipe scores it
 zero.
 
-Each rollout is its latest attempt by attempt index, as Gym's sidecar readers select it: a recovery run appends a newer attempt to the
+Each rollout is its current outcome. For a run Gym's Store manages (it has a run manifest), the Store selects it, so an
+attempt that was reserved but never saved leaves its rollout missing rather than letting an older answer stand.
+Otherwise the newest attempt index wins, as Gym's sidecar readers select it: a recovery run appends a newer attempt to the
 rollouts file or its ``_failures.jsonl`` sidecar, and the newest one stands. A repeat is written only when that attempt
 is exportable for every task in the file. A rollout whose outcome is unscorable (``response_incomplete`` or
 ``submission_invalid``, such as a provider failure or a cancelled episode), whose latest attempt failed, or that is
@@ -42,7 +44,12 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME
-from nemo_gym.rollouts import is_non_superseding_rollout_row
+from nemo_gym.rollouts import (
+    RolloutStore,
+    is_non_superseding_rollout_row,
+    manifest_path_for,
+    materialized_path_for,
+)
 from nemo_gym.utils import failures_path_for
 from resources_servers.critpt_custom_grader.submission import extract_finish_source
 
@@ -75,18 +82,41 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
             if not isinstance(row, dict):
                 raise ValueError(f"{path}:{line_number} is not a JSON object")
             for key in ("_ng_task_index", "_ng_rollout_index"):
-                if not isinstance(row.get(key), int):
+                if type(row.get(key)) is not int:
                     raise ValueError(f"{path}:{line_number} has no integer {key}")
             rows.append(row)
     return rows
 
 
-def load_rollouts(path: Path) -> list[dict[str, Any]]:
-    """The latest attempt of each rollout across the rollouts file and its failures sidecar.
+def load_store_rollouts(output: Path) -> list[dict[str, Any]]:
+    """Each expected rollout's current outcome in a run Gym's Store manages, as the Store selects it.
 
+    A rollout whose latest attempt failed, or was reserved and never saved, is returned with ``"_export_failed"``
+    and the reason; an older saved answer never stands in for it.
+    """
+    store = RolloutStore.read(output)
+    selected = {(row["_ng_task_index"], row["_ng_rollout_index"]): row for row in store.selected("success")}
+    rows = []
+    for expected in _read_rows(materialized_path_for(output)):
+        key = (expected["_ng_task_index"], expected["_ng_rollout_index"])
+        disposition = store.disposition(expected)
+        if disposition == "success" and key in selected:
+            rows.append(selected[key])
+            continue
+        reason = "latest_attempt_missing" if disposition == "unknown" else "latest_attempt_failed"
+        rows.append({**expected, "_export_failed": True, "_export_reason": reason})
+    return rows
+
+
+def load_rollouts(path: Path) -> list[dict[str, Any]]:
+    """The latest attempt of each rollout: through Gym's Store for a managed run, else from the files.
+
+    Without a run manifest, the rollouts file and its failures sidecar are read and the newest attempt index wins.
     A failed latest attempt is returned with ``"_export_failed": True``. Sidecar rows that are no execution or no new
     outcome are skipped, as Gym's readers skip them.
     """
+    if manifest_path_for(path.resolve()).exists():
+        return load_store_rollouts(path.resolve())
     latest: dict[tuple[int, int], dict[str, Any]] = {}
     sidecar = failures_path_for(path.resolve())
     # The sidecar is read first, as Gym's Store reads it: on an equal attempt index a landed result stands.
@@ -136,7 +166,9 @@ def plan_batches(rows: list[dict[str, Any]], batch_size: int) -> dict[int, dict[
                 continue
             row = candidates[0]
             if row.get("_export_failed"):
-                problems.append({"task_index": task_index, "reason": "latest_attempt_failed"})
+                problems.append(
+                    {"task_index": task_index, "reason": row.get("_export_reason", "latest_attempt_failed")}
+                )
                 continue
             response = row.get("response")
             submission = extract_finish_source(response) if isinstance(response, dict) else None

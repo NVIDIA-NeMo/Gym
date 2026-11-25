@@ -252,3 +252,62 @@ def test_an_earlier_export_is_never_overwritten(tmp_path, capsys):
     assert code == 2
     assert "exists; export into a new directory" in capsys.readouterr().err
     assert (out_dir / "repeat-0" / "submissions.jsonl").read_bytes() == before
+
+
+def _managed_run(tmp_path):
+    """A run Gym's Store manages: three tasks, one repeat, each answered once."""
+    from unittest.mock import Mock
+
+    from nemo_gym.rollouts import RolloutStore, RunManifest
+
+    inputs = [
+        {"_ng_task_index": task, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}, "problem_id": PROBLEMS[task]}
+        for task in range(3)
+    ]
+    source = _write(tmp_path / "source.jsonl", inputs)
+    prepare = Mock(
+        side_effect=lambda: (inputs, RunManifest.create(source, inputs, {}, {"agent": {"responses_api_agents": {}}}))
+    )
+    output = tmp_path / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row in store.pending(3):
+            store.record_dispatch(row)
+            answer = f"def answer():\n    return {row['_ng_task_index']}"
+            store.record_outcome(row | {"reward": 0.0, "response": _finished(answer)})
+        first = next(row for row in store.selected("success") if row["_ng_task_index"] == 0)
+        store.allocate_attempt(first)  # Recovery reserved a newer attempt, interrupted before it saved an outcome.
+    return output, prepare
+
+
+def test_a_managed_run_never_exports_an_answer_a_reserved_attempt_superseded(tmp_path, capsys):
+    from nemo_gym.rollouts import RolloutStore
+
+    output, prepare = _managed_run(tmp_path)
+
+    code = main(["--rollouts", str(output), "--out-dir", str(tmp_path / "stale"), "--batch-size", "3"])
+
+    assert code == 3
+    manifest = json.loads((tmp_path / "stale" / "manifest.json").read_text())
+    assert manifest["repeats"]["0"]["problems"] == [{"task_index": 0, "reason": "latest_attempt_missing"}]
+
+    # Once that attempt saves its answer, a fresh export sends the new one.
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
+        (row,) = [row for row in resumed.pending(3) if row["_ng_task_index"] == 0]
+        resumed.record_dispatch(row)
+        resumed.record_outcome(row | {"reward": 0.0, "response": _finished("def answer():\n    return 9")})
+
+    assert main(["--rollouts", str(output), "--out-dir", str(tmp_path / "fresh"), "--batch-size", "3"]) == 0
+    submissions = _read_jsonl(tmp_path / "fresh" / "repeat-0" / "submissions.jsonl")
+    assert submissions[0]["submission"]["generated_code"] == "```python\ndef answer():\n    return 9\n```"
+
+
+@pytest.mark.parametrize("key", ["_ng_task_index", "_ng_rollout_index"])
+def test_a_boolean_rollout_identity_is_refused(tmp_path, capsys, key):
+    rows = _complete_repeat(0)
+    rows[0] = {**rows[0], key: True}
+
+    code, out_dir = _run(tmp_path, rows)
+
+    assert code == 2
+    assert f"no integer {key}" in capsys.readouterr().err
+    assert not out_dir.exists()
