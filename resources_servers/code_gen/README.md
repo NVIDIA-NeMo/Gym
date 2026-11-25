@@ -37,7 +37,8 @@ always gets a sandbox. The model calls no tools, so the group reaches only the m
 
 code_gen is a pure QA task, so for sandbox capacity on large runs it may run the agent loop in the Agent Server's
 process instead. The verifier cannot opt out: the Environment Server then starts a group for the verifier alone
-after the agent closes and lends it to `/verify`.
+after the agent closes, with no egress (`no_network`, whatever `sandbox_config.network` says), and lends it to
+`/verify`.
 
 ```yaml
 code_gen_environment_server:
@@ -71,10 +72,10 @@ code_gen_environment_server:
         model_server: null
 ```
 
-Grading keeps the egress rule the sandbox started with, because providers cannot change a running sandbox's egress
-yet. Candidate code can therefore reach the model server's host during grading, where code_gen's own verifier
-sandbox allowed no egress at all. A group for the verifier alone (`sandbox_opt_out.task`) starts from the same
-`sandbox_config` today.
+In the shared group, grading keeps the egress rule the group started with, because providers cannot change a
+running sandbox's egress yet. Candidate code can therefore reach the model server's host while it is graded, where
+code_gen's own verifier sandbox allowed no egress at all. With `sandbox_opt_out.task`, the verifier's group has no
+egress.
 
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)
