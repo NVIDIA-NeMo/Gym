@@ -89,11 +89,27 @@ Generation defaults are:
 | Thinking | Enabled |
 
 The benchmark extends Gym's vLLM model server through its request and conversion
-hooks. It sends the original text messages to the chat-completions endpoint and
-measures their token count before each request. The output budget is
-`min(120000, context_length - prompt_tokens - 64)`. `MAX_OUTPUT_TOKENS` can lower
-the cap. A preflight check verifies that reasoning and the final answer are
-separated. Parser and parallelism settings must match the evaluated model.
+hooks. It preserves the processed request, including model-profile stop settings,
+penalties, reasoning options, and chat-template kwargs. Template settings follow
+Gym's precedence: config defaults, then direct request kwargs, then
+`metadata.chat_template_kwargs`. Set template kwargs through these fields;
+nesting them inside `extra_body` is rejected.
+
+It sends the original text messages to the chat-completions endpoint and measures
+their token count using the same prompt-affecting settings as generation. The
+output budget is `min(requested_output_tokens, context_length - prompt_tokens - 64)`.
+The requested cap defaults to 120,000; `MAX_OUTPUT_TOKENS` can lower it. A cap above
+120,000, conflicting budget aliases, disabled thinking, prompt truncation,
+assistant-prefix continuation, tools, and multiple completions are rejected
+explicitly. Incompatible model-server modes also fail configuration validation.
+The adapter retains the reference's measured budget and 64-token reserve; Gym's
+error-triggered budget refitting must remain disabled for this protocol.
+
+A preflight check verifies that reasoning and the final answer are separated.
+Parser and parallelism settings must match the evaluated model. Extra profile
+settings are now honored and can change answers: use identical effective settings
+in the reference run when comparing scores. The default reference request payload
+and final-answer extraction are unchanged.
 
 The submission records provide each job ID and artifact directory. Outputs include:
 
@@ -235,7 +251,7 @@ On November 20, 2026, a live smoke run with `google/gemma-4-31B-it` at revision
   official Indic headline suppressed.
 
 This historical smoke used the former Slurm wrappers and validates generation,
-judging, recovery, and summary behavior. Submission-config migration checks are
+judging, recovery, and summary behavior. Subsequent change validation is
 recorded separately in [validation.md](validation.md).
 It covers one conversation across five languages and does not establish aggregate
 model quality or score agreement with a separate reference run. The integration

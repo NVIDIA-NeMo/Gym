@@ -151,9 +151,10 @@ responses and materialized inputs, and uses the original prepared population for
 coverage. The Gemma profile preserves its context, top-k, parsers, and parallelism.
 Both drivers install the same published Gym revision and locked dependencies.
 
-The generation model, preflight, generation/judge configs, preparer, prompt
-templates, source checksums, summarizer, and metric reducer are byte-identical to
-`002507bb8887ec97c950cf9eca595e2770c05f01`. The judge's executable AST is unchanged;
+At submission-migration commit `0210c1ce`, the generation model, preflight,
+generation/judge configs, preparer, prompt templates, source checksums, summarizer,
+and metric reducer were byte-identical to
+`002507bb8887ec97c950cf9eca595e2770c05f01`. The judge's executable AST was unchanged;
 only the thinking-stripper docstring changed. Its literal-tag behavior and use on
 candidate, baseline, and judge text are now explicit.
 
@@ -196,3 +197,111 @@ done
 .venv/bin/pre-commit run --all-files
 git diff --check
 ```
+
+## Generation profile preservation (November 25, 2026)
+
+The benchmark now forwards Gym's processed request instead of rebuilding it from
+a restricted field list. Model-profile stop settings, penalties, reasoning options, direct
+chat-template settings, metadata overrides, and sampling pins are preserved.
+Tokenization uses Gym's prompt-field selector so it measures the same template
+and reasoning settings sent to generation. The request's output-budget alias is
+preserved, with the same measured 64-token context reserve.
+
+Reference-incompatible profiles fail at startup. Conflicting per-request settings
+return HTTP 422 before tokenization or generation, including budgets above
+120,000, disabled thinking, truncation, continuation, and multiple completions.
+The final-answer converter, data, baselines, judge, and scoring are unchanged.
+
+Exact reference-payload tests cover both conversation shapes, both sampling
+profiles, and three context-budget cases. Additional regressions check profile
+and metadata precedence, direct kwargs, stop/penalty forwarding, prompt fields,
+sampling pins, both budget aliases, and explicit rejection. Extra profile settings
+can now change answers because they are honored; comparisons require the same
+effective settings in the reference. Passing payload tests does not establish
+end-to-end score equality.
+
+Against the previous adapter, both new field-preservation regressions fail (lost
+`stop` and `max_completion_tokens`), while all 12 reference-payload cases pass.
+With this fix, those same reference payloads remain identical and the additional
+fields survive. The standard vLLM request/template/sampling/budget suite also
+passes 188 selected cases.
+
+The benchmark/judge/submission/English regression suite passed **298 tests**;
+the focused vLLM suite passed **188 tests** (486 total). The converter AST and
+shared model/resources servers are unchanged. Commands against the final code:
+
+```bash
+RAY_TMPDIR=/tmp .venv/bin/python -m pytest -o addopts= --no-cov -q \
+  tests/unit_tests/orchestration/test_indic_arena_submission.py \
+  tests/unit_tests/orchestration/test_cli_eval_submit.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_generation.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py \
+  resources_servers/arena_judge/tests/test_app.py \
+  benchmarks/lmarena_v3/tests/test_lmarena_v3_subsets.py
+
+RAY_TMPDIR=/tmp .venv/bin/python -m pytest -o addopts= --no-cov -q \
+  responses_api_models/vllm_model/tests/test_app.py \
+  -k 'chat_template_kwargs or sampling or tokenize or budget or prompt_refit'
+
+.venv/bin/pre-commit run --all-files
+git diff --check
+```
+
+Pre-commit passed; the unavailable private guardword catalog prevented that
+content scan. Existing optional histogram-export, statistical, and test-client
+warnings remain. The full core/sandbox/server CI suite was not run locally.
+
+A fresh five-task smoke completed with `google/gemma-4-31B-it` revision
+`842da3794eaa0b77d5f08bae87a17459d91ff475`, vLLM 0.26.0, TP=8,
+context=131,072, temperature=1.0, top-p=0.95, top-k=64, seed=42, and the Gemma
+reasoning/tool parsers. The profile explicitly included zero presence and
+frequency penalties. The smoke cap was **8,192 tokens**, with five concurrent
+tasks and one repeat. All responses completed without truncation (224–346 output
+tokens), with nonempty visible answers and no leaked thinking delimiters.
+
+The five historical inputs cover English, Hindi, Bengali, Tamil, and Telugu;
+they are translations of one multi-turn conversation. Prompt roles/content and
+frozen baselines were preserved. Gym adds message type/phase fields when saving
+its typed request; these do not change the conversation text. Reverification
+preserved each saved policy response and produced **10 valid swapped-position
+verdicts**, with zero failed tasks or invalid verdicts. Both the Gym aggregate
+metrics and offline summary reported English separately and omitted the subset
+headline. Coverage was complete for the five selected tasks.
+
+The GPU model-service job completed successfully. The CPU driver used the final
+code through `gym eval run`, `gym eval reverify`, and the benchmark summarizer:
+
+```bash
+# RUN_DIR contains the five prepared inputs; deployment supplies the policy endpoint.
+export INPUT_JSONL="$RUN_DIR/inputs/arena_proxy_v3_benchmark.jsonl"
+export CONTEXT=131072 TOP_K=64
+.venv/bin/gym eval run \
+  --config benchmarks/indic/arena_proxy_v3/config.yaml \
+  --config benchmarks/indic/arena_proxy_v3/submit/dataset.yaml \
+  --config benchmarks/indic/arena_proxy_v3/generation.yaml \
+  --agent indic_arena_proxy_v3_agent --model "$POLICY_MODEL" \
+  --model-url "$POLICY_BASE_URL" --model-api-key EMPTY \
+  --split benchmark --output "$RUN_DIR/generations/rollouts.jsonl" \
+  --num-repeats 1 --concurrency 5 --temperature 1.0 --top-p 0.95 \
+  --max-output-tokens 8192 +skip_verification=true +require_complete=true \
+  ++policy_model.responses_api_models.vllm_model.extra_body.presence_penalty=0.0 \
+  ++policy_model.responses_api_models.vllm_model.extra_body.frequency_penalty=0.0 \
+  ++head_server.host=127.0.0.1 ++head_server.port=29871
+
+# The judge credential is provided through the deployment's protected environment.
+.venv/bin/gym eval reverify --config benchmarks/indic/arena_proxy_v3/judge.yaml \
+  --inputs "$RUN_DIR/generations/rollouts_materialized_inputs.jsonl" \
+  --rollouts "$RUN_DIR/generations/rollouts.jsonl" \
+  --output "$RUN_DIR/judgments/rollouts.jsonl" --concurrency 5 \
+  ++head_server.host=127.0.0.1 ++head_server.port=29872
+.venv/bin/python -m benchmarks.indic.arena_proxy_v3.summarize \
+  "$RUN_DIR/judgments/rollouts.jsonl" --inputs "$INPUT_JSONL" \
+  --output "$RUN_DIR/metrics.json"
+```
+
+This run validates the application flow with real policy and judge calls. It
+uses a reduced output cap and does not establish agreement with a separate full
+reference run. It also does not validate deployment-specific `gym eval submit`
+containers or mounts; the model service was submitted separately and the Gym
+CLI driver ran on the CPU host. Full paired benchmark evaluation remains pending.
