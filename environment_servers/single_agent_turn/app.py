@@ -984,10 +984,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     def _verify_body(request: SingleAgentTurnRequest, agent_response: NeMoGymResponse) -> dict[str, Any]:
         """The Resources Server's own flat verify body, as an Agent's /run sends it."""
         task_input = request.task.task_input
-        return task_input.task_data | {
+        body = task_input.task_data | {
             "responses_create_params": task_input.responses_create_params.model_dump(mode="json", exclude_unset=True),
             "response": agent_response.model_dump(mode="json"),
         }
+        # Only the attempt's owner can supply verifier access, after the task fields have been assembled.
+        body.pop(NG_SANDBOX_ACCESS_KEY, None)
+        return body
 
     @staticmethod
     def _agent_failure(response: NeMoGymResponse) -> NgFailureEvent | None:

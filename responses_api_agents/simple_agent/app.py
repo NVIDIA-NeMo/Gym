@@ -1294,6 +1294,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         tool_access = kwargs.get("tool_access")
         cookies = kwargs.get("resources_server_cookies")
         model_cookies = kwargs.get("model_server_cookies")
+        if body.metadata:
+            body = self._strip_resource_only_metadata(body)
         payload = {
             # Only the settings the loop reads; the sandbox runs the loop itself, so its copy runs in process there.
             "config": self.config.model_dump(mode="json", exclude_unset=True, include=_SANDBOX_LOOP_CONFIG),
