@@ -312,26 +312,37 @@ def _refusal(error: pytest.ExceptionInfo[NgFailureEvent]) -> tuple[str, bool]:
 
 
 @pytest.mark.parametrize(
-    "opt_out, lends",
+    "tools, runs_without_sandbox, lends_to_agent",
     [
-        ({}, (True, True)),
-        ({"task": True}, (False, True)),
-        ({"verifier": True}, (True, False)),
+        # A task with tools runs in the group, whatever the agent.
+        (["get_weather"], True, True),
+        (["get_weather"], False, True),
+        # A task without tools: only an agent that cannot run its loop without a sandbox borrows the group.
+        ([], False, True),
+        ([], True, False),
     ],
 )
-def test_the_agent_and_the_verifier_each_borrow_the_group_unless_they_opt_out(
-    opt_out: dict[str, bool], lends: tuple[bool, bool]
+def test_the_group_starts_at_seed_for_the_agent_only_when_the_agent_needs_it(
+    tools: list[str], runs_without_sandbox: bool, lends_to_agent: bool
 ) -> None:
-    attempt = _server(sandbox_opt_out=opt_out).plan_attempt_sandbox(key="attempt/a")
+    attempt = _server().plan_attempt_sandbox(
+        key="attempt/a", task_tools=tools, agent_runs_loop_without_sandbox=runs_without_sandbox
+    )
 
-    assert attempt is not None
-    assert (attempt.key, (attempt.lend_to_agent, attempt.lend_to_verifier)) == ("attempt/a", lends)
+    # The verifier is always lent the group; only when it starts is derived.
+    assert (attempt.key, attempt.lend_to_agent) == ("attempt/a", lends_to_agent)
     assert (attempt.image, attempt.workdir) == ("python:3.13-slim", "/workspace")
 
 
-def test_nothing_starts_when_both_opt_out_or_the_server_starts_no_sandboxes() -> None:
-    both = _server(sandbox_opt_out={"task": True, "verifier": True})
-    assert both.plan_attempt_sandbox(key="a") is None
+def test_a_sidecar_makes_the_group_start_at_seed_for_any_agent() -> None:
+    server = _server(_SidecarProvider(), server_type=_ToolGrantingServer)
+    group = SandboxGroupSpec(sidecars=[SandboxGroupSidecar(name="db", image="db")])
+
+    assert server.plan_attempt_sandbox(key="a", group=group, agent_runs_loop_without_sandbox=True).lend_to_agent
+
+
+def test_nothing_starts_when_the_configuration_opts_out_or_the_server_starts_no_sandboxes() -> None:
+    assert _server(sandbox_opt_out=True).plan_attempt_sandbox(key="a", agent_runs_loop_without_sandbox=True) is None
     assert _server(configured=False).plan_attempt_sandbox(key="a") is None
 
 
@@ -339,14 +350,11 @@ def test_nothing_starts_when_both_opt_out_or_the_server_starts_no_sandboxes() ->
     "plan, reason",
     [
         (
-            {"opt_out": {"task": True}, "task_tools": ["get_weather"]},
+            {"opt_out": True, "task_tools": ["get_weather"]},
             "only for a pure QA task, whose model calls no tools, but this task has ['get_weather']",
         ),
         (
-            {
-                "opt_out": {"task": True},
-                "group": SandboxGroupSpec(sidecars=[SandboxGroupSidecar(name="db", image="db")]),
-            },
+            {"opt_out": True, "group": SandboxGroupSpec(sidecars=[SandboxGroupSidecar(name="db", image="db")])},
             "this task has ['sidecar db']",
         ),
         (
@@ -389,7 +397,7 @@ def test_a_refused_opt_out_or_an_unstartable_group_fails_the_attempt_at_seed_for
     provider = plan.pop("provider", _Provider())
     config = {"sandbox_config": plan.pop("sandbox_config")} if "sandbox_config" in plan else {}
     server = _server(
-        provider, configured=plan.pop("configured", True), sandbox_opt_out=plan.pop("opt_out", {}), **config
+        provider, configured=plan.pop("configured", True), sandbox_opt_out=plan.pop("opt_out", False), **config
     )
 
     with pytest.raises(NgFailureEvent) as error:
@@ -529,8 +537,8 @@ async def test_a_declared_prepare_runs_once_the_group_has_started() -> None:
 async def test_a_group_that_cannot_start_fails_the_attempt_for_a_retry_and_leaves_nothing_running() -> None:
     provider = _Provider()
     provider.fail_create = SandboxCreateError("provider unreachable")
-    server = _server(provider, sandbox_opt_out={"task": True})
-    attempt, _ = await server.seed_attempt_sandbox(_request(), key="a")
+    server = _server(provider)
+    attempt, _ = await server.seed_attempt_sandbox(_request(), key="a", agent_runs_loop_without_sandbox=True)
 
     with pytest.raises(NgFailureEvent) as error:
         await server.verifier_sandbox_access(_request(), attempt, partial_response="kept")
@@ -560,9 +568,9 @@ async def test_a_failed_prepare_is_retried_only_when_the_resources_servers_error
     assert provider.running() == []
 
 
-async def test_seeding_marks_the_episode_a_restart_and_starts_the_group_only_for_the_agent() -> None:
+async def test_seeding_marks_the_episode_a_restart_and_starts_a_group_for_the_verifier_alone_late() -> None:
     provider = _Provider()
-    server = _server(provider, sandbox_opt_out={"task": True})
+    server = _server(provider)
     restarts: list[EpisodeId] = []
 
     async def restart(request: _Request) -> None:
@@ -570,11 +578,14 @@ async def test_seeding_marks_the_episode_a_restart_and_starts_the_group_only_for
 
     object.__setattr__(server, "checkpoint_restart", restart)
 
-    attempt, access = await server.seed_attempt_sandbox(_request(), key="a", group=SandboxGroupSpec(env={"T": "1"}))
+    attempt, access = await server.seed_attempt_sandbox(
+        _request(), key="a", group=SandboxGroupSpec(env={"T": "1"}), agent_runs_loop_without_sandbox=True
+    )
 
     # The plan holds what Resources declared, so no checkpoint may export the episode.
     assert restarts == [_request().episode_id]
-    assert (attempt.lend_to_agent, attempt.lend_to_verifier, access) == (False, True, None)
+    # Nothing starts during the agent's turn; the verifier's group starts when /verify is lent it.
+    assert (attempt.lend_to_agent, access) == (False, None)
     assert provider.boxes == {}
     lent = await server.verifier_sandbox_access(_request(), attempt)
     assert lent.connection.descriptor["sandbox_id"] == "sb-1"
@@ -583,15 +594,15 @@ async def test_seeding_marks_the_episode_a_restart_and_starts_the_group_only_for
     assert provider.running() == []
 
 
-async def test_a_group_only_the_agent_borrowed_is_released_before_verify() -> None:
+async def test_the_verifier_is_lent_the_group_the_agent_borrowed() -> None:
     provider = _Provider()
-    server = _server(provider, sandbox_opt_out={"verifier": True})
+    server = _server(provider)
 
-    attempt, access = await server.seed_attempt_sandbox(_request(), key="a")
+    attempt, access = await server.seed_attempt_sandbox(_request(), key="a", task_tools=["run_python"])
+    lent = await server.verifier_sandbox_access(_request(), attempt)
 
-    assert access.connection.descriptor["sandbox_id"] == "sb-1"
-    assert await server.verifier_sandbox_access(_request(), attempt) is None
-    assert provider.running() == []
+    assert access.connection.descriptor["sandbox_id"] == lent.connection.descriptor["sandbox_id"] == "sb-1"
+    assert list(provider.boxes) == ["sb-1"]
 
 
 async def test_a_failed_release_is_left_to_the_episodes_cleanup() -> None:
@@ -615,9 +626,9 @@ async def test_a_failed_release_is_left_to_the_episodes_cleanup() -> None:
     assert provider.running() == []
 
 
-def test_a_server_whose_task_and_verifier_both_opt_out_checks_and_builds_no_provider_at_startup() -> None:
+def test_a_server_that_opts_out_checks_and_builds_no_provider_at_startup() -> None:
     # The provider block is not even defined: nothing of this server's would ever start on it.
-    server = _server(sandbox_opt_out={"task": True, "verifier": True})
+    server = _server(sandbox_opt_out=True)
     server.server_client.global_config_dict = {}
 
     server.check_sandbox_provider()
@@ -626,12 +637,20 @@ def test_a_server_whose_task_and_verifier_both_opt_out_checks_and_builds_no_prov
     assert server._owned_sandboxes == {}
 
 
-def test_startup_refuses_a_task_opt_out_on_a_provider_that_cannot_cut_the_verifiers_egress() -> None:
-    server = _server(_OpenProvider(), sandbox_opt_out={"task": True})
+async def test_a_provider_that_cannot_cut_egress_starts_the_verifiers_group_with_the_configured_rule(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = _OpenProvider()
+    server = _server(provider)
     server.server_client.global_config_dict = {"attempt_sandboxes": {"docker": {}}}
 
-    with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
-        server.check_sandbox_provider()
+    server.check_sandbox_provider()
+    attempt, _ = await server.seed_attempt_sandbox(_request(), key="a", agent_runs_loop_without_sandbox=True)
+    await server.verifier_sandbox_access(_request(), attempt)
+
+    assert "cannot apply no_network" in caplog.text
+    # inherit, the configured rule, takes no provider options.
+    assert provider.boxes["sb-1"]["spec"].provider_options == {}
 
 
 async def test_stopping_an_attempt_that_started_nothing_builds_no_provider() -> None:

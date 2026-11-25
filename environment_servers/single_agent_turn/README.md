@@ -100,31 +100,31 @@ At seed, the Resources Server may declare what the group holds, as `sandbox_grou
 
 A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both. An episode that holds a group this server starts is a restart: no checkpoint exports it, and the declared files and environment variables never reach a checkpoint.
 
+### When the group starts
+
+`/verify` is always lent the group: lending only hands it the access, and a verifier that executes nothing ignores it. When the group starts is derived, not configured:
+
+| The task | The agent | What starts |
+|------|------|------|
+| has tools or sidecars | any | The group starts at seed. The agent borrows it for its turn, then `/verify` borrows it. |
+| has no tools | cannot run its loop without a sandbox, such as a CLI harness | The same: the group starts at seed. |
+| has no tools | runs its loop in its own process when lent nothing, such as Simple Agent | The agent is lent nothing. The group starts just before `/verify`, for the verifier alone, with `no_network` whatever `sandbox_config.network` says. |
+
+The agent says which it is on `GET /v1/agent_sessions/capabilities` (`runs_loop_without_sandbox`, from the agent class's `runs_loop_without_sandbox`), which this server asks once per process; an agent server without the route is lent the group at seed. A group for the verifier alone is not held through the agent's turn, and model code is verified with no egress. A provider that cannot apply `no_network`, such as Enroot, starts it with `sandbox_config.network` instead, which startup logs. Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed.
+
 ### Opting out
 
-Every task and every verifier runs in the group unless `sandbox_opt_out` opts it out explicitly; neither opt-out is ever the default. Only what executes nothing should opt out, to save sandbox capacity on large QA runs:
+`sandbox_opt_out: true` starts no group at all. It is for a pure QA task whose verifier executes nothing (rules, math-verify, a judge call): the agent runs its loop in its own process and `/verify` runs in the Resources Server. It is the configuration's explicit choice, never the default, and the provider is then neither checked nor built.
 
 ```yaml
 environment_servers:
   single_agent_turn:
     sandbox_provider: attempt_sandboxes
     sandbox_config: {...}
-    sandbox_opt_out:
-      task: true      # a pure QA task: the agent is lent no sandbox, so Simple Agent runs its loop in its own process
-      verifier: false # the verifier still gets a sandbox: one of its own, started after the agent closes
+    sandbox_opt_out: true
 ```
 
-| `task` | `verifier` | What starts |
-|------|------|------|
-| `false` | `false` | One group at seed: the agent borrows it, then `/verify`. |
-| `true` | `false` | No sandbox during the agent's turn. A group for the verifier alone starts after the agent closes, with `no_network` whatever `sandbox_config.network` says, and is lent to `/verify`. |
-| `false` | `true` | One group at seed for the agent. It stops once the agent closes, and `/verify` runs in the Resources Server. |
-| `true` | `true` | Nothing. At startup the provider is neither checked nor built, so a large QA run can opt out of a configuration that names one. |
-
-Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed. The task opt-out is checked at seed, and a refused one fails the attempt for good (a terminal seed failure), since every attempt would fail alike:
-
-- `task` is refused for a task that declares tools (`responses_create_params.tools`), for an episode that grants tools (`resources_tool_transports` or `tool_servers`; also refused at startup), and for a group with sidecars. A `resources_tool_transports` grant counts even when its Resources Server serves no tools: drop it from a pure QA pairing. With `task` set, the provider must apply `no_network`, which startup checks. Pair it with an agent whose loop runs in its own process, such as Simple Agent: an agent that runs a harness in a sandbox of its own is not pure QA.
-- `verifier` is the configuration's explicit choice, for a verifier that executes nothing and calls no tools (rules, math-verify, a judge call). It is never the default, and nothing else is checked for it.
+It is refused for a task that declares tools (`responses_create_params.tools`), for an episode that grants tools (`resources_tool_transports` or `tool_servers`; also refused at startup), and for a group with sidecars, as a terminal seed failure, since every attempt would fail alike. A `resources_tool_transports` grant counts even when its Resources Server serves no tools: drop it from a pure QA pairing.
 
 A group no attempt can start (no image or working directory, or sidecars on a provider that cannot start them) is also refused at seed, before the agent's turn. A group for the verifier alone that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
 
