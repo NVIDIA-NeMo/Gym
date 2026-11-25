@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Who borrows the attempt's sandbox group: the sandbox opt-outs, a verifier's own sandbox, and what Resources declares."""
+"""Who borrows the attempt's sandbox group: the opt-outs, a verifier's own sandbox, and what Resources declares."""
 
 from typing import Any
 
