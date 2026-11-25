@@ -19,6 +19,12 @@ Configuration (`configs/automationbench.yaml`):
 
 - `reward_fn`: `aa_headline` (default) or `partial_credit`. Both are reported either way.
 - `export_assertion_results`: add every assertion's verdict to the verify response as `assertion_results`.
+- `tool_sidecar`: serve the api toolset and each session's world from a sidecar of the attempt's sandbox group
+  instead of this process (`configs/automationbench_tool_sidecar.yaml`, on OpenSandbox, with Simple Agent's loop in the
+  group's agent container). The sidecar runs this same class, seeded with the same task, and installs its runtime
+  (Gym, verifiers, `automation-bench`, `datasets` at this server's versions) at the first prepare of each group. Before
+  `/verify`, the world the agent's calls left is copied back here (`export_tool_state` there, `import_tool_state` here),
+  and the rubric scores it as before; a world that cannot be copied fails the attempt as an infrastructure failure.
 
 A row whose `responses_create_params` carries no tools was prepared before this server existed. `/seed_session` refuses
 it with HTTP 422 before any model call, reading the params the typed seed carries beside `task_data`, and the message

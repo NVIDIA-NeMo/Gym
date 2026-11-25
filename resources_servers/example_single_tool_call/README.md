@@ -6,6 +6,7 @@ This is an example environment with simple tool calls. The example data can be f
 
 - `configs/example_single_tool_call.yaml` runs the example through Simple Agent's `/run`.
 - `configs/example_single_tool_call_single_agent_turn.yaml` runs it through the single-agent-turn Environment Server, which seeds the Resources Server and Simple Agent sessions, grants the agent direct HTTP access to the tools, and verifies the response.
+- `configs/example_single_tool_call_tool_sidecar.yaml` runs `get_weather` in a sidecar of each attempt's sandbox group on OpenSandbox, with Simple Agent's loop in the group's agent container. The Resources Server starts its own class there as the tool host, and no tool call reaches the Resources host. See "Tools in a sidecar" in the single-agent-turn Environment Server's README.
 
 ## Tutorial
 

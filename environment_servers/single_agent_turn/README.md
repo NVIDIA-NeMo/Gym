@@ -101,6 +101,27 @@ At seed, the Resources Server may declare what the group holds, as `sandbox_grou
 
 A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both.
 
+### Tools in a sidecar
+
+A Resources Server whose config sets `tool_sidecar` serves its HTTP tools from a sidecar of the group instead of its
+own process (`ToolSidecarResources` in `nemo_gym.environment`). Its seed declares the sidecar, and at
+`/prepare_sandbox` it starts its own class there as the tool host. This server then:
+
+| Step | What it does |
+|------|------|
+| Grant | Grants the agent `http://<name>:<port>` (`direct_http`) with the Resources session's cookies, which the tool host reads as its own, in place of the Resources host. |
+| Check | Probes that address from the agent container before the agent is seeded. |
+| Collect | After the agent closes and before `/verify`, asks the Resources Server to copy the session's tool state out of the sidecar (`/tool_sidecar/collect`), so the grader reads what the tool calls left. |
+
+The pairing needs `sandbox_provider`, `sandbox_config`, `resources_tool_transports: [direct_http]` and no task
+sandbox opt-out, and a provider that runs sidecars; startup refuses anything else. Since the tools run in the group,
+`network: model_only` is enough for the agent container. A group without the declared sidecar fails the attempt for
+good; a tool host that does not start, cannot be reached from the agent container, or whose state cannot be copied
+fails it as a retryable infrastructure failure. No tool call falls back to the Resources host.
+
+Code in the agent container can reach the sidecar's other ports, such as the provider's exec daemon on OpenSandbox, so
+a tool sidecar holds no secret: a config that would copy a credential there is refused.
+
 ### Opting out
 
 Every task and every grader runs in the group unless `sandbox_opt_out` says otherwise. Only what executes nothing may opt out, to save sandbox capacity on large QA runs:

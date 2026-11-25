@@ -470,6 +470,8 @@ options, and the default keep-alive entrypoint. Closing the main sandbox deletes
 - `sandbox.sidecar(name).exec(*argv)` sends the argv to execd without a shell, so the sidecar image can be
   distroless; like any [argument list](#user-and-runtime-notes), it needs `opensandbox>=1.1.0`. `on_stdout` receives stdout one line at a time from the streamed request. With
   `operations.background_exec`, it receives what each poll finds new, stdout and stderr together.
+- `sandbox.sidecar(name).upload(local, remote)` and `.download(remote, local)` move one file through the sidecar's
+  own file API, as they do for the main sandbox.
 - A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
   A checkpoint therefore keeps each sidecar's spec, its `image_auth` included, in plain text in its state; give a
   sidecar's registry credentials through [`images.auth`](#image-policy-and-setup-commands) to keep them out of it.
