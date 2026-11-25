@@ -42,7 +42,12 @@ from resources_servers.swebench.row_evaluation import (
     karma_runs_completed,
     make_row_test_spec,
 )
-from resources_servers.swebench.swebench_patches import EVAL_SCRIPT_COMMAND, run_instance
+from resources_servers.swebench.swebench_patches import (
+    EVAL_SCRIPT_COMMAND,
+    OPENLAYERS_CHROME_WRAPPER,
+    XVFB_RUN_WRAPPER,
+    run_instance,
+)
 
 
 # A row as the SWE-bench Multimodal test split ships it: the evaluation script resets the test files, applies the
@@ -272,6 +277,27 @@ class TestServer:
         make_server()._make_test_spec(SWEBenchVerifyRequest.model_validate(ROW))
         assert received["instance_id"] == ROW["instance_id"]
         assert not {"image", "eval_script", "log_parser", "eval_type"} & received.keys()
+
+    def test_openlayers_gets_the_software_webgl_wrapper_before_its_tests_and_other_repos_do_not(self) -> None:
+        server = make_server(evaluation_spec_source="row")
+        openlayers = server._make_test_spec(
+            SWEBenchVerifyRequest.model_validate(ROW | {"repo": "openlayers/openlayers", "eval_type": "fail_only"})
+        )
+        start = openlayers.eval_script_list.index(f": '{START_TEST_OUTPUT}'")
+        assert openlayers.eval_script_list[start - 1] == OPENLAYERS_CHROME_WRAPPER
+        assert openlayers.eval_script_list.count(OPENLAYERS_CHROME_WRAPPER) == 1
+        carbon = server._make_test_spec(SWEBenchVerifyRequest.model_validate(ROW))
+        assert OPENLAYERS_CHROME_WRAPPER not in carbon.eval_script_list
+
+    def test_a_script_that_runs_xvfb_waits_for_the_previous_x_server(self) -> None:
+        server = make_server(evaluation_spec_source="row")
+        xvfb = 'xvfb-run --server-args="-screen 0 1280x1024x24 -ac :99" su chromeuser -c "npm run test select"'
+        script = EVAL_SCRIPT.replace("yarn jest packages/react/src/a.test.js", f"{xvfb}\n{xvfb}")
+        spec = server._make_test_spec(SWEBenchVerifyRequest.model_validate(ROW | {"eval_script": script}))
+        start = spec.eval_script_list.index(f": '{START_TEST_OUTPUT}'")
+        assert spec.eval_script_list[start - 1] == XVFB_RUN_WRAPPER
+        plain = server._make_test_spec(SWEBenchVerifyRequest.model_validate(ROW))
+        assert XVFB_RUN_WRAPPER not in plain.eval_script_list
 
     def test_the_row_source_rejects_a_row_without_its_evaluation(self) -> None:
         row = {key: value for key, value in ROW.items() if key != "eval_script"}

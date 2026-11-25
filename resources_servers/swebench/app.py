@@ -75,8 +75,10 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_sandbox,
+    patch_swebench_openlayers_software_webgl,
     patch_swebench_pytest_result_summary,
     patch_swebench_verified_env_vars,
+    patch_swebench_xvfb_run_wait,
     run_instance,
 )
 from resources_servers.swebench.task_data import SWEBenchImageAssets, SWEBenchTestAsset, image_assets_from_json
@@ -459,6 +461,8 @@ class SwebenchResourcesServer(CheckpointedSandboxSessionResourcesServer):
                 row_test_spec,
                 [(staged_test_asset_path(index), asset.path) for index, asset in enumerate(body.test_assets())],
             )
+            patch_swebench_openlayers_software_webgl(row_test_spec)
+            patch_swebench_xvfb_run_wait(row_test_spec)
             return row_test_spec
         test_spec = make_test_spec(
             # This accepts a SWEbenchInstance: our body's instance fields, without the agent's request and response.

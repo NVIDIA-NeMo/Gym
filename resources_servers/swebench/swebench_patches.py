@@ -307,6 +307,49 @@ async def run_instance(
         }
 
 
+# OpenLayers' tests use WebGL in Chrome under Xvfb. Without a GPU that needs Chrome's software renderer (SwiftShader),
+# which Chrome does not fall back to in a sandbox that lets it start its own sandbox: WebGL context creation fails and
+# a WebGL test's hook error ends the Karma suite part way. Under Docker's default seccomp Chrome cannot start its
+# sandbox and runs unsandboxed with software WebGL (SWE-bench#636). A wrapper at the path the evaluation script launches
+# Chrome from gives it that setup; with fewer flags, Karma still stopped part way in some runs.
+OPENLAYERS_CHROME_FLAGS = "--no-sandbox --enable-unsafe-swiftshader --use-angle=swiftshader --ignore-gpu-blocklist"
+OPENLAYERS_CHROME_WRAPPER = (
+    "[ -e /usr/bin/google-chrome-stable.real ] || { mv /usr/bin/google-chrome-stable /usr/bin/google-chrome-stable.real"
+    f" && printf '#!/bin/sh\\nexec /usr/bin/google-chrome-stable.real {OPENLAYERS_CHROME_FLAGS} \"$@\"\\n'"
+    " > /usr/bin/google-chrome-stable && chmod 755 /usr/bin/google-chrome-stable; }"
+)
+
+
+def patch_swebench_openlayers_software_webgl(test_spec: Any) -> None:
+    """Give OpenLayers' Chrome the software WebGL renderer before its tests start."""
+    if test_spec.repo != "openlayers/openlayers" or OPENLAYERS_CHROME_WRAPPER in test_spec.eval_script_list:
+        return
+    start = f": '{START_TEST_OUTPUT}'"
+    if start not in test_spec.eval_script_list:
+        raise ValueError(f"The evaluation script of {test_spec.instance_id} has no start-of-test-output marker")
+    test_spec.eval_script_list.insert(test_spec.eval_script_list.index(start), OPENLAYERS_CHROME_WRAPPER)
+
+
+# Some evaluation scripts run several `xvfb-run` commands on display :99 one after another. xvfb-run returns before the
+# X server it stopped has exited, so the next one can fail with "Xvfb failed to start" and that suite never runs. A
+# wrapper makes xvfb-run wait (up to 30 s) until the server named in the display's lock file has exited.
+XVFB_RUN_WRAPPER = (
+    "[ -e /usr/bin/xvfb-run.real ] || { mv /usr/bin/xvfb-run /usr/bin/xvfb-run.real && printf '#!/bin/sh\\n"
+    'for i in $(seq 30); do [ -e /tmp/.X99-lock ] && kill -0 "$(tr -d " " < /tmp/.X99-lock)" 2>/dev/null '
+    '|| break; sleep 1; done\\nexec /usr/bin/xvfb-run.real "$@"\\n\' > /usr/bin/xvfb-run && chmod 755 /usr/bin/xvfb-run; }'
+)
+
+
+def patch_swebench_xvfb_run_wait(test_spec: Any) -> None:
+    """Make a script that starts Xvfb wait for the previous X server before starting the next."""
+    start = f": '{START_TEST_OUTPUT}'"
+    if XVFB_RUN_WRAPPER in test_spec.eval_script_list or start not in test_spec.eval_script_list:
+        return
+    index = test_spec.eval_script_list.index(start)
+    if any("xvfb-run" in line for line in test_spec.eval_script_list[index:]):
+        test_spec.eval_script_list.insert(index, XVFB_RUN_WRAPPER)
+
+
 ########################################
 # START SWE Bench Verified instance patches
 ########################################
