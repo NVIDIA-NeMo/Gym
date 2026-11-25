@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import itsdangerous
 import uvicorn
 from aiohttp import ClientResponseError, RequestInfo
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
@@ -52,6 +52,7 @@ from nemo_gym.config.config_types import BaseRunServerInstanceConfig, BaseServer
 from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    scoped_global_config_dict,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.server_runtime.base_server import (
@@ -119,24 +120,29 @@ class TestServerUtils:
         class Server(SimpleServer):
             config: ServerConfig
 
+            def setup_webserver(self) -> FastAPI:
+                raise AssertionError("A dry run should finish before app setup")
+
         server_settings = {"host": "", "port": 0, "entrypoint": "app.py", **settings}
         config = OmegaConf.create(
             {
                 "worker": {"resources_servers": {"example": server_settings}},
                 "sandbox": {"docker": {}},
                 "api_key": "secret-value",
+                "head_server": {"host": "127.0.0.1", "port": 0},
+                DRY_RUN_KEY_NAME: True,
             }
         )
         monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "worker")
-        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "get_global_config_dict", lambda: config)
-
-        if error is None:
+        with scoped_global_config_dict(config):
             loaded = Server.load_config_from_global_config()
             assert loaded.sandbox_provider == settings.get("sandbox_provider", "optional_provider")
-        else:
-            with raises(ValueError, match=error) as exc:
-                Server.load_config_from_global_config()
-            assert "secret-value" not in str(exc.value)
+            if error is None:
+                assert Server.run_webserver() is None
+            else:
+                with raises(ValueError, match=error) as exc:
+                    Server.run_webserver()
+                assert "secret-value" not in str(exc.value)
 
     @mark.parametrize("missing", ["base_url", "api_key", "model", "all", None])
     def test_unset_model_settings_name_the_source_config(self, monkeypatch: MonkeyPatch, missing) -> None:

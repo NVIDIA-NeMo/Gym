@@ -436,10 +436,11 @@ def _run_webserver(monkeypatch, server_class: type, config: _Config) -> FastAPI:
     from nemo_gym.config.config_types import BaseServerConfig
     from nemo_gym.config.global_config import DRY_RUN_KEY_NAME
 
-    monkeypatch.setattr(base_server_module, "get_global_config_dict", lambda: {DRY_RUN_KEY_NAME: False})
+    global_config = {**SERVER_GLOBAL_CONFIG, DRY_RUN_KEY_NAME: False}
+    monkeypatch.setattr(base_server_module, "get_global_config_dict", lambda: global_config)
     monkeypatch.setattr(ray_support_module, "_get_ray", MagicMock(return_value=MagicMock()))
     server_client = MagicMock(spec=ServerClient)
-    server_client.global_config_dict = SERVER_GLOBAL_CONFIG
+    server_client.global_config_dict = global_config
     server_client_class = MagicMock(return_value=server_client)
     server_client_class.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
     monkeypatch.setattr(base_server_module, "ServerClient", server_client_class)

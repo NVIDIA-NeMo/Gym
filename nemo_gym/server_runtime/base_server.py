@@ -197,14 +197,6 @@ class BaseServer(BaseModel):
                 ) from None
             raise
 
-        # Some servers default to a provider name only used in an optional execution mode.
-        # Check names explicitly supplied in the merged config before any server or provider starts.
-        provider_ref = getattr(server_config, "sandbox_provider", None)
-        if isinstance(provider_ref, str) and "sandbox_provider" in server_config.model_fields_set:
-            from nemo_gym.sandbox.config import resolve_provider_config
-
-            resolve_provider_config(provider_ref, global_config_dict)
-
         return server_config
 
     def setup_liveness(self, app: FastAPI) -> None:
@@ -692,6 +684,14 @@ repr(e): {repr(e)}"""
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
+        # Standalone recipes can be inspected before a provider block is composed in.
+        # At launch, resolve explicit names. Some execution modes leave a default provider unused.
+        provider_ref = getattr(server_config, "sandbox_provider", None)
+        if isinstance(provider_ref, str) and "sandbox_provider" in server_config.model_fields_set:
+            from nemo_gym.sandbox.config import resolve_provider_config
+
+            resolve_provider_config(provider_ref, global_config_dict)
+
         startup.mark("load_config")
         _connect_server_to_ray(cls, global_config_dict)
         if cls.ray_enabled:
