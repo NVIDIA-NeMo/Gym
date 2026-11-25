@@ -30,8 +30,8 @@ from either is omitted rather than guessed:
   is known only for a ``split=benchmark`` run and only when that instance or taskset maps to
   exactly one benchmark dataset. An entry that sets no ``taskset`` declares the taskset of its
   own name, as rollout collection reads it.
-* The attempt index is the driver's resume counter; the driver leaves it unstamped on the
-  first attempt, which is attempt 0.
+* The attempt index is the execution index the rollout store reserved for the dispatch, ``0``
+  on a fresh run and one more on each resumed attempt; a row with none is attempt 0.
 
 The run id is not repeated here: it is the ``nemo.run.id`` resource attribute of every span.
 """
@@ -61,7 +61,7 @@ MODEL_NAME_ATTRIBUTE = "nemo.gym.model.name"
 BENCHMARK_NAME_ATTRIBUTE = "nemo.gym.benchmark.name"
 #: Sorted, distinct benchmark datasets the job dispatched rows from, on ``gym.job``.
 BENCHMARK_NAMES_ATTRIBUTE = "nemo.gym.benchmark.names"
-#: Resume attempt of a dispatched row, 0 on its first attempt, on ``gym.rollout.dispatch``.
+#: Execution index reserved for a dispatched row, 0 on its first attempt, on ``gym.rollout.dispatch``.
 ATTEMPT_INDEX_ATTRIBUTE = "nemo.gym.rollout.attempt.index"
 
 #: Span attribute values this module produces.
