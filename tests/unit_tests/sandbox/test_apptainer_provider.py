@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 import shlex
 import shutil
 import socket
@@ -776,6 +777,152 @@ async def test_download_fallback(fake_binary: str, monkeypatch: pytest.MonkeyPat
     assert list(staging.iterdir()) == []  # temp staging file cleaned up
 
 
+async def test_download_copies_a_large_nested_file_in_chunks(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(apptainer_provider, "STAGED_COPY_CHUNK_BYTES", 1000)
+    staging = tmp_path / "staging"
+    (staging / "a" / "b").mkdir(parents=True)
+    payload = bytes(range(256)) * 41  # not a multiple of the chunk size, and not UTF-8
+    (staging / "a" / "b" / "data.bin").write_bytes(payload)
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    dest = tmp_path / "new" / "dir" / "data.bin"
+    await provider.download_file(_make_handle(staging), "/sandbox/a/./b/data.bin", dest)
+
+    assert dest.read_bytes() == payload
+    assert rec.calls == []
+
+
+async def test_download_missing_file_still_raises_file_not_found(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    with pytest.raises(FileNotFoundError):
+        await provider.download_file(_make_handle(staging), "/sandbox/absent.txt", tmp_path / "local.txt")
+    assert not (tmp_path / "local.txt").exists()
+
+
+@pytest.mark.parametrize("kind", ["file-link", "dir-link", "inside-link", "dangling-link", "directory", "mount"])
+async def test_download_refuses_links_and_directories(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    # The sandbox can write the staging dir: a link there must not make the host read another host file.
+    secret_dir = tmp_path / "host"
+    secret_dir.mkdir()
+    (secret_dir / "secret.txt").write_text("host secret")
+    staging = tmp_path / "staging"
+    (staging / "real").mkdir(parents=True)
+    (staging / "real" / "ok.txt").write_text("fine")
+    source = {
+        "file-link": "/sandbox/link.txt",
+        "dir-link": "/sandbox/linked/secret.txt",
+        "inside-link": "/sandbox/inside/ok.txt",
+        "dangling-link": "/sandbox/dangling.txt",
+        "directory": "/sandbox/real",
+        "mount": "/sandbox",
+    }[kind]
+    (staging / "link.txt").symlink_to(secret_dir / "secret.txt")
+    (staging / "linked").symlink_to(secret_dir, target_is_directory=True)
+    (staging / "inside").symlink_to(staging / "real", target_is_directory=True)
+    (staging / "dangling.txt").symlink_to(tmp_path / "nowhere")
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    dest = tmp_path / "local.txt"
+    with pytest.raises(RuntimeError, match="apptainer download from .* failed"):
+        await provider.download_file(_make_handle(staging), source, dest)
+
+    assert not dest.exists()
+    assert rec.calls == []
+    assert (secret_dir / "secret.txt").read_text() == "host secret"
+
+
+def test_copy_staged_file_refuses_a_path_that_climbs_out(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (tmp_path / "outside.txt").write_text("outside")
+    with pytest.raises(RuntimeError, match="not a file inside the sandbox mount"):
+        apptainer_provider._copy_staged_file(staging, "../outside.txt", tmp_path / "local.txt", "/sandbox/x")
+    assert not (tmp_path / "local.txt").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs not available")
+async def test_download_of_a_fifo_fails_promptly(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    os.mkfifo(staging / "pipe")
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    # Nothing ever writes to the FIFO: a blocking open would never return.
+    with anyio.fail_after(5):
+        with pytest.raises(RuntimeError, match="not a regular file"):
+            await provider.download_file(_make_handle(staging), "/sandbox/pipe", tmp_path / "local.txt")
+    assert not (tmp_path / "local.txt").exists()
+
+
+async def test_download_fallback_refuses_a_link_left_in_staging(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "secret.txt").write_text("host secret")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    async def fake_exec(h: SandboxHandle, command: str, *, user: Any = None, **_: Any) -> SandboxExecResult:
+        # The in-container copy leaves a link, not a file, at the staged name.
+        (staging / Path(shlex.split(command)[-1]).name).symlink_to(tmp_path / "secret.txt")
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(provider, "exec", fake_exec)
+    with pytest.raises(RuntimeError, match="apptainer download from '/etc/shadow' failed"):
+        await provider.download_file(_make_handle(staging), "/etc/shadow", tmp_path / "local.txt")
+    assert not (tmp_path / "local.txt").exists()
+    assert list(staging.iterdir()) == []
+
+
+async def test_download_does_not_block_the_event_loop(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import threading
+    import time
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "slow.bin").write_bytes(b"slow")
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    copy_threads: list[int] = []
+    copyfileobj = shutil.copyfileobj
+
+    def slow_copy(*args: Any) -> None:
+        copy_threads.append(threading.get_ident())
+        time.sleep(0.4)
+        copyfileobj(*args)
+
+    monkeypatch.setattr(apptainer_provider.shutil, "copyfileobj", slow_copy)
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await anyio.sleep(0.01)
+            ticks += 1
+
+    dest = tmp_path / "local.bin"
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(ticker)
+        await provider.download_file(_make_handle(staging), "/sandbox/slow.bin", dest)
+        ticks_during_copy = ticks
+        tasks.cancel_scope.cancel()
+
+    assert dest.read_bytes() == b"slow"
+    assert copy_threads and copy_threads[0] != threading.get_ident()
+    assert ticks_during_copy >= 10
+
+
 async def test_download_fallback_error(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     staging = tmp_path / "staging"
     staging.mkdir()
@@ -908,10 +1055,8 @@ async def test_aclose(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None
     assert await provider.aclose() is None
 
 
-async def test_direct_exec_lifecycle_preserves_overlay_and_supports_io(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Exercise direct mode with a fake CLI that delegates to the requested shell."""
+def _direct_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **kwargs: Any) -> tuple[Any, Path]:
+    """A direct-mode provider over a fake CLI that delegates to the requested shell, and its staging dir."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_apptainer = bin_dir / "apptainer"
@@ -938,7 +1083,22 @@ done
         bin_path=str(bin_dir),
         create={"direct_exec": True, "mount_point": str(staging)},
         exec={"fakeroot_for_root": False},
+        **kwargs,
     )
+    return provider, staging
+
+
+async def _wait_until_gone(pid: int) -> None:
+    with anyio.fail_after(10):
+        while is_running(pid):
+            await anyio.sleep(0.02)
+
+
+async def test_direct_exec_lifecycle_preserves_overlay_and_supports_io(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise direct mode with a fake CLI that delegates to the requested shell."""
+    provider, staging = _direct_provider(monkeypatch, tmp_path)
 
     handle = await provider.create(SandboxSpec(image="unused.sif"))
     assert await provider.status(handle) is SandboxStatus.RUNNING
@@ -970,8 +1130,213 @@ done
     after = await provider.exec(handle, "printf still-running", timeout_s=5)
     assert (after.return_code, after.stdout) == (0, "still-running")
 
+    # Downloads in direct mode: the file under the mount, and the copy from an arbitrary path.
+    await provider.exec(handle, "printf under-mount > result.txt", cwd=str(staging), timeout_s=5)
+    await provider.download_file(handle, f"{staging}/result.txt", tmp_path / "under-mount.txt")
+    assert (tmp_path / "under-mount.txt").read_text() == "under-mount"
+    (tmp_path / "elsewhere.txt").write_text("elsewhere")
+    await provider.download_file(handle, str(tmp_path / "elsewhere.txt"), tmp_path / "copied.txt")
+    assert (tmp_path / "copied.txt").read_text() == "elsewhere"
+
     await provider.close(handle)
     assert await provider.status(handle) is SandboxStatus.STOPPED
+    assert not staging.exists()
+
+
+async def test_direct_exec_output_is_exact_and_has_no_line_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, _staging = _direct_provider(monkeypatch, tmp_path)
+    handle = await provider.create(SandboxSpec(image="unused.sif"))
+    try:
+        # One line far past the stream reader's 64 KiB limit, with no newline at all.
+        size = 1024 * 1024
+        big = await provider.exec(handle, f"head -c {size} /dev/zero | tr '\\0' x", timeout_s=60)
+        assert (big.return_code, big.error_type, big.stderr) == (0, None, "")
+        assert big.stdout == "x" * size
+        # The long command was drained: the next one sees only its own output.
+        after = await provider.exec(handle, "printf next", timeout_s=10)
+        assert (after.return_code, after.stdout) == (0, "next")
+
+        for command, expected in [
+            ("true", ""),
+            ("printf x", "x"),
+            ("printf 'x\\n'", "x\n"),
+            ("printf 'x\\n\\n'", "x\n\n"),
+            ("printf '\\n\\nx'", "\n\nx"),
+            ("printf 'a\\377\\376b'", "a\ufffd\ufffdb"),
+        ]:
+            result = await provider.exec(handle, command, timeout_s=10)
+            assert (result.return_code, result.stdout, result.stderr) == (0, expected, ""), command
+
+        mixed = await provider.exec(handle, "printf out; printf 'err\\n' >&2; exit 3", timeout_s=10)
+        assert (mixed.return_code, mixed.stdout, mixed.stderr, mixed.error_type) == (3, "out", "err\n", None)
+
+        # Supplied stdin feeds the whole compound command, not only its last part.
+        reads = await provider.exec(
+            handle, 'read first; read second; printf "%s|%s" "$first" "$second"', stdin=b"one\ntwo\n", timeout_s=10
+        )
+        assert (reads.return_code, reads.stdout) == (0, "one|two")
+    finally:
+        await provider.close(handle)
+
+
+async def test_direct_exec_finds_a_status_frame_split_across_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With 7-byte reads the frame always straddles several reads, wherever the output ends.
+    monkeypatch.setattr(apptainer_provider, "DIRECT_EXEC_READ_CHUNK_BYTES", 7)
+    provider, _staging = _direct_provider(monkeypatch, tmp_path)
+    handle = await provider.create(SandboxSpec(image="unused.sif"))
+    try:
+        for length in range(0, 9):
+            result = await provider.exec(handle, f"printf %s {'y' * length}; exit {length}", timeout_s=10)
+            assert (result.return_code, result.stdout) == (length, "y" * length)
+        newlines = await provider.exec(handle, "printf 'line one\\n\\nline three\\n\\n'", timeout_s=10)
+        assert (newlines.return_code, newlines.stdout) == (0, "line one\n\nline three\n\n")
+    finally:
+        await provider.close(handle)
+
+
+async def test_direct_exec_handle_cannot_be_serialized_and_stays_usable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from nemo_gym.sandbox.api import AsyncSandbox
+
+    provider, staging = _direct_provider(monkeypatch, tmp_path)
+    handle = await provider.create(SandboxSpec(image="unused.sif"))
+    with pytest.raises(NotImplementedError, match="direct-exec sandboxes cannot be serialized"):
+        await provider.serialize_handle(handle)
+    sandbox = AsyncSandbox(provider, SandboxSpec())
+    sandbox._handle = handle
+    sandbox._stopped = False
+    with pytest.raises(NotImplementedError, match="direct-exec sandboxes cannot be serialized"):
+        await sandbox.serialize()
+
+    # The refusal leaves the sandbox usable and closeable.
+    after = await provider.exec(handle, "printf still-usable", timeout_s=10)
+    assert (after.return_code, after.stdout) == (0, "still-usable")
+    assert await provider.status(handle) is SandboxStatus.RUNNING
+    await provider.close(handle)
+    assert await provider.status(handle) is SandboxStatus.STOPPED
+    assert not staging.exists()
+
+
+async def test_a_cancelled_direct_exec_stops_the_sandbox(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    provider, staging = _direct_provider(monkeypatch, tmp_path)
+    handle = await provider.create(SandboxSpec(image="unused.sif"))
+    shell = handle.raw.direct_process
+    pid_file = staging / "command.pid"
+
+    # An ordinary failing command leaves the sandbox reusable.
+    failed = await provider.exec(handle, "exit 9", timeout_s=10)
+    assert failed.return_code == 9
+    assert await provider.status(handle) is SandboxStatus.RUNNING
+
+    async def run_hanging_command() -> None:
+        await provider.exec(handle, f"echo $$ > {shlex.quote(str(pid_file))}; exec sleep 600", timeout_s=None)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(run_hanging_command)
+        with anyio.fail_after(10):
+            while not (pid_file.exists() and pid_file.read_text().strip()):
+                await anyio.sleep(0.02)
+        tasks.cancel_scope.cancel()
+
+    # The cancelled command and the shell it ran in are gone, not left running behind the released lock.
+    assert shell.returncode is not None
+    await _wait_until_gone(int(pid_file.read_text()))
+    assert not handle.raw.direct_exec_lock.locked()
+    assert await provider.status(handle) is SandboxStatus.STOPPED
+
+    # A later exec reports the stopped sandbox at once instead of waiting behind the abandoned command.
+    with anyio.fail_after(5):
+        after = await provider.exec(handle, "printf next", timeout_s=60)
+    assert (after.return_code, after.error_type) == (apptainer_provider.SANDBOX_RUNTIME_RETURN_CODE, "sandbox")
+    assert "not running" in after.stderr
+
+    await provider.close(handle)
+    assert not staging.exists()
+
+
+async def test_a_direct_exec_timeout_stops_the_sandbox(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A documented limit of direct mode: the provider cannot stop one command, so a timeout stops the shell.
+    provider, staging = _direct_provider(monkeypatch, tmp_path)
+    handle = await provider.create(SandboxSpec(image="unused.sif"))
+    timed_out = await provider.exec(handle, "exec sleep 600", timeout_s=0.3)
+    assert (timed_out.error_type, timed_out.stdout) == ("timeout", None)
+    assert handle.raw.direct_process.returncode is not None
+    assert await provider.status(handle) is SandboxStatus.STOPPED
+    after = await provider.exec(handle, "printf next", timeout_s=10)
+    assert after.error_type == "sandbox"
+    await provider.close(handle)
+    assert not staging.exists()
+
+
+async def test_direct_exec_reports_a_shell_that_exits_mid_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, _staging = _direct_provider(monkeypatch, tmp_path)
+    handle = await provider.create(SandboxSpec(image="unused.sif"))
+    try:
+        shell_pid = handle.raw.direct_process.pid
+        result = await provider.exec(handle, f"printf partial; kill -KILL {shell_pid}", timeout_s=10)
+        assert (result.error_type, result.stdout) == ("sandbox", "partial")
+        assert "exited during command" in result.stderr
+    finally:
+        await provider.close(handle)
+
+
+async def test_cancelling_direct_create_during_its_probe_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_file = tmp_path / "probe.pid"
+    provider, staging = _direct_provider(
+        monkeypatch,
+        tmp_path,
+        probe={"command": f"echo $$ > {shlex.quote(str(pid_file))}; exec sleep 600", "timeout_s": 600},
+    )
+    started: list[Any] = []
+    start_direct = provider._start_direct
+
+    async def recording_start(argv: list[str], stderr: Any) -> Any:
+        started.append((await start_direct(argv, stderr), stderr))
+        return started[-1][0]
+
+    monkeypatch.setattr(provider, "_start_direct", recording_start)
+
+    async def create() -> None:
+        await provider.create(SandboxSpec(image="unused.sif"))
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(create)
+        with anyio.fail_after(10):
+            while not (pid_file.exists() and pid_file.read_text().strip()):
+                await anyio.sleep(0.02)
+        tasks.cancel_scope.cancel()
+
+    (shell, stderr_file) = started[0]
+    assert shell.returncode is not None
+    await _wait_until_gone(int(pid_file.read_text()))
+    assert stderr_file.closed
+    assert not staging.exists()
+
+
+async def test_cancelling_direct_create_while_the_shell_starts_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, staging = _direct_provider(monkeypatch, tmp_path)
+    stderr_files: list[Any] = []
+
+    async def hanging_start(argv: list[str], stderr: Any) -> Any:
+        stderr_files.append(stderr)
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(provider, "_start_direct", hanging_start)
+    with anyio.move_on_after(0.2) as scope:
+        await provider.create(SandboxSpec(image="unused.sif"))
+    assert scope.cancelled_caught
+    assert stderr_files[0].closed
     assert not staging.exists()
 
 

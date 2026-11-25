@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
@@ -68,6 +70,10 @@ APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found",
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
 DIRECT_EXEC_MARKER_PREFIX = "__NEMO_GYM_APPTAINER_DONE_"
+# Direct-exec stdout is read in chunks of this size, so no output line can exceed a reader limit.
+DIRECT_EXEC_READ_CHUNK_BYTES = 65536
+# Downloads copy from the staging dir in chunks of this size instead of loading the whole file.
+STAGED_COPY_CHUNK_BYTES = 1024 * 1024
 
 
 class ApptainerCreateError(SandboxCreateError):
@@ -112,6 +118,13 @@ class ApptainerCreateConfig:
     # Keep one foreground `apptainer exec ... bash` process alive instead of
     # using `instance start`/`instance://`. This is the established nested
     # Pyxis pattern used by the GDPval and legacy SWE harnesses.
+    #
+    # Direct mode is narrower than instance mode:
+    # - one exec at a time per sandbox: commands queue behind the shell;
+    # - an exec that times out or is cancelled stops the whole sandbox;
+    # - `user="root"` adds no `--fakeroot`: commands run as the shell's own user, and
+    #   `exec.fakeroot_for_root` and `exec.extra_exec_args` are ignored;
+    # - the handle cannot be serialized, so the sandbox cannot be reconnected or lent.
     direct_exec: bool = False
     direct_shell: str = "bash"
 
@@ -305,6 +318,48 @@ def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None
             os.close(fd)
         if path is not None:
             path.unlink(missing_ok=True)
+
+
+def _copy_staged_file(staging_dir: Path, relative_path: str, target_path: Path, source_path: str) -> None:
+    """Copy one regular file from the host side of the staging dir to ``target_path``. Blocking: run in a thread.
+
+    Code inside the sandbox can write anything into the staging dir, so nothing in it is trusted. The path is
+    walked one component at a time from the staging dir, never following a symbolic link, so the file that is
+    opened cannot be outside it. The file is opened without blocking and must be a regular file: a FIFO would
+    otherwise hold the read forever. ``source_path`` only names the file in errors.
+    """
+
+    def refuse(reason: str) -> RuntimeError:
+        return RuntimeError(f"apptainer download from {source_path!r} failed: {reason}")
+
+    parts = [part for part in relative_path.split("/") if part and part != "."]
+    if not parts or ".." in parts:
+        raise refuse("not a file inside the sandbox mount")
+
+    no_follow = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(staging_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            flags = no_follow | (os.O_NONBLOCK if last else os.O_DIRECTORY)
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except OSError as e:
+                # A symbolic link gives ELOOP, or ENOTDIR or EMLINK where a directory was required.
+                if e.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                    raise refuse(f"{'/'.join(parts[: index + 1])!r} is a symbolic link or not a directory") from e
+                raise
+            os.close(fd)
+            fd = next_fd
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise refuse("not a regular file")
+        with os.fdopen(fd, "rb") as source:
+            fd = -1
+            with target_path.open("wb") as target:
+                shutil.copyfileobj(source, target, STAGED_COPY_CHUNK_BYTES)
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 class ApptainerProvider:
@@ -579,6 +634,10 @@ class ApptainerProvider:
             direct_stderr = tempfile.TemporaryFile()
             try:
                 direct_process = await self._start_direct(argv, direct_stderr)
+            except asyncio.CancelledError:
+                direct_stderr.close()
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise
             except Exception as e:
                 direct_stderr.close()
                 shutil.rmtree(staging_dir, ignore_errors=True)
@@ -624,6 +683,14 @@ class ApptainerProvider:
         # running instance / staging dir.
         try:
             await self._verify_created_handle(handle)
+        except asyncio.CancelledError:
+            # No handle is returned, so nothing else can stop the direct shell or remove its staging dir.
+            if direct_process is not None:
+                await kill_cancelled_command(direct_process)
+                with contextlib.suppress(Exception):
+                    direct_stderr.close()
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
         except Exception:
             await self._cleanup_failed_create_handle(handle)
             raise
@@ -695,8 +762,17 @@ class ApptainerProvider:
         This is a trusted control-plane descriptor, not a portable lease. The
         receiving worker needs the same staging filesystem and Apptainer config.
         Either handle can stop the instance; callers must coordinate ownership.
+
+        A direct-exec sandbox is one foreground shell owned by this process, with no
+        instance another worker could re-enter, so it raises ``NotImplementedError``.
+        The sandbox stays usable and closeable.
         """
         inst = handle.raw
+        if inst.direct_process is not None:
+            raise NotImplementedError(
+                "Apptainer direct-exec sandboxes cannot be serialized, reconnected or lent: "
+                "the sandbox is a shell owned by the creating process. Use instance mode (create.direct_exec=false)."
+            )
         return {
             "provider": self.name,
             "sandbox_id": inst.name,
@@ -807,25 +883,40 @@ class ApptainerProvider:
             try:
                 proc.stdin.write(script.encode())
                 await proc.stdin.drain()
-                stdout_chunks: list[bytes] = []
+                # The status frame is "\n<marker>:<code>\n". Bounded reads rather than readline(): a line longer
+                # than the stream reader's limit is valid output. The frame may straddle two reads, so each search
+                # restarts just before the bytes not yet ruled out.
+                frame = f"\n{marker}:".encode()
+                buffer = bytearray()
+                frame_start = -1
+                scan_from = 0
                 return_code = SANDBOX_RUNTIME_RETURN_CODE
                 async with asyncio.timeout(effective_timeout):
                     while True:
-                        line = await proc.stdout.readline()
-                        if not line:
+                        chunk = await proc.stdout.read(DIRECT_EXEC_READ_CHUNK_BYTES)
+                        if not chunk:
                             detail = self._direct_stderr_tail(inst)
                             return SandboxExecResult(
-                                stdout=b"".join(stdout_chunks).decode(errors="replace"),
+                                stdout=bytes(buffer).decode(errors="replace"),
                                 stderr=f"direct apptainer shell exited during command: {detail or 'no stderr'}",
                                 return_code=SANDBOX_RUNTIME_RETURN_CODE,
                                 error_type="sandbox",
                             )
-                        decoded = line.decode(errors="replace")
-                        if marker in decoded:
-                            with contextlib.suppress(ValueError, IndexError):
-                                return_code = int(decoded.rsplit(":", 1)[1].strip())
-                            break
-                        stdout_chunks.append(line)
+                        buffer += chunk
+                        if frame_start < 0:
+                            frame_start = buffer.find(frame, scan_from)
+                            scan_from = max(0, len(buffer) - len(frame) + 1)
+                        if frame_start >= 0:
+                            frame_end = buffer.find(b"\n", frame_start + len(frame))
+                            if frame_end >= 0:
+                                with contextlib.suppress(ValueError):
+                                    return_code = int(buffer[frame_start + len(frame) : frame_end])
+                                break
+            except asyncio.CancelledError:
+                # The command still owns the shell and nothing can stop it alone, so stop the sandbox: a later exec
+                # reports it as not running instead of waiting behind the abandoned command and reading its output.
+                await kill_cancelled_command(proc)
+                raise
             except (TimeoutError, asyncio.TimeoutError):
                 await self._terminate_direct_process(inst)
                 return SandboxExecResult(
@@ -846,9 +937,8 @@ class ApptainerProvider:
                 if stdin_path is not None:
                     stdin_path.unlink(missing_ok=True)
 
-        stdout_bytes = b"".join(stdout_chunks)
-        if stdout_bytes.endswith(b"\n"):
-            stdout_bytes = stdout_bytes[:-1]
+        # Everything before the frame is the command's output, byte for byte.
+        stdout_bytes = bytes(buffer[:frame_start])
         stderr = ""
         try:
             if stderr_path.exists():
@@ -977,13 +1067,17 @@ class ApptainerProvider:
         Fast path (source under the bind mount): read directly from the host side
         of the shared folder. Fallback (arbitrary path): cp inside the container
         into the shared folder, then read the host side.
+
+        Both paths read the shared folder, which the sandbox can write, through
+        ``_copy_staged_file``: only a regular file reached without a symbolic link
+        is copied, in a worker thread. Anything else raises ``RuntimeError``.
         """
         inst = handle.raw
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         rel = _path_under_mount(inst.mount_point, source_path)
         if rel is not None:
-            target_path.write_bytes((inst.staging_dir / rel).read_bytes())
+            await asyncio.to_thread(_copy_staged_file, inst.staging_dir, rel, target_path, source_path)
             return
 
         tmp_name = uuid.uuid4().hex
@@ -994,7 +1088,7 @@ class ApptainerProvider:
             result = await self.exec(handle, script, user="root")
             if result.return_code != 0:
                 raise RuntimeError(f"apptainer download from {source_path!r} failed: {result.stderr}")
-            target_path.write_bytes(host_tmp.read_bytes())
+            await asyncio.to_thread(_copy_staged_file, inst.staging_dir, tmp_name, target_path, source_path)
         finally:
             host_tmp.unlink(missing_ok=True)
 
