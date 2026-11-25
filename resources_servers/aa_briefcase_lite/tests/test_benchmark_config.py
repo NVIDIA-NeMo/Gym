@@ -101,7 +101,11 @@ def test_run_provenance_records_the_judge_sampling_seed_as_the_server_reads_it(c
     monkeypatch.setattr(provenance, "served_models", lambda servers: {})
     shipped = OmegaConf.to_container(OmegaConf.select(OmegaConf.load(CONFIG_PATH), RESOURCES_KEY), resolve=False)
     config = OmegaConf.create(
-        {RESOURCES_NAME: {"resources_servers": {"aa_briefcase_lite": {"judge_sampling_seed": shipped["judge_sampling_seed"]}}}}
+        {
+            RESOURCES_NAME: {
+                "resources_servers": {"aa_briefcase_lite": {"judge_sampling_seed": shipped["judge_sampling_seed"]}}
+            }
+        }
     )
     output = tmp_path / "rollouts.jsonl"
     materialized_path_for(output).write_bytes(b"")
@@ -109,6 +113,8 @@ def test_run_provenance_records_the_judge_sampling_seed_as_the_server_reads_it(c
     record = orjson.loads(provenance.write_run_provenance(output, config).read_bytes())
 
     field = AABriefcaseLiteResourcesServerConfig.model_fields["judge_sampling_seed"]
-    seed = TypeAdapter(field.annotation).validate_python(OmegaConf.select(config, f"{RESOURCES_KEY}.judge_sampling_seed"))
+    seed = TypeAdapter(field.annotation).validate_python(
+        OmegaConf.select(config, f"{RESOURCES_KEY}.judge_sampling_seed")
+    )
     assert seed == (None if configured is None else int(configured))
     assert record["sampling_parameters"] == {RESOURCES_KEY: {"judge_sampling_seed": seed}}

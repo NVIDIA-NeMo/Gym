@@ -207,7 +207,11 @@ def test_run_provenance_records_the_judge_sampling_seed_as_the_server_reads_it(c
         monkeypatch.setenv("JUDGE_SAMPLING_SEED", configured)
     shipped = OmegaConf.to_container(OmegaConf.select(OmegaConf.load(BENCHMARK), path), resolve=False)
     config = OmegaConf.create(
-        {"gdpval_resources_server": {"resources_servers": {"gdpval": {"judge_sampling_seed": shipped["judge_sampling_seed"]}}}}
+        {
+            "gdpval_resources_server": {
+                "resources_servers": {"gdpval": {"judge_sampling_seed": shipped["judge_sampling_seed"]}}
+            }
+        }
     )
 
     record = _write_run_provenance(tmp_path / "rollouts.jsonl", config, monkeypatch)
