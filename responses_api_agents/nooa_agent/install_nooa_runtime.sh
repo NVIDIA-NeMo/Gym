@@ -31,13 +31,28 @@ probe() {
   [[ "$libc" = gnu ]] || fail 'current NOOA runtime requires glibc; musl task images are unsupported'
   printf '%s/%s\n' "$arch" "$libc"
 }
+# Print <prefix>-<uid> once it is a directory that only this user can change. Other users can
+# write a shared location such as /tmp, and a runtime one of them placed there must never run.
+private_root() {
+  require id stat mkdir
+  local uid root
+  uid=$(id -u)
+  root="$1-$uid"
+  mkdir -p "$root" || fail "cannot create $root"
+  [[ -d "$root" && ! -L "$root" && "$(stat -c %u:%a "$root")" =~ ^$uid:[0-7]?7[0145][0145]$ ]] \
+    || fail "$root must be a directory that uid $uid owns and no other user can write"
+  printf '%s\n' "$root"
+}
 
 mode=${1:-}
 case "$mode" in
   probe) [[ $# = 1 ]] || fail 'usage: probe'; probe; exit 0 ;;
+  private-root)
+    [[ $# = 2 && "$2" = /* && "$2" != */ ]] || fail 'usage: private-root <absolute path prefix>'
+    private_root "$2"; exit 0 ;;
   check) [[ $# = 4 ]] || fail 'usage: check <runtime> <fingerprint> <health code>' ;;
   install) [[ $# = 6 || $# = 7 ]] || fail 'usage: install <runtime> <fingerprint> <source sha256> <python sha256> <health code> [wheels sha256]' ;;
-  *) fail 'expected probe, check, or install' ;;
+  *) fail 'expected probe, private-root, check, or install' ;;
 esac
 runtime=$2
 fingerprint=$3
@@ -74,6 +89,15 @@ ready() {
 if [[ "$mode" = check ]]; then
   if ready; then exit 0; fi
   printf 'NOOA runtime is absent or unhealthy: %s\n' "$runtime" >&2
+  # An install creates the missing directories below the nearest existing one.
+  # Exit 73 (EX_CANTCREAT) when this user cannot, so the caller can choose another location.
+  existing=${runtime%/*}
+  while [[ -n "$existing" && ! -e "$existing" ]]; do existing=${existing%/*}; done
+  [[ -n "$existing" ]] || existing=/
+  if [[ ! -d "$existing" || ! -w "$existing" || ! -x "$existing" ]]; then
+    printf 'NOOA runtime cannot be installed there: %s is not a writable directory\n' "$existing" >&2
+    exit 73
+  fi
   exit 1
 fi
 

@@ -7,9 +7,11 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -160,6 +162,74 @@ def test_failed_install_is_unpublished_and_a_fresh_call_recovers(tmp_path: Path,
     assert first.runtime.resolve() != failed_generation
     assert (first.runtime / "ready").read_text().strip() == FINGERPRINT
     assert failed_generation.exists()
+
+
+def test_check_reports_a_runtime_root_the_user_cannot_install_into() -> None:
+    # Not tmp_path: when the suite runs as root the check runs as uid 65534, which must reach
+    # these files, and other pytest sessions reset tmp_path's parents to 0700.
+    base = Path(tempfile.mkdtemp(prefix="nooa-check-", dir="/tmp"))
+    try:
+        base.chmod(0o755)
+        root = base / "opt"
+        root.mkdir()
+        call = make_call(base / "call", runtime=root / "nemo-gym-nooa" / FINGERPRINT)
+        shutil.rmtree(call.scratch)
+        call.script.parent.chmod(0o777)
+        kwargs = {"user": 65534, "group": 65534, "extra_groups": []} if os.geteuid() == 0 else {}
+        root.chmod(0o555)
+        result = call.run("check", **kwargs)
+        assert result.returncode == 73, result.stdout + result.stderr
+        assert f"{root} is not a writable directory" in result.stdout + result.stderr
+        root.chmod(0o777)
+        result = call.run("check", **kwargs)
+        assert result.returncode == 1, result.stdout + result.stderr
+        # Neither answer creates anything where the runtime would go.
+        assert list(root.iterdir()) == []
+        # An install needs a directory there: a file in its place cannot be used either.
+        (root / "nemo-gym-nooa").write_text("")
+        assert call.run("check", **kwargs).returncode == 73
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_private_root_belongs_to_this_user_alone() -> None:
+    # Not tmp_path, for the same reason as the check above.
+    base = Path(tempfile.mkdtemp(prefix="nooa-private-", dir="/tmp"))
+    try:
+        base.chmod(0o777)
+        script = base / "setup.sh"
+        shutil.copyfile(INSTALLER, script)
+        script.chmod(0o755)
+        as_root = os.geteuid() == 0
+        uid = 65534 if as_root else os.geteuid()
+        kwargs = {"user": 65534, "group": 65534, "extra_groups": []} if as_root else {}
+
+        def claim(name: str) -> subprocess.CompletedProcess:
+            command = ["bash", str(script), "private-root", str(base / name)]
+            return subprocess.run(command, text=True, capture_output=True, timeout=20, **kwargs)
+
+        root = base / f"runtime-{uid}"
+        for _ in range(2):  # Created on the first call, recognised on the next.
+            result = claim("runtime")
+            assert (result.returncode, result.stdout) == (0, f"{root}\n"), result.stderr
+            assert (root.stat().st_uid, stat.S_IMODE(root.stat().st_mode)) == (uid, 0o700)
+
+        # A runtime that another user could have placed is never handed out.
+        writable = base / f"writable-{uid}"
+        writable.mkdir()
+        os.chown(writable, uid, -1)
+        writable.chmod(0o777)
+        (base / f"link-{uid}").symlink_to(root)
+        (base / f"file-{uid}").write_text("")
+        refused = ["writable", "link", "file"]
+        if as_root:
+            (base / f"foreign-{uid}").mkdir(mode=0o755)
+            refused.append("foreign")
+        for name in refused:
+            result = claim(name)
+            assert (result.returncode, result.stdout) == (1, ""), name
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_concurrent_callers_publish_one_complete_generation(tmp_path: Path) -> None:

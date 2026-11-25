@@ -25,12 +25,16 @@ host-side effects.
 `nooa.execution_mode: sandboxed` runs the complete NOOA agent in the Resources-provided sandbox. Resources must
 return direct `SandboxAccess`; NOOA never provisions or destroys the sandbox. NOOA prepares its runtime under
 `/opt/nemo-gym-nooa`, keeps session files under `/tmp/nemo-gym-nooa`, and executes in the supplied task workdir.
+When the sandbox user cannot create or write `/opt/nemo-gym-nooa`, as in a task image that runs as a non-root
+user, NOOA prepares its runtime under `/tmp/nemo-gym-nooa-runtime-<uid>` instead, a directory only that user can
+write. A runtime already present under `/opt/nemo-gym-nooa` is reused in either case.
 NOOA closes its worker and session before Resources verifies; the Resources-owned sandbox remains available.
 Verification can inspect persisted artifacts after agent cleanup. Tasks whose verifier requires a
 NOOA-started service to remain live are not supported by this lifecycle.
 
 Cold runtime setup requires Linux x86_64 or aarch64 with glibc, `bash`, `tar`, `gzip`, `sha256sum`, `flock`,
-`tee`, `mv` with `-T` support, and writable `/opt/nemo-gym-nooa` and `/tmp`. The controller supplies Python;
+`tee`, `mv` with `-T` support, and a writable `/tmp`. A sandbox user who cannot write `/opt/nemo-gym-nooa` also
+needs `id`, `stat`, and a `/tmp` that allows executable files (not mounted `noexec`). The controller supplies Python;
 Alpine/musl images are not supported. Python packages normally require outbound access during cold installation.
 The NOOA SWE-bench Pro recipe instead requires a controller-prepared offline wheelhouse because its task sandbox
 allows only the Gym model-server host. Model and granted Resources URLs must be reachable from the sandbox;

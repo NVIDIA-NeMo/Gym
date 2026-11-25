@@ -52,7 +52,14 @@ def _stage_installer(source: bytes, local: Path) -> Path:
         assert member is not None
         installer = local / "install_nooa_runtime.sh"
         installer.write_bytes(member.read())
+    _make_readable(installer)
     return installer
+
+
+def _make_readable(staged: Path) -> None:
+    # A provider may keep this mode in the sandbox, where a non-root user must be
+    # able to read the upload whatever the controller's umask is.
+    staged.chmod(0o644)
 
 
 def _stage_runtime_artifacts(
@@ -76,10 +83,19 @@ def _stage_runtime_artifacts(
         if file_sha256(wheels_archive) != wheels_sha256:
             raise RuntimeError("NOOA wheelhouse changed before sandbox upload")
     (local / "source.tar.gz").write_bytes(source)
+    for staged in local.glob("*.tar.gz"):
+        _make_readable(staged)
     return hashlib.sha256(source).hexdigest()
 
 
 _RUNTIME_ROOT = "/opt/nemo-gym-nooa"
+# Used only when the sandbox user cannot create or write _RUNTIME_ROOT, such as a
+# task image that runs as a non-root user. /tmp already holds the setup files, but
+# other users can write it, so the installer appends the user id and keeps the
+# directory private to that user.
+_FALLBACK_RUNTIME_ROOT = "/tmp/nemo-gym-nooa-runtime"
+# Installer `check` exit status: the runtime is absent and cannot be installed at that path.
+_CANNOT_INSTALL = 73
 _PYTHON_VERSION = "3.13.14"
 _PYTHON_RELEASE = "20260805"
 _INSTALLER_PATH = "responses_api_agents/nooa_agent/install_nooa_runtime.sh"
@@ -178,8 +194,10 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
     """Stage verified artifacts and return the target's healthy private Python.
 
     Cold setup requires Linux x86_64/aarch64 with glibc, bash, tar, gzip,
-    sha256sum, flock, tee, mv with -T support, and writable /opt/nemo-gym-nooa
-    and /tmp. No root or system
+    sha256sum, flock, tee, mv with -T support, and writable /tmp. The runtime
+    is installed under /opt/nemo-gym-nooa, or under /tmp/nemo-gym-nooa-runtime-<uid>
+    (which needs id, stat and a /tmp that allows executable files) when the
+    sandbox user cannot create or write that directory. No root or system
     package manager is invoked. The controller supplies Python; the sandbox still
     needs outbound package/build dependency access unless wheelhouse_path selects
     a source-bound bundle prepared outside the task. Offline setup installs only
@@ -227,9 +245,30 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
                 # a runtime installed from different wheel bytes.
                 fingerprint = hashlib.sha256(f"{fingerprint}:{wheelhouse['wheels_sha256']}".encode()).hexdigest()
             runtime = f"{_RUNTIME_ROOT}/{fingerprint}-{arch}-{libc}"
-            python = f"{runtime}/python/bin/python3"
             check = shlex.join(["bash", script, "check", runtime, fingerprint, _IMPORT_CHECK])
             cached = await sandbox.exec(check, cwd="/", timeout_s=60)
+            if cached.return_code == _CANNOT_INSTALL:
+                # A healthy runtime under the default root is still reused (status 0), and a
+                # user who can install there still does (status 1); only others fall back.
+                claim = shlex.join(["bash", script, "private-root", _FALLBACK_RUNTIME_ROOT])
+                claimed = await sandbox.exec(claim, cwd="/", timeout_s=30)
+                fallback = (claimed.stdout or "").strip()
+                usable = (
+                    claimed.return_code == 0 and re.fullmatch(f"{_FALLBACK_RUNTIME_ROOT}-[0-9]+", fallback) is not None
+                )
+                if usable:
+                    runtime = f"{fallback}/{fingerprint}-{arch}-{libc}"
+                    check = shlex.join(["bash", script, "check", runtime, fingerprint, _IMPORT_CHECK])
+                    cached = await sandbox.exec(check, cwd="/", timeout_s=60)
+                if not usable or cached.return_code == _CANNOT_INSTALL:
+                    # Fail before staging archives that no location in this sandbox can take.
+                    failed = cached if usable else claimed
+                    raise RuntimeError(
+                        f"NOOA runtime cannot be installed: the sandbox user can write neither {_RUNTIME_ROOT} "
+                        f"nor a private {_FALLBACK_RUNTIME_ROOT}-<uid>; exit={failed.return_code}; "
+                        f"stdout={(failed.stdout or '')[-2000:]} stderr={(failed.stderr or '')[-2000:]}"
+                    )
+            python = f"{runtime}/python/bin/python3"
             if cached.return_code == 0:
                 completed = True
                 return python

@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
 import tomllib
@@ -277,6 +278,82 @@ async def test_cached_runtime_requires_successful_health_check(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("warm", [False, True])
+async def test_unwritable_default_root_uses_a_private_fallback_root(
+    sandbox: AsyncMock, runtime_package: tuple[bytes, str], portable_download: AsyncMock, warm: bool
+) -> None:
+    source, fingerprint = runtime_package
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "not a writable directory", sandbox_runtime._CANNOT_INSTALL),
+        SandboxExecResult("/tmp/nemo-gym-nooa-runtime-65534\n", "", 0),
+        SandboxExecResult("", "", 0 if warm else 1),
+        *([] if warm else [SandboxExecResult("ready", "", 0)]),
+        SandboxExecResult("", "", 0),
+    ]
+    python = await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    name = f"{fingerprint}-x86_64-gnu"
+    fallback = f"/tmp/nemo-gym-nooa-runtime-65534/{name}"
+    assert python == f"{fallback}/python/bin/python3"
+    script = sandbox.upload.await_args_list[0].args[1]
+    commands = [shlex.split(call.args[0]) for call in sandbox.exec.await_args_list]
+    # The default root is always consulted first, so a runtime already there wins.
+    assert commands[1] == [
+        "bash",
+        script,
+        "check",
+        f"/opt/nemo-gym-nooa/{name}",
+        fingerprint,
+        sandbox_runtime._IMPORT_CHECK,
+    ]
+    assert commands[2] == ["bash", script, "private-root", "/tmp/nemo-gym-nooa-runtime"]
+    assert commands[3] == ["bash", script, "check", fallback, fingerprint, sandbox_runtime._IMPORT_CHECK]
+    if warm:
+        # A fallback runtime left by an earlier session is reused without another upload.
+        assert set(sandbox.uploaded) == {script}
+        portable_download.assert_not_awaited()
+    else:
+        assert commands[4][:4] == ["bash", script, "install", fallback]
+        assert sandbox.uploaded[f"{script.removesuffix('.sh')}/source.tar.gz"] == source
+    assert commands[-1][0] == "rm" and len(commands) == (5 if warm else 6)
+    assert not any("/opt/" in argument for command in commands[2:] for argument in command)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fallback",
+    [
+        [SandboxExecResult("", "must be a directory that uid 65534 owns", 1)],
+        # Only the installer's own answer below the fallback prefix is trusted as a path.
+        [SandboxExecResult("/home/other/runtime-0\n", "", 0)],
+        [
+            SandboxExecResult("/tmp/nemo-gym-nooa-runtime-65534\n", "", 0),
+            SandboxExecResult("", "not a writable directory", sandbox_runtime._CANNOT_INSTALL),
+        ],
+    ],
+)
+async def test_unusable_fallback_root_fails_before_staging_archives(
+    sandbox: AsyncMock,
+    runtime_package: tuple[bytes, str],
+    portable_download: AsyncMock,
+    fallback: list[SandboxExecResult],
+) -> None:
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "", sandbox_runtime._CANNOT_INSTALL),
+        *fallback,
+    ]
+    with pytest.raises(RuntimeError, match="NOOA runtime cannot be installed") as error:
+        await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    assert f"exit={fallback[-1].return_code}; stdout={fallback[-1].stdout} stderr={fallback[-1].stderr}" in str(
+        error.value
+    )
+    assert sandbox.exec.await_count == 2 + len(fallback)
+    sandbox.upload.assert_awaited_once()
+    portable_download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unhealthy_runtime_stages_verified_archives_and_installs(
     sandbox: AsyncMock, runtime_package: tuple[bytes, str], portable_download: AsyncMock
 ) -> None:
@@ -311,6 +388,9 @@ async def test_unhealthy_runtime_stages_verified_archives_and_installs(
         sandbox_runtime._IMPORT_CHECK,
     ]
     assert install.kwargs == {"cwd": "/", "timeout_s": 1800}
+    # A sandbox user who can write the default root installs there, with no extra command.
+    assert python == f"/opt/nemo-gym-nooa/{fingerprint}-x86_64-gnu/python/bin/python3"
+    assert sandbox.exec.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -711,3 +791,31 @@ async def test_glibc_217_bundle_accepts_ubuntu_1804_task_image(
     ]
     assert (await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)).endswith("/bin/python3")
     portable_download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uploads_are_readable_in_the_sandbox_under_a_restrictive_controller_umask(
+    sandbox: AsyncMock, wheelhouse: Path
+) -> None:
+    modes: dict[str, int] = {}
+
+    async def upload(local: Path, remote: str) -> None:
+        name = remote.rsplit("/", 1)[1]
+        modes["installer" if name.endswith(".sh") else name] = stat.S_IMODE(local.stat().st_mode)
+
+    sandbox.upload.side_effect = upload
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.31", "", 0),
+        SandboxExecResult("", "", 1),
+        SandboxExecResult("ready", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    previous = os.umask(0o077)
+    try:
+        await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
+    finally:
+        os.umask(previous)
+    # A provider that keeps the controller's file mode would otherwise hand a non-root
+    # sandbox user an installer and archives it cannot read.
+    assert modes == {name: 0o644 for name in ("installer", "wheels.tar.gz", "source.tar.gz", "python.tar.gz")}
