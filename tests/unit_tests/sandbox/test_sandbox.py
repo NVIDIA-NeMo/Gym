@@ -2562,3 +2562,5 @@ def test_a_setup_whose_rollback_stop_fails_raises_the_setups_own_error() -> None
         with pytest.raises(ValueError, match="setup failed") as raised:
             await sandbox.start_with_setup(SandboxSpec(image="image:tag"), setup)
         assert str(raised.value.__context__) == "provider unreachable"
+
+    asyncio.run(run())
