@@ -16,8 +16,10 @@
 """Behavioral checks for structured outcomes and resuming an interrupted collector."""
 
 import asyncio
+import hashlib
 import json
 import multiprocessing
+import tracemalloc
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -36,7 +38,7 @@ from nemo_gym.rollout_records import (
     logical_rollout_id,
     read_records,
 )
-from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, validate_resume
+from nemo_gym.rollout_recovery import RunManifest, _digest, manifest_path_for, validate_resume
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.server_runtime.episode_types import EpisodeFailure
 from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, http_error, install_fake_server_client
@@ -186,6 +188,57 @@ def test_typed_api_requires_identity():
         RolloutCollectionHelper().run_outcomes([{"agent_ref": {"name": "agent"}}])
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        True,
+        42,
+        '雪😀\n\t"\\',
+        [],
+        {},
+        (1, "two", None),
+        [-0.0, 1.0, 1e-7, 1e20, 1.7976931348623157e308, 5e-324, 2**100],
+        {2: "two", 1: "one"},
+        [{"z": [None, False, {}], "a": {"é": "雪😀", "empty": []}}] * 3,
+    ],
+)
+def test_digest_matches_existing_manifest_encoding(value):
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    assert _digest(value) == hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_digest_rejects_nonfinite_values(value):
+    with pytest.raises(ValueError, match="Out of range float values"):
+        _digest([{"value": value}])
+
+
+def test_digest_rejects_circular_inputs():
+    value = []
+    value.append(value)
+    with pytest.raises(ValueError, match="Circular reference"):
+        _digest(value)
+
+
+def test_digest_does_not_allocate_the_whole_repeated_dataset():
+    rows = [{"prompt": "x" * 4096}] * 2048
+    encoded = json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    expected = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    del encoded
+
+    tracemalloc.start()
+    try:
+        actual = _digest(rows)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert actual == expected
+    # The serialized input exceeds 8 MiB; hashing should need only a chunk at a time.
+    assert peak_bytes < 1024 * 1024
+
+
 @pytest.fixture
 def saved_manifest(tmp_path):
     source = tmp_path / "source.jsonl"
@@ -210,6 +263,16 @@ def saved_manifest(tmp_path):
     path = tmp_path / "manifest.json"
     manifest.write(path)
     return source, rows, materialized, configuration, servers, manifest, path
+
+
+def test_resume_accepts_manifest_hashed_with_json_dumps(saved_manifest):
+    source, rows, materialized, config, servers, saved, path = saved_manifest
+    encoded = json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    saved = saved.model_copy(update={"materialized_digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest()})
+    saved.write(path)
+
+    current = RunManifest.create(source, rows, config, servers)
+    assert validate_resume(path, current, materialized) == saved
 
 
 def test_resume_allows_new_server_addresses_and_operational_options(saved_manifest):

@@ -192,8 +192,13 @@ def manifest_path_for(output: Path) -> Path:
 
 
 def _digest(value: Any) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    return hashlib.sha256(encoded.encode()).hexdigest()
+    # Preserve the saved manifest's JSON representation without materializing the
+    # entire repeated dataset as both a JSON string and a UTF-8 bytes buffer.
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    digest = hashlib.sha256()
+    for chunk in encoder.iterencode(value):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _without_runtime_options(value: Any) -> Any:
