@@ -59,10 +59,10 @@ gym eval run --no-serve \
 
 | Agent | Verifier | Why |
 |-------|----------|-----|
-| Agent Server process | Resources Server (`verifier_mode: none`) | The model calls no tools, and the verifier only calls a judge model, so nothing needs a sandbox. |
+| Agent Server process | `none` | The model calls no tools, and the verifier only calls a judge model, so nothing needs a sandbox. |
 
 `simpleqa_environment_server` grants no tools (`resources_tool_transports: []`) and sets no sandbox provider. See
-[where the agent and the verifier run](../../environment_servers/single_agent_turn/README.md#where-the-agent-and-the-verifier-run).
+[Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs) in the single-agent-turn README.
 
 ## Data Format
 
