@@ -6,12 +6,14 @@
 import asyncio
 import itertools
 import json
+import logging
 from dataclasses import dataclass
+from time import perf_counter, time
 from typing import Any
 
 import cv2
 from aiohttp import ClientError, ClientResponseError
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
@@ -43,10 +45,20 @@ from nemo_gym.core import (
     report_for_current_request,
 )
 from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_mme.app import TOOL_TRACE_METRICS_KEY, AgenticMMEVerifyResponse
-from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema
+from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, InputImageError, function_schema
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 # Refusals that measure the policy: its own tool images and history outgrew the context or the
@@ -72,6 +84,18 @@ class PolicyRequestError(RuntimeError):
     the failures sidecar and retries it, instead of scoring the model 0."""
 
 
+class TaskInputRejectedError(HTTPException, ValueError):
+    """The task's input cannot run in this agent: no input image, or one the image workspace refuses
+    (unsupported or undecodable data URL, or over max_image_pixels / max_total_image_pixels).
+
+    FastAPI answers it with HTTP 422. The task row is at fault, so a retry fails the same way; a caller that
+    tells request errors from server errors (NeMo RL counts 5xx as infrastructure and retries it) records a
+    data failure naming the row's problem. It is also a ``ValueError`` for direct callers."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(422, detail)
+
+
 class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -84,6 +108,11 @@ class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent_rollouts: int = Field(default=8, ge=1)
     max_image_pixels: int = Field(default=16_000_000, ge=1)
     max_total_image_pixels: int = Field(default=64_000_000, ge=1)
+    # An input image over max_image_pixels: False (the default) rejects the task with HTTP 422; True scales the
+    # image down to max_image_pixels, keeping its aspect ratio, and logs it. The model's own request still carries
+    # the original image. The tools take 0-1000 coordinates, so they behave the same, at lower detail. Data
+    # prepared by benchmarks/agentic_mme/prepare.py is already within 2048x2048.
+    downscale_oversized_input_images: bool = False
     # Images per model request (input images plus tool images; every image stays in every later
     # request). None (the default) sets no limit. Set it to the serving engine's per-prompt image
     # limit (vLLM limit_mm_per_prompt.image): an image tool call past it returns a tool error, so the
@@ -180,6 +209,19 @@ class AgenticMMESessionState(AgentSessionState):
 
     activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
     execution: asyncio.Task[tuple[NeMoGymResponse, dict[str, str]]] | None = None
+    # The episode's trajectory observations, returned once by the session close for the health checks.
+    observations: AgentObservationBundle | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _EpisodeResult:
+    """One finished episode: the response, the model server's cookies, the policy-call failure that ended it (if
+    any), and the trajectory observations (None unless the caller asked to collect them)."""
+
+    response: NeMoGymResponse
+    cookies: Any
+    policy_error: PolicyCallFailure | None
+    observations: AgentObservationBundle | None
 
 
 class AgenticMMEAgent(SimpleResponsesAPIAgent):
@@ -205,14 +247,19 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         cookies: Any,
         replay: list[dict[str, Any]] | None = None,
         model_url_path: str = "/v1/responses",
-    ) -> tuple[NeMoGymResponse, Any, PolicyCallFailure | None]:
+        *,
+        collect_observations: bool = False,
+    ) -> _EpisodeResult:
         async with self._rollouts:
             workspace = ImageWorkspace(
                 max_pixels=self.config.max_image_pixels,
                 max_total_pixels=self.config.max_total_image_pixels,
                 max_images=self.config.max_images_per_request,
+                downscale_inputs=self.config.downscale_oversized_input_images,
             )
-            return await self._episode_with_workspace(params, cookies, replay, workspace, model_url_path)
+            return await self._episode_with_workspace(
+                params, cookies, replay, workspace, model_url_path, collect_observations=collect_observations
+            )
 
     async def _episode_with_workspace(
         self,
@@ -221,7 +268,9 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         replay: list[dict[str, Any]] | None,
         workspace: ImageWorkspace,
         model_url_path: str = "/v1/responses",
-    ) -> tuple[NeMoGymResponse, Any, PolicyCallFailure | None]:
+        *,
+        collect_observations: bool = False,
+    ) -> _EpisodeResult:
         params = params.model_copy(deep=True)
         if isinstance(params.input, str):
             params.input = [NeMoGymEasyInputMessage(role="user", content=params.input)]
@@ -231,9 +280,21 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             if isinstance(content, list):
                 for part in content:
                     if part.get("type") == "input_image":
-                        await asyncio.to_thread(workspace.load, part["image_url"])
+                        try:
+                            await asyncio.to_thread(workspace.load, part["image_url"])
+                        except InputImageError as error:
+                            raise TaskInputRejectedError(f"Agentic-MME input image refused: {error}") from error
         if not workspace.images:
-            raise ValueError("Agentic-MME requires at least one input image")
+            raise TaskInputRejectedError("Agentic-MME requires at least one input image")
+        for (width, height), (new_width, new_height) in workspace.downscaled_inputs:
+            logger.warning(
+                "Agentic-MME input image %dx%d is over max_image_pixels=%d; the tools use it at %dx%d",
+                width,
+                height,
+                self.config.max_image_pixels,
+                new_width,
+                new_height,
+            )
         tools = self.tool_schemas()
         # Inputs contain task prompts only; verifier metadata never enters model context.
         params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
@@ -242,6 +303,9 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         retrieval = Retrieval(self.config.retrieval, replay)
         outputs = []
         trace = []
+        observations = AgentObservationBundle(source="agentic_mme") if collect_observations else None
+        model_calls: list[ModelCallRef] = []
+        tool_observations: list[ToolCallObservation] = []
         usage = None
         attempts = 0
         finished = False
@@ -283,6 +347,13 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                 break
             cookies = response.cookies
             generated = reply
+            if observations is not None:
+                if reply.id:
+                    model_calls.append(ModelCallRef(model_ref=self.config.model_server, response_id=reply.id))
+                else:
+                    observations.gaps.append(
+                        ObservationGap(code="model_call_reference_unavailable", invocation_id="root")
+                    )
             usage = accumulate_response_usage(usage, generated.usage)
             # Preserve typed output items, including token IDs/log-probs for training.
             outputs.extend(generated.output)
@@ -296,6 +367,9 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             budget_exceeded = False
             for call in calls:
                 arguments = None
+                started_at, started_perf = time(), perf_counter()
+                error_type = None
+                tool_timed_out = False
                 try:
                     if max_tool_calls is not None and attempts >= max_tool_calls:
                         budget_exceeded = True
@@ -310,10 +384,27 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                         result = await retrieval.call(call.name, arguments, workspace)
                     else:
                         raise ValueError("unknown tool")
-                except (TimeoutError, ClientError):
+                except (TimeoutError, ClientError) as exc:
+                    error_type = type(exc).__name__
+                    tool_timed_out = isinstance(exc, TimeoutError)
                     result = {"ok": False, "error": "retrieval provider unavailable or timed out"}
                 except (ValueError, TypeError, KeyError, OSError, cv2.error) as exc:
+                    error_type = type(exc).__name__
                     result = {"ok": False, "error": str(exc)}
+                if observations is not None:
+                    tool_observations.append(
+                        ToolCallObservation(
+                            invocation_id="root",
+                            tool_call_id=call.call_id,
+                            tool_name=call.name,
+                            started_at=started_at,
+                            completed_at=max(started_at, time()),
+                            duration_ms=(perf_counter() - started_perf) * 1000,
+                            timing_source="executor",
+                            status="timeout" if tool_timed_out else "completed" if result.get("ok") else "failed",
+                            error_type=error_type,
+                        )
+                    )
                 trace.append(
                     {
                         "index": len(trace) + 1,
@@ -382,7 +473,23 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             # drop the loss for running out of budget. The verifier scores it 0 as missing_answer, since
             # no assistant message follows the last tool call.
             result = NeMoGymResponse.model_validate(result.model_dump() | {"status": "incomplete"})
-        return result, cookies, policy_error
+        if observations is not None:
+            observations.records = [
+                AgentInvocation(
+                    invocation_id="root",
+                    status=(
+                        "failed"
+                        if policy_error is not None and policy_error.infrastructure
+                        else "completed"
+                        if finished
+                        else "incomplete"
+                    ),
+                    model_calls=model_calls,
+                    conversation=[*params.input, *outputs],
+                ),
+                *tool_observations,
+            ]
+        return _EpisodeResult(response=result, cookies=cookies, policy_error=policy_error, observations=observations)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgenticMMESessionState:
         if body.sandbox_access is not None:
@@ -410,16 +517,24 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                         "Agentic-MME episode did not stop within the session close timeout; close must retry"
                     )
             await asyncio.gather(execution, return_exceptions=True)
-        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, agent_observations=state.observations
+        )
 
     async def _session_episode(
-        self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict[str, str], model_url_path: str
+        self,
+        state: AgenticMMESessionState,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: dict[str, str],
+        model_url_path: str,
     ) -> tuple[NeMoGymResponse, dict[str, str]]:
-        result, model_cookies, policy_error = await self._episode(body, cookies, model_url_path=model_url_path)
-        if policy_error is not None:
+        episode = await self._episode(body, cookies, model_url_path=model_url_path, collect_observations=True)
+        state.observations = episode.observations
+        result = episode.response
+        if episode.policy_error is not None:
             # Report the cause, so the Environment Server's outcome policy decides between grading and retry.
-            result = policy_error.failed_response(result)
-        return result, {name: getattr(value, "value", value) for name, value in (model_cookies or {}).items()}
+            result = episode.policy_error.failed_response(result)
+        return result, {name: getattr(value, "value", value) for name, value in (episode.cookies or {}).items()}
 
     async def responses(
         self,
@@ -435,10 +550,10 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         route = self.url_path_for_request("/v1/responses", request)
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            result, model_cookies, _ = await self._episode(body, request.cookies, model_url_path=route)
-            for name, value in (model_cookies or {}).items():
+            episode = await self._episode(body, request.cookies, model_url_path=route)
+            for name, value in (episode.cookies or {}).items():
                 response.set_cookie(name, value)
-            return result
+            return episode.response
         state = self._require_agent_session(session_id)
         if not isinstance(state, AgenticMMESessionState):
             raise TypeError("Expected Agentic-MME session state")
@@ -449,7 +564,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             raise AgentSessionConflictError("Session already has another activation")
         if state.execution is None:
             state.activation_key = key
-            state.execution = asyncio.create_task(self._session_episode(body, dict(request.cookies), route))
+            state.execution = asyncio.create_task(self._session_episode(state, body, dict(request.cookies), route))
         try:
             result, model_cookies = await asyncio.shield(state.execution)
         except asyncio.CancelledError:
@@ -462,14 +577,21 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         return result
 
     async def run(self, request: Request, body: AgenticMMERunRequest) -> AgenticMMEVerifyResponse:
-        result, _, policy_error = await self._episode(
+        episode = await self._episode(
             body.responses_create_params,
             request.cookies,
             body.retrieval_replay,
             model_url_path=self.url_path_for_run("/v1/responses", body),
+            collect_observations=True,
         )
+        result, policy_error = episode.response, episode.policy_error
         if policy_error is not None and policy_error.infrastructure:
             raise PolicyRequestError(policy_error.message)
+        observed = (
+            {"ng_agent_observations": episode.observations.model_dump(mode="json")}
+            if episode.observations is not None
+            else {}
+        )
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
@@ -481,11 +603,13 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             cookies=request.cookies,
         )
         await raise_for_status(verification)
-        # Verify returns the tool trace and its counts.
+        # Verify returns the tool trace and its counts. It does not read the observations, whose conversation holds
+        # every image, so they join the result only here.
         verified = AgenticMMEVerifyResponse.model_validate(await get_response_json(verification))
         return verified.model_copy(
             update={
                 "policy_error": policy_error.message if policy_error else None,
+                **observed,
                 **({"failure_reason": "policy_error"} if policy_error else {}),
             }
         )

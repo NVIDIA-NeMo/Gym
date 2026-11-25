@@ -22,6 +22,7 @@ ui_generation_agentic_opencode_agent:
       max_output_tokens: ${ui_generation_agentic_max_output_tokens}
       timeout: 3600
       sandbox_install_timeout_seconds: 600
+      opencode_version: 1.17.11
       sandbox_executable_path: /opt/ui-gen/runtime/opencode
       sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
       sandbox_ripgrep_path: /opt/ui-gen/runtime/rg
