@@ -475,7 +475,10 @@ async def write_aggregate_metrics(output: Path, records: list[dict], client: Ser
     finally:
         response.release()
     agent_ref = {"name": "agentic_if_realworld_agent"}
-    implementation = _aggregated_agent_implementation(records, client.global_config_dict, agent_ref["name"])
+    # A client without a config names no agent type, as for an agent the config does not declare.
+    implementation = _aggregated_agent_implementation(
+        records, getattr(client, "global_config_dict", None), agent_ref["name"]
+    )
     if implementation is not None:
         agent_ref["implementation"] = implementation
     write(
