@@ -2395,7 +2395,30 @@ class OpenSandboxProvider:
                     f"{command}\n{(result.stderr or result.stdout or '')[-500:]}",
                 )
 
-    async def _exec_setup_command(self, handle: SandboxHandle, command: str) -> SandboxExecResult:
+    async def _create_workdir(self, handle: SandboxHandle, workdir: str | None) -> None:
+        """Create ``SandboxSpec.workdir`` when the image lacks it, as Docker creates a missing ``-w`` directory.
+
+        execd refuses a command whose working directory does not exist (HTTP 400), and every ``AsyncSandbox`` exec
+        that names no ``cwd`` runs in this one. It is created from ``/`` like a ``setup.commands`` entry: as root, or
+        as the image's own user where the sandbox cannot switch, and that user owns it.
+        """
+        if not workdir or workdir == "/":
+            return
+        result = await self._exec_setup_command(handle, f"mkdir -p {shlex.quote(workdir)}", cwd="/")
+        if result.error_type is not None or result.return_code != 0:
+            raise opensandbox_failure(
+                operation="create working directory",
+                exit_code=result.return_code if result.error_type is None else None,
+                sandbox_id=handle.sandbox_id,
+                failure_kind=PROVIDER_SETUP_FAILED,
+                reason=f"Sandbox {handle.sandbox_id!r} cannot create its working directory {workdir!r} "
+                f"(exit {result.return_code}, {result.error_type or 'no error type'}): "
+                f"{(result.stderr or result.stdout or '')[-500:]}",
+            )
+
+    async def _exec_setup_command(
+        self, handle: SandboxHandle, command: str, *, cwd: str | None = None
+    ) -> SandboxExecResult:
         """One ``setup.commands`` entry as root, or as the image's own user when the sandbox cannot switch
         identity.
 
@@ -2403,7 +2426,7 @@ class OpenSandboxProvider:
         runs (``nemo_gym.sandbox.transfer.exec_as_root`` degrades the same way), so a command written to no-op where
         it does not apply gets to no-op, and one that needs root there fails on its own result, as before.
         """
-        result = await self.exec(handle, command, user="root", timeout_s=self._setup.timeout_s)
+        result = await self.exec(handle, command, cwd=cwd, user="root", timeout_s=self._setup.timeout_s)
         if result.error_type != "user_switch_unavailable":
             return result
         LOGGER.debug(
@@ -2411,7 +2434,7 @@ class OpenSandboxProvider:
             handle.sandbox_id,
             command.strip().splitlines()[0][:80] if command.strip() else command,
         )
-        return await self.exec(handle, command, timeout_s=self._setup.timeout_s)
+        return await self.exec(handle, command, cwd=cwd, timeout_s=self._setup.timeout_s)
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
         if self._probe.command is None:
@@ -2837,6 +2860,7 @@ class OpenSandboxProvider:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
             await self._run_setup_commands(handle)
+            await self._create_workdir(handle, spec.workdir)
         except BaseException:
             # Also on cancellation (a caller's timeout, shutdown): otherwise the pod lives to its TTL.
             # The shield lets the cleanup finish even if this task is cancelled again meanwhile.
