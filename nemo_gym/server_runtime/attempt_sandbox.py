@@ -8,6 +8,7 @@ whether its verifier executes nothing; the agent borrows the group for its turn 
 both sides share; the lifecycle itself is ``BaseEnvironmentServer``'s.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -15,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.config import SandboxConfig
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSidecarSpec
+from nemo_gym.sandbox.providers.base import NetworkRule, SandboxResources, SandboxSidecarSpec
 
 
 # The /prepare_sandbox route a Resources Server serves when it prepares the task in the attempt's sandbox group.
@@ -74,7 +75,12 @@ class SandboxGroupSidecar(BaseModel):
     """A sidecar container of the attempt's sandbox group, started from its own image beside the main container.
 
     It serves an environment tool reached over HTTP, an API or MCP. Starting a group with sidecars needs a provider
-    that implements ``SupportsSandboxSidecars``.
+    that implements ``SupportsSandboxSidecars`` and applies ``no_network`` and ``hosts_only``.
+
+    Attributes:
+        egress_hosts: The only hosts the sidecar reaches, such as the API its tool calls (``hosts_only``); empty, it
+            reaches none (``no_network``). The main container's network rule never applies to a sidecar.
+        tools_port: The port on which the sidecar serves the Resources Server's HTTP tools, if it does.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -83,6 +89,8 @@ class SandboxGroupSidecar(BaseModel):
     image: str = Field(min_length=1)
     env: dict[str, str] = Field(default_factory=dict)
     resources: dict[str, Any] = Field(default_factory=dict)
+    egress_hosts: list[str] = Field(default_factory=list)
+    tools_port: int | None = Field(default=None, ge=1, le=65535)
 
     @field_validator("resources")
     @classmethod
@@ -90,9 +98,20 @@ class SandboxGroupSidecar(BaseModel):
         SandboxResources.from_mapping(resources)
         return resources
 
-    def spec(self) -> SandboxSidecarSpec:
-        """The provider-neutral sidecar spec this declaration starts."""
-        return SandboxSidecarSpec(name=self.name, image=self.image, env=dict(self.env), resources=dict(self.resources))
+    @property
+    def network(self) -> NetworkRule:
+        """The sidecar's own network rule: ``hosts_only`` for its ``egress_hosts``, else ``no_network``."""
+        return "hosts_only" if self.egress_hosts else "no_network"
+
+    def spec(self, *, provider_options: Mapping[str, Any] | None = None) -> SandboxSidecarSpec:
+        """The provider-neutral sidecar spec this declaration starts, with its own ``provider_options``."""
+        return SandboxSidecarSpec(
+            name=self.name,
+            image=self.image,
+            env=dict(self.env),
+            resources=dict(self.resources),
+            provider_options=dict(provider_options or {}),
+        )
 
 
 class SandboxGroupSpec(BaseModel):
