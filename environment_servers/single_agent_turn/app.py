@@ -10,10 +10,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectorError, ConnectionTimeoutError
+from aiohttp import ClientConnectorError, ClientResponseError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
@@ -24,6 +24,7 @@ from nemo_gym.agents import (
     AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    AgentSessionCapabilitiesResponse,
     OutcomeAction,
     agent_outcome_policy,
     confirmed_policy_response_timeout,
@@ -129,7 +130,7 @@ class SessionHandles(BaseModel):
     # A restore rebuilds that sandbox under a new id, so the replacement attempt seeds both sessions again.
     borrowed_sandbox: bool = False
     # The attempt's sandbox group this server starts, and who borrows it, as decided at seed; None when it starts
-    # none, as when the Resources Server lent one or both the task and the grader opted out.
+    # none, as when the Resources Server lent one, or neither the agent nor the verifier borrows a group.
     attempt_sandbox: AttemptSandbox | None = None
     # Where the agent was granted the Resources Server's tools in the group's tool sidecar, if it was.
     tool_sidecar_url: str | None = None
@@ -147,7 +148,7 @@ class SessionHandles(BaseModel):
 class SingleAgentTurnEnvironmentServerConfig(AttemptSandboxEnvironmentServerConfig):
     """Bind Resources and Agent Servers for one agent turn.
 
-    ``sandbox_provider``, ``sandbox_config`` and ``sandbox_opt_out`` configure the attempt's sandbox group, which the
+    ``sandbox_provider`` and ``sandbox_config`` configure how the attempt's sandbox groups start, which the
     base class starts, lends and stops (see ``AttemptSandboxEnvironmentServerConfig``).
     """
 
@@ -185,12 +186,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     # The base class starts the attempt sandbox from sandbox_config through self.sandboxes, so startup checks that
     # block's network rule against sandbox_provider.
     owned_sandbox_blocks: ClassVar[Mapping[str, str]] = ATTEMPT_SANDBOX_BLOCKS
+    # The bound agent's session capabilities, asked once per process (_agent_capabilities).
+    _agent_session_capabilities: AgentSessionCapabilitiesResponse | None = PrivateAttr(default=None)
 
     def check_sandbox_provider(self) -> None:
         """Refuse at startup an attempt sandbox the provider cannot start, apply the rule to, or lend.
 
         Beyond the base checks, the network rule must allow every server whose tools an episode grants, since a harness
-        in the sandbox calls them from there, and a task sandbox opt-out is refused for an episode that grants tools.
+        in the sandbox calls them from there.
 
         Raises:
             ValueError: Naming the first need the configuration or the provider cannot meet.
@@ -198,20 +201,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         super().check_sandbox_provider()
         self._check_tool_sidecar()
         config = self.config.sandbox_config
-        if config is None and not self.config.sandbox_opt_out.task:
+        if config is None:
             return
         # The Resources Server's tools run in the group's tool sidecar when it declares one, so the sandbox need not
         # reach its host.
         serves_resources_tools = self.config.resources_tool_transports and self.tool_sidecar is None
         granted = {*([self.config.resources_server.name] if serves_resources_tools else [])}
         granted.update(self.tool_server_names)
-        if self.config.sandbox_opt_out.task and granted:
-            raise ValueError(
-                f"sandbox_opt_out.task is only for a pure QA task, but every episode grants the tools of "
-                f"{sorted(granted)}; drop resources_tool_transports for a Resources Server that serves no tools"
-            )
-        if config is None:
-            return
         # inherit leaves egress open, and hosts_only names hosts rather than servers, so neither can be checked here.
         missing = sorted(granted - set(config.tool_servers))
         if missing and config.network in ("no_network", "model_only", "model_and_tools"):
@@ -236,10 +232,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return
         server = f"Environment Server {self.config.name!r}"
         resources = self.config.resources_server.name
-        if self.config.sandbox_config is None or self.config.sandbox_opt_out.task:
+        if self.config.sandbox_config is None:
             raise ValueError(
                 f"{resources!r} serves its tools from a sidecar of the attempt's sandbox group, which {server} starts "
-                "only with sandbox_provider and sandbox_config set and no task sandbox opt-out"
+                "only with sandbox_provider and sandbox_config set"
             )
         if self.config.resources_tool_transports != ["direct_http"]:
             raise ValueError(
@@ -587,12 +583,22 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         """
         seed = await self._seed_resources(request, handles)
         tool_accesses = await self._seed_tool_servers(request, handles)
+        task_tools = self._task_tools(request, tool_accesses)
         handles.attempt_sandbox, sandbox_access = await self.seed_attempt_sandbox(
             request,
             key=self._attempt_sandbox_key(handles),
             lent=seed.sandbox_access,
             group=seed.sandbox_group,
-            task_tools=self._task_tools(request, tool_accesses),
+            verifier_mode=seed.verifier_mode,
+            task_tools=task_tools,
+            # Asked only when it decides anything: groups this server starts, for a task without tools or sidecars.
+            agent_runs_loop_without_sandbox=(
+                self.starts_attempt_sandboxes
+                and not task_tools
+                and seed.sandbox_access is None
+                and not (seed.sandbox_group is not None and seed.sandbox_group.sidecars)
+                and (await self._agent_capabilities()).runs_loop_without_sandbox
+            ),
             resources_server=repr(self.config.resources_server.name),
             prepare=lambda access: self._prepare_resources_sandbox(request, handles, access),
         )
@@ -601,17 +607,37 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         await self._seed_agent(request, handles, seed, tool_accesses, sandbox_access=sandbox_access)
         return registered
 
+    async def _agent_capabilities(self) -> AgentSessionCapabilitiesResponse:
+        """The bound agent's session capabilities, asked once per process before any session is seeded.
+
+        An agent server without the route (an older build) declares nothing, so its agent is lent a group at seed.
+        """
+        if self._agent_session_capabilities is None:
+            try:
+                http_response = await self.server_client.get(
+                    server_name=self.config.agent_server.name, url_path="/v1/agent_sessions/capabilities"
+                )
+                await raise_boundary_failure(http_response)
+                capabilities = AgentSessionCapabilitiesResponse.model_validate(await get_response_json(http_response))
+            except ClientResponseError as error:
+                if error.status not in (404, 405):
+                    raise dependency_failure(error, stage="seed") from error
+                capabilities = AgentSessionCapabilitiesResponse()
+            except Exception as error:
+                raise dependency_failure(error, stage="seed") from error
+            self._agent_session_capabilities = capabilities
+        return self._agent_session_capabilities
+
     def _task_tools(self, request: SingleAgentTurnRequest, tool_accesses: Sequence[ToolAccess]) -> list[str]:
-        """The tools the task declares or the episode grants, which a pure QA task's sandbox opt-out refuses."""
+        """The tools the task declares or the episode grants, which make the agent borrow the attempt's group."""
         declared = [
             tool if isinstance(tool, Mapping) else vars(tool)
             for tool in request.task.task_input.responses_create_params.tools
         ]
         names = [str(tool.get("name") or tool.get("type") or "tool") for tool in declared]
-        # A grant counts even when its server serves no tools, so its name says how to drop it.
+        # A grant counts even when its server serves no tools: drop it from a pairing whose server has none.
         names += [
-            f"resources_tool_transports {transport} (drop it for a Resources Server that serves no tools)"
-            for transport in self.config.resources_tool_transports
+            f"{self.config.resources_server.name} {transport}" for transport in self.config.resources_tool_transports
         ]
         names += [access.name for access in tool_accesses]
         return names
@@ -1002,7 +1028,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     error, stage="verification", terminal=False, name_error_type=True, **evidence
                 ) from error
         # The attempt's sandbox group, lent to the verifier now that the agent has closed (NG_SANDBOX_ACCESS_KEY): the
-        # one the agent borrowed, or one started now for the verifier alone, when the task opted out.
+        # one the agent borrowed (shared), or one started now for the verifier alone (separate).
         access = await self.verifier_sandbox_access(
             request,
             handles.attempt_sandbox,

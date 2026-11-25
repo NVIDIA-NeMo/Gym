@@ -189,10 +189,6 @@ def test_a_pairing_that_cannot_start_or_grant_the_tool_sidecar_is_refused_at_sta
     with pytest.raises(ValueError, match="only with sandbox_provider and sandbox_config set"):
         server._check_tool_sidecar()
 
-    server, _ = _sidecar_server(_SidecarProvider(), sandbox_opt_out={"task": True})
-    with pytest.raises(ValueError, match="no task sandbox opt-out"):
-        server._check_tool_sidecar()
-
 
 def test_a_model_only_group_may_grant_tools_that_run_in_its_sidecar() -> None:
     # Without the sidecar, model_only with direct_http tools is refused: the sandbox could not reach the Resources host.

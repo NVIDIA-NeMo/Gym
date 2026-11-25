@@ -36,7 +36,3 @@ example_single_tool_call_single_agent_turn:
         # The tools are in the group, so the agent container needs only the model server.
         network: model_only
         model_server: policy_model
-      # The verifier only reads the response's tool calls, so it runs in the Resources Server and the group stops once
-      # the agent closes.
-      sandbox_opt_out:
-        verifier: true
