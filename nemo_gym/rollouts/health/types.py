@@ -152,6 +152,8 @@ class Finding(BaseModel):
 
 
 class RolloutDigest(BaseModel):
+    looping: dict[str, Any] | None = None
+    looping_group: str | None = None
     task_index: int | str
     rollout_index: int | str
     # Multi-stage drivers (e.g. gdpval) persist one row per (task, rollout) per stage.
@@ -212,6 +214,7 @@ class _LineSlice:
 class _WorkerInput:
     line: _LineSlice
     ignored_checks: frozenset[str]
+    looping_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)

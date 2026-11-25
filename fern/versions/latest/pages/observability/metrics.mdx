@@ -442,3 +442,25 @@ at most the number of unhealthy rollouts, while the sum over checks can be large
 can be flagged by several checks. The report's per-check issue counts are per finding. The check
 ids are the fixed ids of the rollout-level checks in the health report, plus `check_execution_error`.
 Neither counter has task or rollout identifiers as dimensions.
+
+
+## Passive Looping Assessments
+
+This draft feature assesses completed rollout evidence without stopping generation or changing scores. It is disabled by default.
+
+```yaml
+looping:
+  enabled: true
+```
+
+`gym eval run` and `gym eval aggregate` compute looping assessments during their saved-rollout analysis pass. They share the existing `health_check_workers` processes, retain the selected attempt, add a `looping` object to each applicable `rollout_verdicts.jsonl` row, and include the run summary under `looping` in `quality_summary.json`. Per-group scalars are also added to the ordinary aggregate metrics artifact and sent through the existing exporters. Looping assessments remain independent of health findings; `disable_health_check=true` leaves the looping pass enabled when requested.
+
+Assessments use captured, invocation-owned policy responses and exact paired tool outcomes. Enable `observability_enabled` and set `model_call_capture_dir` to retain model-call evidence. A verified single direct response can be bound using its response ID and configured policy model server.
+
+`assess_looping_record(record)` is exported from `nemo_gym.rollouts`. It assesses a canonical saved record without changing it; eval workers call this same helper.
+
+Metrics include selected and expected counts, invalid counts, and assessed, flagged, unknown counts and assessed rates for severe/warning text, tool cycles, and their union. Expected population is null when the saved inventory is unavailable; group summaries then describe selected rows only. A rate with no assessed rows stays null and is omitted from scalar export.
+
+The detector uses paragraph repetition, exact character tandem spans, and exact tool cycles. The scoring helpers are shared under Apache-2.0, with source attribution in the detector module. The extractor has its own version. Canonical evidence is capped at two million characters, output items at 8,192, and tool calls at 1,024. This conservative bound includes input echoes and unselected captures before validation; they are excluded from the repetition scan. Exceeding a bound produces unknown coverage. The current extractor supports a single policy invocation; multiple invocations and unsupported output formats remain explicitly unknown.
+
+A provider-reported repetition stop remains a separate health observation. This assessment does not enable vLLM repetition termination. Live CPU execution, NeMo RL integration, representative replay, and multi-invocation extraction are follow-up work.

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import random
 import sys
 from asyncio import Future
 from copy import deepcopy
@@ -17,11 +18,14 @@ import nemo_gym.rollouts.health.checks as health_checks
 import nemo_gym.rollouts.rollout_collection as rollout_collection
 import nemo_gym.rollouts.rollout_health as health
 from nemo_gym.core.responses_api_types import NeMoGymChatCompletion, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.metrics.looping import LoopingCounts
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.rollouts import trajectory_builder
+from nemo_gym.rollouts.looping_assessment import assess_looping_record
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, RolloutStore, run_health_checks
 from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.trajectory.looping import LoopingAssessment, LoopingInput, detect_looping
 from nemo_gym.trajectory.model_call_record import build_model_call_record
 from nemo_gym.trajectory.trajectory_record import AgentInvocation, TrajectoryModelCall, TrajectoryRecord
 
@@ -4463,3 +4467,66 @@ def test_interrupted_tool_label_preserves_failure_marker_health(tmp_path, status
     )
     assert len(findings) == 1
     assert findings[0].detail["count"] == 1
+
+
+def _looping_record(copies=16):
+    text = "".join(random.Random(19).choices("abcdefghijklmnopqrstuvwxyz", k=129)) * copies
+    row = _record(0, 0, answer="recovered final")
+    row["response"]["output"].insert(0, {"type": "reasoning", "summary": [{"type": "summary_text", "text": text}]})
+    row.update(reward=1.0, agent_ref={"name": "agent"}, _ng_environment_server="environment")
+    row["response"]["id"] = "r1"
+    row["ng_trajectory"].update(
+        invocations=[{"invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]}],
+        model_calls=[_trajectory_call(_call(response=row["response"]))],
+    )
+    return row
+
+
+@pytest.mark.parametrize(
+    "copies,severe,warning", [(0, False, False), (15, False, True), (16, True, True), (None, None, None)]
+)
+def test_looping_eval_matches_shared_assessment(tmp_path, copies, severe, warning, monkeypatch):
+    from nemo_gym.artifacts import exporters
+
+    row = _looping_record(copies or 0)
+    if copies is None:
+        row["ng_trajectory"]["model_calls"] = []
+    path = tmp_path / "rollouts.jsonl"
+    original = orjson.dumps(row)
+    path.write_bytes(original)
+    baseline = run_health_checks(path, workers=1)
+    result = run_health_checks(path, workers=1, looping_enabled=True)
+    assert result.rollouts[0].looping["input_digest"] == assess_looping_record(row).input_digest
+    assert result.rollouts[0].looping["severe_union"] is severe
+    assert result.rollouts[0].looping["warning_union"] is warning
+    assert result.rollouts[0].verdict == baseline.rollouts[0].verdict
+    assert baseline.rollouts[0].looping is None and path.read_bytes() == original
+    artifact = tmp_path / "rollouts_aggregate_metrics.json"
+    artifact.write_bytes(orjson.dumps([{"agent_ref": {"name": "agent"}, "_ng_environment_server": "environment"}]))
+    exported = []
+    monkeypatch.setattr(exporters, "export_metrics", exported.append)
+    health.publish_looping_metrics(result.summary["looping"], path)
+    key = "agent/looping/severe_union/flagged_total"
+    assert exported[0][key] == int(severe is True)
+    assert orjson.loads(artifact.read_bytes())[0]["agent_metrics"]["looping/severe_union/assessed_total"] == int(
+        severe is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "signatures,severe,warning",
+    [("aa", False, False), ("aaa", False, True), ("abababab", True, True), ("abcdefgh", False, False)],
+)
+def test_looping_tool_cycle_boundaries(signatures, severe, warning):
+    tools = tuple({"signature_sha256": value, "input_signature_sha256": "same input"} for value in signatures)
+    result = detect_looping(LoopingInput((), tools, True, True, ()))
+    assert (result.severe_tool_cycle, result.warning_tool_cycle) == (severe, warning)
+
+
+def test_looping_unknown_invalid_and_missing_rows_stay_out_of_the_rate():
+    counts = LoopingCounts()
+    for valid in (True, False):
+        counts.observe(LoopingAssessment(severe_union=True), valid=valid)
+    metrics = counts.metrics(expected=3)
+    assert metrics["looping/severe_union/rate_assessed"] == 1
+    assert metrics["looping/severe_union/unknown_total"] == 2

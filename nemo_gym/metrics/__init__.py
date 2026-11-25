@@ -21,6 +21,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.metrics.looping import LoopingCounts
     from nemo_gym.metrics.metrics_config import Stat
     from nemo_gym.metrics.reward_profile import (
         MASK_SAMPLE_FIELD,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "LoopingCounts": "looping",
     "AggregateMetricsMixin": "reward_profile",
     "MASK_SAMPLE_FIELD": "reward_profile",
     "RewardProfiler": "reward_profile",

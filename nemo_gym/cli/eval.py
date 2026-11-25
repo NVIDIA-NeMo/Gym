@@ -65,6 +65,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.config.looping import LoopingConfig
 from nemo_gym.data.tasks.harbor.build_options import (
     _block_from_overrides,
     _merged_cli_config,
@@ -430,6 +431,7 @@ def e2e_rollout_collection():  # pragma: no cover
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
     # The default path runs the built-in single-pass helper.
     driver_path = e2e_rollout_collection_config.rollout_collection_driver
+    looping_enabled = rollout_collection_config.looping.enabled
     health_check_enabled = (
         not rollout_collection_config.disable_aggregation and not rollout_collection_config.disable_health_check
     )
@@ -437,6 +439,7 @@ def e2e_rollout_collection():  # pragma: no cover
     # The no-serve entry point calls the collection helper directly.
     if driver_path:
         rollout_collection_config.disable_health_check = True
+        rollout_collection_config.looping = rollout_collection_config.looping.model_copy(update={"enabled": False})
 
     print(
         f"""Output artifacts:
@@ -489,6 +492,7 @@ def e2e_rollout_collection():  # pragma: no cover
                     None if driver_path else rch._landed_keys,
                     model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
                     disabled=not health_check_enabled,
+                    **({"looping_enabled": True} if looping_enabled else {}),
                 )
         finally:
             supervisor.shutdown()
@@ -1043,6 +1047,7 @@ def _remove_completion_files(output: Path) -> None:
 class _SettledHealthSettings(RunHealthConfig):
     """The health-check settings of a run config, read for the quality summary of a run a judge-only job settled."""
 
+    looping: LoopingConfig = Field(default_factory=LoopingConfig)
     disable_health_check: bool = False
     health_check_workers: int | None = None
     health_check_ignored_checks: List[str] = Field(default_factory=list)
@@ -1088,7 +1093,11 @@ def _refresh_settled_source(
     """
     from nemo_gym.rollouts import RolloutStore, run_health_checks
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
-    from nemo_gym.rollouts.rollout_health import capture_dirs_for_health, format_health_report, write_disabled_summary
+    from nemo_gym.rollouts.rollout_health import (
+        capture_dirs_for_health,
+        format_health_report,
+        write_disabled_summary,
+    )
     from nemo_gym.rollouts.rollout_store import raw_outcomes_are_selected
 
     if isinstance(run_config, DictConfig):
@@ -1114,7 +1123,7 @@ def _refresh_settled_source(
     projection = None
     try:
         settings = _SettledHealthSettings.model_validate(run_config)
-        if settings.disable_health_check:
+        if settings.disable_health_check and not settings.looping.enabled:
             write_disabled_summary([output], output.parent)
             return refreshed
         store = RolloutStore.read(output, import_legacy=False)
@@ -1142,9 +1151,15 @@ def _refresh_settled_source(
             limits=settings.run_health_limits,
             run_coverage=[store.coverage()] if store is not None else None,
             model_call_capture_dirs=capture_dirs_for_health(run_config),
+            **({"looping_enabled": True} if settings.looping.enabled else {}),
+            **({"health_enabled": False} if settings.disable_health_check else {}),
         )
         print(format_health_report(result))
         refreshed["health_summary_recomputed"] = True
+        if settings.looping.enabled and refreshed["metrics_recomputed"]:
+            from nemo_gym.rollouts.rollout_health import publish_looping_metrics
+
+            publish_looping_metrics(result.summary["looping"], output)
     except Exception as error:
         print(
             f"The quality summary was not recomputed after the re-judgment ({type(error).__name__}: {error}); "

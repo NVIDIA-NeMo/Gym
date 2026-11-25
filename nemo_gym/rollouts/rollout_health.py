@@ -144,7 +144,42 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
 
 def _worker(payload: _WorkerInput) -> RolloutDigest:
     record, parse_error = _read_record(payload.line)
-    return evaluate_record(record, payload.ignored_checks, line=payload.line, parse_error=parse_error)
+    digest = evaluate_record(record, payload.ignored_checks, line=payload.line, parse_error=parse_error)
+    if payload.looping_enabled:
+        from nemo_gym.rollouts.looping_assessment import assess_looping_record
+        from nemo_gym.trajectory.looping import unknown_looping_assessment
+
+        if parse_error or any(finding.check == "record_unreadable" for finding in digest.findings):
+            assessment = unknown_looping_assessment("record_unreadable")
+        else:
+            assessment = assess_looping_record(record)
+        digest.looping = assessment.to_dict()
+        digest.looping_group = record.get("_ng_environment_server") or (record.get("agent_ref") or {}).get("name")
+    return digest
+
+
+def publish_looping_metrics(summary: dict[str, Any], output: Path) -> None:
+    """Merge passive diagnostics into ordinary eval entries using the existing exporter naming."""
+    from nemo_gym.artifacts.exporters import export_metrics
+    from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+
+    try:
+        path = aggregate_metrics_path_for(output)
+        entries = orjson.loads(path.read_bytes()) if path.is_file() else []
+        for entry in entries:
+            group = entry.get("_ng_environment_server") or (entry.get("agent_ref") or {}).get("name")
+            if group in summary["groups"]:
+                entry.setdefault("agent_metrics", {}).update(summary["groups"][group])
+        if entries:
+            with atomic_output_file(path) as stream:
+                stream.write(orjson.dumps(entries, option=orjson.OPT_INDENT_2))
+        metrics = {key: value for key, value in flatten_aggregate_metrics(entries).items() if "/looping/" in key}
+        metrics.update(summary["metrics"])
+        export_metrics({key: value for key, value in metrics.items() if value is not None})
+    except Exception:
+        logger.exception("Looping metrics export failed; rollout artifacts and the quality summary remain available.")
 
 
 def evaluate_record(
@@ -945,6 +980,8 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
                 "unobserved": digest.unobserved,
                 "responses": digest.responses,
             }
+            if digest.looping is not None:
+                row["looping"] = digest.looping
             if digest.stage_index is not None:
                 row["stage_index"] = digest.stage_index
             handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
@@ -1044,6 +1081,8 @@ def run_health_checks(
     run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
     source_histories: Mapping[Path, RolloutStore | None] | None = None,
     model_call_capture_dirs: Sequence[Path] = (),
+    looping_enabled: bool = False,
+    health_enabled: bool = True,
 ) -> HealthCheckResult:
     """Check selected completed attempts while retaining run-wide failure and timeout evidence.
 
@@ -1053,7 +1092,11 @@ def run_health_checks(
     History-map keys accept the same relative paths and aliases as rollout_paths.
     Loose JSONL and explicit failure sidecars retain their line-by-line behavior.
     """
-    ignored = frozenset(normalize_ignored_checks(ignored_checks))
+    ignored = (
+        frozenset(normalize_ignored_checks(ignored_checks))
+        if health_enabled
+        else frozenset(spec.id for spec in CHECK_REGISTRY)
+    )
     paths = list([rollout_paths] if isinstance(rollout_paths, Path) else rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
@@ -1081,6 +1124,7 @@ def run_health_checks(
         _WorkerInput(
             line=line,
             ignored_checks=ignored,
+            looping_enabled=looping_enabled,
         )
         for line in lines
     ]
@@ -1135,6 +1179,22 @@ def run_health_checks(
             scored=landed - {key for key, digest in zip(keys, digests) if not digest.scored},
         )
     )
+    if looping_enabled:
+        from nemo_gym.metrics.looping import LoopingCounts
+        from nemo_gym.trajectory.looping import LoopingAssessment
+
+        counts = LoopingCounts()
+        groups: dict[str, LoopingCounts] = {}
+        for digest in digests:
+            if digest.looping is not None:
+                assessment = LoopingAssessment(**digest.looping)
+                counts.observe(assessment, valid=digest.scored)
+                if digest.looping_group is not None:
+                    groups.setdefault(digest.looping_group, LoopingCounts()).observe(assessment, valid=digest.scored)
+        summary["looping"] = {
+            "metrics": counts.metrics(expected=artifacts["expected"]),
+            "groups": {name: value.metrics() for name, value in groups.items()},
+        }
     # Every rollout's final record: its saved row, or the last failed attempt of one that never landed.
     timings = [digest.timing for digest in digests if digest.timing is not None]
     timings += map(
@@ -1223,6 +1283,10 @@ def run_health_checks(
     summary["run"]["provenance"] = run_provenance(paths[0])
     if source_digests == _health_artifact_digests(paths):
         summary["run"]["provenance"]["rollout_artifact_digests"] = source_digests
+    if not health_enabled:
+        summary["run"]["artifacts"] = _disabled_health_artifacts()
+        for digest in digests:
+            digest.verdict = "unobserved"
     report_dir = output_dir or paths[0].parent
     summary["run"][QUALITY_SUMMARY_SOURCES_KEY] = _report_sources(paths, report_dir)
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
@@ -1234,6 +1298,16 @@ def run_health_checks(
     )
 
 
+def _disabled_health_artifacts() -> dict[str, Any]:
+    return {
+        "state": "disabled",
+        "state_reason": "disable_health_check is set",
+        **dict.fromkeys(("expected", "completed", "scored", "failed", "missing", "healthy")),
+        "unhealthy_reasons": [],
+        "not_evaluated": sorted(spec.id for spec in CHECK_REGISTRY),
+    }
+
+
 def write_disabled_summary(rollout_paths: Sequence[Path], output_dir: Path) -> Path | None:
     """Write the quality summary of a run with ``disable_health_check`` set, so a disabled check is recorded as
     ``state: disabled`` rather than by an absent summary. It counts and judges nothing: the counts and ``healthy``
@@ -1241,13 +1315,7 @@ def write_disabled_summary(rollout_paths: Sequence[Path], output_dir: Path) -> P
 
     A report written at the end of a run must not stop it, so a write error is logged and returns ``None``.
     """
-    artifacts = {
-        "state": "disabled",
-        "state_reason": "disable_health_check is set",
-        **dict.fromkeys(("expected", "completed", "scored", "failed", "missing", "healthy")),
-        "unhealthy_reasons": [],
-        "not_evaluated": sorted(spec.id for spec in CHECK_REGISTRY),
-    }
+    artifacts = _disabled_health_artifacts()
     run = {"artifacts": artifacts, QUALITY_SUMMARY_SOURCES_KEY: _report_sources(rollout_paths, output_dir)}
     summary_path = output_dir / QUALITY_SUMMARY_FILENAME
     try:
@@ -1646,6 +1714,7 @@ def _health_check_collected_rollouts(
     terminated: bool = False,
     model_call_capture_dirs: Sequence[Path] = (),
     disabled: bool = False,
+    looping_enabled: bool = False,
 ) -> None:
     """Write the quality summary for whatever a run collected; a run that never started collection has none.
 
@@ -1656,7 +1725,7 @@ def _health_check_collected_rollouts(
     """
     if not output_fpath.exists():
         return
-    if disabled:
+    if disabled and not looping_enabled:
         write_disabled_summary([output_fpath], output_fpath.parent)
         return
     from nemo_gym.rollouts.health.timeouts import export_run_health_timeouts
@@ -1693,9 +1762,14 @@ def _health_check_collected_rollouts(
             # This run's coverage describes its own rows; listed shards are checked with their own histories.
             run_coverage=None if shards is not None else [coverage],
             model_call_capture_dirs=model_call_capture_dirs,
+            **({"looping_enabled": True} if looping_enabled else {}),
+            **({"health_enabled": False} if disabled else {}),
         )
     except Exception:
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
     else:
         print(format_health_report(health_result))
-        export_run_health_timeouts(health_result)
+        if not disabled:
+            export_run_health_timeouts(health_result)
+        if looping_enabled:
+            publish_looping_metrics(health_result.summary["looping"], output_fpath)

@@ -161,6 +161,7 @@ ROLLOUT_CORRELATION_KEY_NAME = "rollout_correlation"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/models/token_capture/config.py``.
+LOOPING_BLOCK = "looping"
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
 # Set by a training framework whose rows carry model-call sampling values.
 # See ``ModelCallSamplingConfig`` below, and ``nemo_gym/core/model_call_sampling.py`` for the values themselves.
@@ -216,6 +217,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ROLLOUT_CORRELATION_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
+    LOOPING_BLOCK,
     MODEL_CALL_SAMPLING_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,

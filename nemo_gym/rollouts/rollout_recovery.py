@@ -646,6 +646,7 @@ _COLLECTION_OPTIONS = frozenset(
         "require_complete",
         "disable_aggregation",
         "disable_health_check",
+        "looping",
         "health_check_workers",
         "health_check_ignored_checks",
         "health_check_max_not_final_failure_fraction",

@@ -73,12 +73,14 @@ if TYPE_CHECKING:
         model_call_sampling_config,
         taskset_environment_server_name,
     )
+    from nemo_gym.config.looping import LoopingConfig
     from nemo_gym.config.server_metadata import ServerMetadata, visit_agent_server, visit_resources_server
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "LoopingConfig": "looping",
     "AGENT_REF_KEY_NAME": "global_config",
     "AGENT_SESSION_AGENT_TYPES": "global_config",
     "ATTEMPT_INDEX_KEY_NAME": "global_config",

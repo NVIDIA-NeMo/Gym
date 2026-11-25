@@ -100,6 +100,7 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.config.looping import LoopingConfig
 from nemo_gym.core.episode_context import (
     check_rollout_id_length,
     maybe_rollout_id_from_run_body,
@@ -1730,6 +1731,7 @@ class SharedRolloutCollectionConfig(
             "afterward by `gym eval aggregate`."
         ),
     )
+    looping: LoopingConfig = Field(default_factory=LoopingConfig)
     disable_health_check: bool = Field(
         default=False,
         description=(
@@ -4468,6 +4470,7 @@ executions → not run again (left to recovery)
                         model_call_capture_dirs=self._health_capture_dirs,
                         terminated=terminated,
                         disabled=config.disable_health_check,
+                        **({"looping_enabled": True} if config.looping.enabled else {}),
                     )
                     if terminated:
                         report()  # The small provisional summary must finish within Slurm's KillWait.
@@ -6836,6 +6839,7 @@ class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
             "the same metric-hook limitation."
         ),
     )
+    looping: LoopingConfig = Field(default_factory=LoopingConfig)
     disable_health_check: bool = Field(
         default=False,
         description="Skip post-aggregation rollout quality verification and report writing.",
@@ -7307,7 +7311,7 @@ class RolloutAggregationHelper(BaseModel):
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
-        if not config.disable_health_check:
+        if not config.disable_health_check or config.looping.enabled:
             from nemo_gym.rollouts.rollout_health import (
                 format_health_report,
                 run_health_checks,
@@ -7324,6 +7328,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                     limits=config.run_health_limits,
+                    **({"looping_enabled": True} if config.looping.enabled else {}),
+                    **({"health_enabled": False} if config.disable_health_check else {}),
                 )
             except Exception:
                 logger.exception(
@@ -7331,7 +7337,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
-                export_run_health_timeouts(health_result)
+                if not config.disable_health_check:
+                    export_run_health_timeouts(health_result)
+                if config.looping.enabled:
+                    from nemo_gym.rollouts.rollout_health import publish_looping_metrics
+
+                    publish_looping_metrics(health_result.summary["looping"], output_fpath)
 
         return aggregate_metrics_fpath
 
