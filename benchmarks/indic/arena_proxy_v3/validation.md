@@ -142,3 +142,57 @@ Pre-commit passed across all files; the private guardword catalog was unavailabl
 so its content scan was skipped. The full core, sandbox, and server suites were
 not run locally; the complete PR requires full CI scope. Existing scikit-learn and
 statistical edge-case warnings remain.
+
+## Submission-config migration (November 25, 2026)
+
+The benchmark now uses Gym's Slurm submission configs for policy serving and CPU
+reverification. The CPU job retains `afterok` ordering, reads the same saved policy
+responses and materialized inputs, and uses the original prepared population for
+coverage. The Gemma profile preserves its context, top-k, parsers, and parallelism.
+Both drivers install the same published Gym revision and locked dependencies.
+
+The generation model, preflight, generation/judge configs, preparer, prompt
+templates, source checksums, summarizer, and metric reducer are byte-identical to
+`002507bb8887ec97c950cf9eca595e2770c05f01`. The judge's executable AST is unchanged;
+only the thinking-stripper docstring changed. Its literal-tag behavior and use on
+candidate, baseline, and judge text are now explicit.
+
+All three submission profiles passed the real CLI's `--resolve-only --json` and
+`--dry-run` paths. Rendered scripts passed `bash -n`. Command-level tests verify
+the reference service/sampling settings, preflight ordering and failure handling,
+CPU-only judging, saved-input paths, resume flags, dependency, and rejection of
+an overly permissive key file. The token is read only by the CPU command and is
+absent from the resolved configuration. Slurm's explicit
+[`exclusive=exclusive` spelling](https://github.com/SchedMD/slurm/blob/slurm-24-11-0-1/src/common/slurm_opt.c#L1184)
+retains the reference's exclusive allocation in Gym's key/value directives.
+
+The five saved Gemma judgments again matched the earlier summary exactly and
+returned matching language scores, intervals, and counts through the HTTP metrics
+endpoint and tracking exporter. No model calls were made in this replay. A fresh
+Slurm/GPU rollout with these submission configs was not run; model, verifier, and
+scoring behavior are unchanged, while cluster-specific containers and mounts still
+need deployment validation.
+
+The final targeted suite passed **267 tests**, including nine submission-command
+tests and the existing CLI, generation-request, preparation, metric, judge, and
+English benchmark regressions:
+
+```bash
+RAY_TMPDIR=/tmp .venv/bin/python -m pytest -o addopts= --no-cov -q \
+  tests/unit_tests/orchestration/test_indic_arena_submission.py \
+  tests/unit_tests/orchestration/test_cli_eval_submit.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_generation.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py \
+  resources_servers/arena_judge/tests/test_app.py \
+  benchmarks/lmarena_v3/tests/test_lmarena_v3_subsets.py
+
+# With non-secret deployment variables set as in submit/README.md:
+for profile in generate gemma31b judge; do
+  .venv/bin/gym eval submit --config "benchmarks/indic/arena_proxy_v3/submit/$profile.yaml" --resolve-only --json
+  .venv/bin/gym eval submit --config "benchmarks/indic/arena_proxy_v3/submit/$profile.yaml" --dry-run
+done
+.venv/bin/gym env validate indic/arena_proxy_v3
+.venv/bin/pre-commit run --all-files
+git diff --check
+```

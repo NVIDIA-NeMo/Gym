@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Deployment settings belong here; the benchmark's generation model is unchanged.
+_generation:
+  context: ${oc.env:CONTEXT,163840}
+  top_k: ${oc.env:TOP_K,-1}
+  vllm_args: >-
+    --host 127.0.0.1 --max-model-len ${_generation.context}
+    --gpu-memory-utilization ${oc.env:GPU_UTIL,0.85} --max-num-seqs 256
+    --default-chat-template-kwargs '{"enable_thinking":true}'
+
+compute:
+  cluster:
+    type: slurm
+    account: ${oc.env:SLURM_ACCOUNT}
+    walltime: "04:00:00"
+    node_pools:
+      gpu:
+        partition: ${oc.env:GPU_PARTITION,interactive}
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: 8
+        extra_args:
+          exclusive: exclusive
+          mem: "0"
+
+services:
+  policy:
+    type: vllm
+    container: ${oc.env:IMAGE}
+    model: ${oc.env:MODEL_PATH}
+    served_model_name: ${oc.env:MODEL_KEY}
+    tensor_parallel_size: ${oc.env:TP,8}
+    number_of_instances: ${oc.env:DP,1}
+    trust_remote_code: true
+    health_check:
+      timeout_seconds: 2700
+    mounts: ["${oc.env:SHARED_ROOT}:${oc.env:SHARED_ROOT}"]
+    pre_command: unset ARENA_JUDGE_API_KEY MLFLOW_TRACKING_TOKEN HF_TOKEN HUGGING_FACE_HUB_TOKEN
+    extra_args: >-
+      ${_generation.vllm_args} --enable-expert-parallel
+      --reasoning-parser nemotron_v3 --enable-auto-tool-choice --tool-call-parser qwen3_coder
+
+driver:
+  container: ${oc.env:GYM_DRIVER_IMAGE}
+  gym_install:
+    repo: ${oc.env:GYM_GIT_REPO}
+    ref: ${oc.env:GYM_GIT_REF}
+  policy_model: policy
+  policy_host: 127.0.0.1
+  policy_model_type: ""
+  mounts: ["${oc.env:SHARED_ROOT}:${oc.env:SHARED_ROOT}"]
+  env:
+    INPUT_JSONL: lit:${oc.env:RUN_DIR}/inputs/arena_proxy_v3_benchmark.jsonl
+    CONTEXT: lit:${_generation.context}
+    TOP_K: lit:${_generation.top_k}
+    TEMPERATURE: lit:${oc.env:TEMPERATURE,1.0}
+    TOP_P: lit:${oc.env:TOP_P,0.95}
+    MAX_OUTPUT_TOKENS: lit:${oc.env:MAX_OUTPUT_TOKENS,120000}
+    CONCURRENCY: lit:${oc.env:CONCURRENCY,256}
+  benchmarks:
+    generation:
+      # A command retains the required parser preflight before Gym collection.
+      # Gym owns service startup, health checks, teardown, and job artifacts.
+      command: |
+        set +x
+        umask 077
+        unset ARENA_JUDGE_API_KEY MLFLOW_TRACKING_TOKEN HF_TOKEN HUGGING_FACE_HUB_TOKEN
+        test -s "$INPUT_JSONL"
+        python -m benchmarks.indic.arena_proxy_v3.generation_preflight \
+          --base-url "$NEMO_GYM_POLICY_BASE_URL" --model "$NEMO_GYM_POLICY_MODEL_NAME" \
+          --top-p "$TOP_P" --top-k "$TOP_K"
+        gym eval run \
+          --config benchmarks/indic/arena_proxy_v3/config.yaml \
+          --config benchmarks/indic/arena_proxy_v3/submit/dataset.yaml \
+          --config benchmarks/indic/arena_proxy_v3/generation.yaml \
+          --agent indic_arena_proxy_v3_agent --model "$NEMO_GYM_POLICY_MODEL_NAME" \
+          --model-url "$NEMO_GYM_POLICY_BASE_URL" --model-api-key "$NEMO_GYM_POLICY_API_KEY" \
+          --split benchmark --output "$NEMO_GYM_BENCH_DIR/artifacts/rollouts.jsonl" --resume \
+          --num-repeats 1 --concurrency "$CONCURRENCY" \
+          --temperature "$TEMPERATURE" --top-p "$TOP_P" --max-output-tokens "$MAX_OUTPUT_TOKENS" \
+          +skip_verification=true +require_complete=true \
+          ++head_server.host=127.0.0.1 "++head_server.port=$((20000 + SLURM_JOB_ID % 30000))"
+
+job:
+  output_path: ${oc.env:RUN_DIR}/jobs
+# No additional service is needed for this two-stage evaluation.
+otel:
+  enabled: false

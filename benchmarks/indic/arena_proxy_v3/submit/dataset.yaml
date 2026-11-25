@@ -7,5 +7,5 @@ indic_arena_proxy_v3_agent:
       datasets:
         - name: indic_arena_proxy_v3
           type: benchmark
-          jsonl_fpath: ${oc.env:ARENA_PROXY_INPUT_JSONL}
+          jsonl_fpath: ${oc.env:INPUT_JSONL}
           num_repeats: 1

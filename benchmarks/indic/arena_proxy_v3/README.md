@@ -60,19 +60,18 @@ arena-proxy-v3.
 
 ## Generation and judging
 
-Configure the checkpoint, container image, and cluster resources for your
-deployment before submitting. The workflow runs generation on one eight-GPU
-node, followed by CPU judging after generation succeeds.
+Use [`gym eval submit` configs](submit/README.md) for generation on one eight-GPU
+node and CPU judging after generation succeeds. The submission guide covers
+deployment settings, preparation, the `afterok` dependency, and retries.
+Gym manages the vLLM service, health checks, batch scripts, and logs.
 
 ```bash
-export MODEL_KEY=my-model
-export LANGUAGES="bn gu hi kn ml mr ne or pa ta te ur"
-export TEMPERATURE=1.0 TOP_P=0.95
-bash benchmarks/indic/arena_proxy_v3/slurm/submit.sh
+gym eval submit --config benchmarks/indic/arena_proxy_v3/submit/generate.yaml --dry-run
+gym eval submit --config benchmarks/indic/arena_proxy_v3/submit/judge.yaml --dry-run
 ```
 
-Separate languages with spaces. Set `TEMPERATURE=0.6` for that sampling experiment.
-`LIMIT` applies per language; the five-sample example below uses `LIMIT=1`.
+Set `TEMPERATURE=0.6` for that sampling experiment. Select languages and a
+per-language `--limit` during preparation; the workers use those exact inputs.
 
 Generation uses `gym eval run` with verification deferred. Judging uses
 `gym eval reverify` on the saved responses, without running policy inference again.
@@ -96,48 +95,51 @@ measures their token count before each request. The output budget is
 the cap. A preflight check verifies that reasoning and the final answer are
 separated. Parser and parallelism settings must match the evaluated model.
 
-The workflow prints the run directory and job IDs. Outputs include:
+The submission records provide each job ID and artifact directory. Outputs include:
 
 ```text
 RUN_DIR/
   inputs/arena_proxy_v3_benchmark.jsonl
   inputs/preparation_report.json
-  generations/rollouts.jsonl
-  generations/rollouts_materialized_inputs.jsonl
-  judgments/rollouts.jsonl
-  metrics.json
+  generation-submission.json
+  judge-submission.json
+  jobs/<generation-submission>/generation/artifacts/
+    rollouts.jsonl
+    rollouts_materialized_inputs.jsonl
+  jobs/<judge-submission>/judging/artifacts/
+    rollouts.jsonl
+    rollouts_aggregate_metrics.json
+    metrics.json
 ```
 
-To resume, reuse the run directory and original model, data, sampling, and judge
-settings, then resubmit the appropriate batch script. Use a fresh run directory
-when those settings change. A judge retry reuses the saved policy answers.
+To resume, use `gym eval resubmit` with the recorded Gym job ID and benchmark name,
+as described in the submission guide. Keep model, data, sampling, and judge settings
+unchanged. A judge retry reuses saved policy answers. If generation is resubmitted,
+submit a dependent judge job against the replacement Slurm ID.
 
 ### Five-sample Gemma smoke run
 
-With deployment settings configured for `google/gemma-4-31B-it`, use:
+With deployment settings configured for `google/gemma-4-31B-it`, prepare:
 
 ```bash
-export MODEL_KEY=gemma4-31b-it-smoke
-export LANGUAGES="hi bn ta te ur" LIMIT=1
-export CONTEXT=131072 MAX_OUTPUT_TOKENS=120000
-export TEMPERATURE=1.0 TOP_P=0.95 TOP_K=64
-export PARSER=gemma4 TOOL_PARSER=gemma4
-export TP=8 DP=1 EP=0
-export CONCURRENCY=5 JUDGE_CONCURRENCY=5
-bash benchmarks/indic/arena_proxy_v3/slurm/submit.sh
+python -m benchmarks.indic.arena_proxy_v3.prepare \
+  --output-dir "$RUN_DIR/inputs" --languages hi bn ta te ur --limit 1
 ```
 
-This selects five translated versions of the first source conversation, one per
-language. Use a fresh run directory. The full-run defaults remain unchanged;
-the context, top-k, parsers, and expert-parallel setting above are specific to
-this model configuration.
+Then follow the submission guide using `submit/gemma31b.yaml` for generation and
+`JUDGE_CONCURRENCY=5`. The profile preserves the previous smoke's context, top-k,
+parsers, parallelism, and five concurrent tasks. This selects five translations
+of the first conversation, one per language. Use a fresh run directory.
 
 ## Scoring
 
 The default judge is Gemini 3.8 Flash with temperature 0, reasoning effort low,
 and a 32,768-token output limit. Each task receives two judgments with candidate
 and reference positions swapped. Creative-writing tasks use their own prompt.
-Only the final answer after thinking removal is judged.
+Only the final answer after thinking removal is judged. The stripper recognizes
+literal `<think>` / `</think>` markers and also processes the judge's reply;
+other reasoning delimiters are unchanged. This retains the current Gemini judge
+protocol.
 
 Scoring uses Arena-Elo with strong-verdict weight 3, an MLE fit, and 100 bootstrap
 rounds with seed 42. Each language has overall, single-turn, multi-turn, and seven
@@ -159,16 +161,16 @@ same server-owned reducer and formats the headline as `metrics.json`'s `_avg.all
 Coverage is checked against the prepared inputs and their adjacent
 `preparation_report.json`. When using a custom preparation directory, export
 `INPUT_JSONL` pointing to its `arena_proxy_v3_benchmark.jsonl` before running Gym.
-The Slurm scripts set this automatically. Without this override, the judge uses
+The submission configs set this automatically. Without this override, the judge uses
 the benchmark's default prepared data. This protocol permits one rollout per
 task and one repeat per aggregate; evaluate repeats as separate runs.
 
 Run scoring commands in an environment with the Arena judge dependencies installed:
 
 ```bash
-python -m benchmarks.indic.arena_proxy_v3.summarize "$RUN_DIR/judgments/rollouts.jsonl" \
+python -m benchmarks.indic.arena_proxy_v3.summarize "$JUDGE_DIR/artifacts/rollouts.jsonl" \
   --inputs "$RUN_DIR/inputs/arena_proxy_v3_benchmark.jsonl" \
-  --output "$RUN_DIR/metrics.json"
+  --output "$JUDGE_DIR/artifacts/metrics.json"
 ```
 
 Both server metrics and the summary reject duplicate or mismatched tasks.
@@ -189,7 +191,7 @@ Separate runs can still differ because of stochastic generation or hosted judgin
 Compare saved reference judgments with Gym judgments using:
 
 ```bash
-python -m benchmarks.indic.arena_proxy_v3.summarize "$RUN_DIR/judgments/rollouts.jsonl" \
+python -m benchmarks.indic.arena_proxy_v3.summarize "$JUDGE_DIR/artifacts/rollouts.jsonl" \
   --inputs "$RUN_DIR/inputs/arena_proxy_v3_benchmark.jsonl" \
   --reference-verdicts "$REFERENCE_INDIC_DIR"/*.jsonl \
   --output "$RUN_DIR/comparison.json"
@@ -232,7 +234,9 @@ On November 20, 2026, a live smoke run with `google/gemma-4-31B-it` at revision
 - Complete coverage of the selected subset, with English separate and the
   official Indic headline suppressed.
 
-This smoke validates the generation, judging, recovery, and summary workflow.
+This historical smoke used the former Slurm wrappers and validates generation,
+judging, recovery, and summary behavior. Submission-config migration checks are
+recorded separately in [validation.md](validation.md).
 It covers one conversation across five languages and does not establish aggregate
 model quality or score agreement with a separate reference run. The integration
 remains experimental pending full benchmark evaluation and reference comparison.

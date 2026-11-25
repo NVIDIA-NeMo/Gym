@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+compute:
+  cluster:
+    type: slurm
+    account: ${oc.env:SLURM_ACCOUNT}
+    walltime: "04:00:00"
+    extra_args:
+      dependency: afterok:${oc.env:GENERATION_JOB_ID}
+      kill-on-invalid-dep: "yes"
+    node_pools:
+      cpu:
+        partition: ${oc.env:CPU_PARTITION,cpu_interactive}
+        nodes: 1
+        ntasks_per_node: 1
+        extra_args:
+          cpus-per-task: "4"
+          mem: 32G
+
+services: {}
+driver:
+  container: ${oc.env:GYM_DRIVER_IMAGE}
+  gym_install:
+    repo: ${oc.env:GYM_GIT_REPO}
+    ref: ${oc.env:GYM_GIT_REF}
+  mounts: ["${oc.env:SHARED_ROOT}:${oc.env:SHARED_ROOT}"]
+  env:
+    INPUT_JSONL: lit:${oc.env:RUN_DIR}/inputs/arena_proxy_v3_benchmark.jsonl
+    GENERATION_DIR: host:GENERATION_DIR
+    JUDGE_KEY_FILE: host:JUDGE_KEY_FILE
+    ARENA_JUDGE_BASE_URL: lit:${oc.env:ARENA_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+    ARENA_JUDGE_MODEL: lit:${oc.env:ARENA_JUDGE_MODEL,gcp/google/gemini-3.8-flash}
+    JUDGE_CONCURRENCY: lit:${oc.env:JUDGE_CONCURRENCY,12}
+  benchmarks:
+    judging:
+      command: |
+        set +x
+        umask 077
+        test -s "$INPUT_JSONL"
+        test -s "$GENERATION_DIR/artifacts/rollouts.jsonl"
+        test -s "$GENERATION_DIR/artifacts/rollouts_materialized_inputs.jsonl"
+        # Only the path is submitted. Read the protected token on this CPU node.
+        [[ -f "$JUDGE_KEY_FILE" && -r "$JUDGE_KEY_FILE" && -O "$JUDGE_KEY_FILE" ]] || \
+          { echo 'JUDGE_KEY_FILE must be a readable file owned by you.' >&2; exit 1; }
+        mode=$(stat -Lc '%a' "$JUDGE_KEY_FILE")
+        (( (8#$mode & 077) == 0 )) || \
+          { echo 'JUDGE_KEY_FILE must have no group or other permissions.' >&2; exit 1; }
+        ARENA_JUDGE_API_KEY=$(< "$JUDGE_KEY_FILE")
+        [[ -n "$ARENA_JUDGE_API_KEY" && ! "$ARENA_JUDGE_API_KEY" =~ [[:space:]] ]] || \
+          { echo 'JUDGE_KEY_FILE must contain one nonempty token.' >&2; exit 1; }
+        export ARENA_JUDGE_API_KEY
+        gym eval reverify --config benchmarks/indic/arena_proxy_v3/judge.yaml \
+          --inputs "$GENERATION_DIR/artifacts/rollouts_materialized_inputs.jsonl" \
+          --rollouts "$GENERATION_DIR/artifacts/rollouts.jsonl" \
+          --output "$NEMO_GYM_BENCH_DIR/artifacts/rollouts.jsonl" \
+          --resume --concurrency "$JUDGE_CONCURRENCY" \
+          ++head_server.host=127.0.0.1 "++head_server.port=$((20000 + SLURM_JOB_ID % 30000))"
+        unset ARENA_JUDGE_API_KEY
+        resources_servers/arena_judge/.venv/bin/python -m benchmarks.indic.arena_proxy_v3.summarize \
+          "$NEMO_GYM_BENCH_DIR/artifacts/rollouts.jsonl" --inputs "$INPUT_JSONL" \
+          --output "$NEMO_GYM_BENCH_DIR/artifacts/metrics.json"
+
+job:
+  output_path: ${oc.env:RUN_DIR}/jobs
+otel:
+  enabled: false

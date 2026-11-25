@@ -110,7 +110,10 @@ def sanitize_generation(generation: str) -> str:
 
 
 def final_answer_only(text: str) -> str:
-    """Keep text after the last thinking block; unfinished thinking has no answer."""
+    """Keep text after the last literal </think> in candidate, baseline, and judge text.
+
+    Other reasoning delimiters are untouched; unfinished <think> has no answer.
+    """
     closing = text.rfind("</think>")
     answer = text[closing + len("</think>") :] if closing >= 0 else text
     return "" if "<think>" in answer else answer
