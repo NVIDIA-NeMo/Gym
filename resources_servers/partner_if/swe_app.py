@@ -136,8 +136,8 @@ async def _run(sandbox: AsyncSandbox, command: str, step: str) -> str:
 class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSWEResourcesServer):
     # Actor sandboxes live in worker memory, so the server runs one worker (see model_post_init) and no Ray.
     ray_enabled = False
-    # Its sessions are its own, not Scale-SWE's checkpointed ones, so its episodes start over after a crash, and a
-    # checkpoint waits for its verify, which grades with a judge.
+    # Its sessions are its own, not Scale-SWE's checkpointed ones, so its episodes start over after a crash. Its verify
+    # grades with a judge and is not safe to run again, so it does not inherit Scale-SWE's `replay`.
     checkpoint_mode = "restart_only"
     checkpoint_verify = "wait"
 
