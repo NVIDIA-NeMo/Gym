@@ -73,7 +73,7 @@ from resources_servers.swebench.sandbox_session_checkpoints import (
     CheckpointedSandboxSessionResourcesServer,
     SandboxCheckpointFields,
 )
-from resources_servers.swebench.sandbox_sessions import STOP_TIMEOUT_S, SandboxSessionResourcesServer
+from resources_servers.swebench.sandbox_sessions import STOP_TIMEOUT_S
 
 
 logger = logging.getLogger(__name__)
@@ -261,7 +261,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, CheckpointedSandbo
 
         The close is the shared base's, whatever DeepSWE defines: both kinds of seed register their sandbox there.
         """
-        return await SandboxSessionResourcesServer.close_resources_session(self, request, body)
+        return await CheckpointedSandboxSessionResourcesServer.close_resources_session(self, request, body)
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = super()._provider_options(phase=phase)
