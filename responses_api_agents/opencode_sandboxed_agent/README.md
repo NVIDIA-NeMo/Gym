@@ -76,15 +76,15 @@ sandbox_row_option_keys: [volumes]
 
 ## Run controls
 
-Options for long, unattended runs (used by [NL2RepoBench](../../benchmarks/nl2repobench/README.md)). All of them are off
-by default, except the two always-on changes listed after the example.
+Options for long, unattended runs, used by the relay preset of [NL2RepoBench](../../benchmarks/nl2repobench/README.md)
+(`benchmarks/nl2repobench/opencode_sandboxed_agent.yaml`). All of them are off by default, and with none set the command
+line and behavior are unchanged.
 
 ```yaml
 opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
-      sandbox_timeout: 21600          # one wall budget, seconds, for the whole agent phase
-      wall_grace_s: 60                # extra seconds before the run is cut off
+      sandbox_timeout: 21600          # one time budget, seconds, for the first run and every resume
       idle_nudge:                     # continue a session that stops without a tool call
         text: "Continue until the task is complete."
         max_nudges: 3
@@ -92,27 +92,33 @@ opencode_sandboxed_agent:
         finish_instruction: "When you are finished, reply TASK_COMPLETE."
       stuck_detector: true            # end a run that loops
       opencode_data_home_in_tmp: true # images whose user has no writable home
+      opencode_unset_proxy_env: true  # drop HTTP(S)_PROXY / ALL_PROXY before OpenCode starts
       require_opencode_runtime: true  # offline runs: refuse to start without a configured OpenCode runtime
       preinstalled_opencode: true     # (or remote_opencode_install_script_path + remote_opencode_binary_path)
 ```
 
-- **Budgets.** `sandbox_timeout` is one wall budget for the whole agent phase: the first `opencode run` and every nudged
-  resume share it, and `max_nudges` caps the resumes. `sandbox_timeout` plus `wall_grace_s` is the hard deadline.
-- **Stopping policy.** At the deadline, on a provider timeout, when an exec fails, or when the request is cancelled,
-  every recorded OpenCode session and its tool processes are stopped and confirmed gone before anything is exported. If
-  that cannot be confirmed the row fails ungraded (`opencode.quiesce`) and is not sent to `/verify`. A confirmed stop
-  after a deadline or provider timeout is graded on the partial work, with `opencode_error_type == "timeout"`;
-  `opencode_wall_exceeded` says the deadline enforced it. The step needs only a POSIX `sh`: `pkill` and `pgrep` are
-  used when the image has them.
-- **`stuck_detector`.** Ports OpenHands 0.56's `StuckDetector` as an OpenCode plugin and ends a looping run; the row's
-  `opencode_stuck` names the scenario. The run is refused (ungraded `opencode.plugin`) if the plugin's
-  `[stuck_detector] loaded` line is missing from the output, because OpenCode swallows plugin load failures.
+- **`idle_nudge`.** After a run exits cleanly with time left and its last assistant turn made no tool call, the same
+  session is continued with `text`, up to `max_nudges` times. `stop_on_text` ends it only when the reply ends with that
+  text (trailing punctuation allowed), so a mention in the middle of a reply is not "done". The step cap
+  (`agent.build.steps`) and `sandbox_timeout` are one budget across the first run and all resumes; a resume needs at least
+  a minute left. Each resume is checked on its own output: it must print the completion marker and, when plugins are
+  enabled, their receipts, or the row fails ungraded. A typed provider failure in the idle check or the resume is
+  reported (ungraded, retried) and is not graded as a short clean run. `finish_instruction` is appended to the first
+  prompt so the model knows how to finish from the first turn.
+- **`stuck_detector`.** An OpenCode plugin adapted from OpenHands 0.56's `StuckDetector`
+  ([source](https://github.com/OpenHands/OpenHands/blob/0.56.0/openhands/controller/stuck.py), commit
+  `81f73ee91d4b4fb645b48ca99f1e559c6e058118`, MIT license). It ends a run whose root session loops; a looping subagent
+  (`task`) session is left alone. The monologue scenario is checked between runs, before a nudge. The row's
+  `opencode_stuck` names the scenario. It differs from OpenHands in one scenario: ten compactions in a row (OpenHands
+  fires when any two of its last ten condensations are back to back), so this port fires less often. A run is refused
+  (ungraded `opencode.plugin`) if the plugin's `[stuck_detector] loaded` line is missing, because OpenCode swallows plugin
+  load failures.
+- **`opencode_data_home_in_tmp`.** For task images whose user has no writable home: OpenCode's data, state, cache and
+  config directories go under `/tmp`, for the run, every resume and every session command.
+- **`opencode_unset_proxy_env`.** Task images can carry a builder's proxy settings that OpenCode would honor; this drops
+  them before OpenCode starts, so enable it only for benchmarks whose agent commands have no internet anyway.
 - **`require_opencode_runtime`.** Refuses to start when no OpenCode runtime is configured, instead of failing at the
   installer's download after the sandbox is seeded.
-
-Two changes apply to every run, whatever the options: OpenCode starts in a session of its own (`setsid`, which the
-stopping policy relies on), and the proxy variables `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lower-case forms
-are unset before it starts, because task images can carry a builder's proxy that OpenCode would honor.
 
 ## Offline scientific evaluation with OpenCode or Pi
 

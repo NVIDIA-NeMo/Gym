@@ -548,7 +548,7 @@ def parse_opencode_observations(
 # Task images can carry their builder's proxy settings (gitingest's points HTTP(S)_PROXY at
 # sys-proxy-rd-relay.byted.org:8118, unresolvable here). OpenCode runs on Bun, which honours them, so every model call
 # failed at once and was retried every 30 s for the whole rollout: gitingest never finished in any no-internet run.
-# The model server is reached directly and the agent's own commands have no internet anyway, so drop them.
+# Dropped only when opencode_unset_proxy_env is set, for benchmarks whose agent commands have no internet anyway.
 UNSET_PROXY_ENV = "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy"
 
 
@@ -610,6 +610,9 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     # user without a writable home (NL2RepoBench more-itertools runs as `appuser`), where the default $HOME/.local/share
     # fails with EACCES before the agent's first turn. Off by default: unchanged command line for everyone else.
     opencode_data_home_in_tmp: bool = False
+    # Drop HTTP(S)_PROXY/ALL_PROXY before `opencode run` (see UNSET_PROXY_ENV). Off by default: the command line is
+    # unchanged for every other benchmark, whose agent commands may need the proxy to reach the internet.
+    opencode_unset_proxy_env: bool = False
     # Continue the session when the model stops with budget left (same model and semantics as the ProgramBench
     # opencode_agent's IdleNudgeConfig). `opencode run` exits on ANY reply without a tool call, which is also how it
     # says it is done; mini-swe-agent answers a reply without a command with a correction, and OpenHands with a
@@ -668,8 +671,6 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
     sandbox_timeout: float
-    # Seconds past sandbox_timeout before the agent phase is cut off (OpenCode killed, the workspace graded as it is).
-    wall_grace_s: float = 60.0
 
     debug: bool = False
 
@@ -743,7 +744,7 @@ def _idle_reason(opencode_export: Dict[str, Any], stop_on_text: Optional[str] = 
 
     "length": the last assistant turn was cut off at the output token limit without a tool call.
     "idle":   it stopped without a tool call for any other reason (reasoning only, empty, or text), unless its text
-              contains ``stop_on_text``.
+              ends with ``stop_on_text`` (trailing punctuation allowed).
     None:     it called a tool, ended on an API/provider error, said ``stop_on_text``, or there is no assistant turn."""
     messages = opencode_export.get("messages") or []
     assistant = [m for m in messages if (m.get("info") or {}).get("role") == "assistant"]
@@ -757,66 +758,13 @@ def _idle_reason(opencode_export: Dict[str, Any], stop_on_text: Optional[str] = 
     if any(p.get("type") == "tool" for p in parts):
         return None
     text = " ".join(str(p.get("text") or "") for p in parts if p.get("type") == "text")
-    if stop_on_text and stop_on_text in text:
-        return None
+    if stop_on_text and re.search(re.escape(stop_on_text) + r"\W*$", text):
+        return None  # said only at the end: a mention mid-reply ("I will say X when done") is not "done"
     if info.get("finish") == "length" or any(
         p.get("type") == "step-finish" and p.get("reason") == "length" for p in parts
     ):
         return "length"
     return "idle"
-
-
-_SESSION_ID_RE = re.compile(r"\bses_[A-Za-z0-9]+")
-_VALID_SESSION_ID_RE = re.compile(r"ses_[A-Za-z0-9]+")
-MAX_CHILD_SESSIONS = 500
-
-
-def _child_session_ids(opencode_export: Dict[str, Any]) -> List[str]:
-    """Sessions this one started with the `task` tool (subagents), in call order. The task tool records the child in
-    its metadata (`sessionId`); a resumed child is named by the call's `task_id`, and its output names it too
-    (`<task id="ses_...">`). `opencode session list` shows only top-level sessions, so this is how children are found."""
-    ids: List[str] = []
-    own = (opencode_export.get("info") or {}).get("id")
-    for message in opencode_export.get("messages") or []:
-        for part in message.get("parts") or []:
-            if part.get("type") != "tool" or part.get("tool") != "task":
-                continue
-            state = part.get("state") or {}
-            found = [(state.get("metadata") or {}).get("sessionId"), (state.get("input") or {}).get("task_id")]
-            found += _SESSION_ID_RE.findall(str(state.get("output") or ""))
-            for sid in found:
-                # Sandbox output is untrusted and the id becomes a host file name: accept nothing but a plain id.
-                if isinstance(sid, str) and _VALID_SESSION_ID_RE.fullmatch(sid) and sid != own and sid not in ids:
-                    ids.append(sid)
-    return ids
-
-
-def _token_totals(opencode_export: Dict[str, Any]) -> Dict[str, int]:
-    """Token use summed over a session's model calls, as OpenCode records them per assistant message."""
-    totals = {"calls": 0, "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
-    for message in opencode_export.get("messages") or []:
-        info = message.get("info") or {}
-        tokens = info.get("tokens")
-        if info.get("role") != "assistant" or not tokens:
-            continue
-        cache = tokens.get("cache") or {}
-        totals["calls"] += 1
-        totals["input"] += int(tokens.get("input") or 0)
-        totals["output"] += int(tokens.get("output") or 0)
-        totals["reasoning"] += int(tokens.get("reasoning") or 0)
-        totals["cache_read"] += int(cache.get("read") or 0)
-        totals["cache_write"] += int(cache.get("write") or 0)
-    return totals
-
-
-def _token_breakdown(main: Dict[str, Any], children: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Main agent vs subagents: {"main": totals, "subagents": totals summed, "per_subagent": {id: totals}}."""
-    per = {sid: _token_totals(export) for sid, export in children.items()}
-    summed = _token_totals({})
-    for totals in per.values():
-        for key in summed:
-            summed[key] += totals[key]
-    return {"main": _token_totals(main), "subagents": summed, "per_subagent": per}
 
 
 STUCK_DIR = "/tmp/nemo_gym_stuck"
@@ -860,42 +808,6 @@ async def _read_stuck_marker(sandbox: Any) -> Optional[str]:
     except Exception:
         print("Reading the stuck marker failed", format_exc(), file=sys.stderr)
         return None
-
-
-def _opencode_launcher(sessions_file: str) -> str:
-    """The prefix of an `opencode run`: the run starts in a session of its own and records the session id in
-    `sessions_file`, so the wall deadline can kill the run together with every tool process it started. The process
-    that calls setsid is the session leader, so its pid is the session id: no `ps` is needed to record it."""
-    return f"setsid -w sh -c 'echo $$ >> {sessions_file}; exec \"$@\"' _"
-
-
-def _quiesce_command(sessions_file: str, pattern: str = "[o]pencode run") -> str:
-    """Kill every recorded session and any leftover `opencode run`, and print QUIESCED only when none is left.
-
-    Each recorded session is a process group `setsid` made, so the shell builtin `kill` reaches it and its children
-    even in an image without procps; `pkill` and `pgrep` additionally catch leftovers outside the group when the
-    image has them. Without them the group check alone decides, so nothing is ever reported stopped unchecked. The
-    group is signalled with `kill -s SIG -- -ID`, the form dash (`sh` on Debian/Ubuntu) and bash both accept; dash
-    rejects `kill -SIG -- -ID`. A group probe that fails for any reason except "No such process" counts as alive, so
-    a probe that cannot run never confirms. The bracketed pattern does not match this command's own text. Each pass
-    kills, then checks; a process that survives all passes means no QUIESCED."""
-    have_pgrep = "command -v pgrep >/dev/null 2>&1"
-    have_pkill = "command -v pkill >/dev/null 2>&1"
-    return (
-        f"files={sessions_file}; alive=1; "
-        # No recorded session and no pgrep: nothing could show that the run is gone, so never confirm.
-        f'if [ ! -s "$files" ] && ! {have_pgrep}; then exit 3; fi; '
-        "for i in 1 2 3 4 5; do "
-        'if [ -f "$files" ]; then for sid in $(cat "$files"); do kill -s KILL -- "-$sid" 2>/dev/null; '
-        f'{have_pkill} && pkill -KILL -s "$sid" 2>/dev/null; done; fi; '
-        f"{have_pkill} && pkill -KILL -f '{pattern}' 2>/dev/null; sleep 0.2; alive=0; "
-        'if [ -f "$files" ]; then for sid in $(cat "$files"); do '
-        'if err=$(LC_ALL=C kill -s 0 -- "-$sid" 2>&1); then alive=1; '
-        'else case "$err" in *"No such process"*) ;; *) alive=1;; esac; fi; '
-        f'{have_pgrep} && pgrep -s "$sid" >/dev/null 2>&1 && alive=1; done; fi; '
-        f"{have_pgrep} && pgrep -f '{pattern}' >/dev/null 2>&1 && alive=1; "
-        '[ "$alive" = 0 ] && break; sleep 1; done; [ "$alive" = 0 ] && echo QUIESCED'
-    )
 
 
 class _CombinedExecResult:
@@ -1400,37 +1312,37 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         env["NEMO_GYM_OPENCODE_PROVIDER_ID"] = self.config.opencode_provider_id
         return env
 
-    @staticmethod
-    async def _quiesce_opencode(sandbox: Any, sessions_file: str) -> None:
-        """Stop the rollout's OpenCode runs and everything they started; fail the row, ungraded, unless that is confirmed."""
-        reason = ""
-        try:
-            result = await asyncio.wait_for(sandbox.exec(command=_quiesce_command(sessions_file), timeout_s=60), 90)
-            if (
-                getattr(result, "return_code", None) == 0
-                and getattr(result, "error_type", None) is None
-                and "QUIESCED" in (getattr(result, "stdout", "") or "")
-            ):
-                return
-            reason = f"no confirmation (rc={getattr(result, 'return_code', None)}, error_type={getattr(result, 'error_type', None)})"
-        except Exception as error:
-            reason = f"{type(error).__name__}: {error}"
-        raise NgFailureEvent(
-            boundary="harness",
-            failure_kind=AGENT_ROUTE_FAILED,
-            operation="opencode.quiesce",
-            stage="agent",
-            failure_reason=f"OpenCode could not be confirmed stopped after the wall deadline: {reason}",
-        )
-
-    @classmethod
-    async def _quiesce_opencode_best_effort(cls, sandbox: Any, sessions_file: str) -> None:
-        """Quiesce on a path that is already failing, shielded from the cancellation that may be ending it. The
-        original failure is the one reported, so a failed or unconfirmed quiesce is only logged."""
-        try:
-            await asyncio.shield(cls._quiesce_opencode(sandbox, sessions_file))
-        except BaseException as error:
-            print(f"OpenCode could not be confirmed stopped: {type(error).__name__}: {error}", file=sys.stderr)
+    def _require_resume_evidence(self, resumed: Any) -> None:
+        """A resume that exited cleanly is accepted on its own output, not on the first launch's: the combined text would
+        otherwise carry the first run's completion marker and plugin receipts over a resume that printed nothing."""
+        if getattr(resumed, "return_code", None) != 0 or getattr(resumed, "error_type", None) is not None:
+            return
+        stdout, stderr = getattr(resumed, "stdout", "") or "", getattr(resumed, "stderr", "") or ""
+        if "OpenCode run finished" not in stdout:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.capture",
+                failure_reason="An OpenCode resume reported exit 0 without a trustworthy completion marker",
+            )
+        output = stdout + stderr
+        missing = [
+            name
+            for enabled, receipt, name in (
+                (self.config.stuck_detector, "[stuck_detector] loaded", "stuck_detector"),
+                (bool(self.config.opencode_plugins), "[nemo-gym-plugin] loaded", "configured plugins"),
+            )
+            if enabled and receipt not in output
+        ]
+        if missing:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.plugin",
+                stage="agent",
+                failure_reason=f"An OpenCode resume ran without its {', '.join(missing)} receipt; "
+                "refusing to score a rollout that ran without them.",
+            )
 
     async def _nudge_idle_turns(
         self,
@@ -1442,7 +1354,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         run_flags: str,
         session_env: Optional[Dict[str, str]],
         deadline: float,
-        sessions_file: Optional[str] = None,
     ) -> tuple[Any, int]:
         """Continue the session per ``idle_nudge`` while its last assistant turn made no tool call.
 
@@ -1455,6 +1366,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         step_cap = ((base_config.get("agent") or {}).get("build") or {}).get("steps")
         combined = _CombinedExecResult(first_result)
         latest_stdout = combined.stdout
+        unset_proxy_str = f"{UNSET_PROXY_ENV} && " if self.config.opencode_unset_proxy_env else ""
         nudges = 0
         check_remote = "/tmp/opencode_idle_check.json"
         nudge_config = self.config.idle_nudge
@@ -1488,6 +1400,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     local = Path(tmp) / "export.json"
                     await sandbox.download(check_remote, local)
                     session_export = json.loads(local.read_text().strip() or "{}")
+            except NgFailureEvent:
+                raise  # a typed provider failure is reported (ungraded, retried), not graded as a short clean run
             except Exception:
                 print("Idle check failed; not nudging", format_exc(), file=sys.stderr)
                 break
@@ -1515,9 +1429,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 else nudge_config.text
             )
             resume = (
-                f"export PATH=$HOME/.opencode/bin:$PATH && {UNSET_PROXY_ENV} "
-                f"&& printf '%s' {quote(nudge)} | OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
-                f"{_opencode_launcher(sessions_file) + ' ' if sessions_file else ''}"
+                f"export PATH=$HOME/.opencode/bin:$PATH && {unset_proxy_str}"
+                f"printf '%s' {quote(nudge)} | OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
                 f"opencode run --session {quote(session_id)} {run_flags} "
                 f'&& echo "OpenCode run finished"'
             )
@@ -1526,6 +1439,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             resumed = await sandbox.exec(command=resume, timeout_s=remaining)
             combined.add(resumed)
             latest_stdout = getattr(resumed, "stdout", "") or ""
+            self._require_resume_evidence(resumed)
         return combined, nudges
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
@@ -1784,10 +1698,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             f"NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))}"
         )
         run_env_str = f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str}"
-        # Every `opencode run` of this rollout (the first launch and each idle-nudge resume) starts in a session of its
-        # own and records it here, so a deadline kills the run with every tool process it started and confirms it.
-        sessions_file = f"/tmp/nemo-gym-opencode-sessions-{uuid4().hex}"
-        launcher = _opencode_launcher(sessions_file)
+        unset_proxy_str = f"{UNSET_PROXY_ENV} && " if self.config.opencode_unset_proxy_env else ""
 
         # Query delivery. argv is the default and preserves today's behaviour exactly; stdin is
         # opt-in (see `opencode_query_via_stdin`).
@@ -1830,10 +1741,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
-        # Task images can carry builder proxy settings that OpenCode (Bun) honours: see UNSET_PROXY_ENV.
         agent_command = f"""
-        {UNSET_PROXY_ENV} && {query_seed_str}{required_mcp_str} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} {run_env_str} \
-            {launcher} opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
+        {unset_proxy_str}{query_seed_str}{required_mcp_str} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} {run_env_str} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """
         if self.config.report_agent_sandbox_oom:
@@ -1868,55 +1778,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         run_started = time()
-        # One hard deadline for the whole agent phase (the first `opencode run` and every nudged resume): sandbox_timeout.
-        # The per-exec timeouts alone did not hold it: NL2RepoBench rollouts on OpenSandbox ran ~14 h against a 6 h
-        # sandbox_timeout (2026-11-03), since the provider's own backstop on a detached command is about twice its
-        # timeout and each resume got a fresh one. On expiry OpenCode is killed in the sandbox and the run goes on to
-        # export and grading with what is there; the row says opencode_wall_exceeded.
-        phase = {"result": None, "idle_nudges": 0, "stuck": None}
-
-        async def agent_phase() -> None:
-            phase["result"] = await sandbox.exec(command=command, timeout_s=self.config.sandbox_timeout)
+        idle_nudges, stuck = 0, None
+        try:
+            result = await sandbox.exec(
+                command=command,
+                timeout_s=self.config.sandbox_timeout,
+            )
             if self.config.idle_nudge is not None:
-                phase["result"], phase["idle_nudges"] = await self._nudge_idle_turns(
+                result, idle_nudges = await self._nudge_idle_turns(
                     sandbox=sandbox,
-                    first_result=phase["result"],
+                    first_result=result,
                     config_content=opencode_config_content,
                     env_suffix=f"{required_mcp_str} {run_env_str}",
                     run_flags=f"{opencode_debug_str} {opencode_thinking_str}",
                     session_env=dict(xdg_env) or None,
                     deadline=run_started + self.config.sandbox_timeout,
-                    sessions_file=sessions_file,
                 )
-                phase["stuck"] = phase["result"].stuck
-
-        wall_exceeded = False
-        try:
-            try:
-                async with asyncio.timeout(self.config.sandbox_timeout + self.config.wall_grace_s) as wall:
-                    await agent_phase()
-            except TimeoutError:
-                # A TimeoutError the exec itself raised is a provider failure, handled below.
-                if not wall.expired():
-                    raise
-                wall_exceeded = True
-                # The value every timeout consumer already matches; opencode_wall_exceeded says the deadline did it.
-                run_error_type = "timeout"
-                print(
-                    f"OpenCode agent phase passed sandbox_timeout ({self.config.sandbox_timeout:g} s); stopping it",
-                    file=sys.stderr,
-                )
-                # Nothing is exported or graded until the run and its tool processes are confirmed gone: a child still
-                # writing /workspace would change what is collected, and a model call would go on after the deadline.
-                await self._quiesce_opencode(sandbox, sessions_file)
-            else:
-                # A provider timeout kills only the exec's own process group, and the run's session is a group of
-                # its own, so the run and its tools can still be writing: confirm them gone before collection.
-                if getattr(phase["result"], "error_type", None) == "timeout":
-                    await self._quiesce_opencode(sandbox, sessions_file)
-        except asyncio.CancelledError:
-            await self._quiesce_opencode_best_effort(sandbox, sessions_file)
-            raise
+                stuck = result.stuck
         except NgFailureEvent as exc:
             if not (
                 self.config.report_agent_sandbox_oom
@@ -1978,7 +1856,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         except Exception as error:
             # A foreign exec exception leaves the outcome unknown; report the failed harness operation with
             # the sandbox facts known here, rather than grade a substituted partial run.
-            await self._quiesce_opencode_best_effort(sandbox, sessions_file)
             raise NgFailureEvent(
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
@@ -1990,54 +1867,51 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 stage="agent",
             ) from error
 
-        result, idle_nudges, stuck = phase["result"], phase["idle_nudges"], phase["stuck"]
-        if result is not None and self.config.stuck_detector and stuck is None:
+        if self.config.stuck_detector and stuck is None:
             stuck = await _read_stuck_marker(sandbox)
 
-        result_stdout = (result.stdout if result is not None else "") or ""
+        if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
+            # The provider returned a result that does not say how the command ended: an error type, or the -1
+            # signal-death sentinel. That is sandbox evidence, not a contradiction inside the harness, so it keeps
+            # the registered provider kind (an environment fault, ungraded and rerun under the attempt cap) and the
+            # harness failure only routes it. Neither value is an observed process exit, so no exit code is recorded.
+            handle = getattr(sandbox, "_handle", None)
+            provider = getattr(handle, "provider_name", None)
+            sandbox_id = getattr(handle, "sandbox_id", None)
+            provider_failure = sandbox_failure(
+                operation="exec",
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason=self._agent_sandbox_facts(
+                    sandbox,
+                    exit_code=result.return_code,
+                    reason=result.error_type if isinstance(result.error_type, str) else None,
+                )
+                + "Sandbox command outcome cannot be classified",
+                provider=provider if isinstance(provider, str) else None,
+                sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                provider_status_reason=result.error_type if isinstance(result.error_type, str) else None,
+            )
+            raise agent_route_failure(
+                provider_failure, operation="opencode.execute", stage="agent"
+            ) from provider_failure
+        result_stdout = result.stdout or ""
         stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
-        # None when the wall deadline cut the agent phase off: the run then goes on to export and grading.
-        if result is not None:
-            if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
-                # The provider returned a result that does not say how the command ended: an error type, or the -1
-                # signal-death sentinel. That is sandbox evidence, not a contradiction inside the harness, so it keeps
-                # the registered provider kind (an environment fault, ungraded and rerun under the attempt cap) and the
-                # harness failure only routes it. Neither value is an observed process exit, so no exit code is recorded.
-                handle = getattr(sandbox, "_handle", None)
-                provider = getattr(handle, "provider_name", None)
-                sandbox_id = getattr(handle, "sandbox_id", None)
-                provider_failure = sandbox_failure(
-                    operation="exec",
-                    failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
-                    reason=self._agent_sandbox_facts(
-                        sandbox,
-                        exit_code=result.return_code,
-                        reason=result.error_type if isinstance(result.error_type, str) else None,
-                    )
-                    + "Sandbox command outcome cannot be classified",
-                    provider=provider if isinstance(provider, str) else None,
-                    sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
-                    provider_status_reason=result.error_type if isinstance(result.error_type, str) else None,
-                )
-                raise agent_route_failure(
-                    provider_failure, operation="opencode.execute", stage="agent"
-                ) from provider_failure
-            if len(stdout_parts) < 2:
-                raise NgFailureEvent(
-                    boundary="harness",
-                    failure_kind=AGENT_ROUTE_FAILED,
-                    operation="opencode.capture",
-                    failure_reason="OpenCode command output is missing its launch marker",
-                )
-            if result.return_code == 0 and (
-                result.error_type is not None or "OpenCode run finished" not in stdout_parts[1]
-            ):
-                raise NgFailureEvent(
-                    boundary="harness",
-                    failure_kind=AGENT_ROUTE_FAILED,
-                    operation="opencode.capture",
-                    failure_reason="OpenCode command reported exit 0 without a trustworthy completion marker",
-                )
+        if len(stdout_parts) < 2:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.capture",
+                failure_reason="OpenCode command output is missing its launch marker",
+            )
+        if result.return_code == 0 and (
+            result.error_type is not None or "OpenCode run finished" not in stdout_parts[1]
+        ):
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.capture",
+                failure_reason="OpenCode command reported exit 0 without a trustworthy completion marker",
+            )
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -2187,39 +2061,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 operation="opencode.capture",
                 failure_reason=f"OpenCode export at {results_local_fpath} had no assistant messages or was invalid",
             )
-
-        # Subagent sessions (the `task` tool), recursively: exported next to the main one, children/<session id>.json
-        child_exports: Dict[str, Dict[str, Any]] = {}
-        if results_local_fpath.exists():
-            try:
-                pending = _child_session_ids(json.loads(results_local_fpath.read_text().strip() or "{}"))
-            except Exception:
-                pending = []
-            while pending and len(child_exports) < MAX_CHILD_SESSIONS:
-                child_id = pending.pop(0)
-                if child_id in child_exports:
-                    continue
-                child_remote = f"/tmp/opencode_child_{child_id}.json"
-                child_local = results_dir / "children" / f"{child_id}.json"
-                try:
-                    exported = await sandbox.exec(
-                        command=(
-                            "export PATH=$HOME/.opencode/bin:$PATH "
-                            f"&& opencode export {quote(child_id)} > {quote(child_remote)}"
-                        ),
-                        env=dict(xdg_env) or None,
-                    )
-                    if exported.return_code != 0:
-                        print(f"Failed to export subagent session {child_id}: {exported.stderr}", file=sys.stderr)
-                        continue
-                    child_local.parent.mkdir(parents=True, exist_ok=True)
-                    await sandbox.download(child_remote, child_local)
-                    child_export = json.loads(child_local.read_text().strip() or "{}")
-                except Exception:
-                    print(f"Failed to export subagent session {child_id}", format_exc(), file=sys.stderr)
-                    continue
-                child_exports[child_id] = child_export
-                pending.extend(c for c in _child_session_ids(child_export) if c not in child_exports)
 
         observations = None
         trajectory = (
@@ -2402,10 +2243,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_finished": opencode_finished,
             "opencode_idle_nudges": idle_nudges,
             "opencode_stuck": stuck,
-            "opencode_wall_exceeded": wall_exceeded,
-            # Token use of the main agent vs its subagents (`usage` and the trajectory are the main session only)
-            "opencode_tokens": _token_breakdown(opencode_export, child_exports),
-            "opencode_subagent_sessions": list(child_exports),
             "opencode_plugins_loaded": plugins_loaded,
             # Terminal reason the turn-budget plugin reported, if any. Stock emits nothing here,
             # so an empty string means the run ended some other way (answered, or infra failure).

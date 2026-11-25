@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // OpenHands 0.56's StuckDetector (openhands/controller/stuck.py, headless mode) for an OpenCode session.
+// Adapted from https://github.com/OpenHands/OpenHands/blob/0.56.0/openhands/controller/stuck.py
+// (tag 0.56.0, commit 81f73ee91d4b4fb645b48ca99f1e559c6e058118), MIT License, Copyright (c) All Hands AI.
+// Where this port differs: scenario 5 needs ten compactions in a row; OpenHands fires when any two of its last ten
+// condensations are back to back, so this port fires less often. Only the root session is checked: a stuck subagent
+// (`task` tool) session does not end the run, and OpenHands ends only the stuck delegate.
 // OpenHands checks it before every agent step and ends the run with an error when it fires; here it is checked after
 // every finished tool call (and compaction), and when it fires the plugin writes stuck.json next to itself and aborts
 // the session, so `opencode run` exits and the adapter grades the workspace as it is.
@@ -113,8 +118,23 @@ export const StuckDetector = async ({ client }) => {
   let queue = Promise.resolve();
   console.error("[stuck_detector] loaded"); // a receipt in the run's stderr (opencode_run_stderr)
 
+  const rootSessions = new Map(); // session id -> whether it has no parent
+  const isRootSession = async (sessionID) => {
+    if (!rootSessions.has(sessionID)) {
+      let root = true; // if the lookup fails, check it as before rather than never check
+      try {
+        const res = await client.session.get({ path: { id: sessionID }, sessionID });
+        root = !(res?.data ?? res)?.parentID;
+      } catch (err) {
+        console.error(`[stuck_detector] could not read session ${sessionID}: ${err}`);
+      }
+      rootSessions.set(sessionID, root);
+    }
+    return rootSessions.get(sessionID);
+  };
+
   const check = async (sessionID) => {
-    if (fired) return;
+    if (fired || !(await isRootSession(sessionID))) return;
     // compaction parts sit in user messages; every other user part is left out, as OpenHands filters user messages
     const ordered = [...parts.values()].filter(
       (p) => p.sessionID === sessionID && (p.type === "compaction" || roles.get(p.messageID) !== "user"),

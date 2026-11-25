@@ -65,4 +65,26 @@ for (let i = 0; i < 6; i++) {
 }
 assert.equal(aborts.length, 1, "the loop is aborted once although the marker could not be written");
 assert.equal(aborts[0].path.id, "ses_h");
+
+// Only the root session is checked: a looping subagent (a session with a parent) must not end the whole run.
+const childDir = mkdtempSync(join(tmpdir(), "stuck-plugin-child-"));
+copyFileSync(new URL("../stuck_detector.mjs", import.meta.url), join(childDir, "stuck_detector.mjs"));
+const childAborts = [];
+const childHooks = await (await import(join(childDir, "stuck_detector.mjs"))).StuckDetector({
+  client: {
+    session: {
+      abort: async (args) => { childAborts.push(args.path.id); },
+      get: async ({ path }) => ({ data: path.id === "ses_child" ? { id: path.id, parentID: "ses_root" } : { id: path.id } }),
+    },
+  },
+});
+const sendTo = (sessionID, part) => childHooks.event({ event: { type: "message.part.updated", properties: { part: { messageID: "m1", ...part, sessionID } } } });
+for (const sessionID of ["ses_child", "ses_root"]) {
+  for (let i = 0; i < 6; i++) {
+    await sendTo(sessionID, { id: `${sessionID}-s${i}`, type: "step-start" });
+    await sendTo(sessionID, { ...sameCall(i), id: `${sessionID}-c${i}` });
+    await sendTo(sessionID, { id: `${sessionID}-f${i}`, type: "step-finish" });
+  }
+}
+assert.deepEqual(childAborts, ["ses_root"], "the looping child is left alone and the looping root is aborted once");
 console.log("ok");
