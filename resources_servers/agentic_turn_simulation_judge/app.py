@@ -19,8 +19,9 @@ schema; user: the rendered conversation with the turn under evaluation) and a re
 judge verdicts. The policy writes the judge's JSON verdict; /verify reads it (`verdict.read_verdict`), takes its
 correctness ladder (`addresses_concern == "no"` -> "no", else `correct`) and pays agreement with `gold_ladder`.
 Verification is deterministic: no LLM is called. Output that cannot be read as a valid verdict scores 0 and is never
-masked. Reasoning is expected in the model server's separate reasoning items (vLLM `--reasoning-parser`); only
-assistant `message` items are read, with any leftover `<think>` block stripped.
+masked; only a verifier exception (a bug in this server, not the policy's output) is masked. Reasoning is expected
+in the model server's separate reasoning items (vLLM `--reasoning-parser`); only assistant `message` items are read,
+with any leftover `<think>` block stripped.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from typing import Any, ClassVar, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core.failure_kinds import VERIFIER_ERROR
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -53,7 +55,7 @@ from resources_servers.agentic_turn_simulation_judge.verdict import (
 LOG = logging.getLogger(__name__)
 
 Ladder = Literal["yes", "no"]
-# parse_error of a /verify that failed outside parsing (logged; a bug, not the policy's output).
+# parse_error of a /verify that raised (logged and masked; a bug in this server, not the policy's output).
 INTERNAL_ERROR = "internal"
 UNSCORED = "unscored"
 # Per-slice metrics: (metric name, path into the rollout dict). A rollout without the field counts as "none".
@@ -97,16 +99,15 @@ class AgenticTurnSimulationJudgeConfig(BaseResourcesServerConfig):
     parse_mode: ParseMode = "strict"
     # Require every key of the evaluation schema and enum values it allows (off: only the ladder must be decided).
     validate_schema: bool = True
-    # hard: 1 if the predicted ladder equals gold_ladder. soft: gold_p_yes for "yes", 1 - gold_p_yes for "no"
-    # (rows without gold_p_yes fall back to hard).
-    reward_mode: Literal["hard", "soft"] = "hard"
     field_bonus: Optional[FieldBonusConfig] = None
     # An `analysis` longer than this many words is a "too_long" output (scores 0). None: off.
     max_analysis_words: Optional[int] = Field(default=None, ge=1)
 
 
 class AgenticTurnSimulationJudgeRunRequest(BaseRunRequest):
-    """Row fields on the wire (see task_data.py for their meaning)."""
+    """Row fields on the wire (see task_data.py for their meaning). The same fields as `TaskData`, kept loose on
+    purpose: `/verify` accepts any row with a valid `gold_ladder`, and `scripts/validate_rows.py` checks the typed
+    `TaskData` before training. `tests/test_data.py` fails when the two field lists drift."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -130,7 +131,7 @@ class AgenticTurnSimulationJudgeVerifyResponse(BaseVerifyResponse):
 
     gold_ladder: Ladder
     pred_ladder: Optional[Ladder] = None
-    # 1.0 when pred_ladder == gold_ladder: the accuracy metrics read this, whatever reward_mode pays.
+    # 1.0 when pred_ladder == gold_ladder: the accuracy metrics read this, whatever field_bonus pays.
     ladder_match: float = 0.0
     parse_ok: bool = False
     parse_error: Optional[str] = None
@@ -180,7 +181,6 @@ def score_output(
     text: str,
     *,
     gold_ladder: str,
-    gold_p_yes: Optional[float],
     gold_fields: Optional[dict[str, Any]],
     config: AgenticTurnSimulationJudgeConfig,
 ) -> dict[str, Any]:
@@ -193,12 +193,7 @@ def score_output(
     )
     pred = read.ladder
     match = float(pred is not None and pred == gold_ladder)
-    if pred is None:
-        base = 0.0
-    elif config.reward_mode == "soft" and gold_p_yes is not None:
-        base = gold_p_yes if pred == "yes" else 1.0 - gold_p_yes
-    else:
-        base = match
+    base = match
 
     predicted = read.verdict if pred is not None else {}
     gold = {k: v for k, v in (gold_fields or {}).items() if k in VERDICT_FIELDS and v is not None}
@@ -221,7 +216,15 @@ def score_output(
         **_confusion(pred, gold_ladder),
         "analysis_words": read.analysis_words,
         "output_chars": len(text),
-        "pred_fields": {k: read.verdict.get(k) for k in VERDICT_FIELDS} if read.verdict is not None else None,
+        # Strings only, with lone surrogates replaced, so every value survives JSON encoding of the response.
+        "pred_fields": (
+            {
+                k: v.encode("utf-8", "replace").decode() if isinstance(v := read.verdict.get(k), str) else None
+                for k in VERDICT_FIELDS
+            }
+            if read.verdict is not None
+            else None
+        ),
         "field_matches": field_matches,
         "field_match_share": share,
     }
@@ -298,13 +301,19 @@ class AgenticTurnSimulationJudgeResourcesServer(SimpleResourcesServer):
             outcome = score_output(
                 assistant_text(body.response),
                 gold_ladder=body.gold_ladder,
-                gold_p_yes=body.gold_p_yes,
                 gold_fields=body.gold_fields,
                 config=self.config,
             )
-        except Exception:  # noqa: BLE001 - the reward boundary: a verifier bug scores 0, it never crashes the server
+        except Exception as exc:  # noqa: BLE001 - a verifier bug is masked, never scored as the policy's failure
             LOG.exception("agentic_turn_simulation_judge: verify failed for row %s", body.row_id)
-            outcome = {"reward": 0.0, "parse_ok": False, "parse_error": INTERNAL_ERROR}
+            outcome = {
+                "reward": 0.0,
+                "parse_ok": False,
+                "parse_error": INTERNAL_ERROR,
+                "mask_sample": True,
+                "failure_kind": VERIFIER_ERROR,
+                "failure_reason": f"{type(exc).__name__}: {exc}"[:500],
+            }
         # by_alias: aliased OpenAI fields (e.g. a json_schema text format's `schema`) must survive the round trip.
         return AgenticTurnSimulationJudgeVerifyResponse(**body.model_dump(by_alias=True), **outcome)
 

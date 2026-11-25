@@ -37,7 +37,7 @@ Task fields sit at the row top level (`task_data.py` declares them; there is no 
 | `task` | `verdict` (the only kind; `pairwise` is reserved). |
 | `row_id`, `group_id` | Row id; transcript/session key. Rows of one group stay in one split. |
 | `gold_ladder` | `yes` / `no`: the reward label (required). |
-| `gold_p_yes` | Share of usable reference passes with ladder `yes` (soft reward). |
+| `gold_p_yes` | Share of usable reference passes with ladder `yes` (provenance; not used by the reward). |
 | `gold_n` | Number of reference passes behind the label. |
 | `gold_fields` | Reference verdict fields (majority); used for field matches and the optional field bonus. |
 | `label` | Provenance: label policy, tier, judge model, rubric tag and sha256, source set, run tag. |
@@ -56,15 +56,26 @@ Task fields sit at the row top level (`task_data.py` declares them; there is no 
    take allowed values, string fields are strings. Extra keys are allowed. `max_analysis_words` (default off) fails an
    `analysis` longer than that many words.
 3. **Ladder**: `pred_ladder = "no"` if `addresses_concern == "no"`, else `correct`.
-4. **Score** (`reward_mode`). `hard` (default): `1` if `pred_ladder == gold_ladder`, else `0`. `soft`: `gold_p_yes` for a
-   `yes`, `1 - gold_p_yes` for a `no` (the expected agreement with one reference pass; rows without `gold_p_yes` score
-   hard). Optional `field_bonus {weight w, fields [...]}`: `reward = ladder_score * ((1 - w) + w * share of the listed
-   fields equal to gold_fields)`, gated by the ladder so matching fields never pay for a wrong ladder (rows without
-   gold for the listed fields keep the ladder score).
+4. **Score**: `1` if `pred_ladder == gold_ladder`, else `0`. Optional `field_bonus {weight w, fields [...]}`:
+   `reward = ladder_score * ((1 - w) + w * share of the listed fields equal to gold_fields)`, gated by the ladder so
+   matching fields never pay for a wrong ladder (rows without gold for the listed fields keep the ladder score).
 
-Unreadable output scores 0 and is **never masked**. `parse_error` names why: `empty`, `no_json`, `multiple_objects`,
-`bad_json`, `missing_keys`, `bad_enum`, `too_long` (and `internal` for a verifier exception, which is logged; it also
-scores 0 so a bug can never crash the server).
+Unreadable output scores 0 and is **never masked**. `parse_error` names why:
+
+| Code | Meaning |
+|---|---|
+| `empty` | No text after stripping think blocks, whitespace and the fence. |
+| `no_json` | No `{` in the text. |
+| `multiple_objects` | More than one JSON object (strict). |
+| `bad_json` | The text is not one decodable JSON object (cut off, malformed, or not an object). |
+| `missing_keys` | A key the verdict needs is absent: a key the schema requires; in lenient mode, no object holds `addresses_concern`; with `validate_schema` off, `correct` when the ladder needs it. |
+| `bad_enum` | A verdict value is not allowed: a value outside a schema enum or a non-string where the schema says string; with `validate_schema` off, a `correct` that is not `yes`/`no`. |
+| `too_long` | `analysis` is longer than `max_analysis_words`. |
+
+The codes are the same as in the training runs this env was built for, so `parse_fail/<code>` compares across runs.
+
+A verifier exception (a bug in this server, not the policy's output) is logged and **masked**: `mask_sample: true`,
+`failure_kind: verifier_error`, `parse_error: internal`, reward 0.
 
 The verify response carries `pred_ladder`, `gold_ladder`, `ladder_match`, `parse_ok`, `parse_error`, the confusion
 one-hots `tp`/`fp`/`fn`/`tn` with POSITIVE = ladder `no` (the judge catching a failed turn; all 0 when unparsed),
@@ -99,7 +110,6 @@ Key metrics: `mean/reward`, `accuracy`, `balanced_accuracy`, `kappa`, `parse_fai
 |---|---|---|
 | `parse_mode` | `strict` | `strict` or `lenient` (above). |
 | `validate_schema` | `true` | Off: only the ladder (`addresses_concern`, `correct`) must be decided. |
-| `reward_mode` | `hard` | `hard` or `soft`. |
 | `field_bonus` | `null` | e.g. `{weight: 0.2, fields: [blocked_by, request_questionable, discard]}`. |
 | `max_analysis_words` | `null` | Word cap on `analysis`. |
 
@@ -143,10 +153,26 @@ ng_collect_rollouts +agent_name=agentic_turn_simulation_judge_simple_agent \
   +num_repeats=4 "+responses_create_params={temperature: 1.0, max_output_tokens: 32768}"
 ```
 
+## Labels
+
+Each label comes from several passes of the reference judge (the ATS judge model and rubric) on the row's exact
+prompt. A pass counts only if ATS marks its verdict usable (parsed and schema-valid) and it was made on the same
+prompt bytes as the row.
+
+- `gold_n` = usable passes, `gold_p_yes` = the share of them whose ladder is `yes`.
+- `gold_ladder`: the ladder all passes agree on. Tier `A`: at least 3 passes, all agreeing. Tier `B`: 1 or 2 passes,
+  all agreeing. A split vote takes the majority with a tie counted as `no` (the ATS combine rule); the rows this env
+  was trained on had no split-vote rows. A row labelled another way (for example by hand) names its own `label.tier`
+  and `label.policy`, and its `gold_p_yes` may then sit on the other side of 0.5 (`validate_rows.py` counts these).
+- `gold_fields`: per field, the most common value over the usable passes (nulls skipped; a tie takes the smallest
+  string).
+
 ## Data
 
 Real rows are built outside git from stored reference-judge requests and results (the request messages are the
-judge prompt byte for byte); only the synthetic example is committed. Check a built file before use:
+judge prompt byte for byte), with the label rule above. The rows used to train with this env come from internal
+judge logs, so neither they nor their builder are public; only the synthetic example is committed.
+Rows built from your own ATS judge runs work the same way. Check a built file before use:
 
 ```bash
 PYTHONPATH=. python resources_servers/agentic_turn_simulation_judge/scripts/validate_rows.py train.jsonl validation.jsonl \

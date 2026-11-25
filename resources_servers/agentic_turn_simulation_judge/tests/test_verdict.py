@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import json
+import random
+import re
+import time
 
 import pytest
 
+import resources_servers.agentic_turn_simulation_judge.verdict as verdict_module
 from resources_servers.agentic_turn_simulation_judge.verdict import (
     correct_ladder,
     parse_lenient,
@@ -199,12 +203,82 @@ class TestReadVerdict:
         assert read_verdict(text).error == "bad_json"
         assert read_verdict(text, parse_mode="lenient").ladder == "no"
 
-    def test_parser_exception_is_bad_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parser_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A parser bug is not the policy's output: it is raised, and `verify` masks the sample.
         import resources_servers.agentic_turn_simulation_judge.verdict as module
 
         def boom(text: str):
             raise MemoryError("simulated")
 
         monkeypatch.setattr(module, "parse_strict", boom)
-        read = module.read_verdict(TEXT)
-        assert (read.verdict, read.ladder, read.error) == (None, None, "bad_json")
+        with pytest.raises(MemoryError):
+            module.read_verdict(TEXT)
+
+
+class TestAdversarialSpeed:
+    """Inputs that made the parser quadratic; each must finish fast and give the old result."""
+
+    _OLD_FENCE_RE = re.compile(r"\A```(?:json)?[ \t]*\n?(.*?)\n?[ \t]*```\Z", re.S | re.I)
+    _OLD_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S)
+
+    def _old_strip_think(self, text: str) -> str:
+        if "</think" in text:
+            text = self._OLD_THINK_RE.sub("", text).split("</think>")[-1]
+        return text
+
+    def _old_parse_strict(self, text: str):
+        # parse_strict as it was with the fence regex.
+        text = strip_think(text).strip()
+        if not text:
+            return None, "empty"
+        fenced = self._OLD_FENCE_RE.match(text)
+        if fenced:
+            text = fenced.group(1).strip()
+            if not text:
+                return None, "empty"
+        if not text.startswith("{"):
+            return None, verdict_module._failure_kind(text)
+        try:
+            value, end = json.JSONDecoder().raw_decode(text)
+        except (ValueError, RecursionError):
+            return None, verdict_module._failure_kind(text)
+        if not isinstance(value, dict):
+            return None, "bad_json"
+        if text[end:].strip():
+            return None, verdict_module._failure_kind(text)
+        return value, None
+
+    def test_long_blank_run_in_fence(self) -> None:
+        start = time.perf_counter()
+        assert parse_strict("```json\n" + " " * 400_000 + "x")[1] == "no_json"
+        assert time.perf_counter() - start < 0.5
+
+    def test_many_unclosed_think_tags(self) -> None:
+        text = "</think" + "<think>" * 20_000
+        start = time.perf_counter()
+        assert strip_think(text) == text
+        assert time.perf_counter() - start < 0.5
+
+    def test_same_results_as_the_regexes(self) -> None:
+        rng = random.Random(0)
+        pieces = [
+            "```",
+            "json",
+            "JSON",
+            " ",
+            "\t",
+            "\n",
+            "{}",
+            '{"a": 1}',
+            "[1]",
+            "<think>",
+            "</think>",
+            "<thinking>",
+            "</thinking>",
+            "</think",
+            "x",
+        ]
+        for _ in range(20_000):
+            text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 10)))
+            assert strip_think(text) == self._old_strip_think(text), text
+            assert parse_strict(text) == self._old_parse_strict(text), text

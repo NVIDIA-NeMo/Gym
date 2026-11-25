@@ -10,8 +10,6 @@ agentic_turn_simulation_judge_resources_server:
       parse_mode: strict
       # Require every key of the evaluation schema and allowed enum values.
       validate_schema: true
-      # hard: 1 if the ladder matches gold_ladder. soft: gold_p_yes for "yes", 1 - gold_p_yes for "no".
-      reward_mode: hard
       # e.g. {weight: 0.2, fields: [blocked_by, request_questionable, discard]}; gated by the ladder.
       field_bonus: null
       # Score an analysis longer than this many words as "too_long" (null: off).

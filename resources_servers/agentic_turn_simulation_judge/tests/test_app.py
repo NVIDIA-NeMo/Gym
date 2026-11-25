@@ -93,9 +93,9 @@ def make_request(text: str | None, *, gold: str = "yes", **fields) -> AgenticTur
     )
 
 
-def score(text: str, gold: str = "yes", *, p_yes=None, gold_fields=None, **config) -> dict:
+def score(text: str, gold: str = "yes", *, gold_fields=None, **config) -> dict:
     cfg = AgenticTurnSimulationJudgeConfig(host="", port=0, entrypoint="", name="", **config)
-    return score_output(text, gold_ladder=gold, gold_p_yes=p_yes, gold_fields=gold_fields, config=cfg)
+    return score_output(text, gold_ladder=gold, gold_fields=gold_fields, config=cfg)
 
 
 class TestConfig:
@@ -105,7 +105,7 @@ class TestConfig:
             "agentic_turn_simulation_judge"
         ]
         config = AgenticTurnSimulationJudgeConfig(host="", port=0, name="", **server)
-        assert (config.parse_mode, config.validate_schema, config.reward_mode) == ("strict", True, "hard")
+        assert (config.parse_mode, config.validate_schema) == ("strict", True)
         assert config.field_bonus is None and config.max_analysis_words is None
         assert server["domain"] == "agent" and server["verified"] is False
         agent = raw["agentic_turn_simulation_judge_simple_agent"]["responses_api_agents"]["simple_agent"]
@@ -164,21 +164,13 @@ class TestScoreOutput:
         [("", "empty"), ("yes", "no_json"), (YES[:-10], "bad_json"), (f"{YES}{NO}", "multiple_objects")],
     )
     def test_unreadable_output_scores_zero(self, text: str, error: str) -> None:
-        for reward_mode in ("hard", "soft"):
-            out = score(text, "yes", p_yes=0.75, reward_mode=reward_mode)
-            assert out["reward"] == 0.0 and out["pred_ladder"] is None
-            assert (out["parse_ok"], out["parse_error"]) == (False, error)
-            assert out["tp"] == out["fp"] == out["fn"] == out["tn"] == 0.0
+        out = score(text, "yes")
+        assert out["reward"] == 0.0 and out["pred_ladder"] is None
+        assert (out["parse_ok"], out["parse_error"]) == (False, error)
+        assert out["tp"] == out["fp"] == out["fn"] == out["tn"] == 0.0
 
-    def test_soft_reward(self) -> None:
-        assert score(YES, "yes", p_yes=0.75, reward_mode="soft")["reward"] == 0.75
-        out = score(NO, "yes", p_yes=0.75, reward_mode="soft")
-        assert out["reward"] == pytest.approx(0.25) and out["ladder_match"] == 0.0
-        assert score(NO, "no", p_yes=0.0, reward_mode="soft")["reward"] == 1.0
-
-    def test_soft_reward_falls_back_to_hard_without_p_yes(self) -> None:
-        assert score(NO, "yes", reward_mode="soft")["reward"] == 0.0
-        assert score(YES, "yes", reward_mode="soft")["reward"] == 1.0
+    def test_soft_reward_mode_is_gone(self) -> None:
+        assert "reward_mode" not in AgenticTurnSimulationJudgeConfig.model_fields
 
     def test_field_matches_are_reported(self) -> None:
         gold = {**GOLD_YES, "blocked_by": "infra", "reason": "not a verdict field", "discard_reason": None}
@@ -204,8 +196,6 @@ class TestScoreOutput:
         assert wrong["reward"] == 0.0 and wrong["field_match_share"] == 1.0
         # Rows without gold for the listed fields keep the ladder score.
         assert score(YES, "yes", field_bonus=bonus)["reward"] == 1.0
-        soft = score(YES, "yes", p_yes=0.5, gold_fields=gold, field_bonus=bonus, reward_mode="soft")
-        assert soft["reward"] == pytest.approx(0.45)
 
     def test_unparsed_output_matches_no_field(self) -> None:
         out = score("not json", "yes", gold_fields=GOLD_YES)
@@ -264,14 +254,21 @@ class TestVerify:
         # All rollouts: 2/4 predicted yes vs 3/4 gold yes; parsed: 2/2 yes vs 1/2 gold yes -> lenient.
         assert stats["pred_yes_rate"] == 0.5 and stats["leniency_gap"] == pytest.approx(0.5)
 
-    async def test_internal_error_scores_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_reward_follows_gold_ladder_not_gold_p_yes(self) -> None:
+        # gold_p_yes is provenance only: a hand-labelled row where it disagrees with gold_ladder pays the ladder match.
+        server = make_server()
+        assert (await server.verify(make_request(NO, gold="no", gold_p_yes=1.0))).reward == 1.0
+        assert (await server.verify(make_request(YES, gold="no", gold_p_yes=1.0))).reward == 0.0
+
+    async def test_internal_error_is_masked(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom(*args, **kwargs):
             raise RuntimeError("bug")
 
         monkeypatch.setattr(app_module, "score_output", boom)
         response = await make_server().verify(make_request(YES))
         assert (response.reward, response.parse_ok, response.parse_error) == (0.0, False, "internal")
-        assert response.mask_sample is False
+        assert response.mask_sample is True and response.failure_kind == "verifier_error"
+        assert response.failure_reason == "RuntimeError: bug"
 
 
 class TestServer:
@@ -310,6 +307,20 @@ class TestServer:
         assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(70.0)
         assert metrics["family/obstacle/n"] == 1.0 and metrics["tier/B/accuracy"] == 0.5
         assert metrics["hand/accuracy"] == 1.0 and metrics["hand/n"] == 1.0
+
+    @pytest.mark.parametrize(
+        "blocked_by", ['"none\\ud83d"', "[" * 300 + "]" * 300], ids=["lone_surrogate", "deep_list"]
+    )
+    def test_unserializable_verdict_values_still_score_zero(self, blocked_by: str) -> None:
+        client = TestClient(make_server().setup_webserver())
+        text = YES.replace('"blocked_by": "none"', f'"blocked_by": {blocked_by}')
+        assert text != YES
+        body = {**EXAMPLE_ROWS[0], "response": make_response(text).model_dump(mode="json")}
+        reply = client.post("/verify", json=body)
+        assert reply.status_code == 200, reply.text
+        result = reply.json()
+        assert (result["reward"], result["parse_error"]) == (0.0, "bad_enum")
+        assert isinstance(result["pred_fields"]["blocked_by"], (str, type(None)))
 
     def test_row_without_gold_is_rejected(self) -> None:
         client = TestClient(make_server().setup_webserver())

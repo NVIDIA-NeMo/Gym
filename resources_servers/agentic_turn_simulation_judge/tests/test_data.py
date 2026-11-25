@@ -9,8 +9,10 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
+from nemo_gym.server_runtime import BaseRunRequest
 from resources_servers.agentic_turn_simulation_judge.app import AgenticTurnSimulationJudgeRunRequest
 from resources_servers.agentic_turn_simulation_judge.scripts.validate_rows import validate_files
+from resources_servers.agentic_turn_simulation_judge.task_data import TaskData
 
 
 ENV_DIR = Path(__file__).resolve().parents[1]
@@ -161,3 +163,14 @@ def test_same_basename_files_stay_apart(tmp_path: Path) -> None:
     for p, row in zip(paths, (yes, no)):
         write(tmp_path, str(p.relative_to(tmp_path)), [{**row, "meta": {**row["meta"], "split": "train"}}])
     assert validate_files(paths, agent="")["all"]["groups_in_multiple_splits"] == 0
+
+
+def test_run_request_and_task_data_declare_the_same_fields() -> None:
+    # /verify's loose request model and the typed TaskData must list the same row fields, with the same required-ness.
+    own = set(AgenticTurnSimulationJudgeRunRequest.model_fields) - set(BaseRunRequest.model_fields)
+    assert own == set(TaskData.model_fields)
+    for name in own:
+        assert (
+            AgenticTurnSimulationJudgeRunRequest.model_fields[name].is_required()
+            == TaskData.model_fields[name].is_required()
+        ), name

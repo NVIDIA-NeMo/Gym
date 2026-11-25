@@ -84,8 +84,8 @@ class TaskData(BaseModel):
         default=None,
         ge=0.0,
         le=1.0,
-        description="Share of usable reference passes with ladder yes (reward_mode soft).",
-        json_schema_extra={"consumed_by": ["verify"]},
+        description="Share of usable reference passes with ladder yes (provenance; the reward uses gold_ladder).",
+        json_schema_extra={"consumed_by": ["provenance"]},
     )
     gold_n: Optional[int] = Field(
         default=None,

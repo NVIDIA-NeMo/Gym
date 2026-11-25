@@ -15,9 +15,11 @@
 """Reading a judge verdict the way the agentic_turn_simulation (ATS) judge writes it.
 
 `VERDICT_FIELDS`, `correct_ladder`, the think stripping and the lenient parse are copied from
-`resources_servers/agentic_turn_simulation/judge.py` (not imported: that module pulls in the ATS harnesses and
-jsonschema), minus the ATS salvage of cut-off output: a verdict that broke off is never read here.
-`prompts/evaluation_schema.json` is a copy of the ATS output schema; tests fail when either copy drifts.
+`resources_servers/agentic_turn_simulation/judge.py` at commit f0c9450f4649e8c25e735bb4b9bdcaac274bcc7a (#5027),
+not imported because that module pulls in the ATS harnesses and jsonschema; the ATS salvage of cut-off output is
+left out, so a verdict that broke off is never read here. `prompts/evaluation_schema.json` is a copy of
+`resources_servers/agentic_turn_simulation/prompts/evaluation_schema.json` at the same commit. `tests/test_golden.py`
+imports ATS and fails when either copy drifts.
 
 Two parse modes:
 
@@ -49,8 +51,6 @@ ParseMode = Literal["strict", "lenient"]
 # Why an output gave no usable verdict, in the order they are checked.
 PARSE_ERRORS = ("empty", "no_json", "multiple_objects", "bad_json", "missing_keys", "bad_enum", "too_long")
 
-# One optional Markdown fence around the whole text (strict mode).
-_FENCE_RE = re.compile(r"\A```(?:json)?[ \t]*\n?(.*?)\n?[ \t]*```\Z", re.S | re.I)
 # Failure classification tries a JSON decode at no more than this many "{" positions.
 _MAX_DECODE_ATTEMPTS = 64
 
@@ -64,7 +64,10 @@ def evaluation_schema() -> dict[str, Any]:
 def strip_think(text: str) -> str:
     """Drop `<think>...</think>` blocks and anything before a dangling `</think>` (as ATS does)."""
     if "</think" in text:
-        text = _THINK_RE.sub("", text).split("</think>")[-1]
+        # Every _THINK_RE match ends at a closing tag, so only the text up to the last one can match; the regex never
+        # rescans the tail (quadratic on many unclosed `<think>` tags). Same result as on the whole text.
+        cut = max(text.rfind("</think>") + len("</think>"), text.rfind("</thinking>") + len("</thinking>"))
+        text = (_THINK_RE.sub("", text[:cut]) + text[cut:]).split("</think>")[-1]
     return text
 
 
@@ -133,9 +136,10 @@ def parse_strict(text: str | None) -> tuple[dict[str, Any] | None, str | None]:
     text = strip_think(text or "").strip()
     if not text:
         return None, "empty"
-    fenced = _FENCE_RE.match(text)
-    if fenced:
-        text = fenced.group(1).strip()
+    # One optional Markdown fence around the whole text, stripped by slicing (a regex backtracks on long blank runs).
+    if len(text) >= 6 and text.startswith("```") and text.endswith("```"):
+        text = text[3:-3]
+        text = (text[4:] if text[:4].lower() == "json" else text).strip()
         if not text:
             return None, "empty"
     if not text.startswith("{"):
@@ -211,11 +215,9 @@ def read_verdict(
     validate_schema: bool = True,
     max_analysis_words: int | None = None,
 ) -> ReadVerdict:
-    """Parse, validate and ladder one output. Never raises: an unexpected exception is a "bad_json" output."""
-    try:
-        verdict, error = (parse_strict if parse_mode == "strict" else parse_lenient)(text)
-    except Exception:  # noqa: BLE001 - the reward boundary: no output may crash /verify
-        verdict, error = None, "bad_json"
+    """Parse, validate and ladder one output. The parsers name every unreadable output; any other exception is a
+    bug and propagates (`verify` masks it)."""
+    verdict, error = (parse_strict if parse_mode == "strict" else parse_lenient)(text)
     if verdict is None:
         return ReadVerdict(None, None, error, 0)
     analysis = verdict.get("analysis")
