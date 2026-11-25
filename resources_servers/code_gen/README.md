@@ -25,9 +25,9 @@ alarm of `unit_test_timeout_secs`, an overall deadline of
 
 ### One sandbox per attempt
 The shipped pairing (`code_gen_environment_server`) runs each attempt in one sandbox group that the Environment
-Server owns (see "A sandbox for each attempt" in the `single_agent_turn` README). At seed, code_gen declares that its
-grader runs code (`grader_runs_code`) and that the group starts from its `sandbox_config.image`. The model calls no
-tools, so the group reaches only the model server (`network: model_only`).
+Server owns (see "A sandbox for each attempt" in the `single_agent_turn` README). At seed, code_gen declares that the
+group starts from its `sandbox_config.image`, and it never declares `verifier_executes_nothing`, so its verifier
+always gets a sandbox. The model calls no tools, so the group reaches only the model server (`network: model_only`).
 
 | Step | Where it runs |
 |---|---|
@@ -36,8 +36,8 @@ tools, so the group reaches only the model server (`network: model_only`).
 | Stop | The Environment Server stops the group after the episode. code_gen never stops it. |
 
 code_gen is a pure QA task, so for sandbox capacity on large runs it may run the agent loop in the Agent Server's
-process instead. The grader cannot opt out: the Environment Server then starts a group for the grader alone after
-the agent closes and lends it to `/verify`.
+process instead. The verifier cannot opt out: the Environment Server then starts a group for the verifier alone
+after the agent closes and lends it to `/verify`.
 
 ```yaml
 code_gen_environment_server:
@@ -73,7 +73,7 @@ code_gen_environment_server:
 
 Grading keeps the egress rule the sandbox started with, because providers cannot change a running sandbox's egress
 yet. Candidate code can therefore reach the model server's host during grading, where code_gen's own verifier
-sandbox allowed no egress at all. A group for the grader alone (`sandbox_opt_out.task`) starts from the same
+sandbox allowed no egress at all. A group for the verifier alone (`sandbox_opt_out.task`) starts from the same
 `sandbox_config` today.
 
 ### Running unit tests in a sandbox

@@ -122,9 +122,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
     ray_enabled = False
-    # The grader runs the candidate's code, so it never opts out of a sandbox: an Environment Server lends /verify the
-    # attempt's sandbox group, or one of the grader's own when the task opted out.
-    grader_runs_code = True
+    # The verifier runs the candidate's code, so it never declares verifier_executes_nothing: an Environment Server
+    # lends /verify the attempt's sandbox group, or a group for the verifier alone when the task opted out.
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):

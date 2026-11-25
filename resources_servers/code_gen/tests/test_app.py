@@ -399,10 +399,11 @@ class TestLentSandboxVerify:
         body = _verify_request(code).model_dump(mode="json") | {NG_SANDBOX_ACCESS_KEY: _ACCESS}
         return CompCodingVerifyRequest.model_validate(body)
 
-    def test_the_seed_declares_a_code_running_grader_and_the_verifier_image(self) -> None:
-        # The Environment Server starts the group from this image and never lets the grader opt out of it.
-        group = _make_server().declared_sandbox_group(MagicMock(spec=ResourcesSeedSessionRequest))
-        assert group == SandboxGroupSpec(image="code-gen-verifier:test", grader_runs_code=True)
+    def test_the_seed_declares_the_verifier_image_and_never_a_verifier_that_executes_nothing(self) -> None:
+        # The Environment Server starts the group from this image, and without verifier_executes_nothing it refuses a
+        # verifier opt-out, so the unit tests always get a sandbox.
+        declaration = _make_server().sandbox_declaration(MagicMock(spec=ResourcesSeedSessionRequest))
+        assert declaration == {"sandbox_group": SandboxGroupSpec(image="code-gen-verifier:test")}
 
     def test_the_access_is_read_from_the_wire_key_and_never_dumped(self) -> None:
         request = self._lent_request()
