@@ -17,9 +17,21 @@ prepare_script_args:
   dialect: sqlite  # the default; other dialects are selected by `eval.sh --dialect` (see README.md, "SQL dialects")
   split: dev  # the default; the train split is selected by `eval.sh --split train` (see README.md, "Splits")
   # BIRD dev release, dated: dev_20240627 (the default), dev_20251106, minidev_20250704 or minidev_20261028 (see
-  # README.md, "Versions"); selected by `eval.sh --version`.
+  # README.md, "Versions"); selected by `eval.sh --version` or `+prepare_script_args.version=<version>`.
   version: dev_20240627
-  prompt_format: default  # or schema_only (SQLite): `eval.sh --prompt-format schema_only`
+  # or schema_only (SQLite): `eval.sh --prompt-format schema_only` or `+prepare_script_args.prompt_format=schema_only`
+  prompt_format: default
+
+# The dataset below follows prepare_script_args.version and prompt_format, so setting either one directly selects the
+# file prepare() writes for it and the matching prompt. File names mirror prepare.output_fpath_for on SQLite dev: the
+# default version's file is named by the split and any other by the version; any prompt format but the default adds
+# `_<format>`. An unknown value reaches prepare(), which rejects it. Another dialect or split also changes the server;
+# eval.sh handles those and replaces the whole dataset entry.
+birdbench_prepared_file:
+  name_for_version:
+    dev_20240627: dev  # every other version: the version
+  suffix_for_prompt_format:
+    default: ""  # every other prompt format: _<format>
 
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_bird_sql_resources_server:
@@ -34,8 +46,9 @@ birdbench_bird_sql_simple_agent:
       datasets:
         - name: birdbench
           type: benchmark
-          jsonl_fpath: benchmarks/birdbench/data/birdbench_sqlite_dev.jsonl
-          prompt_config: benchmarks/birdbench/prompts/default_sqlite.yaml
+          # benchmarks/birdbench/data/birdbench_sqlite_dev.jsonl by default (see birdbench_prepared_file above)
+          jsonl_fpath: benchmarks/birdbench/data/birdbench_sqlite_${oc.select:birdbench_prepared_file.name_for_version.${prepare_script_args.version},${prepare_script_args.version}}${oc.select:birdbench_prepared_file.suffix_for_prompt_format.${prepare_script_args.prompt_format},_${prepare_script_args.prompt_format}}.jsonl
+          prompt_config: benchmarks/birdbench/prompts/${prepare_script_args.prompt_format}_sqlite.yaml
           prepare_script: benchmarks/birdbench/prepare.py
           prepare_project: benchmarks/birdbench
           # Never repeat the dataset: `gym eval run` multiplies this by `--num-repeats`, so any value above 1 makes

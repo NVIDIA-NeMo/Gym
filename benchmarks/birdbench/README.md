@@ -102,9 +102,16 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
 
 ## Versions
 
-BIRD's authors have revised the dev questions since the release Gym has used. `--version` (eval.sh) or
-`prepare_script_args.version` picks one; all of them run on the same 11 SQLite databases from `dev.zip`, and every
-other option combines with them.
+BIRD's authors have revised the dev questions since the release Gym has used. `--version` (eval.sh) picks one; all of
+them run on the same 11 SQLite databases from `dev.zip`, and every other option combines with them. Without eval.sh,
+`+prepare_script_args.version=<version>` does the same for `gym eval prepare --benchmark birdbench` and
+`gym eval run --benchmark birdbench`: `config.yaml` derives the dataset file from it, so the cache check and the run
+use that version's file, never the default's. This holds on SQLite dev; another dialect or split also changes the
+server, so use eval.sh for those.
+
+```bash
+gym eval prepare --benchmark birdbench +use_cached_prepared_benchmarks=true +prepare_script_args.version=minidev_20261028
+```
 
 | Version | Released | Tasks | Questions from | What it is |
 |---|---|---|---|---|
@@ -148,7 +155,8 @@ may land on the other side of 30 s.
 column descriptions, with the question and its evidence apart (`prompts/schema_only_sqlite.yaml`). It is the prompt
 of auto-ontology-eval's schema-only control arm, byte for byte, so the same model scores the same here as there; on
 BIRD dev all 1,534 rendered prompts match the prompts a saved auto-ontology-eval run sent. It needs no BM25 index, so
-it prepares in seconds.
+it prepares in seconds. Without eval.sh, `+prepare_script_args.prompt_format=schema_only` selects both the
+schema-only file and its prompt (with or without `+prepare_script_args.version=...`).
 
 ## Preparing data
 
