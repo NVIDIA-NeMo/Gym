@@ -14,15 +14,18 @@ from datetime import datetime
 import ab_synth_env as env
 import pytest
 import verifiers as vf
+from automationbench.schema.world import WorldState
 from verifiers.legacy.types import AssistantMessage, ToolCall
 
 from responses_api_agents.verifiers_agent.tests.test_ab_synth_env import (
+    CONTACTS,
     INFO,
     INITIAL_STATE,
     PROMOTE,
     PROMOTED,
     PROMPT,
     SINGLE_DAY,
+    end_turn,
     load,
 )
 
@@ -742,6 +745,100 @@ def test_an_event_that_cannot_apply_is_refused_at_load(name):
     assert any("does not apply" in p for p in env.resolve_records(copy.deepcopy(info)))
     with pytest.raises(ValueError):
         load(info)
+
+
+# An A1 range covers the rows events add, not only the seeded ones.
+def range_row(record, assertion_type="not_acted", **extra):
+    seed = copy.deepcopy(sheet_seed())
+    seed["google_sheets"]["rows"] = seed["google_sheets"]["rows"][:1]  # row 2 only, the event adds row 9
+    seed["hubspot"] = copy.deepcopy(INITIAL_STATE["hubspot"])
+    return {
+        "initial_state": seed,
+        "period_end": "2026-03-06T18:00:00",
+        "events": [ADD_ROW_9],
+        "wait_tool_description": "Wait.",
+        "wait_until_description": "ISO time.",
+        "assertions": [PROMOTED, {"type": assertion_type, "record": record, **extra}],
+    }
+
+
+def test_a_range_guardrail_covers_a_row_an_event_adds():
+    info = range_row("Queue!A2:A9")
+    wait = {"wait": "2026-03-04T09:00:00"}
+    assert env.replay(info, [wait, PROMOTE]) == 1.0
+    assert env.replay(info, [wait, PROMOTE, WRITE_ROW_9]) == 0.0
+
+
+def test_a_range_objective_credits_a_row_an_event_adds_on_its_day():
+    info = range_row("Queue!A2:A9", "acted_on_day", day="2026-03-04")
+    assert env.replay(info, [{"wait": "2026-03-04T09:00:00"}, PROMOTE, WRITE_ROW_9]) == 1.0
+
+
+def test_requester_writes_reach_the_write_log():
+    clock = env.Clock(WorldState(**copy.deepcopy(INITIAL_STATE)), [], "2026-03-06T18:00:00")
+    env.requester_tool(clock, ["hubspot"], "api_fetch", json.dumps(PROMOTE))
+
+    assert [e["method"] for e in clock.log] == ["PATCH"]
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {k: v for k, v in INFO.items() if k != "period_end"},  # events but no wait tool
+        {**INFO, "events": [{**INFO["events"][0], "at": "2026-03-09T08:00:00"}]},  # an event after period_end
+        {**INFO, "initial_state": {"hubspot": INITIAL_STATE["hubspot"]}},  # no seed clock
+    ],
+)
+def test_rows_whose_events_can_never_fire_are_refused(info):
+    assert env.row_problems(copy.deepcopy(info), requester=True)
+
+
+def test_a_naive_wait_time_is_read_in_the_seed_zone():
+    seed = {**INITIAL_STATE, "meta": {"current_time": "2026-03-02T09:00:00-08:00"}}
+    clock = env.Clock(WorldState(**copy.deepcopy(seed)), [], "2026-03-06T18:00:00-08:00")
+
+    assert json.loads(clock.wait("2026-03-04T07:59:00"))["now"] == "2026-03-04T07:59:00-08:00"
+
+
+def test_not_acted_with_excluded_false_scores_as_an_objective():
+    info = {"initial_state": INITIAL_STATE, "assertions": [{"type": "not_acted", "record": "1010", "excluded": False}]}
+    touch = {"method": "PATCH", "url": CONTACTS + "1010", "body": {"properties": {"lifecyclestage": "customer"}}}
+
+    assert (env.replay(info, []), env.replay(info, [touch])) == (1.0, 0.0)
+
+
+def test_a_long_policy_turn_is_cut_before_it_reaches_the_requester():
+    vf_env, state = load({**SINGLE_DAY, "user_card": "notes"})
+    seen = []
+
+    async def chat(messages, **body):
+        seen.append(messages)
+        return {"content": "DONE"}
+
+    vf_env._chat = chat
+    end_turn(state, "x" * (env.REQUESTER_RESULT_CHARS + 5000))
+    asyncio.run(vf_env.no_tools_called(state))
+
+    assert max(len(m["content"]) for m in seen[0][1:]) == env.REQUESTER_RESULT_CHARS
+
+
+def test_a_multi_day_row_is_graded_at_period_end():
+    reopen = {
+        "at": "2026-03-04T08:00:00",
+        "patch": {**INFO["events"][0]["patch"], "id": "101", "set": {"lifecyclestage": "lead"}},
+    }
+    info = {**INFO, "events": [reopen], "assertions": [PROMOTED]}
+
+    assert env.replay(info, [PROMOTE]) == 0.0  # the event reopens 101 after the agent stopped
+    assert env.replay(info, [{"wait": "2026-03-04T09:00:00"}, PROMOTE]) == 1.0
+
+
+@pytest.mark.parametrize("flag", [None, {"excluded": True}, {"excluded": False}, {"scored": False}])
+def test_a_world_assertion_an_event_alone_changes_is_refused_unless_flagged(flag):
+    is_lead = {**PROMOTED, "contact_id": "1010", "value": "lead", **(flag or {})}  # the INFO event makes it false
+    problems = env.resolve_records({**INFO, "assertions": [PROMOTED, is_lead]})
+
+    assert [p.split(":")[0] for p in problems] == (["event-dependent"] if flag is None else [])
 
 
 if __name__ == "__main__":

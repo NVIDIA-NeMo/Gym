@@ -155,6 +155,7 @@ class HeadlineTest(unittest.TestCase):
     def test_skipped_and_force_scored_assertions_follow_the_headline_split(self):
         info = {
             **INFO,
+            "events": [],
             "assertions": [
                 PROMOTED,
                 {**PROMOTED, "contact_id": "1010", "value": "lead", "excluded": False},  # true at start, still scored
@@ -183,8 +184,11 @@ def load(info, **kwargs):
 
 
 def end_turn(state, text):
-    """The agent ends a turn with `text` and no tool call."""
-    state["trajectory"] = [{"prompt": PROMPT, "completion": [AssistantMessage(content=text)]}]
+    """The agent takes one more step that ends its turn with `text` and no tool call."""
+    state["trajectory"] = [
+        *(state.get("trajectory") or []),
+        {"prompt": PROMPT, "completion": [AssistantMessage(content=text)]},
+    ]
 
 
 class LoadEnvironmentTest(unittest.TestCase):
@@ -234,7 +238,7 @@ class RequesterTest(unittest.TestCase):
 
         end_turn(state, "Done, contact 101 is a customer.")
         self.assertTrue(asyncio.run(vf_env.no_tools_called(state)))
-        self.assertEqual(state["user_turns"], 1)
+        self.assertEqual((state["user_turns"], len(seen)), (1, 2))  # the requester was asked again and said DONE
 
     def test_unavailable_requester_ends_the_episode_and_is_counted(self):
         vf_env, state = load({**SINGLE_DAY, "user_card": "notes"})
@@ -872,16 +876,18 @@ class EventAfterPolicyDeleteTest(unittest.TestCase):
         self.assertEqual(state["clock"].now(), datetime(2026, 3, 4, 9))
 
     def test_an_event_on_a_record_added_by_an_earlier_event_and_then_deleted_is_scored(self):
+        added = {"id": "003B", "first_name": "Bo", "last_name": "Kim", "email": "b@example.com"}
         events = [
-            {"at": "2026-03-03T08:00:00", "patch": {"app": "hubspot", "collection": "contacts", "add": {"id": "202"}}},
+            {"at": "2026-03-03T08:00:00", "patch": {"app": "salesforce", "collection": "contacts", "add": added}},
             {
                 "at": "2026-03-04T08:00:00",
-                "patch": {"app": "hubspot", "collection": "contacts", "id": "202", "set": {"lifecyclestage": "lead"}},
+                "patch": {"app": "salesforce", "collection": "contacts", "id": "003B", "set": {"title": "VP"}},
             },
         ]
         clock = env.Clock(WorldState(**copy.deepcopy(INITIAL_STATE)), events, "2026-03-06T18:00:00")
         clock.wait("2026-03-03T09:00:00")
-        clock.fetch("DELETE", CONTACTS + "202")
+        clock.fetch("DELETE", SF + "Contact/003B")
+        self.assertEqual(clock.world.salesforce.contacts, [])  # the delete happened (HubSpot has no DELETE route)
 
         self.assertEqual(json.loads(clock.wait("2026-03-05T09:00:00"))["advanced"], True)
 

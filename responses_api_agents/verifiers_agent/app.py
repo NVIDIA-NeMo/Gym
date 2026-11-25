@@ -956,7 +956,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         finally:
             _RUBRIC_FAILURES.reset(token)
             _MODEL_CALL_OUTCOME.reset(outcome_token)
-        failed = [m for m in self.config.mask_sample_metrics if (resp.metrics or {}).get(m, 0) > 0]
+        metrics = resp.metrics or {}
+        if missing := [m for m in self.config.mask_sample_metrics if m not in metrics]:
+            logger.warning(f"Task {body.task_idx}: mask_sample_metrics {missing} not among the rollout's metrics")
+        failed = [m for m in self.config.mask_sample_metrics if metrics.get(m, 0) > 0]
         if failed:
             logger.warning(f"Task {body.task_idx}: masked, the environment reported {failed}")
 

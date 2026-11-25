@@ -45,7 +45,7 @@ STAMPED_FIELDS = {
 }  # fmt: skip
 FIELD_KEYS = {"field", "property"}  # not a sheet `column`: cells hold what the agent writes, nothing is stamped
 VALUE_MAPS = {"cells", "cell_contains", "fields"}  # keyed by column names (a Google Forms "Timestamp"), not fields
-REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
+REQUESTER_RESULT_CHARS = 30000  # one requester message or tool result, cut: a whole sheet runs to 70k+ characters
 # An A1 reference to sheet rows: "Tab!B7", "'Q4 2025'!A7:C7", "B7", a bare "7", or rows "2:5".
 ROW_REF = re.compile(r"(?:'?(?P<tab>.+?)'?!)?[A-Za-z]{0,3}(?P<first>\d+)(?::[A-Za-z]{0,3}(?P<last>\d+))?")
 # A write to a record of these collections also acts on its parent: (app, collection) -> [(parent collection, field)].
@@ -127,10 +127,10 @@ through the api_search tool (find the endpoint) and the api_fetch tool (call it)
 - If the assistant says the work is done, or asks nothing and needs nothing from you, reply with exactly: DONE"""
 
 
-def _time(value) -> datetime:
-    """Naive UTC time. A time with an offset is converted to UTC first, a naive one is taken as UTC."""
+def _time(value, zone=timezone.utc) -> datetime:
+    """Naive UTC time. A time with an offset is converted to UTC, a naive one is read in `zone` (UTC by default)."""
     t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    return t.astimezone(timezone.utc).replace(tzinfo=None) if t.tzinfo else t
+    return t.replace(tzinfo=t.tzinfo or zone).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _as_json_text(value) -> str:
@@ -287,6 +287,17 @@ def row_problems(info: dict, *, requester: bool) -> list[str]:
                 _time(t)
             except (TypeError, ValueError):
                 problems.append(f"{t!r} is not an ISO 8601 time")
+        start = ((info.get("initial_state") or {}).get("meta") or {}).get("current_time")
+        if not start:  # upstream would start the clock at the wall clock, after period_end
+            problems.append("a multi-day row needs initial_state.meta.current_time")
+        elif not problems:
+            end = _time(info["period_end"])
+            if _time(start) >= end:
+                problems.append(f"period_end {info['period_end']!r} is not after the seed's current_time {start!r}")
+            if late := [e["at"] for e in events if _time(e["at"]) > end]:
+                problems.append(f"events after period_end never fire: {late[:3]}")
+    elif events:
+        problems.append("events need a period_end: without one there is no wait tool and no event fires")
     if (info.get("user_card") or info.get("requester_services")) and not requester:
         problems.append(
             "multi-turn rows (user_card or requester_services) need requester_base_url and requester_model"
@@ -312,13 +323,23 @@ def resolve_records(info: dict) -> list[str]:
         except Exception as err:  # noqa: BLE001  any failure refuses the row, with the error
             problems.append(f"unresolvable: event at {e['at']} does not apply: {type(err).__name__}: {err}"[:300])
             break
+    else:
+        for a in info.get("assertions", []) if info.get("events") else []:
+            if a.get("type") in DAY_ASSERTIONS or "excluded" in a or a.get("scored") is False:
+                continue
+            if AssertionRegistry.check(seed, a) != AssertionRegistry.check(scratch, a):
+                problems.append(
+                    f"event-dependent: a dated event changes {a['type']}: set excluded: true to skip it, "
+                    "or excluded: false if the agent must make it hold at period_end"
+                )
     for a in info.get("assertions", []):
         if a.get("type") not in DAY_ASSERTIONS:
             continue
         name = str(a["record"])
         found, tabs = names.get(name, set()), {}
         if not found and (ref := ROW_REF.fullmatch(name)):
-            tabs = _sheet_rows(world, ref, sheets)
+            # Read rows from the world after the events, so a row an event adds resolves too.
+            tabs = _sheet_rows(scratch.model_dump(mode="json"), ref, scratch.google_sheets)
             found = set().union(*tabs.values()) if len(tabs) == 1 else set()
         if len(found) == 1 or (len(tabs) == 1 and found):
             a["targets"] = sorted(found)
@@ -373,7 +394,7 @@ class Clock:
 
     def wait(self, until: str) -> str:
         """Move to `until` (capped at the end of the task's period), applying every event due by then."""
-        target = min(_time(until), self.end)
+        target = min(_time(until, self.zone), self.end)
         if target <= self.now():
             return json.dumps({"now": self._local(self.now()), "advanced": False})
         while self.events and _time(self.events[0]["at"]) <= target:
@@ -481,14 +502,14 @@ def day_check(log: list[dict], assertion: dict) -> bool:
 
 def headline(initial_state: dict, world: WorldState, log: list[dict], assertions: list[dict]) -> float:
     """Guardrail-gated share of objectives over world and day assertions, split as AutomationBench's headline splits
-    them. Every `not_acted` is a guardrail, and a broken guardrail scores the task 0."""
+    them. A `not_acted` is a guardrail unless it sets `excluded: false`, and a broken guardrail scores the task 0."""
     initial = WorldState(**strip_none_values(initial_state))
     passed = total = 0
     for a in assertions:
         if a.get("scored") is False or a.get("excluded") is True:
             continue
         if a["type"] in DAY_ASSERTIONS:
-            result, guardrail = day_check(log, a), a["type"] == "not_acted"
+            result, guardrail = day_check(log, a), a["type"] == "not_acted" and a.get("excluded") is not False
         else:
             result = AssertionRegistry.check(world, a)
             guardrail = AssertionRegistry.check(initial, a) and a.get("excluded") is not False
@@ -544,11 +565,13 @@ def replay(info: dict, calls: list[dict]) -> float:
             clock.wait(call["wait"])
         else:
             clock.fetch(call["method"], call["url"], call.get("params"), call.get("body"))
+    clock.wait(clock.end.replace(tzinfo=timezone.utc).isoformat())
     return headline(info["initial_state"], world, clock.log, info["assertions"])
 
 
-def requester_tool(world: WorldState, services: list[str], name: str, arguments: str) -> str:
-    """Run one requester tool call: api_search, or api_fetch with only the requester's own services connected."""
+def requester_tool(clock: Clock, services: list[str], name: str, arguments: str) -> str:
+    """Run one requester tool call: api_search, or api_fetch with only the requester's own services connected. Writes go
+    through the clock, so day assertions see a step the agent handed over."""
     from automationbench.tools.api import api_search
 
     try:
@@ -557,10 +580,11 @@ def requester_tool(world: WorldState, services: list[str], name: str, arguments:
             return api_search(str(args.get("query", "")), int(args.get("top_k") or 5))
         if name != "api_fetch":
             return json.dumps({"error": f"no tool named {name}"})
+        world = clock.world
         saved, world.meta.allowed_services = world.meta.allowed_services, list(services)
         try:
-            return upstream_api_fetch(
-                world, str(args.get("method", "GET")), str(args.get("url", "")), args.get("params"), args.get("body")
+            return clock.fetch(
+                str(args.get("method", "GET")), str(args.get("url", "")), args.get("params"), args.get("body")
             )
         finally:
             world.meta.allowed_services = saved
@@ -592,6 +616,7 @@ def reward(state, **kwargs) -> float:
     verifier error instead of scoring it 0."""
     if state.get("violation") or state.get("env_row_invalid"):
         return 0.0
+    state["clock"].wait(state["clock"].end.replace(tzinfo=timezone.utc).isoformat())
     return headline(state["initial_state"], state["world"], state["clock"].log, state["info"]["assertions"])
 
 
@@ -782,7 +807,7 @@ def load_environment(
             ]
             last = state["trajectory"][-1]
             for m in prompt[first + 1 :] + list(last["prompt"])[len(prompt) :] + list(last["completion"]):
-                role, text = _get(m, "role"), _text(_get(m, "content"))
+                role, text = _get(m, "role"), _text(_get(m, "content"))[:REQUESTER_RESULT_CHARS]
                 if role in ("assistant", "user") and text:
                     msgs.append({"role": "user" if role == "assistant" else "assistant", "content": text})
             return msgs
@@ -849,7 +874,7 @@ def load_environment(
                 for call in message["tool_calls"]:
                     fn = call["function"]
                     if remaining > 0:
-                        result = requester_tool(world, services, fn["name"], fn.get("arguments"))
+                        result = requester_tool(state["clock"], services, fn["name"], fn.get("arguments"))
                         remaining -= 1
                         state["requester_tool_calls"] = state.get("requester_tool_calls", 0) + 1
                     else:

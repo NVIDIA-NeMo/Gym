@@ -15,8 +15,8 @@ tasks are shipped or used. One environment serves three kinds of rows, chosen by
 The `wait` tool moves the clock forward, and each dated event (an approval arrives, a ticket is reopened) is applied
 when the clock passes its time, so the agent has to wait for the right day, read the world again and act then.
 `events` is `[{"at": iso time, "patch": {...}}]`: a patch sets fields on a record (`app`, `collection`, `id`, `set`) or
-adds one (`app`, `collection`, `add`). The `wait` reply gives the new time in the seed's zone (naive UTC for a naive
-seed).
+adds one (`app`, `collection`, `add`). A naive time the agent waits until is read in the seed's zone, and the `wait`
+reply gives the new time in that zone (naive UTC for a naive seed).
 
 Every `api_fetch` write that changes the world is logged with the simulated time and the records it added, changed or
 deleted. A failed write or a read-only POST (a search) is not an act. Two more assertion types grade when the agent
@@ -24,7 +24,7 @@ acted:
 
 - `acted_on_day` (`record`, `day`, optional `body_contains`): the first write that changed `record` happened on `day`
   (YYYY-MM-DD, in the zone of the seed's `meta.current_time`). Acting early fails it.
-- `not_acted` (`record`): no write changed `record`. It is a guardrail.
+- `not_acted` (`record`): no write changed `record`. It is a guardrail, or an objective when it sets `excluded: false`.
 
 `record` names a record of the seed or one an event adds: by its key (`id`, else `sid`, else the collection's primary
 key such as Xero's `contact_id`), a Jira issue by its `key` (`OPS-1`), a sheet row by its `row_id` or `id`. A string
@@ -39,10 +39,13 @@ an action log and no records (Trello, Notion, Asana, ...) cannot be graded with 
 
 Load checks every row and leaves out the ones that cannot be graded, logging the count (it fails only when no row is
 left): a `record` that names nothing or more than one record, an `acted_on_day` `day` that is not YYYY-MM-DD, a
-multi-day row without its two wait texts or with a time that is not ISO 8601, a dated event that cannot apply to the
-seed (load runs the events in time order on a copy of it), and a world assertion on a field the simulator stamps from
-the wall clock (see Limitations). Each rollout repeats these checks on the row Gym sends it, so a refused row that still
-arrives ends before its first turn, masked as `env_row_invalid`, never a server error.
+multi-day row without its two wait texts, without the seed's `meta.current_time` or with a time that is not ISO 8601, a
+`period_end` not after the seed's time, events without a `period_end` or after it, a dated event that cannot apply to
+the seed (load runs the events in time order on a copy of it), a world assertion that those events alone change (set
+`excluded: true` to skip it, or `excluded: false` if the agent must make it hold at `period_end`), and a world
+assertion on a field the simulator stamps from the wall clock (see Limitations). Each rollout repeats these checks on
+the row Gym sends it, so a refused row that still arrives ends before its first turn, masked as `env_row_invalid`,
+never a server error.
 
 An event on a record the agent (or the requester it asked) deleted is skipped and the rollout is scored. An event that
 still fails when it fires, or a requester that fails after `requester_max_tries`, ends the episode with
@@ -57,20 +60,23 @@ When the agent ends a turn without tool calls, a requester model answers as the 
   add (at most `max_user_turns` replies).
 - `requester_services`: apps only the requester can use. They leave the agent's connected services, and when the agent
   asks, the requester operates them with `api_search` and `api_fetch` (at most `max_requester_tool_calls` calls per
-  reply) and reports back. The agent has to hand those steps over with every value they need.
+  reply) and reports back. The agent has to hand those steps over with every value they need. The requester's writes
+  are logged like the agent's, so `acted_on_day` and `not_acted` see them.
 
 The requester is any OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`), called through Gym's
-HTTP client, and sees only the visible conversation, never reasoning or tool traffic. `requester_body` fields are
-merged over the built-in sampling values. A key, if the endpoint needs one, is read from the environment variable named
-by `requester_api_key_env` or the file at `requester_api_key_file` and sent as a Bearer token. Each try ends after
-`requester_timeout_s` (default 300). Multi-turn rows do not load without `requester_base_url` and `requester_model`.
+HTTP client, and sees only the visible conversation (each message cut to `REQUESTER_RESULT_CHARS`), never reasoning or
+tool traffic. `requester_body` fields are merged over the built-in sampling values. A key, if the endpoint needs one,
+is read from the environment variable named by `requester_api_key_env` or the file at `requester_api_key_file` and sent
+as a Bearer token. Each try ends after `requester_timeout_s` (default 300). Multi-turn rows do not load without
+`requester_base_url` and `requester_model`.
 
 ## Reward and metrics
 
 The reward is the guardrail-gated share of objectives over the world and day assertions, with the same split as
-AutomationBench's headline: a broken guardrail scores 0, otherwise the score is the share of objectives met. With
-`unavailable_call_break: true`, a call to a tool the agent was not given, or to a service not connected for it (a
-requester-owned app included), also breaks a guardrail.
+AutomationBench's headline: a broken guardrail scores 0, otherwise the score is the share of objectives met. A
+multi-day row is graded at `period_end`: the clock runs to it first, so an event the agent did not wait for still
+applies. With `unavailable_call_break: true`, a call to a tool the agent was not given, or to a service not connected
+for it (a requester-owned app included), also breaks a guardrail.
 
 Metrics: `user_turns`, `requester_failed`, `env_row_invalid`, `empty_turn`, `unknown_tool_calls`, `out_of_scope_calls`,
 `requester_service_calls`, `requester_tool_calls`, `violation`.
