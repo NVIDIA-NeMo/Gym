@@ -118,6 +118,11 @@ The patch to include prompt and generation token ids for preventing retokenizati
 
 For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `gym env start` after any environment changes to ensure the pinned version of verifiers is used.
 
+With observability on, each rollout's trajectory has a tool call record per call the model made. verifiers runs
+the tool loop, so the agent times each call where a verifiers tool environment runs it (`call_tool`), in this
+process: `timing_source: executor`, with `failed` when the tool raised. A call verifiers never ran, such as one with
+arguments that do not parse, has no timing and a `tool_timing_unavailable` gap.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A

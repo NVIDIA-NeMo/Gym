@@ -31,11 +31,14 @@ from nemo_gym.core import FailureReportRow, StageOutcomePolicyConfig, model_samp
 from nemo_gym.core.outcome_policy import is_policy_counted_zero
 from nemo_gym.rollouts.rollout_recovery import masked_infrastructure_kind
 from responses_api_agents.verifiers_agent.app import (
+    _TOOL_CALL_TIMINGS,
     VerifiersAgent,
     VerifiersAgentConfig,
     _as_response_usage,
     _NoStoreCookieJar,
     _rollout_error_fact,
+    _time_tool_calls,
+    _ToolCallTiming,
 )
 from responses_api_agents.verifiers_agent.app import (
     logger as agent_app_logger,
@@ -552,8 +555,17 @@ class TestRolloutObservability:
         assert client.recorded_usage.output_tokens == 8
         assert client.recorded_usage.total_tokens == 38
 
-    def _trajectory_for(self, output: list[dict], response_ids: list[str]):
+    def _trajectory_for(
+        self, output: list[dict], response_ids: list[str], tool_timings: dict[str, _ToolCallTiming] | None = None
+    ):
         agent = self._agent()
+        if tool_timings is None:
+            # As if the tool environment ran every call the output names.
+            tool_timings = {
+                item["call_id"]: _ToolCallTiming("t", 100.0, 100.5, 500.0, "completed", None)
+                for item in output
+                if item.get("type") == "function_call"
+            }
         return agent._build_trajectory(
             invocation_id="inv-1",
             task_id="0",
@@ -562,6 +574,7 @@ class TestRolloutObservability:
             response_ids=response_ids,
             conversation=[],
             status="completed" if response_ids else "incomplete",
+            tool_timings=tool_timings,
         )
 
     @staticmethod
@@ -620,6 +633,60 @@ class TestRolloutObservability:
 
         assert len(trajectory.turns) == 1
         assert trajectory.turns[0].answer == []
+
+    def test_each_tool_call_has_one_executor_timing_and_the_model_call_of_its_turn(self) -> None:
+        output = [
+            {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "api_fetch", "arguments": "{}"},
+            {"type": "function_call", "id": "fc_2", "call_id": "c2", "name": "api_fetch", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "done"},
+            {"type": "function_call_output", "call_id": "c2", "output": "boom"},
+            {"type": "function_call", "id": "fc_3", "call_id": "c3", "name": "search", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c3", "output": "found"},
+        ]
+        timings = {
+            "c1": _ToolCallTiming("api_fetch", 10.0, 10.2, 200.0, "completed", None),
+            "c2": _ToolCallTiming("api_fetch", 10.2, 10.3, 100.0, "failed", "RuntimeError"),
+            "c3": _ToolCallTiming("search", 11.0, 11.5, 500.0, "completed", None),
+        }
+
+        trajectory = self._trajectory_for(output, ["chatcmpl-a", "chatcmpl-b"], timings)
+
+        assert [
+            (tool.tool_call_id, tool.model_call_ref.response_id, tool.status, tool.error_type)
+            for tool in trajectory.tool_calls
+        ] == [
+            ("c1", "chatcmpl-a", "completed", None),
+            ("c2", "chatcmpl-a", "failed", "RuntimeError"),
+            ("c3", "chatcmpl-b", "completed", None),
+        ]
+        assert all(tool.timing_source == "executor" for tool in trajectory.tool_calls)
+        assert [(tool.started_at, tool.completed_at, tool.duration_ms) for tool in trajectory.tool_calls] == [
+            (10.0, 10.2, 200.0),
+            (10.2, 10.3, 100.0),
+            (11.0, 11.5, 500.0),
+        ]
+        assert trajectory.gaps == []
+
+    def test_a_call_the_tool_environment_never_ran_has_no_timing_and_a_gap(self) -> None:
+        """verifiers answers a call whose arguments do not parse without running the tool."""
+        output = [
+            {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "api_fetch", "arguments": "not json"},
+            {"type": "function_call_output", "call_id": "c1", "output": "Expecting value"},
+            {"type": "function_call", "id": "fc_2", "call_id": "c2", "name": "api_fetch", "arguments": "{}"},
+        ]
+
+        trajectory = self._trajectory_for(output, ["chatcmpl-a", "chatcmpl-b"], {})
+
+        assert [
+            (tool.tool_call_id, tool.status, tool.started_at, tool.timing_source) for tool in trajectory.tool_calls
+        ] == [
+            ("c1", "completed", None, None),
+            ("c2", "incomplete", None, None),
+        ]
+        assert [(gap.code, gap.detail) for gap in trajectory.gaps] == [
+            ("tool_timing_unavailable", "c1"),
+            ("tool_timing_unavailable", "c2"),
+        ]
 
     def test_a_rollout_with_no_model_calls_reports_a_gap(self) -> None:
         """Every call failing must not look like an ordinary empty trajectory."""
@@ -1166,3 +1233,117 @@ def test_usage_reports_cache_reads_only_when_the_model_does(prompt_tokens_detail
         }
     )
     assert _as_response_usage(usage).input_tokens_details.cached_tokens == expected
+
+
+class TestToolCallTiming:
+    """verifiers runs the tool loop; the agent times each call where verifiers' tool environment runs it."""
+
+    @staticmethod
+    def _tool_env():
+        import verifiers as vf
+        from datasets import Dataset
+
+        async def lookup(key: str) -> str:
+            await asyncio.sleep(0.02)
+            return key.upper()
+
+        def broken() -> str:
+            raise RuntimeError("tool crashed")
+
+        env = vf.ToolEnv(tools=[lookup, broken], dataset=Dataset.from_dict({"question": ["q"], "answer": ["a"]}))
+        _time_tool_calls(env)
+        _time_tool_calls(env)  # once per environment, however often it is loaded
+        return env
+
+    @staticmethod
+    def _assistant(*calls: tuple[str, str, str]):
+        import verifiers as vf
+
+        return vf.AssistantMessage(
+            content=None, tool_calls=[vf.ToolCall(id=i, name=name, arguments=args) for i, name, args in calls]
+        )
+
+    async def test_each_call_the_environment_runs_is_timed_for_its_own_rollout(self) -> None:
+        env = self._tool_env()
+
+        async def rollout(prefix: str) -> dict[str, _ToolCallTiming]:
+            timings: dict[str, _ToolCallTiming] = {}
+            token = _TOOL_CALL_TIMINGS.set(timings)
+            try:
+                message = self._assistant(
+                    (f"{prefix}1", "lookup", '{"key": "x"}'),
+                    (f"{prefix}2", "broken", "{}"),
+                    (f"{prefix}3", "lookup", "not json"),
+                )
+                replies = await env.env_response([message], {})
+            finally:
+                _TOOL_CALL_TIMINGS.reset(token)
+            assert [reply.tool_call_id for reply in replies] == [f"{prefix}1", f"{prefix}2", f"{prefix}3"]
+            return timings
+
+        first, second = await asyncio.gather(rollout("a"), rollout("b"))
+
+        for prefix, timings in (("a", first), ("b", second)):
+            # The call whose arguments did not parse never reached the tool: no timing.
+            assert set(timings) == {f"{prefix}1", f"{prefix}2"}
+            ok, failed = timings[f"{prefix}1"], timings[f"{prefix}2"]
+            assert (ok.tool_name, ok.status, ok.error_type) == ("lookup", "completed", None)
+            assert ok.duration_ms >= 15 and ok.started_at <= ok.completed_at
+            assert (failed.status, failed.error_type) == ("failed", "RuntimeError")
+
+    async def test_without_a_rollout_collector_calls_run_untimed(self) -> None:
+        env = self._tool_env()
+
+        (reply,) = await env.env_response([self._assistant(("c1", "lookup", '{"key": "x"}'))], {})
+
+        assert reply.content == "X"
+
+    def test_the_response_carries_the_timed_calls_through_the_route(self) -> None:
+        env = self._tool_env()
+
+        async def run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            # What verifiers does between two model calls: run the turn's tool calls.
+            calls = [("c1", "lookup", '{"key": "x"}'), ("c2", "broken", "{}")]
+            replies = await env.env_response([self._assistant(*calls)], {})
+            completion = [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": i, "type": "function", "function": {"name": name, "arguments": args}}
+                        for i, name, args in calls
+                    ],
+                },
+                *({"role": "tool", "tool_call_id": r.tool_call_id, "content": str(r.content)} for r in replies),
+            ]
+            return [{"reward": 1.0, "metrics": {}, "completion": completion, "trajectory": []}]
+
+        env.run_group = run_group
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: True}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value="http://policy/v1"),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/ng-rollout/7-2/v1/responses",
+                json={"task_idx": 0, "responses_create_params": {"input": [{"role": "user", "content": "hi"}]}},
+            )
+
+        assert response.status_code == 200, response.text
+        tools = response.json()["ng_trajectory"]["tool_calls"]
+        assert [(tool["tool_call_id"], tool["status"], tool["timing_source"]) for tool in tools] == [
+            ("c1", "completed", "executor"),
+            ("c2", "failed", "executor"),
+        ]
+        assert all(tool["started_at"] is not None and tool["duration_ms"] is not None for tool in tools)
