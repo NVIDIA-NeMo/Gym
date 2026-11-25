@@ -103,7 +103,8 @@ curl -fsSL --retry 3 "${node_dist}/${archive}" -o "$archive"
 curl -fsSL --retry 3 "${node_dist}/SHASUMS256.txt" -o SHASUMS256.txt
 awk -v archive="$archive" '$2 == archive' SHASUMS256.txt | sha256sum -c -
 mkdir -p node
-tar -xzf "$archive" --strip-components=1 -C node
+# A root in a user namespace (rootless Podman) cannot take the archive's owner, uid 1000.
+tar --no-same-owner -xzf "$archive" --strip-components=1 -C node
 if [ "$platform" = linux-x64-musl ] && ! "$runtime/node/bin/node" --version; then
   # Confine the newer C++ runtime to our Node binary, preserving task libraries.
   command -v patchelf >/dev/null 2>&1 || install_packages patchelf

@@ -10,6 +10,7 @@ from fastapi import Request
 from benchmarks.model_identity.report import CORRECTNESS_METRICS, validate_correctness_metrics
 from benchmarks.model_identity.scoring import INFORMATIONAL_KINDS, OTHER_MISTAKE_KINDS, score_model_identity
 from benchmarks.model_identity.usersim_api import scorer_state
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, _ResourcesModelFacade
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
@@ -96,3 +97,5 @@ class ModelIdentityResourcesServer(UserSimResourcesServer):
 
 if __name__ == "__main__":
     ModelIdentityResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = ModelIdentityResourcesServer.run_webserver()  # noqa: F401

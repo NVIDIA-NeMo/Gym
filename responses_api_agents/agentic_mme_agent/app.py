@@ -6,12 +6,13 @@
 import asyncio
 import itertools
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import cv2
 from aiohttp import ClientError, ClientResponseError
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
@@ -45,8 +46,11 @@ from nemo_gym.core import (
 from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_mme.app import TOOL_TRACE_METRICS_KEY, AgenticMMEVerifyResponse
-from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema
+from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, InputImageError, function_schema
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 # Refusals that measure the policy: its own tool images and history outgrew the context or the
@@ -72,6 +76,18 @@ class PolicyRequestError(RuntimeError):
     the failures sidecar and retries it, instead of scoring the model 0."""
 
 
+class TaskInputRejectedError(HTTPException, ValueError):
+    """The task's input cannot run in this agent: no input image, or one the image workspace refuses
+    (unsupported or undecodable data URL, or over max_image_pixels / max_total_image_pixels).
+
+    FastAPI answers it with HTTP 422. The task row is at fault, so a retry fails the same way; a caller that
+    tells request errors from server errors (NeMo RL counts 5xx as infrastructure and retries it) records a
+    data failure naming the row's problem. It is also a ``ValueError`` for direct callers."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(422, detail)
+
+
 class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -84,6 +100,11 @@ class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent_rollouts: int = Field(default=8, ge=1)
     max_image_pixels: int = Field(default=16_000_000, ge=1)
     max_total_image_pixels: int = Field(default=64_000_000, ge=1)
+    # An input image over max_image_pixels: False (the default) rejects the task with HTTP 422; True scales the
+    # image down to max_image_pixels, keeping its aspect ratio, and logs it. The model's own request still carries
+    # the original image. The tools take 0-1000 coordinates, so they behave the same, at lower detail. Data
+    # prepared by benchmarks/agentic_mme/prepare.py is already within 2048x2048.
+    downscale_oversized_input_images: bool = False
     # Images per model request (input images plus tool images; every image stays in every later
     # request). None (the default) sets no limit. Set it to the serving engine's per-prompt image
     # limit (vLLM limit_mm_per_prompt.image): an image tool call past it returns a tool error, so the
@@ -211,6 +232,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                 max_pixels=self.config.max_image_pixels,
                 max_total_pixels=self.config.max_total_image_pixels,
                 max_images=self.config.max_images_per_request,
+                downscale_inputs=self.config.downscale_oversized_input_images,
             )
             return await self._episode_with_workspace(params, cookies, replay, workspace, model_url_path)
 
@@ -231,9 +253,21 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             if isinstance(content, list):
                 for part in content:
                     if part.get("type") == "input_image":
-                        await asyncio.to_thread(workspace.load, part["image_url"])
+                        try:
+                            await asyncio.to_thread(workspace.load, part["image_url"])
+                        except InputImageError as error:
+                            raise TaskInputRejectedError(f"Agentic-MME input image refused: {error}") from error
         if not workspace.images:
-            raise ValueError("Agentic-MME requires at least one input image")
+            raise TaskInputRejectedError("Agentic-MME requires at least one input image")
+        for (width, height), (new_width, new_height) in workspace.downscaled_inputs:
+            logger.warning(
+                "Agentic-MME input image %dx%d is over max_image_pixels=%d; the tools use it at %dx%d",
+                width,
+                height,
+                self.config.max_image_pixels,
+                new_width,
+                new_height,
+            )
         tools = self.tool_schemas()
         # Inputs contain task prompts only; verifier metadata never enters model context.
         params = NeMoGymResponseCreateParamsNonStreaming.model_validate(

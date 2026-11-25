@@ -250,8 +250,13 @@ async def test_concurrent_dispatch_uses_per_row_model_capture_urls(tmp_path, mon
     }
     monkeypatch.setattr(skillsbench_app, "get_global_config_dict", lambda: global_config)
     monkeypatch.setattr(app, "get_global_config_dict", lambda: global_config)
+    config = _config(False)
+    # Each run reads its task's agent budget from the prepared task folder.
+    config.job.datasets[0].path = tmp_path / "tasks"
+    (tmp_path / "tasks" / "example").mkdir(parents=True)
+    (tmp_path / "tasks" / "example" / "task.toml").write_text("[agent]\ntimeout_sec = 600\n")
     agent = SkillsBenchHarborAgent.model_construct(
-        config=_config(False), server_client=SimpleNamespace(global_config_dict=global_config)
+        config=config, server_client=SimpleNamespace(global_config_dict=global_config)
     )
     template = agent.config.job.model_dump(mode="json")
     submitted = []
@@ -356,6 +361,35 @@ def test_the_leaf_sets_the_llm_request_timeout_and_keeps_the_task_agent_budgets(
     assert (kwargs.llm_timeout_s, kwargs.llm_num_retries) == (3600, 5)
     # Each task's own [agent] timeout_sec is the benchmark's budget; Harbor scales it by this unchanged multiplier.
     assert job.agent_timeout_multiplier == 1.0 and "override_timeout_sec" not in job.agents[0]
+
+
+@pytest.mark.parametrize("multiplier", [1.0, 1.5])
+def test_each_run_bounds_openhands_by_its_task_agent_deadline(tmp_path, monkeypatch, multiplier):
+    from harbor.agents.factory import AgentFactory
+
+    from benchmarks.skillsbench.prepare import task_toml
+
+    sandbox = {"network_mode": "public", "build_timeout_sec": 600, "cpus": 1, "memory_mb": 2048, "storage_mb": 4096}
+    # 7200 s is the longest official agent budget at the pinned task revision.
+    definition = {"verifier": {"timeout_sec": 900}, "agent": {"timeout_sec": 7200}, "sandbox": sandbox | {"gpus": 0}}
+    (tmp_path / "long-task").mkdir()
+    (tmp_path / "long-task" / "task.toml").write_text(task_toml("long-task", definition))
+    global_config = {"policy_model": {"responses_api_models": {"vllm_model": {"host": "127.0.0.2", "port": 9010}}}}
+    monkeypatch.setattr(skillsbench_app, "get_global_config_dict", lambda: global_config)
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: global_config)
+    config = _config(opensandbox=False)
+    config.job.datasets[0].path = tmp_path
+    config.job.agent_timeout_multiplier = multiplier
+    agent = SkillsBenchHarborAgent.model_construct(
+        config=config, server_client=SimpleNamespace(global_config_dict=global_config)
+    )
+    job = agent.config.build_job_config("long-task", "t0-r0")
+    body = HarborRunRequest(
+        task_name="long-task", task_index=0, rollout_index=0, responses_create_params={"input": []}
+    )
+    agent._configure_job_for_run(job, body)
+    openhands = AgentFactory.create_agent_from_config(job.agents[0], logs_dir=tmp_path / "agent")
+    assert openhands.agent_timeout_sec == 7200 * multiplier
 
 
 def test_opensandbox_recovers_process_oom_without_changing_task_limits():

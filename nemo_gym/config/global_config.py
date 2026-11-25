@@ -98,6 +98,12 @@ ray_version = _installed_version("ray")
 _GLOBAL_CONFIG_DICT = None
 _SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
+# Names a file that holds the config, for a config too long for an environment variable.
+NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT_FILE"
+# Linux refuses to start a process ("Argument list too long") when one environment variable is longer than 32
+# memory pages, which is 128 KiB with 4 KiB pages, the smallest page size. A config near that length reaches a
+# server in a file.
+MAX_CONFIG_DICT_ENV_BYTES = 120 * 1024
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
@@ -240,11 +246,13 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "codex_agent",
         "copilot_agent",
         "crewai_agent",
+        "direct_vision_agent",
         "droid_agent",
         "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
+        "legal_agent_bench_native",
         "kilocode_agent",
         "langchain_deepagents_agent",
         "kimi_code_agent",
@@ -604,7 +612,18 @@ class GlobalConfigDictParser(BaseModel):
         original_get_args_parser = hydra_main_module.get_args_parser
 
         def new_get_args_parser():
-            parser: ArgumentParser = original_get_args_parser()
+            # Python 3.14's argparse checks each help string in add_argument and rejects hydra-core 1.3.x's
+            # `--shell-completion`, whose help is an object rather than a str ("badly formed help string"). The check
+            # is skipped only while hydra builds its parser; Gym replaces hydra's help, so that string is never shown.
+            # hydra-core 1.4 applies the same workaround itself; remove this once Gym requires hydra-core>=1.4.
+            original_check_help = getattr(ArgumentParser, "_check_help", None)
+            if original_check_help is not None:
+                ArgumentParser._check_help = lambda self, action: None
+            try:
+                parser: ArgumentParser = original_get_args_parser()
+            finally:
+                if original_check_help is not None:
+                    ArgumentParser._check_help = original_check_help
             # Set the conflict handlers to resolve so we can disable the help.
             parser.conflict_handler = "resolve"
             for action_group in parser._action_groups:
@@ -2158,7 +2177,8 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
     """The global config dict when this process already has one; never triggers a CLI parse.
 
     Returns the cached dict, or the one the parent injected via
-    NEMO_GYM_CONFIG_DICT (caching it), or None in a bare process. Library code
+    NEMO_GYM_CONFIG_DICT or the file NEMO_GYM_CONFIG_DICT_FILE names (caching it),
+    or None in a bare process. Library code
     that only wants to *consult* the config should use this instead of
     `get_global_config_dict`, which falls through to a full CLI/hydra parse.
     """
@@ -2167,6 +2187,9 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
         return _GLOBAL_CONFIG_DICT
 
     nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    config_dict_file = getenv(NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME)
+    if not nemo_gym_config_dict_str_from_env and config_dict_file:
+        nemo_gym_config_dict_str_from_env = Path(config_dict_file).read_text(encoding="utf-8")
     if nemo_gym_config_dict_str_from_env:
         global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
 
@@ -2225,7 +2248,7 @@ def get_global_config_dict(
 
     Then, the global config dict will be cached and reused.
 
-    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME. The config dict will be read directly off this variable, cached, and returned with no additional validation.
+    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, or with NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME naming a file for a config too long for a variable. The config dict will be read directly off this variable or file, cached, and returned with no additional validation.
     """
     existing_global_config_dict = maybe_get_global_config_dict()
     if existing_global_config_dict is not None:

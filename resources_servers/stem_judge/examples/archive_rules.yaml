@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+stem_judge:
+  resources_servers:
+    stem_judge:
+      extra_answer_rules:
+        - For archive classes, accept K-17 as an alias for Blue Ledger.

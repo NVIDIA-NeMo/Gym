@@ -31,10 +31,10 @@ flock 9
 staging=$(mktemp -d "$runtime.install.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
 if [ -n "$runtime_archive" ]; then
-    tar -xzf "$runtime_archive" -C "$staging"
+    tar --no-same-owner -xzf "$runtime_archive" -C "$staging"
 else
     echo "$node_sha256  $node_archive" | sha256sum -c -
-    tar -xzf "$node_archive" -C "$staging" --strip-components=1
+    tar --no-same-owner -xzf "$node_archive" -C "$staging" --strip-components=1
     # npm's cache and logs stay in the staging directory, out of the task's HOME.
     HOME="$staging/.npm-home" npm_config_cache="$staging/.npm-cache" PATH="$staging/bin:$PATH" \
         "$staging/bin/node" "$staging/lib/node_modules/npm/bin/npm-cli.js" install --global --prefix "$staging" \

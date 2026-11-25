@@ -77,6 +77,7 @@ from nemo_gym.rollouts.rollout_records import (
     REJUDGED_FAILURE_ID_KEY,
     RUN_ID_KEY,
     coverage_path_for,
+    is_parsed_judge_abstention,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
@@ -1429,7 +1430,7 @@ def bind_judge_failures(
     spent = set()
     for row in store.failures():
         identity = logical_rollout_id(row)
-        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
+        if _is_judge_failure(row) and store._state.failure_count(identity) >= cap:
             if not skip_spent:
                 raise ConfigError(
                     f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
@@ -1444,7 +1445,7 @@ def bind_judge_failures(
         "failures": {
             logical_rollout_id(row): row
             for row in store.failures()
-            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
+            if _is_judge_failure(row) and logical_rollout_id(row) not in spent
         }
         | saved_results,
         "saved_results": set(saved_results),
@@ -1556,7 +1557,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
     the binding. A judged identity that the binding does not hold, a changed manifest or materialized input, or a
     failure that is no longer the selected outcome is refused. A bound saved result replaces its grade only with a
     result that binds the same saved answer and attempt (``is_rejudgment_of``); one whose re-verification answered
-    without a grade keeps its saved row, and its admission is withdrawn.
+    without a grade or a parsed abstention keeps its saved row, and its admission is withdrawn.
 
     Each settlement is recorded in ``binding["settled_operations"]`` (this pass's admission operation ids) as soon as
     it is fsynced, and each completed withdrawal in ``binding["withdrawn_operations"]``, so a pass that raises
@@ -1604,7 +1605,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         if binding["admitted"][identity].operation_id in done:
             continue  # this pass settled or withdrew it before an error
         if _ungraded_reverification(result) and (
-            identity in saved_results or result.get(NG_FAILURE_CLASS_KEY) != "judge_failed"
+            identity in saved_results or not matches_failure_class(result, {JUDGE_FAILED_FAILURE_CLASS})
         ):
             # The verifier answered without a grade or a judge failure: the bound row stays as it was, and nothing
             # is saved. A judge failure that failed to judge again is saved below as its re-judgment's outcome.
@@ -1667,11 +1668,11 @@ def _validate_rescored_completion(result: object) -> None:
 
 
 def _ungraded_reverification(result: Dict[str, Any]) -> bool:
-    """Whether a re-verification answered without a usable grade: a failure, a mask or no finite reward."""
+    """Whether the re-verification returned neither a usable grade nor a parsed abstention."""
     reward = result.get("reward")
     return (
         result.get(NG_FAILURE_CLASS_KEY) is not None
-        or bool(result.get("mask_sample"))
+        or (bool(result.get("mask_sample")) and not is_parsed_judge_abstention(result))
         or result.get("evaluation_completed") is False
         or type(reward) not in (int, float)
         or not math.isfinite(reward)
@@ -2014,6 +2015,9 @@ class RolloutReverificationHelper(BaseModel):
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                if "instance_config" in row:
+                    # Preserve the materialized task's training mask when the verifier omits this field.
+                    result.setdefault("instance_config", row["instance_config"])
                 for key in (AGENT_REF_KEY_NAME, *_IDENTITY_KEYS):
                     if key in row:
                         result[key] = row[key]
