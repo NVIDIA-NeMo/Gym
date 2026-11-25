@@ -387,7 +387,7 @@ class TestSchemaOnly:
         report = validate_jsonl_rows(
             "bird_sql", TypeAdapter(TaskData), "birdbench_sqlite_dev_schema_only.jsonl", lines
         )
-        assert report.error_rows == 0 and "task_id" not in report.unknown_keys
+        assert report.clean, report.summary()
 
     def test_no_descriptions_leaves_the_dump(self, tmp_path):
         db = tmp_path / "db1"
@@ -396,3 +396,28 @@ class TestSchemaOnly:
         assert birdbench_prepare.schema_only_context(tmp_path, "db1") == (
             "BEGIN TRANSACTION;\nCREATE TABLE t (a INTEGER);\nCOMMIT;"
         )
+
+
+class TestTaskDataSchema:
+    """Every prepared row shape is clean against bird_sql's TaskData, as strict collation
+    (``task_data_validation=error``) requires: no unknown keys, not just no failed rows."""
+
+    @staticmethod
+    def _report(rows):
+        lines = [json.dumps(r) for r in rows]
+        return validate_jsonl_rows("bird_sql", TypeAdapter(TaskData), "birdbench_sqlite_dev.jsonl", lines)
+
+    @pytest.mark.parametrize("prompt_format", ["default", "schema_only"])
+    @pytest.mark.parametrize("version", ["dev_20240627", "dev_test"])
+    def test_every_prepared_shape_is_clean(self, prepared, release, version, prompt_format):
+        entries = [_q(7, evidence="e7"), _q(9, question="Q9")]
+        release(entries)
+        report = self._report(prepared(entries, version=version, prompt_format=prompt_format))
+        assert report.clean, report.summary()
+
+    def test_a_misspelled_field_is_still_reported(self, prepared, release):
+        release([_q(7)])
+        rows = prepared([_q(7)], version="dev_test", prompt_format="schema_only")
+        rows[0]["bird_versoin"] = rows[0].pop("bird_version")
+        report = self._report(rows)
+        assert not report.clean and report.unknown_keys == {"bird_versoin": 1}

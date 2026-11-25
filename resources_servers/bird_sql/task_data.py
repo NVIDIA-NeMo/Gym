@@ -6,7 +6,9 @@ All task data rides at the top level; there is no verifier_metadata. Mirrors
 ``BirdSqlVerifyRequest`` (app.py): ``question``/``gt_sql``/``db_id`` are wire-required,
 ``difficulty``/``id`` are wire-Optional. ``sql_context`` (a large CREATE TABLE DDL string used
 only as prompt context) is UNDECLARED on today's wire model — it rides through
-``extra="allow"`` and is echoed back — so it is declared here as an optional prompt field.
+``extra="allow"`` and is echoed back — so it is declared here as an optional prompt field. So are the
+fields only some prepared files carry: ``evidence_section`` (the schema-only prompt) and ``question_id``/
+``bird_version`` (a named BIRD dev version, or the schema-only prompt); see benchmarks/birdbench/prepare.py.
 """
 
 from typing import Optional
@@ -54,4 +56,28 @@ class TaskData(BaseModel):
             "context. Not read by verify(); undeclared on today's wire model (flows via extra='allow')."
         ),
         json_schema_extra={"consumed_by": ["prompt"]},
+    )
+    evidence_section: Optional[str] = Field(
+        default=None,
+        description=(
+            "Schema-only prompt only (prepare_script_args.prompt_format=schema_only): BIRD's evidence as a "
+            "'### Evidence' section, or '' when the question has none. Not read by verify()."
+        ),
+        json_schema_extra={"consumed_by": ["prompt"]},
+    )
+    question_id: Optional[int] = Field(
+        default=None,
+        description=(
+            "BIRD's own question id, on rows of a named BIRD dev version or the schema-only prompt; the same "
+            "value as task_id, as an integer. Logging and echo only."
+        ),
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    bird_version: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which dated release of BIRD dev the row comes from (e.g. 'dev_20251106'), on rows of a named version "
+            "or the schema-only prompt. Logging and echo only."
+        ),
+        json_schema_extra={"consumed_by": ["provenance"]},
     )
