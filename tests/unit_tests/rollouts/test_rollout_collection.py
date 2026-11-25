@@ -26,7 +26,7 @@ import weakref
 from asyncio import Future
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from pathlib import Path
 from threading import get_ident
@@ -17972,6 +17972,31 @@ class TestRunStatusFiles:
         assert "Could not update the run status" in caplog.text
         second = orjson.loads((tmp_path / "rollouts-rs1_batch_status.json").read_bytes())
         assert second["members"]["a"]["aggregation_status"] == "error"
+
+    def test_aggregation_keeps_counts_a_recount_wrote_while_it_waited(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recount after a re-judge rewrites the counts under the same lock, so aggregation reads the status there."""
+        import nemo_gym.rollouts.rollout_collection as rollout_collection
+
+        shard = tmp_path / "rollouts-rs0.jsonl"
+        status_fpath = tmp_path / "rollouts-rs0_batch_status.json"
+        stale = {"expected_rollout_count": 2, "completed_rollout_count": 1, "aggregation_status": "deferred"}
+        status_fpath.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"a": stale}}))
+        recounted = {**stale, "completed_rollout_count": 2}
+        real_lock = rollout_collection.run_status_lock
+
+        @contextmanager
+        def lock_after_recount(path):
+            with real_lock(path):
+                path.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"a": recounted}}))
+                yield
+
+        monkeypatch.setattr(rollout_collection, "run_status_lock", lock_after_recount)
+
+        rollout_collection._refresh_shard_status_aggregation([str(shard)], None)
+
+        assert orjson.loads(status_fpath.read_bytes())["members"]["a"] == {**recounted, "aggregation_status": "error"}
 
 
 async def test_run_status_keeps_results_persisted_inside_the_throttle_when_the_run_fails(

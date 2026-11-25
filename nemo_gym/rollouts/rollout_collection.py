@@ -133,6 +133,7 @@ from nemo_gym.rollouts.batch_status import (
     _environment_status_members,
     _read_aggregate_entries,
     disable_run_status,
+    run_status_lock,
 )
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
@@ -3067,8 +3068,7 @@ def refresh_run_status(output_fpath: Path) -> None:
     """
     status_fpath = batch_status_path_for(output_fpath)
     try:
-        status = orjson.loads(status_fpath.read_bytes())
-        if status.get("tracking") != "enabled":
+        if orjson.loads(status_fpath.read_bytes()).get("tracking") != "enabled":
             return
         agent_refs: Dict[Tuple[int, int], Dict] = {}
         with materialized_path_for(output_fpath).open("rb") as handle:
@@ -3081,11 +3081,13 @@ def refresh_run_status(output_fpath: Path) -> None:
             [_batch_status_row(record.read(), agent_refs) for record in store.selected_records("success").values()],
             [_batch_status_row(row, agent_refs) for row in store.failures()],
         )
-        previous = status.get("members") or {}
-        for agent, member in recounted["members"].items():
-            # The run's aggregation, not this recount, decides whether a member aggregated.
-            member["aggregation_status"] = previous.get(agent, member)["aggregation_status"]
-        _atomic_write_json(status_fpath, recounted)
+        # Read after the scan, under the lock aggregation also takes, so neither puts back the other's stale value.
+        with run_status_lock(status_fpath):
+            previous = orjson.loads(status_fpath.read_bytes()).get("members") or {}
+            for agent, member in recounted["members"].items():
+                # The run's aggregation, not this recount, decides whether a member aggregated.
+                member["aggregation_status"] = previous.get(agent, member)["aggregation_status"]
+            _atomic_write_json(status_fpath, recounted)
     except FileNotFoundError:
         if status_fpath.exists():
             disable_run_status(status_fpath, RuntimeError(f"{output_fpath} lost the files its status counts."))
@@ -3110,20 +3112,26 @@ def _refresh_shard_status_aggregation(
         # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
         # reason to fail the aggregation or hide its own error.
         try:
-            status = orjson.loads(status_fpath.read_bytes())
-            members = status.get("members")
-            if status.get("tracking") != "enabled" or not isinstance(members, dict):
+            if not status_fpath.exists():
                 continue
-            for agent, member in members.items():
-                entry, _ = _aggregate_entry_for_member(entries, agent, environment_member=agent in environment_members)
-                failed = (
-                    aggregate_metrics_fpath is None
-                    or artifact_error
-                    or entry is None
-                    or AGGREGATION_ERROR_KEY in entry
-                )
-                member["aggregation_status"] = "error" if failed else "complete"
-            _atomic_write_json(status_fpath, status)
+            # A recount after a re-judge rewrites the counts under the same lock.
+            with run_status_lock(status_fpath):
+                status = orjson.loads(status_fpath.read_bytes())
+                members = status.get("members")
+                if status.get("tracking") != "enabled" or not isinstance(members, dict):
+                    continue
+                for agent, member in members.items():
+                    entry, _ = _aggregate_entry_for_member(
+                        entries, agent, environment_member=agent in environment_members
+                    )
+                    failed = (
+                        aggregate_metrics_fpath is None
+                        or artifact_error
+                        or entry is None
+                        or AGGREGATION_ERROR_KEY in entry
+                    )
+                    member["aggregation_status"] = "error" if failed else "complete"
+                _atomic_write_json(status_fpath, status)
         except FileNotFoundError:
             continue
         except Exception:

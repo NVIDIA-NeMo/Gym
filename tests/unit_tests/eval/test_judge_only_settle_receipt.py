@@ -5,6 +5,7 @@ run's coverage, aggregate metrics and quality summary, and ends with a receipt; 
 
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from nemo_gym.eval.rollout_reverification import (
     due_judge_failures,
     read_settle_receipt,
 )
+from nemo_gym.rollouts import rollout_collection
 from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper, refresh_run_status
 from nemo_gym.rollouts.rollout_records import materialized_path_for
 from nemo_gym.rollouts.rollout_recovery import run_lock
@@ -193,6 +195,29 @@ def test_the_settled_run_recounts_its_run_status(tmp_path, verifier, aggregation
     after = json.loads(status.read_text())["members"]["agent"]
     assert (before["completed_rollout_count"], before["failures_by_class"]) == (2, {"judge_failed": 1})
     assert (after["completed_rollout_count"], after["failures_by_class"]) == (3, {})
+
+
+def test_the_recount_keeps_an_aggregation_status_written_while_it_scanned(tmp_path, monkeypatch) -> None:
+    """Aggregation rewrites the status under the same lock, so the recount reads it there, not before its scan."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    real_lock = rollout_collection.run_status_lock
+
+    @contextmanager
+    def lock_after_aggregation(status_fpath):
+        with real_lock(status_fpath):
+            aggregated = json.loads(status_fpath.read_text())
+            aggregated["members"]["agent"]["aggregation_status"] = "complete"
+            status_fpath.write_text(json.dumps(aggregated))
+            yield
+
+    monkeypatch.setattr(rollout_collection, "run_status_lock", lock_after_aggregation)
+
+    refresh_run_status(output)
+
+    assert json.loads(status.read_text())["members"]["agent"]["aggregation_status"] == "complete"
 
 
 def test_a_job_refused_the_run_never_writes_its_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811

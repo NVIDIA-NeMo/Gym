@@ -14,18 +14,20 @@
 # limitations under the License.
 """Validated Eval Factory batch manifests and compact, atomic Gym status artifacts."""
 
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import re
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Mapping, Optional, Sequence
 
 import orjson
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -439,6 +441,18 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def run_status_lock(status_fpath: Path) -> Iterator[None]:
+    """Wait for, then hold, the lock that writers outside collection take to read, update and rewrite a run status.
+
+    The status recount after a re-judge and ``gym eval aggregate`` each rewrite a field the other keeps, so each reads
+    the status inside this lock. Unlike the run lock, it waits instead of refusing, and is held only around the rewrite.
+    """
+    with status_fpath.with_name(status_fpath.name + ".lock").open("a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
 
 
 class BatchStatusTracker:
