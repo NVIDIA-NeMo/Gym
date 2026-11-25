@@ -1,0 +1,203 @@
+{
+  "defaults": {
+    "prompt_override": {
+      "system_prompt": ""
+    },
+    "request": {
+      "max_output_tokens": 1024,
+      "preset": "greedy"
+    },
+    "skills": {
+      "EVAL_ARGS": "++eval_type=audiobench ++eval_config.normalization_mode=audiobench",
+      "METRICS_TYPE": "audiobench"
+    }
+  },
+  "judge_prompt_templates": {
+    "audiobench": {
+      "user": "[Reference Answer]\n{expected_answer}\n\n[Model Answer]\n{generation}\n\n[Question]\n{question}\n\n[Task]\nYou are grading a model's answer against a reference answer. Judge how well the model's answer agrees with the reference in content, accuracy and relevance, and be strict about details. If the model declines to commit to an answer (for example it says it cannot decide), the rating is 0.\nUse this 0-5 scale:\n0: the model refuses to give a concrete answer, or its answer is entirely wrong or unrelated to the reference.\n1: barely agrees with the reference; mostly misunderstands the question or offers unrelated details.\n2: addresses the right topic but departs substantially from the reference in accuracy or relevance.\n3: broadly agrees with the reference but is missing detail or is imprecise in places.\n4: mostly accurate and relevant and close to the reference, though it could be clearer or more complete.\n5: accurate, complete and equivalent to the reference answer.\n\nFormat your reply exactly as follows:\nExplanation: <a short justification that compares the reference answer with the model's answer>\nRating: <a single integer from 0 to 5>"
+    }
+  },
+  "profiles": {
+    "audiobench.alpaca_audio_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.audiocaps_qa_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.audiocaps_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.clotho_aqa_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.cn_college_listen_mcq_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.dream_tts_mcq_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.iemocap_emotion_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.iemocap_gender_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_ar_dialogue": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_ar_sentence": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_gr_dialogue": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_gr_sentence": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part3_30s_ds_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part4_30s_ds_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part5_30s_ds_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part6_30s_ds_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part3_30s_sqa_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part4_30s_sqa_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part5_30s_sqa_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.imda_part6_30s_sqa_human_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.meld_emotion_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.meld_sentiment_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.mmau_mini": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.muchomusic_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.openhermes_audio_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.public_sg_speech_qa_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.slue_p2_sqa5_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.spoken_squad_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.voxceleb_accent_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.voxceleb_gender_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.wavcaps_qa_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.wavcaps_test": {
+      "judge_prompt_template": "audiobench"
+    },
+    "audiobench.aishell_asr_zh_test": {},
+    "audiobench.common_voice_15_en_test": {},
+    "audiobench.covost2_en_id_test": {},
+    "audiobench.covost2_en_ta_test": {},
+    "audiobench.covost2_en_zh_test": {},
+    "audiobench.covost2_id_en_test": {},
+    "audiobench.covost2_ta_en_test": {},
+    "audiobench.covost2_zh_en_test": {},
+    "audiobench.earnings21_test": {
+      "request": {
+        "max_output_tokens": 16384
+      },
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audiobench ++eval_config.normalization_mode=audiobench_earnings"
+      }
+    },
+    "audiobench.earnings22_test": {
+      "request": {
+        "max_output_tokens": 16384
+      },
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audiobench ++eval_config.normalization_mode=audiobench_earnings"
+      }
+    },
+    "audiobench.gigaspeech_test": {},
+    "audiobench.gigaspeech2_indo": {},
+    "audiobench.gigaspeech2_thai": {},
+    "audiobench.gigaspeech2_viet": {},
+    "audiobench.imda_part1_asr_test": {},
+    "audiobench.imda_part2_asr_test": {},
+    "audiobench.imda_part3_30s_asr_test": {},
+    "audiobench.imda_part4_30s_asr_test": {},
+    "audiobench.imda_part5_30s_asr_test": {},
+    "audiobench.imda_part6_30s_asr_test": {},
+    "audiobench.librispeech_test_clean": {},
+    "audiobench.librispeech_test_other": {},
+    "audiobench.peoples_speech_test": {},
+    "audiobench.seame_dev_man": {},
+    "audiobench.seame_dev_sge": {},
+    "audiobench.spoken-mqa.long_digit": {
+      "prompt_override": {
+        "system_prompt": "You are a voice-controlled assistant. The speech in the provided audio is the user's request: understand it and carry it out. Produce the requested answer or artifact rather than a transcript of the speech, unless transcription is explicitly requested. Solve the exact arithmetic or reasoning problem spoken in the complete audio. Carefully preserve every digit, decimal place, sign, quantity, unit, and requested operation. Compute the requested result rather than repeating the expression. Do not round or change precision unless requested. Your final response must be exactly one line: The answer is: <number>, replacing <number> with the single numeric result written in digits. For example, a result of negative twelve point five must be written The answer is: -12.5. The example demonstrates syntax only. Use the answer marker exactly once. Do not output units, thousands separators, alternatives, an equation, explanation, or text after the numeric answer. Before responding, check the calculation and ensure that the first number after the marker is the final requested result.",
+        "user_prompt": null
+      },
+      "request": "reasoning",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audiobench ++eval_config.normalization_mode=none"
+      }
+    },
+    "audiobench.spoken-mqa.multi_step_reasoning": {
+      "prompt_override": {
+        "system_prompt": "You are a voice-controlled assistant. The speech in the provided audio is the user's request: understand it and carry it out. Produce the requested answer or artifact rather than a transcript of the speech, unless transcription is explicitly requested. Solve the exact arithmetic or reasoning problem spoken in the complete audio. Carefully preserve every digit, decimal place, sign, quantity, unit, and requested operation. Compute the requested result rather than repeating the expression. Do not round or change precision unless requested. Your final response must be exactly one line: The answer is: <number>, replacing <number> with the single numeric result written in digits. For example, a result of negative twelve point five must be written The answer is: -12.5. The example demonstrates syntax only. Use the answer marker exactly once. Do not output units, thousands separators, alternatives, an equation, explanation, or text after the numeric answer. Before responding, check the calculation and ensure that the first number after the marker is the final requested result.",
+        "user_prompt": null
+      },
+      "request": "reasoning",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audiobench ++eval_config.normalization_mode=none"
+      }
+    },
+    "audiobench.spoken-mqa.short_digit": {
+      "prompt_override": {
+        "system_prompt": "You are a voice-controlled assistant. The speech in the provided audio is the user's request: understand it and carry it out. Produce the requested answer or artifact rather than a transcript of the speech, unless transcription is explicitly requested. Solve the exact arithmetic or reasoning problem spoken in the complete audio. Carefully preserve every digit, decimal place, sign, quantity, unit, and requested operation. Compute the requested result rather than repeating the expression. Do not round or change precision unless requested. Your final response must be exactly one line: The answer is: <number>, replacing <number> with the single numeric result written in digits. For example, a result of negative twelve point five must be written The answer is: -12.5. The example demonstrates syntax only. Use the answer marker exactly once. Do not output units, thousands separators, alternatives, an equation, explanation, or text after the numeric answer. Before responding, check the calculation and ensure that the first number after the marker is the final requested result.",
+        "user_prompt": null
+      },
+      "request": "reasoning",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audiobench ++eval_config.normalization_mode=none"
+      }
+    },
+    "audiobench.spoken-mqa.single_step_reasoning": {
+      "prompt_override": {
+        "system_prompt": "You are a voice-controlled assistant. The speech in the provided audio is the user's request: understand it and carry it out. Produce the requested answer or artifact rather than a transcript of the speech, unless transcription is explicitly requested. Solve the exact arithmetic or reasoning problem spoken in the complete audio. Carefully preserve every digit, decimal place, sign, quantity, unit, and requested operation. Compute the requested result rather than repeating the expression. Do not round or change precision unless requested. Your final response must be exactly one line: The answer is: <number>, replacing <number> with the single numeric result written in digits. For example, a result of negative twelve point five must be written The answer is: -12.5. The example demonstrates syntax only. Use the answer marker exactly once. Do not output units, thousands separators, alternatives, an equation, explanation, or text after the numeric answer. Before responding, check the calculation and ensure that the first number after the marker is the final requested result.",
+        "user_prompt": null
+      },
+      "request": "reasoning",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audiobench ++eval_config.normalization_mode=none"
+      }
+    },
+    "audiobench.tedlium3_test": {},
+    "audiobench.tedlium3_long_form_test": {
+      "request": {
+        "max_output_tokens": 16384
+      }
+    }
+  }
+}

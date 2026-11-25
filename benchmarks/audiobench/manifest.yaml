@@ -1,0 +1,29 @@
+name: audiobench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: 63 AudioBench test sets for audio language models (speech recognition and translation, spoken question answering, instruction following, spoken math, paralinguistics, audio and music understanding), scored by automatic metrics or an LLM judge.
+modality: audio
+licensing: CC0-1.0 AND CC-BY-4.0 AND CC-BY-SA-4.0 AND Apache-2.0 AND CC-BY-NC-4.0 AND CC-BY-NC-ND-3.0 AND LicenseRef-SODL-1.0 AND LicenseRef-AudioBench-Dataset-Terms
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 0.0
+  higher_is_better: true
+determinism: unknown
+resources_server: audio_eval
+agent_server: simple_agent
+datasets:
+- name: audiobench
+  type: benchmark
+  jsonl_fpath: benchmarks/audiobench/data/audiobench_benchmark.jsonl
+  prepare_script: benchmarks/audiobench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active
