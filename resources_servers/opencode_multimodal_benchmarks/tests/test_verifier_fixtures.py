@@ -60,7 +60,7 @@ async def test_prepared_catalog_validation_and_verifier_without_deployment(bench
                 "opencode_multimodal_benchmarks": {
                     "resources_servers": {
                         "opencode_multimodal_benchmarks": {
-                            "datasets": [dataset | {"taskset": "visual_tasks"}],
+                            "datasets": [dataset | {"taskset": f"opencode_multimodal_benchmarks/{benchmark}"}],
                         }
                     }
                 },

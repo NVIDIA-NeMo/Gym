@@ -8,7 +8,7 @@ mm_coding_opencode_resources:
       - name: example
         type: example
         jsonl_fpath: environments/mm_coding_opencode/data/example.jsonl
-        taskset: mm-coding:opencode
+        taskset: mm_coding_opencode
         num_repeats: 1
 # The base config declares the single-answer example rows; this entry runs only the OpenCode rows.
 mm_coding_training:

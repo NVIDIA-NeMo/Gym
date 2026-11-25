@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Catalog names that were renamed, each with the catalog name that replaced it.
+"""Catalog names and tasksets that were renamed, each with the name that replaced it.
 
 A catalog name is a manifest's ``name``: the folder path of its manifest under ``benchmarks/`` or ``environments/``.
 It names a taskset, never the harness that runs it, so a config that only changes the harness is a run preset of its
@@ -72,3 +72,31 @@ RENAMED_CATALOG_NAMES: dict[str, str] = {
 def renamed_catalog_name_warning(old: str, new: str) -> str:
     """The deprecation warning for a use of the renamed catalog name ``old``."""
     return f"Catalog name `{old}` is deprecated: it was renamed to `{new}`. Use `{new}` instead."
+
+
+# Tasksets that did not name their catalog entry as `<catalog name>[:<label>]`, each with the tasksets that replaced
+# it. Results that carry an old name come from runs before the rename; a repository check refuses the old names in
+# configs.
+RENAMED_TASKSETS: dict[str, tuple[str, ...]] = {
+    "bird_interact:a_interact": ("bird_interact/lite/a_interact", "bird_interact/full/a_interact"),
+    # The BIRD-Interact Environment Server's own example, which is no catalog entry.
+    "bird_interact:a_interact_example": ("bird_interact_example:a_interact",),
+    "bird_interact:c_interact": ("bird_interact/lite/c_interact", "bird_interact/full/c_interact"),
+    "bird_interact:c_interact_example": ("bird_interact_example:c_interact",),
+    "mm-coding:opencode": ("mm_coding_opencode",),
+    "officeqa_pro_examples": ("officeqa_pro:examples",),
+    "swebench:multilingual": ("swebench/multilingual",),
+    "swebench:multimodal": ("swebench/multimodal",),
+    "swebench:pro": ("swebench/pro",),
+    "swebench:verified": ("swebench/verified",),
+    "terminal-bench-2.1": ("terminal_bench_2_1",),
+    "visual_tasks": (
+        "opencode_multimodal_benchmarks/agentx",
+        "opencode_multimodal_benchmarks/hrbench8k",
+        "opencode_multimodal_benchmarks/vstar",
+        "opencode_multimodal_benchmarks/vtcbench",
+        "opencode_multimodal_benchmarks/zerobench",
+        # The resources server's own example, which is no catalog entry.
+        "opencode_multimodal_benchmarks:example",
+    ),
+}

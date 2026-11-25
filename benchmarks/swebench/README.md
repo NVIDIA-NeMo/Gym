@@ -18,7 +18,7 @@ Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
 Use the `opencode.yaml` recipe of Verified, Multilingual, Pro or Multimodal. It runs `opencode_agent` through
 `single_agent_turn`, as `verified/hermes.yaml` and `multimodal/hermes.yaml` run Hermes: the Resources Server starts
 the task sandbox, lends it to the agent session, and grades the captured patch after the agent closes. Rows reach it
-through the recipe's taskset (`swebench:verified`, `swebench:multilingual`, `swebench:pro` or `swebench:multimodal`).
+through the recipe's taskset (`swebench/verified`, `swebench/multilingual`, `swebench/pro` or `swebench/multimodal`, its catalog name).
 Both harnesses receive the Multimodal issue images as prompt images.
 
 The `opencode_legacy_agent.yaml` recipes of Verified, Multilingual, Pro and Multimodal are deprecated. They run

@@ -26,8 +26,7 @@ prepare_script_args:
   mode: ${bird_interact_mode}
 
 environment_server_routes:
-  "bird_interact:c_interact": bird_interact_c_interact
-  "bird_interact:a_interact": bird_interact_a_interact
+  bird_interact/lite/c_interact: bird_interact_c_interact
 
 # One dataset for each release and mode, so each has its own file and metrics. Written out, not interpolated: the
 # manifest mirrors it.
@@ -38,7 +37,7 @@ bird_interact_agent:
         - name: bird_interact_lite_c_interact
           type: benchmark
           jsonl_fpath: benchmarks/bird_interact/data/lite/c_interact.jsonl
-          taskset: bird_interact:c_interact
+          taskset: bird_interact/lite/c_interact
           prepare_script: benchmarks/bird_interact/prepare.py
           num_repeats: 1
           license: CC BY-SA 4.0

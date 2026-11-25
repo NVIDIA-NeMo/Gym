@@ -9,8 +9,8 @@
 # a-Interact: the agent reaches the user, the database and the grader through nine tools, in one turn.
 
 environment_server_routes:
-  "bird_interact:c_interact_example": bird_interact_c_interact
-  "bird_interact:a_interact_example": bird_interact_a_interact
+  "bird_interact_example:c_interact": bird_interact_c_interact
+  "bird_interact_example:a_interact": bird_interact_a_interact
 
 # The simulated user runs on its own model, separate from the evaluated policy, so these have no default.
 user_model_base_url: ???
@@ -45,13 +45,13 @@ bird_interact_agent:
         - name: example
           type: example
           jsonl_fpath: environment_servers/bird_interact/data/example.jsonl
-          taskset: bird_interact:c_interact_example
+          taskset: bird_interact_example:c_interact
           num_repeats: 1
           license: Apache 2.0
         - name: example
           type: example
           jsonl_fpath: environment_servers/bird_interact/data/example.jsonl
-          taskset: bird_interact:a_interact_example
+          taskset: bird_interact_example:a_interact
           num_repeats: 1
           license: Apache 2.0
 

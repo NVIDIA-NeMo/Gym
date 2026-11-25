@@ -9,7 +9,7 @@ The run wrapper composes three parts:
 
 - The reusable [benchmark profile](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1_benchmark.yaml)
   defines the `benchmark` resources-server instance. It owns the unchanged canonical dataset and preparer,
-  using the `terminal-bench-2.1` taskset.
+  using the `terminal_bench_2_1` taskset.
 - The reusable [sandboxed NOOA profile](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/nooa_agent/configs/nooa_sandboxed.yaml)
   defines the `agent` instance with `resources_server: null`. It uses the sandbox supplied for the episode
   and does not define an environment server of its own.

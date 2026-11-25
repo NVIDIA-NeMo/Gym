@@ -130,7 +130,7 @@ def test_example_configuration_prepares_and_collates_five_single_attempt_tasks(a
     settings = get_first_server_config_dict(config, "officeqa_pro_resources_server")
     assert len(settings.datasets) == 1 and settings.datasets[0].type == "example"
     assert settings.datasets[0].num_repeats == 1
-    assert taskset_environment_server_name(config, "officeqa_pro_examples") == "officeqa_pro_environment_server"
+    assert taskset_environment_server_name(config, "officeqa_pro:examples") == "officeqa_pro_environment_server"
     settings.datasets[0].jsonl_fpath = str(output)
     instances = [c for c in GlobalConfigDictParser().filter_for_server_instance_configs(config) if c.datasets]
     paths = TrainDataProcessor()._collate_samples_single_type(
@@ -138,7 +138,7 @@ def test_example_configuration_prepares_and_collates_five_single_attempt_tasks(a
     )
     rows = [json.loads(line) for line in paths[0].read_text().splitlines()]
     assert len(rows) == 5
-    assert all(row["task_id"]["taskset"] == "officeqa_pro_examples" for row in rows)
+    assert all(row["task_id"]["taskset"] == "officeqa_pro:examples" for row in rows)
     for row in rows:
         task_input = SingleAgentTurnTaskInput.model_validate(row["task_input"])
         assert "expected_answer" not in task_input.task_data and "answer" not in task_input.task_data

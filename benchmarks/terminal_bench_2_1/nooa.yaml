@@ -7,7 +7,7 @@ config_paths:
 
 environment_routing_mode: taskset
 environment_server_routes:
-  terminal-bench-2.1: experiment
+  terminal_bench_2_1: experiment
 
 experiment:
   _inherit_from: single_agent_turn

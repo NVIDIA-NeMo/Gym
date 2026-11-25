@@ -13,6 +13,8 @@ config_paths:
 bird_interact_release: full
 bird_interact_mode: a_interact
 
+environment_server_routes:
+  bird_interact/full/a_interact: bird_interact_a_interact
 bird_interact_agent:
   responses_api_agents:
     simple_agent:
@@ -20,7 +22,7 @@ bird_interact_agent:
         - name: bird_interact_full_a_interact
           type: benchmark
           jsonl_fpath: benchmarks/bird_interact/data/full/a_interact.jsonl
-          taskset: bird_interact:a_interact
+          taskset: bird_interact/full/a_interact
           prepare_script: benchmarks/bird_interact/prepare.py
           num_repeats: 1
           license: CC BY-SA 4.0

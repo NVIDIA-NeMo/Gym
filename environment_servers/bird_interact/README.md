@@ -221,8 +221,8 @@ with a model; the other rows are not results from runs.
 server. `bookshop_3` and `bookshop_4` have a follow-up question. `bookshop_4` and `bookshop_5` have two critical
 ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge. `task_input.py` is the row schema.
 
-The agent's config declares the file once for each mode's taskset, `bird_interact:c_interact_example` and
-`bird_interact:a_interact_example`, and `environment_server_routes` sends each to its mode's server.
+The agent's config declares the file once for each mode's taskset, `bird_interact_example:c_interact` and
+`bird_interact_example:a_interact`, and `environment_server_routes` sends each to its mode's server.
 `data/example_rollouts.jsonl` has one rollout for each task in each mode, with `simple_agent`.
 
 The public BIRD-Interact releases (Mini-Interact, Lite, Full) withhold `sol_sql` and `test_cases`. The authors
@@ -326,7 +326,7 @@ rows = [json.loads(line) for line in open("environment_servers/bird_interact/dat
 with open("bird_interact_example_input.jsonl", "w") as f:
     for mode in ("c_interact", "a_interact"):
         for row in rows:
-            task_id = {"taskset": f"bird_interact:{mode}_example", "task_id": row["instance_id"]}
+            task_id = {"taskset": f"bird_interact_example:{mode}", "task_id": row["instance_id"]}
             f.write(json.dumps({"task_id": task_id, "task_input": row}) + "\n")
 EOF
 
