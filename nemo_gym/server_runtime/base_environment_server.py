@@ -8,6 +8,7 @@ import dataclasses
 import json
 import logging
 import re
+import shlex
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
@@ -363,6 +364,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     # (``model_sampling_segment``). The default fails closed: such an episode is refused, because the agents it trains
     # would sample with other values.
     applies_model_sampling: ClassVar[bool] = False
+    # Whether this protocol grants the agent the HTTP tools a sandbox group's sidecar serves on its tools_port, and
+    # brings their state to /verify. The default fails closed: a group whose sidecar serves tools is refused, since
+    # its agent would never reach them and its verifier would grade an untouched state.
+    grants_tool_sidecars: ClassVar[bool] = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -732,7 +737,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         return not (opt_out.task and opt_out.verifier)
 
     def check_sandbox_provider(self) -> None:
-        """Refuse at startup what the server's sandbox providers cannot do; see ``SimpleServer.check_sandbox_provider``.
+        """Refuse at startup what the server's sandbox providers cannot do (``SimpleServer.check_sandbox_provider``).
 
         A server that starts attempt sandboxes must also declare that it owns and lends them, and its provider is
         built now, so a bad provider block fails startup instead of every attempt. With the task opted out, it starts
@@ -750,8 +755,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             not ATTEMPT_SANDBOX_BLOCKS.items() <= dict(self.owned_sandbox_blocks).items() or not self.lends_sandboxes
         ):
             raise ValueError(
-                f"{type(self).__name__} starts attempt sandboxes from sandbox_config, so it sets lends_sandboxes = True "
-                "and lists ATTEMPT_SANDBOX_BLOCKS in owned_sandbox_blocks"
+                f"{type(self).__name__} starts attempt sandboxes from sandbox_config, so it sets "
+                "lends_sandboxes = True and lists ATTEMPT_SANDBOX_BLOCKS in owned_sandbox_blocks"
             )
         super().check_sandbox_provider()
         if starts:
@@ -785,7 +790,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             NgFailureEvent: A terminal seed failure, which no retry changes: a refused opt-out (a task opt-out with
                 tools; a verifier opt-out the Resources Server does not declare ``verifier_executes_nothing`` for), a
                 declared group without a ``sandbox_provider`` to start it, a group without an image or a working
-                directory, sidecars on a provider that cannot start them, or a Resources Server that lends a sandbox
+                directory, sidecars on a provider that cannot start them, a sidecar that serves tools on a server
+                that does not grant them (``grants_tool_sidecars``), or a Resources Server that lends a sandbox
                 although this server owns the attempt's.
         """
         settings = self._attempt_sandbox_settings()
@@ -845,6 +851,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 raise self._attempt_sandbox_refusal(
                     f"sidecar {sidecar.name!r} reaches only its own hosts, but {error}"
                 ) from error
+        serving = [sidecar.name for sidecar in declared.sidecars if sidecar.tools_port is not None]
+        if serving and not self.grants_tool_sidecars:
+            raise self._attempt_sandbox_refusal(
+                f"sidecars {serving} serve tools on a tools_port, but {type(self).__name__} does not grant a "
+                "sidecar's tools to the agent (grants_tool_sidecars), so the verifier would grade an untouched state"
+            )
         return AttemptSandbox(
             key=key,
             lend_to_agent=lend_to_agent,
@@ -927,11 +939,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         The group starts from ``sandbox_config`` with the declared image, working directory, environment variables,
         files and sidecars over it. A group for the verifier alone starts with ``no_network``, and each sidecar with
-        its own rule (``SandboxGroupSidecar.network``), never the main container's. Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled
-        start still stops what it created. ``prepare`` runs when the seed declared ``prepare``: it asks the Resources
-        Server to prepare the task through the access. There is no host fallback: a group that cannot start or be
-        described fails the attempt as a retryable infrastructure failure at ``stage``, with ``evidence`` kept, and
-        records no reward; a failed prepare is retried when the Resources Server's error is.
+        its own rule (``SandboxGroupSidecar.network``), never the main container's. Its working directory is
+        created before anyone borrows it, since not every provider creates it. Register ``stop_attempt_sandbox`` in
+        the episode's cleanup first, so a cancelled start still stops what it created. ``prepare`` runs when the seed
+        declared ``prepare``: it asks the Resources Server to prepare the task through the access. There is no host
+        fallback: a group that cannot start or be described fails the attempt as a retryable infrastructure failure at
+        ``stage``, with ``evidence`` kept, and records no reward; a failed prepare is retried when the Resources
+        Server's error is.
         """
         settings = self._attempt_sandbox_settings()
         assert settings is not None and settings.sandbox_config is not None  # plan_attempt_sandbox returned a plan
@@ -960,7 +974,16 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 files=group.files,
             )
             spec = dataclasses.replace(spec, env=spec.env | group.env, sidecars=sidecars)
-            await self.sandboxes.create(attempt.key, spec)
+            sandbox = await self.sandboxes.create(attempt.key, spec)
+            # Every borrower runs its commands in the working directory, and a provider need not create the one it
+            # starts a sandbox with; where it does, this is a no-op.
+            made = await sandbox.exec(f"mkdir -p {shlex.quote(attempt.workdir)}", cwd="/")
+            if made.error_type is not None or made.return_code != 0:
+                output = (made.stderr or made.stdout or "").strip()[:500]
+                raise RuntimeError(
+                    f"the working directory {attempt.workdir!r} could not be created "
+                    f"(return code {made.return_code}, {made.error_type or 'no error type'}): {output}"
+                )
             access = await self.sandboxes.access(attempt.key, workdir=attempt.workdir)
         except Exception as error:
             raise dependency_failure(error, stage=stage, terminal=False, name_error_type=True, **evidence) from error
