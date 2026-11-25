@@ -772,7 +772,6 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         key: str,
         lent: SandboxAccess | None = None,
         group: SandboxGroupSpec | None = None,
-        verifier_executes_nothing: bool = False,
         task_tools: Sequence[str] = (),
         resources_server: str = "the Resources Server",
     ) -> AttemptSandbox | None:
@@ -780,18 +779,17 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         ``key`` names the group in ``self.sandboxes`` and must be unique to the attempt. ``lent`` is a sandbox the
         Resources seed lent itself: without ``sandbox_provider`` it is lent on and this server starts none; with it,
-        the attempt fails, since one attempt has one sandbox owner. ``group`` and ``verifier_executes_nothing`` are
-        what the seed declared, and ``task_tools`` names the tools the task declares or the episode grants. Unless
-        ``sandbox_opt_out`` says otherwise, the agent borrows the group for its turn and ``/verify`` borrows it after
+        the attempt fails, since one attempt has one sandbox owner. ``group`` is what the seed declared, and
+        ``task_tools`` names the tools the task declares or the episode grants. Unless ``sandbox_opt_out`` says
+        otherwise, the agent borrows the group for its turn and ``/verify`` borrows it after
         the agent closes. Returns ``None`` when nothing borrows a group this server starts, which is always the case
         without ``sandbox_provider``. What no attempt can start is refused here, before the agent's turn.
 
         Raises:
-            NgFailureEvent: A terminal seed failure, which no retry changes: a refused opt-out (a task opt-out with
-                tools; a verifier opt-out the Resources Server does not declare ``verifier_executes_nothing`` for), a
-                declared group without a ``sandbox_provider`` to start it, a group without an image or a working
-                directory, sidecars on a provider that cannot start them, a sidecar that serves tools on a server
-                that does not grant them (``grants_tool_sidecars``), or a Resources Server that lends a sandbox
+            NgFailureEvent: A terminal seed failure, which no retry changes: a refused task opt-out (a task with
+                tools), a declared group without a ``sandbox_provider`` to start it, a group without an image or a
+                working directory, sidecars on a provider that cannot start them, a sidecar that serves tools on a
+                server that does not grant them (``grants_tool_sidecars``), or a Resources Server that lends a sandbox
                 although this server owns the attempt's.
         """
         settings = self._attempt_sandbox_settings()
@@ -804,12 +802,6 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             raise self._attempt_sandbox_refusal(
                 "sandbox_opt_out.task is only for a pure QA task, whose model calls no tools, but this task has "
                 f"{tools}; a task with tools always runs in the attempt's sandbox group"
-            )
-        if opt_out.verifier and not verifier_executes_nothing:
-            raise self._attempt_sandbox_refusal(
-                "sandbox_opt_out.verifier is only for a verifier that executes nothing and calls no tools, and "
-                f"{resources_server} does not declare that its verifier does (verifier_executes_nothing); a verifier "
-                "that is not declared so always gets a sandbox"
             )
         if lent is not None:
             if settings.sandbox_config is not None:
@@ -873,7 +865,6 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         key: str,
         lent: SandboxAccess | None = None,
         group: SandboxGroupSpec | None = None,
-        verifier_executes_nothing: bool = False,
         task_tools: Sequence[str] = (),
         resources_server: str = "the Resources Server",
         prepare: Callable[[SandboxAccess], Awaitable[None]] | None = None,
@@ -890,7 +881,6 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             key=key,
             lent=lent,
             group=group,
-            verifier_executes_nothing=verifier_executes_nothing,
             task_tools=task_tools,
             resources_server=resources_server,
         )
