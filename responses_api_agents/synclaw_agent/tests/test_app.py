@@ -917,7 +917,7 @@ class TestRun:
             ({"max_model_len": 131072}, [{"id": "policy", "max_model_len": 131072}], None),
             ({"max_model_len": 131072}, [{"id": "policy", "max_model_len": 262144}], None),
             ({}, [{"id": "policy"}], None),
-            ({}, _mock_error_response("unauthorized", status=401), None),
+            ({}, _mock_error_response("unauthorized", status=401), "Could not read http://vllm:8000/v1/models"),
         ],
     )
     async def test_served_context_must_fit_resolved_task_limit(
@@ -945,7 +945,8 @@ class TestRun:
             else:
                 with pytest.raises(HTTPException, match=error):
                     await agent._require_served_max_model_len(agent.config.max_model_len)
-        assert requested_urls == ["http://vllm:8000/v1/models"]
+        # A lookup that failed is not cached, so every call asks again; a successful one is asked once.
+        assert requested_urls == ["http://vllm:8000/v1/models"] * (2 if error and "Could not read" in error else 1)
 
     async def test_unknown_task_context_skips_served_limit_check(self, monkeypatch: MonkeyPatch) -> None:
         agent, _ = _make_agent(max_model_len=None)

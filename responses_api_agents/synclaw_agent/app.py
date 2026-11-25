@@ -24,7 +24,7 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import Annotated, Any, Literal
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientError, ClientResponseError
 from fastapi import HTTPException, Request, Response
 from pydantic import BeforeValidator, Field, PositiveInt, model_validator
 from synclaw.rollout.budget import (
@@ -213,7 +213,11 @@ class SynClawAgent(SimpleResponsesAPIAgent):
             )
 
     async def _fetch_served_max_model_len(self) -> int | None:
-        """The context limit the model endpoint reports in /v1/models, or None if it reports none."""
+        """The context limit the model endpoint reports in /v1/models, or None if it reports none.
+
+        Raises:
+            HTTPException: The endpoint could not be asked (502).
+        """
         global_config = self.server_client.global_config_dict
         name = self.config.model_server.name
         model_config = get_first_server_config_dict(global_config, name) if name in global_config else {}
@@ -228,9 +232,11 @@ class SynClawAgent(SimpleResponsesAPIAgent):
         )
         try:
             models = (await client.create_models()).get("data") or []
-        except ClientResponseError as err:
-            logger.warning("%s/models failed (%s); cannot check its max_model_len", client.base_url, err)
-            return None
+        except (ClientError, TimeoutError) as err:
+            # Not cached by the caller, so the next rollout looks again; running unchecked could overflow the context.
+            raise HTTPException(
+                status_code=502, detail=f"Could not read {client.base_url}/models to check max_model_len: {err}"
+            ) from err
         model_name = model_config.get("model") or model_config.get("openai_model")
         card = next((model for model in models if model.get("id") == model_name), models[0] if models else {})
         served = card.get("max_model_len")
