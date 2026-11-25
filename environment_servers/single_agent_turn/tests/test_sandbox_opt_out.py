@@ -1,21 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Who borrows the attempt's sandbox group: the sandbox opt-outs, a verifier's own sandbox, and what Resources declares."""
+"""Who borrows the attempt's sandbox group: the opt-outs, a verifier's own sandbox, and what Resources declares."""
 
 from typing import Any
 
 import pytest
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServer
-from environment_servers.single_agent_turn.tests.test_attempt_sandbox import _lending_server, _Provider
+from environment_servers.single_agent_turn.tests.test_attempt_sandbox import MODEL_HOST, _lending_server
+from environment_servers.single_agent_turn.tests.test_attempt_sandbox import _Provider as _ModelOnlyProvider
 from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import SandboxAccess, SandboxCreateError
+from nemo_gym.sandbox import SandboxAccess, SandboxCapabilities, SandboxCreateError
 from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, PREPARE_SANDBOX_PATH, ResourcesPrepareSandboxRequest
 from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
 
 AGENT_PATH = "/ng-rollout/rollout-a2/v1/responses"
+
+
+class _Provider(_ModelOnlyProvider):
+    """The attempt sandbox provider, which can also cut all egress of a group that runs the verifier alone."""
+
+    capabilities = SandboxCapabilities(network_rules=frozenset({"inherit", "model_only", "no_network"}))
 
 
 def _recording(client: Any, provider: _Provider) -> list[tuple[str, list[str]]]:
@@ -65,6 +72,8 @@ async def test_a_pure_qa_task_runs_its_turn_lent_nothing_and_its_verifier_gets_a
     lent = SandboxAccess.model_validate(_verify_body(client)[NG_SANDBOX_ACCESS_KEY])
     assert (lent.connection.descriptor["sandbox_id"], lent.workdir) == ("sb-1", "/workspace")
     assert seen[-1] == ("/close_session", [])
+    # The verifier runs the model's output there, so its group reaches nothing, not even the model server.
+    assert provider.rules == [("no_network", [])]
 
 
 async def test_a_verifier_that_executes_nothing_gets_no_sandbox_and_the_agents_stops_before_verify() -> None:
@@ -78,6 +87,7 @@ async def test_a_verifier_that_executes_nothing_gets_no_sandbox_and_the_agents_s
     assert result.failure is None, result.failure
     assert AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).sandbox_access is not None
     assert dict(seen)[AGENT_PATH] == ["sb-1"]
+    assert provider.rules == [("model_only", [MODEL_HOST])]
     # Nothing borrows the group after the agent closed, so it is stopped before the Resources Server verifies.
     assert dict(seen)["/verify"] == []
     assert NG_SANDBOX_ACCESS_KEY not in _verify_body(client)
@@ -211,6 +221,15 @@ async def test_a_resources_server_that_declares_a_group_with_no_sandbox_provider
     assert _paths(client) == ["/seed_session", "/close_session"]
 
 
+def test_a_server_whose_task_and_verifier_both_opt_out_needs_no_provider_block_at_startup() -> None:
+    # attempt_sandboxes is not defined: a large QA run that opts out of a config shipping a provider still starts.
+    server, _ = _lending_server(None, sandbox_opt_out={"task": True, "verifier": True})
+
+    server.check_sandbox_provider()
+
+    assert server._owned_sandboxes == {}
+
+
 def test_startup_refuses_a_task_sandbox_opt_out_for_an_episode_that_grants_tools() -> None:
     server, client = _environment_server(resources_tool_transports=["mcp"])
     opt_out = server.config.sandbox_opt_out.model_validate({"task": True})
@@ -218,7 +237,7 @@ def test_startup_refuses_a_task_sandbox_opt_out_for_an_episode_that_grants_tools
         config=server.config.model_copy(update={"sandbox_opt_out": opt_out}), server_client=client
     )
 
-    with pytest.raises(ValueError, match=r"pure QA task, but every episode grants the tools of \['resources'\]"):
+    with pytest.raises(ValueError, match=r"grants the tools of \['resources'\]; drop resources_tool_transports"):
         server.check_sandbox_provider()
 
 

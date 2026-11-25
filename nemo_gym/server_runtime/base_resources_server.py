@@ -422,7 +422,7 @@ class ResourcesSeedSessionResponse(BaseModel):
     # A return annotation would replace the model's serialization schema with that container schema.
     @model_serializer(mode="wrap")
     def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server supplies no observation field and declares no sandbox fields."""
+        """Preserve the seed wire shape when the server sets no observation field and declares no sandbox fields."""
         result = handler(self)
         if "observation" not in self.model_fields_set:
             result.pop("observation", None)
@@ -711,8 +711,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     grading_may_use_uninstrumented_model: ClassVar[bool] = False
     # True for a server whose verifier executes nothing and calls no tools: it only reads the answer, with rules,
     # math-verify or a judge call. Its seed reply declares it, and only then may an Environment Server run /verify
-    # without a sandbox (SandboxOptOut.verifier). A verifier that runs model output, passes it to eval or to sympy's
-    # parse_expr, or reads state from the sandbox, leaves it False.
+    # without a sandbox (SandboxOptOut.verifier). A verifier that runs model output, passes model-chosen text to eval
+    # or to sympy's parse_expr, or reads state from the sandbox, leaves it False; math-verify qualifies because it
+    # parses only text its patterns limit to numbers and arithmetic operators.
     verifier_executes_nothing: ClassVar[bool] = False
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
@@ -1239,8 +1240,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         Override it to set the task up through ``borrow(body.sandbox_access)``, such as starting a sidecar's tool
         service; release the borrowed client before returning and never stop the group. Overriding it serves
-        ``/prepare_sandbox`` and declares ``prepare`` on the seed reply (see ``sandbox_declaration``). Files go in ``SandboxGroupSpec.files``
-        instead, which the group starts with. Raise ``ResourcesSeedRejectedError`` for a task no retry can prepare.
+        ``/prepare_sandbox`` and declares ``prepare`` on the seed reply (see ``sandbox_declaration``). Files go in
+        ``SandboxGroupSpec.files`` instead, which the group starts with. Raise ``ResourcesSeedRejectedError`` for a
+        task no retry can prepare.
         """
         raise NotImplementedError(f"{type(self).__name__} does not prepare sandboxes")
 
