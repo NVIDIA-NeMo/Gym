@@ -17,6 +17,7 @@ import pytest
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT
 from nemo_gym.sandbox import SandboxAccess
+from responses_api_agents.opencode_agent.app import REPROMPT_SCRIPT
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.snapshot import snapshot
 
@@ -208,6 +209,44 @@ async def test_sandbox_access_env_task_only_path_reaches_opencode_and_not_the_se
     completed = subprocess.run(argv, capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
     assert (tmp_path / "stdout.jsonl").read_text() == "/task-tools/bin\n"
+
+
+# Stands in for ``opencode serve``: prints its PATH and its parent's command line, then answers each POST with
+# HTTP 200.
+OPENCODE_SERVER = """
+import http.server, os
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.end_headers()
+
+print(os.environ["PATH"])
+print(open(f"/proc/{os.getppid()}/cmdline").read().replace(chr(0), " "))
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+print(f"opencode server listening on http://127.0.0.1:{server.server_address[1]}", flush=True)
+server.serve_forever()
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc is required")
+async def test_sandbox_access_env_task_only_path_reaches_opencode_serve_and_not_the_reprompt_script(tmp_path):
+    opencode = tmp_path / "opencode"
+    opencode.write_text(f"#!{sys.executable}{OPENCODE_SERVER}")
+    opencode.chmod(0o755)
+    # The task's PATH holds neither bash nor the script's own tools, such as seq, sleep and base64.
+    access = lent_sandbox(tmp_path, {"PATH": "/task-tools/bin"})
+    command = ["bash", str(REPROMPT_SCRIPT), str(opencode), "ses_1", str(tmp_path / "reprompt.json")]
+    argv = await stage(tmp_path, command, sandbox_access=access, reprompt={})
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    # Exit status 0: the script found its tools, saw the server start and got HTTP 200 for the reprompt request.
+    log = tmp_path / "stderr.log"
+    assert completed.returncode == 0, (completed.stderr, log.read_text() if log.exists() else None)
+    server_path, script_command = (tmp_path / "reprompt-server.log").read_text().splitlines()[:2]
+    assert server_path == "/task-tools/bin"
+    # The script runs for the whole turn, and every process in the sandbox can read its command line.
+    assert script_command.startswith(" ".join(command)) and "/task-tools/bin" not in script_command
 
 
 async def test_sandbox_access_env_entries_keep_a_failed_setup_from_starting_opencode(tmp_path):

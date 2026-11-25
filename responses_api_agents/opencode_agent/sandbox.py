@@ -548,11 +548,17 @@ class OpenCodeSandboxSession(AgentSessionState):
                 )
             # env(1) then sets the entries for the CLI alone, over the sandbox's values. The names in ``env`` are left
             # out, so the adapter's own variables keep their values, and so is PWD, which the runner's ``cd`` sets.
-            params["command"] = [
-                "env",
-                *(f"{key}={value}" for key, value in access_env.items() if key not in env and key != "PWD"),
-                *command,
-            ]
+            assignments = [f"{key}={value}" for key, value in access_env.items() if key not in env and key != "PWD"]
+            if payload.get("reprompt") is not None:
+                # reprompt_opencode.sh starts the OpenCode server with the env(1) words in this file, so its own
+                # commands, such as ``seq`` and ``curl``, keep the sandbox's variables. The words are in a file
+                # because the script's command line stays readable in the sandbox for the whole turn.
+                server_env = f"{directory}/reprompt-env.sh"
+                text = shell_assignments({"server_env": ["env", *assignments]})
+                await upload_text(self.session.sandbox, path=server_env, text=text)
+                params["command"] = [*command, server_env]
+            else:
+                params["command"] = ["env", *assignments, *command]
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"
