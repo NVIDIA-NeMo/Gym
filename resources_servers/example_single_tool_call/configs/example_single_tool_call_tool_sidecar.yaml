@@ -1,12 +1,12 @@
-# The example with get_weather served from a sidecar of each attempt's sandbox group. The Environment Server starts
-# the group (the agent container and a `tools` sidecar) on OpenSandbox, the Resources Server starts its tool host in the
-# sidecar, and Simple Agent runs its loop in the agent container and calls http://tools:8000/get_weather. No tool call
-# reaches the Resources host. See the README.
+# The example through the single-agent-turn Environment Server (example_single_tool_call_single_agent_turn.yaml), with
+# get_weather served from a sidecar of each attempt's sandbox group on OpenSandbox. The Resources Server starts its own
+# class there as the tool host, and Simple Agent runs its loop in the group's agent container and calls
+# http://tools:8000/get_weather. No tool call reaches the Resources host. See the README.
 #
 # Set OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY. The deployment must enforce egress policies at the packet level
 # (`enforces_network_policy`), and its sandboxes must reach the model server's host.
 config_paths:
-  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+  - resources_servers/example_single_tool_call/configs/example_single_tool_call_single_agent_turn.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 sandbox:
@@ -19,42 +19,19 @@ sandbox:
 example_single_tool_call:
   resources_servers:
     example_single_tool_call:
-      entrypoint: app.py
-      domain: agent
       verified: false
-      description: Basic single-step tool calling
       tool_sidecar:
-        # A stock image: the Resources Server installs the tool host's runtime at the first prepare.
+        # A stock image: the Resources Server installs the tool host's runtime at the first prepare of each group.
         image: python:3.13-slim
+
 example_single_tool_call_session_agent:
   responses_api_agents:
     simple_agent:
-      entrypoint: app.py
       sandboxed: true
-      # Sessions take tool access from the Environment Server's grant; dataset tooling finds the task schema here.
-      resources_server:
-        type: resources_servers
-        name: example_single_tool_call
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/example_single_tool_call/data/example.jsonl
 
 example_single_tool_call_single_agent_turn:
-  _inherit_from: single_agent_turn_legacy
   environment_servers:
     single_agent_turn_legacy:
-      resources_server:
-        type: resources_servers
-        name: example_single_tool_call
-      agent_server:
-        type: responses_api_agents
-        name: example_single_tool_call_session_agent
-      resources_tool_transports:
-      - direct_http
       sandbox_provider: sandbox
       sandbox_config:
         image: python:3.13-slim
@@ -65,3 +42,7 @@ example_single_tool_call_single_agent_turn:
         # The tools are in the group, so the agent container needs only the model server.
         network: model_only
         model_server: policy_model
+      # The verifier only reads the response's tool calls, so it runs in the Resources Server and the group stops once
+      # the agent closes.
+      sandbox_opt_out:
+        verifier: true
