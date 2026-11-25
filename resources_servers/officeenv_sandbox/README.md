@@ -331,7 +331,10 @@ On a cluster, `configs/officeenv_opensandbox.yaml` composes the same episodes wi
 provider, as Gym's SWE-bench and Terminal-Bench runs use it: the servers run on a cluster node,
 the sandboxes on the OpenSandbox cell, and `use_absolute_ip` with
 `absolute_ip_server_types: [responses_api_models, resources_servers]` advertises the node's address
-for the two servers a sandbox calls (the head server stays on loopback; no relay). Credentials go
+for the two servers a sandbox calls (the head server stays on loopback; no relay). An explicit
+`default_host`, which NeMo RL sets to the node's address, applies to every server instead, so each
+harness config pins its agent and environment servers to `127.0.0.1`: no sandbox calls them, and
+code in a sandbox cannot start a run on Gym's host or stop another episode's run. Credentials go
 in `env.yaml` under `sandbox.opensandbox.connection`. Until `sandbox/Dockerfile`'s image is
 published to a registry the cell pulls from, the config uses a stock `python:3.12-bookworm` image
 (pinned by digest) and installs pandas and openpyxl in the provider's setup commands.

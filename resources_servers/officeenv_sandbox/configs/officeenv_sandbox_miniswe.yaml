@@ -19,12 +19,16 @@ officeenv_sandbox_miniswe_agent:
   _inherit_from: miniswe_sandboxed_agent
   responses_api_agents:
     miniswe_sandboxed_agent:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       agent_timeout_sec: 1800
 
 officeenv_sandbox_miniswe_environment_server:
   _inherit_from: single_agent_turn_legacy
   environment_servers:
     single_agent_turn_legacy:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       resources_server:
         name: officeenv_sandbox_miniswe_resources_server
       agent_server:

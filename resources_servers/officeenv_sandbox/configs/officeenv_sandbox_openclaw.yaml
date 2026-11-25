@@ -17,6 +17,8 @@ officeenv_sandbox_openclaw_agent:
   _inherit_from: openclaw_agent
   responses_api_agents:
     openclaw_agent:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       timeout: 1800
       # OpenClaw's default, set here for the admission cap below to follow.
       concurrency: 32
@@ -25,6 +27,8 @@ officeenv_sandbox_openclaw_environment_server:
   _inherit_from: single_agent_turn_legacy
   environment_servers:
     single_agent_turn_legacy:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       resources_server:
         name: officeenv_sandbox_openclaw_resources_server
       agent_server:

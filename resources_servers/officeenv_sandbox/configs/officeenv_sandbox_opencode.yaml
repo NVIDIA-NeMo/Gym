@@ -25,6 +25,8 @@ officeenv_sandbox_opencode_agent:
   _inherit_from: opencode_agent
   responses_api_agents:
     opencode_agent:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       timeout: 1800
       # OpenCode's default, set here for the admission cap below to follow.
       concurrency: 8
@@ -33,6 +35,8 @@ officeenv_sandbox_opencode_environment_server:
   _inherit_from: single_agent_turn_legacy
   environment_servers:
     single_agent_turn_legacy:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       resources_server:
         name: officeenv_sandbox_opencode_resources_server
       agent_server:

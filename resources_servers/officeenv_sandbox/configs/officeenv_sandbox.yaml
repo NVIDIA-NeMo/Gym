@@ -40,6 +40,8 @@ officeenv_sandbox_pi_agent:
   _inherit_from: pi_agent
   responses_api_agents:
     pi_agent:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       # No finish tool: the Environment Server ends the run once the task has ended, on every exposure
       # (end_on_task_state below), while a finish tool that a row's tools do not offer fails Pi's setup.
       finish_tool_names: []
@@ -59,6 +61,8 @@ officeenv_sandbox_pi_environment_server:
   _inherit_from: single_agent_turn_legacy
   environment_servers:
     single_agent_turn_legacy:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
       resources_server:
         name: officeenv_sandbox_pi_resources_server
       agent_server:
