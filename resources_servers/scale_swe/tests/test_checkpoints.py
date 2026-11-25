@@ -462,6 +462,75 @@ async def test_an_agent_s_own_run_still_seeds_with_the_flat_row(graders: FakeSan
     assert provider.live() == [] and graders.live() == []
 
 
+async def test_an_agent_s_own_run_cannot_replace_an_episode_session(graders: FakeSandboxProvider) -> None:
+    provider = FakeSnapshotProvider(git_results)
+    server = make_server(provider, {})
+    async with http(server) as client:
+        episode = await client.post("/seed_session", json=episode_seed().model_dump(mode="json"))
+        assert episode.status_code == 200, episode.text
+        # The same cookie, now with a flat row, as an agent's own /run would seed.
+        agent_run = await client.post("/seed_session", json={**ROW, "responses_create_params": {"input": []}})
+
+    assert agent_run.status_code == 409, agent_run.text
+    [sandbox_id] = provider.boxes
+    assert provider.live() == [sandbox_id], "the episode session's sandbox is neither stopped nor replaced"
+    await server.shutdown()
+
+
+class _SlowStops(FakeSnapshotProvider):
+    """A provider whose stops wait for ``release`` once ``hold`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__(git_results)
+        self.hold = False
+        self.stopping = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def close(self, handle: Any) -> None:
+        if self.hold:
+            self.stopping.set()
+            await self.release.wait()
+        await super().close(handle)
+
+
+async def test_a_commit_during_the_stop_after_capture_waits_and_snapshots_nothing(tmp_path: Path) -> None:
+    provider = _SlowStops()
+    server = make_server(provider, checkpointing_config(tmp_path / "state"))
+    async with http(server) as client:
+        await seed(client, episode_seed())
+        provider.hold = True
+        verifying = asyncio.create_task(
+            client.post("/ng-rollout/r/verify", json=verify_body(), headers={"x-ng-checkpoint-close-follows": "1"})
+        )
+        try:
+            async with asyncio.timeout(30):
+                await provider.stopping.wait()
+            prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control("c1"), headers=AUTH)
+            committing = asyncio.create_task(
+                client.post(
+                    "/ng-control/v1/checkpoint/commit",
+                    json=control("c1", checkpoint_dir=str(tmp_path / "ckpt")),
+                    headers=AUTH,
+                )
+            )
+            # Give the commit time to reach the session while the stop is still running.
+            await asyncio.sleep(0.5)
+            snapshots_during_stop = dict(provider.snapshots)
+        finally:
+            provider.release.set()
+        async with asyncio.timeout(30):
+            committed = await committing
+            graded = await verifying
+        await client.post("/ng-control/v1/checkpoint/resume", json=control("c1"), headers=AUTH)
+
+    assert prepared.status_code == 200, prepared.text
+    assert graded.status_code == 200, graded.text
+    assert snapshots_during_stop == {}, "a commit snapshotted the task sandbox while its stop was running"
+    assert committed.status_code == 200, committed.text
+    assert provider.snapshots == {}, "a session past its capture exports its capture, not a sandbox"
+    await server.shutdown()
+
+
 def test_a_golden_patch_server_holds_no_session_state() -> None:
     server = make_server(
         FakeSnapshotProvider(git_results),
