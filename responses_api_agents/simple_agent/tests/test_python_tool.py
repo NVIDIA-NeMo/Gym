@@ -60,6 +60,16 @@ async def _run(tools: PythonTools, code: str) -> dict[str, Any]:
     return json.loads(output)
 
 
+def _holds_cap_sys_resource() -> bool:
+    """Whether this process, and so the worker it starts as the same user, may raise its own hard limits."""
+    try:
+        status = Path("/proc/self/status").read_text()
+    except OSError:
+        return os.geteuid() == 0
+    effective = next(line.split()[1] for line in status.splitlines() if line.startswith("CapEff:"))
+    return bool(int(effective, 16) & (1 << 24))  # CAP_SYS_RESOURCE
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -189,9 +199,14 @@ async def test_code_past_the_memory_cap_gets_a_memory_error_and_the_worker_keeps
         worker = tools._workers["execute_python"].pid
         failed = await _run(tools, "y = bytearray(1024 * 1024 * 1024)")
         assert failed["success"] is False
-        # The code cannot lift the cap it runs under.
-        raised = await _run(tools, "import resource\nresource.setrlimit(resource.RLIMIT_DATA, (-1, -1))")
-        assert raised["success"] is False and "not allowed to raise" in raised["error_message"]
+        lifted = await _run(tools, "import resource\nresource.setrlimit(resource.RLIMIT_DATA, (-1, -1))")
+        if _holds_cap_sys_resource():
+            # A worker with CAP_SYS_RESOURCE, such as root on a host, lifts its own hard limit: the cap only stops
+            # code that asks for too much by mistake, and the sandbox's memory limit is the boundary.
+            assert lifted["success"] is True
+        else:
+            # Without it (any other user, or root in a container that drops it) the hard limit stays.
+            assert lifted["success"] is False and "not allowed to raise" in lifted["error_message"]
         assert (await _run(tools, "x"))["result"] == "1"
         assert tools._workers["execute_python"].pid == worker
 

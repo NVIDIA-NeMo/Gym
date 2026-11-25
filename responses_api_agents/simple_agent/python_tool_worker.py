@@ -49,7 +49,9 @@ def write_message(stream: BinaryIO, message: Any) -> None:
 def limit_memory(memory_mib: int | None) -> None:
     """Cap what this process may allocate, so code that asks for more gets a MemoryError.
 
-    The hard limit is set too, so the code cannot raise it again.
+    The hard limit is set too, so the code cannot raise it again unless it holds CAP_SYS_RESOURCE, as root does when
+    the sandbox keeps that capability (Docker drops it by default). The cap guards the agent loop against code that
+    asks for too much by mistake; the sandbox's own memory limit is the boundary.
     """
     if memory_mib is None:
         return
