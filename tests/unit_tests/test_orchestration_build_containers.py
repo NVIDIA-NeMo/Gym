@@ -222,6 +222,26 @@ async def test_interrupt_cancels_owned_srun_before_removing_image(tmp_path, monk
                 await task
 
 
+async def test_run_slurm_overrides_do_not_change_build_resources(container_config, monkeypatch):
+    container_config.slurm = {"account": "build", "partition": "batch", "qos": "short", "gpus-per-node": "4"}
+    container_config.slurm_run = {"account": "run", "partition": "batch_long", "qos": "normal", "gpus-per-node": 8}
+    run_command = AsyncMock(return_value=CommandOutput(returncode=0, output_lines=[]))
+    monkeypatch.setattr(build_containers, "_run_command", run_command)
+    helper = BuildContainerHelper(config=container_config)
+
+    assert helper._slurm_launcher_env(for_run=True) == {
+        "SBATCH_ACCOUNT": "run",
+        "SBATCH_PARTITION": "batch_long",
+        "SBATCH_QOS": "normal",
+        "SBATCH_GPUS_PER_NODE": "8",
+    }
+    await helper._run_single_srun("true", {}, {})
+
+    argv = shlex.split(run_command.call_args.args[0])
+    assert {"--account=build", "--partition=batch", "--qos=short", "--gpus-per-node=4"} <= set(argv)
+    assert container_config.slurm == {"account": "build", "partition": "batch", "qos": "short", "gpus-per-node": "4"}
+
+
 @pytest.fixture
 def container_config(tmp_path):
     return BuildContainerConfig(
@@ -573,6 +593,7 @@ def test_cli_loads_configs_and_overrides(entrypoint, overwrite_existing, tmp_pat
     config.write_text(
         "input_container_fpath: base.sqsh\n"
         "output_container_fpath: output.sqsh\n"
+        "slurm:\n  account: build-account\n  partition: batch\n"
         "vllm:\n"
         "  repo: https://example.invalid/vllm.git\n"
         "  branch: vllm-dev\n"
@@ -596,6 +617,7 @@ def test_cli_loads_configs_and_overrides(entrypoint, overwrite_existing, tmp_pat
     override = tmp_path / "override.yaml"
     override.write_text(
         "flashinfer:\n  branch: dev\nwarmup:\n  env:\n    MODEL: /models/nemotron\n    NUM_PREFILL_NODES: 2\n"
+        "slurm_run:\n  account: run-account\n"
     )
     monkeypatch.chdir(tmp_path)
     # Exercise real config composition without reading developer credentials or
@@ -611,7 +633,14 @@ def test_cli_loads_configs_and_overrides(entrypoint, overwrite_existing, tmp_pat
         captured.append(self.config)
 
     monkeypatch.setattr(build_containers.BuildContainerHelper, "run", capture_run)
-    args = ["--config", str(config), "--config", str(override), "++flashinfer.cpus_per_task=64"]
+    args = [
+        "--config",
+        str(config),
+        "--config",
+        str(override),
+        "++flashinfer.cpus_per_task=64",
+        "++slurm_run.qos=normal",
+    ]
     if overwrite_existing:
         args.append("--overwrite-existing")
     if entrypoint == "gym":
@@ -625,6 +654,8 @@ def test_cli_loads_configs_and_overrides(entrypoint, overwrite_existing, tmp_pat
     assert resolved.input_container_fpath == (tmp_path / "base.sqsh").resolve()
     assert resolved.output_container_fpath == (tmp_path / "output.sqsh").resolve()
     assert resolved.overwrite_existing is overwrite_existing
+    assert resolved.slurm == {"account": "build-account", "partition": "batch"}
+    assert resolved.slurm_run == {"account": "run-account", "qos": "normal"}
     assert resolved.vllm.branch == "vllm-dev"
     assert resolved.vllm.version == "0.32.0"
     assert resolved.vllm.precompiled_wheel_commit == "wheel-ref"
@@ -1642,7 +1673,10 @@ def test_build_failure_does_not_submit_run(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("status", [0, 37])
 @pytest.mark.parametrize("args_mode", ["evaluation", "omitted", "empty_list", "empty_string"])
-async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeypatch, status, args_mode):
+@pytest.mark.parametrize("separate_slurm", [False, True])
+async def test_run_real_launcher_uses_yaml_and_preserves_image(
+    tmp_path, monkeypatch, status, args_mode, separate_slurm
+):
     benchmark = tmp_path / BENCHMARK
     benchmark.mkdir(parents=True)
     for name in ("sbatch_external_vllm.sh", "save_warmed_vllm_container.py"):
@@ -1680,6 +1714,7 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
         input_container_fpath="missing.sqsh",
         output_container_fpath="built image.sqsh",
         slurm={"account": "build-account", "partition": "batch", "qos": "interactive", "gres": "gpu:4"},
+        slurm_run={"account": "run-account", "qos": "normal", "gres": "gpu:8"} if separate_slurm else {},
         run=RunConfig(
             env={
                 "MODEL": "/models/test",
@@ -1707,9 +1742,11 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     assert len(submissions) == (2 if evaluation and not status else 1)
     job = submissions[0]
     assert "--time=01:30:00" in job["args"]
-    assert job["env"]["SBATCH_ACCOUNT"] == "build-account"
+    assert job["env"]["SBATCH_ACCOUNT"] == ("run-account" if separate_slurm else "build-account")
+    assert job["env"]["SBATCH_PARTITION"] == "batch"
+    # Explicit run.env still overrides both shared and run-specific Slurm settings.
     assert job["env"]["SBATCH_QOS"] == "short"
-    assert job["env"]["SBATCH_GRES"] == "gpu:4"
+    assert job["env"]["SBATCH_GRES"] == ("gpu:8" if separate_slurm else "gpu:4")
     assert job["env"]["ENABLE_MOONCAKE"] == "1"
     assert job["env"]["CONTAINER"] == str(config.output_container_fpath)
     assert "SBATCH_WAIT" not in job["env"]
@@ -1786,6 +1823,7 @@ sys.exit(7 if outcome == "failure" else 0)
             "time": "02:00:00",
             gpu_key: gpu_value,
         },
+        slurm_run={"account": "run-account", "partition": "batch_long", "qos": "normal", gpu_key: "8"},
         warmup=WarmupConfig(
             env={
                 "MODEL": "/models/nemotron",

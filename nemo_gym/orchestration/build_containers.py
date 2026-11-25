@@ -143,6 +143,13 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
         return value
 
     slurm: Dict[str, Any] = Field(default_factory=dict)
+    slurm_run: dict[str, str | int] = Field(
+        default_factory=dict,
+        description=(
+            "Run-only overrides of slurm account, partition, qos, gpus-per-node, and gres. "
+            "Applies to --run and --run-only; run.env takes precedence. Builds and warmup use slurm."
+        ),
+    )
     vllm: Optional[VLLMConfig] = None
     flashinfer: Optional[FlashInferConfig] = None
     mooncake: Optional[MooncakeConfig] = None
@@ -955,7 +962,7 @@ def _timed_stage(name: str, stages: dict[str, str]) -> Iterator[None]:
 class BuildContainerHelper(BaseModel):
     config: BuildContainerConfig
 
-    def _slurm_launcher_env(self) -> dict[str, str]:
+    def _slurm_launcher_env(self, *, for_run: bool = False) -> dict[str, str]:
         mapping = {
             "account": "SBATCH_ACCOUNT",
             "partition": "SBATCH_PARTITION",
@@ -963,7 +970,10 @@ class BuildContainerHelper(BaseModel):
             "gpus-per-node": "SBATCH_GPUS_PER_NODE",
             "gres": "SBATCH_GRES",
         }
-        return {env_var: str(self.config.slurm[key]) for key, env_var in mapping.items() if key in self.config.slurm}
+        slurm = self.config.slurm
+        if for_run:
+            slurm = slurm | self.config.slurm_run
+        return {env_var: str(slurm[key]) for key, env_var in mapping.items() if key in slurm}
 
     async def run(self) -> None:
         builders: list[BaseBuilder] = []
@@ -1109,7 +1119,7 @@ class BuildContainerHelper(BaseModel):
             raise FileNotFoundError(f"Launcher not found: {launcher}. Run from the Gym checkout.")
         if not self.config.output_container_fpath.is_file():
             raise FileNotFoundError(f"Built image not found: {self.config.output_container_fpath}")
-        env = self._slurm_launcher_env()
+        env = self._slurm_launcher_env(for_run=True)
         env.update(
             {key: str(int(value)) if isinstance(value, bool) else str(value) for key, value in config.env.items()}
         )
