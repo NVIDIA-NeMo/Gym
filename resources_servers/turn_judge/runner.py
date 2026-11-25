@@ -40,6 +40,9 @@ _BACKGROUND_STOPS: set[asyncio.Task] = set()
 class OpenCodeSettings:
     install_script_path: str = "/mnt/s3-data/data/harness/opencode/install.sh"
     binary_path: str = "/mnt/s3-data/data/harness/opencode/linux-x64/1.17.11/opencode"
+    # Set for a libc-aware cached installer (--glibc-binary / --musl-binary), as the rollout agent's
+    # remote_opencode_musl_binary_path; empty = the installer takes --binary only.
+    musl_binary_path: str = ""
     version: str = "1.17.11"
     max_context_window: int = 262144
     max_output_tokens: int = 32768
@@ -195,7 +198,13 @@ async def run_pair(
         if rc != 0:
             raise RuntimeError(f"upload/extract failed rc={rc}: {err[-500:]}")
         oc = s.opencode
-        install = f"bash {shlex.quote(oc.install_script_path)} --binary {shlex.quote(oc.binary_path)}"
+        if oc.musl_binary_path:
+            install = (
+                f"bash {shlex.quote(oc.install_script_path)} --glibc-binary {shlex.quote(oc.binary_path)} "
+                f"--musl-binary {shlex.quote(oc.musl_binary_path)}"
+            )
+        else:
+            install = f"bash {shlex.quote(oc.install_script_path)} --binary {shlex.quote(oc.binary_path)}"
         cfg = shlex.quote(json.dumps(opencode_config(s)))
         cmd = (
             f"cd /judge && {install} > /judge/.install.log 2>&1 && export PATH=$HOME/.opencode/bin:$PATH && "

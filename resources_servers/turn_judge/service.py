@@ -82,7 +82,7 @@ from resources_servers.turn_judge.offline import (
 )
 from resources_servers.turn_judge.pairing import Pair, make_pairs
 from resources_servers.turn_judge.prompt import build_instructions
-from resources_servers.turn_judge.runner import PairRunSettings
+from resources_servers.turn_judge.runner import OpenCodeSettings, PairRunSettings
 
 LOG = logging.getLogger("turn_judge.service")
 DECISION = ("good", "harmful")
@@ -278,6 +278,7 @@ class ServiceConfig:
     endpoint_max_age_s: float = 1.0  # a session start re-reads the file if the last check is older than this
     shutdown_wait_s: float = 30.0  # SIGTERM -> SIGKILL is 120 s on this cluster: cancel 30 + stops 15 + reap 30
     reap_timeout_s: float = 300.0
+    opencode: OpenCodeSettings = dataclasses.field(default_factory=OpenCodeSettings)
 
 
 @dataclasses.dataclass
@@ -646,7 +647,13 @@ class JudgeService:
         empty = {str(g): {"n_calls": n, "labels": [], **align[str(g)]} for g, n in zip(order, built["n_calls"])}
         common["alignment_not_proven"] = sum(1 for a in built["alignment"] if not a["aligned"])
         common["trailing_empty_rollouts"] = sum(1 for a in built["alignment"] if a["trailing_empty_calls"])
-        pairs = make_pairs([r["reward"] for r in meta["rollouts"]], f"{ov['seed']}:{req.group_id}")
+        # A masked rollout's outcome was not measured (infrastructure failure): it is neither a pass nor a fail to
+        # contrast with, so it takes no part in the pairing (and gets no label).
+        measured = [k for k, r in enumerate(meta["rollouts"]) if not r["mask_sample"]]
+        pairs = [
+            Pair(fail=measured[p.fail], passing=measured[p.passing], larger_side=p.larger_side)
+            for p in make_pairs([meta["rollouts"][k]["reward"] for k in measured], f"{ov['seed']}:{req.group_id}")
+        ]
         if not pairs:
             return self._result(job, "no_pairs", t0, labels=empty, **common)
         image = task_image(req.task)
@@ -864,6 +871,7 @@ class JudgeService:
                     session_timeout_s=timeout_s,
                     sandbox_ttl_s=self.cfg.sandbox_ttl_s,
                     metadata=dict(self.metadata),
+                    opencode=dataclasses.replace(self.cfg.opencode),
                 )
                 s.opencode.temperature = ov["temperature"]
                 res = await self.run_pair(
@@ -1255,6 +1263,14 @@ def main() -> None:
     ap.add_argument("--tb-task-root", default=workspace.TB_TASK_ROOT, help="host dir of /terminal-bench-tasks")
     ap.add_argument("--gym-sha", default=os.environ.get("TJ_GYM_SHA", ""))
     ap.add_argument("--no-reap", action="store_true", help="do not list / delete sandboxes at startup and exit")
+    oc = OpenCodeSettings()
+    ap.add_argument("--opencode-install-script", default=oc.install_script_path, help="installer path in the sandbox")
+    ap.add_argument("--opencode-binary", default=oc.binary_path, help="OpenCode binary path in the sandbox (glibc)")
+    ap.add_argument(
+        "--opencode-musl-binary",
+        default=oc.musl_binary_path,
+        help="musl OpenCode binary; when set the installer is called with --glibc-binary / --musl-binary",
+    )
     a = ap.parse_args(argv)
 
     run_id = a.run_id or os.environ.get("NEMO_GYM_RUN_ID") or f"tjsvc-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
@@ -1297,6 +1313,11 @@ def main() -> None:
         archive_name=a.archive_name or (f"service-{job}.tar.gz" if job else ""),
         gym_sha=a.gym_sha,
         endpoint_poll_s=a.endpoint_poll,
+        opencode=OpenCodeSettings(
+            install_script_path=a.opencode_install_script,
+            binary_path=a.opencode_binary,
+            musl_binary_path=a.opencode_musl_binary,
+        ),
     )
     user = resolve_attribution().get("user")
     svc = JudgeService(cfg, provider, default_metadata, reaper=None if a.no_reap else opensandbox_reaper(user))

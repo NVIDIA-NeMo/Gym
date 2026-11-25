@@ -11,8 +11,15 @@ Use your working Gym/OpenSandbox environment. From the Gym repository root:
 ```bash
 uv run python -m resources_servers.turn_judge.service \
   --endpoint-file /shared/turn-judge/model.env \
-  --service-env-out /shared/turn-judge/service.env
+  --service-env-out /shared/turn-judge/service.env \
+  --opencode-install-script /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh \
+  --opencode-binary /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64 \
+  --opencode-musl-binary /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11
 ```
+
+The three `--opencode-*` options are the OpenCode assets as seen inside the judge sandbox; give the same paths as
+the rollout agent's `remote_opencode_*` settings. Without them the upstream defaults under
+`/mnt/s3-data/data/harness/opencode` are used. Rollouts with `mask_sample` (outcome not measured) are not paired.
 
 `model.env` must provide `JUDGE_BASE_URL` and `JUDGE_MODEL_NAME` for an already
 served judge model (upstream uses Qwen3.8-Flash-Next). `service.env` is written

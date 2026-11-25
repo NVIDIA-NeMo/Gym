@@ -387,6 +387,29 @@ def test_no_pairs_for_uniform_group(tmp_path):
     }
 
 
+def test_masked_rollouts_take_no_part_in_pairing(tmp_path):
+    judge = FakeJudge()
+    only_fail_masked = payload("m1", {3: 1.0, 1: 0.0, 8: 1.0})
+    one_fail_masked = payload("m2", MIXED)  # R1 = g2 (masked), R2 = g5: the only measured fail
+    for body, gi in ((only_fail_masked, 1), (one_fail_masked, 2)):
+        next(r for r in body["rollouts"] if r["generation_index"] == gi)["mask_sample"] = True
+
+    async def main():
+        svc = make_service(tmp_path, judge)
+        svc.submit(JudgeRequest(**only_fail_masked))
+        r1 = await wait_done(svc, "m1")
+        calls_after_m1 = list(judge.calls)
+        svc.submit(JudgeRequest(**one_fail_masked))
+        return r1, calls_after_m1, await wait_done(svc, "m2"), await svc.shutdown()
+
+    r1, calls_after_m1, r2, _ = run(main())
+    assert r1["status"] == "no_pairs" and calls_after_m1 == []
+    assert r2["status"] == "ok"
+    pairs = [c for c in judge.calls if c[0] == "pair"]
+    assert sorted(pairs) == [("pair", 2, 0), ("pair", 2, 3)]
+    assert r2["labels"]["2"]["labels"] == [] and r2["labels"]["5"]["labels"]
+
+
 def test_deadline_partial_cancels_unfinished(tmp_path):
     # 4 pairs (each fail with a pass); the pairs of R4 (g9) and R5 (g11) never finish before the deadline
     slow = {4, 5}
