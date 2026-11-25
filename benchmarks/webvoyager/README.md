@@ -188,8 +188,7 @@ against the old table retain their original source/runtime requirements.
 ### Configure external services
 
 Keep credentials in environment variables. Replace the example proxy address
-with your approved proxy endpoint. The vision judge needs the Responses API
-with inline image input. This example uses a public endpoint:
+with your approved proxy endpoint, and configure the judge gateway:
 
 ```bash
 export WA_BROWSER_PROXY_SERVER="proxy-host.example:19407"
@@ -198,8 +197,8 @@ read -rsp "CapSolver API key: " CAPSOLVER_API_KEY
 export CAPSOLVER_API_KEY
 printf '\n'
 
-export WEBARENA_JUDGE_BASE_URL="https://api.openai.com/v1"
-export WEBARENA_JUDGE_MODEL="gpt-4.1"
+export WEBARENA_JUDGE_BASE_URL="https://inference-api.nvidia.com/v1"
+export WEBARENA_JUDGE_MODEL="gcp/google/gemini-3-flash-preview"
 read -rsp "Judge API key: " WEBARENA_JUDGE_API_KEY
 export WEBARENA_JUDGE_API_KEY
 printf '\n'
@@ -207,8 +206,7 @@ printf '\n'
 
 Verify that the proxy exits through the intended region and preflight the
 CapSolver account before running browser tasks. Export these variables in the
-terminal that will run `gym env start`. Record the judge ID with each result.
-The historical results reported above used the Gemini judge.
+terminal that will run `gym env start`.
 
 ### Select a policy
 
