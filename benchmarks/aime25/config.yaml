@@ -2,11 +2,6 @@
 config_paths:
   - resources_servers/math_with_judge/configs/math_with_judge.yaml
 
-# Each attempt's sandbox reaches only the model server, so the model server listens on this host's address instead of
-# loopback; every other server stays on loopback. A run with no sandbox may set `use_absolute_ip: false`.
-use_absolute_ip: true
-absolute_ip_server_types: [responses_api_models]
-
 # We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
 aime25_math_with_judge_resources_server:
   _inherit_from: math_with_judge
@@ -34,10 +29,12 @@ aime25_math_with_judge_environment_server:
         name: aime25_math_with_judge_resources_server
       agent_server:
         name: aime25_math_with_judge_simple_agent
-      # Each attempt's agent loop runs in a sandbox this server starts, lends to the agent and stops, on the provider
-      # block named `sandbox`: add a provider config that can apply `model_only` (E2B, or OpenSandbox with
-      # `networking.enforces_network_policy: true`) and whose sandboxes can reach the model server's address. A
-      # provider that cannot apply it (Docker, Enroot) refuses to start; nothing falls back to the host.
+      # AIME is answer-only and its verifier executes nothing, so both opt out (below) and no sandbox starts. To run
+      # each attempt's agent loop in a sandbox instead, set `task: false`, add a provider config named `sandbox` that
+      # can apply `model_only` (E2B, or OpenSandbox with `networking.enforces_network_policy: true`), and set
+      # `use_absolute_ip: true` with `absolute_ip_server_types: [responses_api_models]` so the sandbox reaches the model
+      # server. A provider that cannot apply `model_only` (Docker, Enroot) refuses to start; nothing falls back to the
+      # host.
       sandbox_provider: sandbox
       sandbox_config:
         image: python:3.13-slim
@@ -47,10 +44,8 @@ aime25_math_with_judge_environment_server:
         network: model_only
         model_server: policy_model
       sandbox_opt_out:
-        # The task calls no tools, so a large run may set `task: true` to save sandbox capacity: the agent loop then
-        # runs in the Agent Server's process. With the verifier opted out too, the server starts no sandbox and needs
-        # no provider block.
-        task: false
+        # The task calls no tools, so the agent loop runs in the Agent Server's process.
+        task: true
         # Math-Verify runs nothing from the answer (see the math_with_judge README), so /verify runs in the
         # Resources Server.
         verifier: true
