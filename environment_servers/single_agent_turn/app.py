@@ -4,9 +4,11 @@
 """Resources-backed single-agent environment server."""
 
 import asyncio
+import functools
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import ClientConnectorError, ClientResponseError, ConnectionTimeoutError
@@ -62,6 +64,7 @@ from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     NG_SANDBOX_ACCESS_KEY,
     PREPARE_SANDBOX_PATH,
+    TOOL_SIDECAR_IMPORT_STATE_PATH,
     AttemptSandbox,
     AttemptSandboxEnvironmentServerConfig,
     BaseEnvironmentServer,
@@ -79,12 +82,18 @@ from nemo_gym.server_runtime import (
     SingleAgentTurnResult,
     StepType,
     ToolAccess,
+    ToolSidecarConfig,
+    ToolSidecarImportStateRequest,
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
     seed_rebinds_tool_accesses,
     seed_restarts,
     seed_verify_step_type,
+    tool_host_on_loopback,
+    tool_sidecar_config_of,
+    tool_sidecar_reachable,
+    tool_sidecar_to_grant,
 )
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -125,6 +134,8 @@ class SessionHandles(BaseModel):
     # The attempt's sandbox group this server starts, and who borrows it, as decided at seed; None when it starts
     # none, as when the Resources Server lent one, or neither the agent nor the verifier borrows a group.
     attempt_sandbox: AttemptSandbox | None = None
+    # Where the agent was granted the Resources Server's tools in the group's tool sidecar, if it was.
+    tool_sidecar_url: str | None = None
 
     @classmethod
     def new(cls, tool_servers: Sequence[str] = ()) -> "SessionHandles":
@@ -172,6 +183,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     # With sandbox_provider set, it lends the attempt's sandbox to the agent and to the Resources Server, so startup
     # refuses a provider no other process can connect to, such as the local provider that runs commands on this host.
     lends_sandboxes: ClassVar[bool] = True
+    # It grants the agent the tools a Resources Server serves from a sidecar of the group, and brings their state to
+    # /verify (_grant_tool_sidecar, _import_tool_sidecar_state).
+    grants_tool_sidecars: ClassVar[bool] = True
     # The base class starts the attempt sandbox from sandbox_config through self.sandboxes, so startup checks that
     # block's network rule against sandbox_provider.
     owned_sandbox_blocks: ClassVar[Mapping[str, str]] = ATTEMPT_SANDBOX_BLOCKS
@@ -188,8 +202,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ValueError: Naming the first need the configuration or the provider cannot meet.
         """
         super().check_sandbox_provider()
+        self._check_tool_sidecar()
         config = self.config.sandbox_config
-        granted = {*([self.config.resources_server.name] if self.config.resources_tool_transports else [])}
+        # The Resources Server's tools run in the group's tool sidecar when it declares one, so the sandbox need not
+        # reach its host.
+        serves_resources_tools = self.config.resources_tool_transports and self.tool_sidecar is None
+        granted = {*([self.config.resources_server.name] if serves_resources_tools else [])}
         granted.update(self.tool_server_names)
         if config is None:
             if self.starts_attempt_sandboxes and granted:
@@ -206,6 +224,34 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 f"sandbox_config network {config.network!r} does not allow {missing}, whose tools the episode grants; "
                 "use network: model_and_tools with these servers in tool_servers"
             )
+
+    @functools.cached_property
+    def tool_sidecar(self) -> ToolSidecarConfig | None:
+        """The sidecar the Resources Server's tools run in, as its config declares; None when they run in its process,
+        or when this process's config holds no block for that server."""
+        if self.server_client.global_config_dict.get(self.config.resources_server.name) is None:
+            return None
+        return tool_sidecar_config_of(
+            get_first_server_config_dict(self.server_client.global_config_dict, self.config.resources_server.name)
+        )
+
+    def _check_tool_sidecar(self) -> None:
+        """Refuse a pairing whose Resources Server serves its tools from a sidecar this server cannot run or grant."""
+        if self.tool_sidecar is None:
+            return
+        server = f"Environment Server {self.config.name!r}"
+        resources = self.config.resources_server.name
+        if self.config.sandbox_config is None:
+            raise ValueError(
+                f"{resources!r} serves its tools from a sidecar of the attempt's sandbox group, which {server} starts "
+                "only with sandbox_provider and sandbox_config set"
+            )
+        if self.config.resources_tool_transports != ["direct_http"]:
+            raise ValueError(
+                f"{server} grants the tool sidecar of {resources!r} over direct_http only; "
+                f"set resources_tool_transports: [direct_http], not {self.config.resources_tool_transports}"
+            )
+        self.tool_sidecar.check_provider(self.sandboxes.provider)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -566,6 +612,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             resources_server=repr(self.config.resources_server.name),
             prepare=lambda access: self._prepare_resources_sandbox(request, handles, access),
         )
+        await self._grant_tool_sidecar(handles, seed)
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
         await self._seed_agent(request, handles, seed, tool_accesses, sandbox_access=sandbox_access)
         return registered
@@ -604,6 +651,70 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         ]
         names += [access.name for access in tool_accesses]
         return names
+
+    async def _grant_tool_sidecar(self, handles: "SessionHandles", seed: ResourcesSeedSessionResponse) -> None:
+        """Grant the agent the Resources Server's tools in the sidecar its seed declared with a ``tools_port``, once
+        the agent container reaches the tool host there.
+
+        A Resources Server configured with a ``tool_sidecar`` whose seed declares none, or a tool sidecar the agent
+        does not borrow the group of, fails the attempt for good; a tool host the agent container cannot reach fails
+        it as an infrastructure failure. No tool call falls back to the Resources host.
+        """
+        lent_to_agent = handles.attempt_sandbox is not None and handles.attempt_sandbox.lend_to_agent
+        try:
+            sidecar = tool_sidecar_to_grant(
+                seed.sandbox_group,
+                resources_server=self.config.resources_server.name,
+                configured=self.tool_sidecar is not None,
+                lent_to_agent=lent_to_agent,
+                transports=self.config.resources_tool_transports,
+            )
+        except ValueError as refusal:
+            raise self._failure(stage="seed", failure_reason=str(refusal), terminal=True) from refusal
+        if sidecar is None:
+            return
+        try:
+            sandbox = self.sandboxes.get(handles.attempt_sandbox.key)
+            if sandbox is None:
+                raise RuntimeError("the attempt's sandbox group is gone before its tool sidecar was checked")
+            # The address the agent container reaches the tool port at, as the provider gives it.
+            url = sandbox.sidecar(sidecar.name).url(sidecar.tools_port)
+        except Exception as error:
+            raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
+        if tool_host_on_loopback(url):
+            raise self._failure(
+                stage="seed",
+                failure_reason=(
+                    f"the agent container reaches the tool sidecar {sidecar.name!r} on its own loopback ({url}), so "
+                    "code in it could seed the tool host and read its state; the provider must give each sidecar "
+                    "its own address"
+                ),
+                terminal=True,
+            )
+        try:
+            checked = await tool_sidecar_reachable(sandbox, urlsplit(url).hostname or "", sidecar.tools_port)
+        except Exception as error:
+            raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
+        if not checked:
+            raise self._failure(
+                stage="seed",
+                failure_reason=(
+                    f"the agent container has neither python3 nor bash to check that it reaches the tool sidecar at "
+                    f"{url}; the agent is granted no tools it was not checked to reach"
+                ),
+                terminal=True,
+            )
+        handles.tool_sidecar_url = url
+
+    async def _import_tool_sidecar_state(self, handles: "SessionHandles", access: SandboxAccess) -> None:
+        """Have the Resources Server copy the session's tool state out of the sidecar, before ``/verify`` grades it."""
+        collected = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path=TOOL_SIDECAR_IMPORT_STATE_PATH,
+            json=ToolSidecarImportStateRequest(sandbox_access=access).model_dump(mode="json"),
+            cookies=handles.resources_cookies,
+        )
+        await raise_boundary_failure(collected)
 
     async def _prepare_resources_sandbox(
         self, request: SingleAgentTurnRequest, handles: "SessionHandles", access: SandboxAccess
@@ -754,7 +865,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         sandbox_access = sandbox_access or seed.sandbox_access
         resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
-        if "direct_http" in self.config.resources_tool_transports:
+        if handles.tool_sidecar_url is not None:
+            # The tools run in the group's tool sidecar, which the agent container reaches by its name. The tool host
+            # reads the Resources session's cookies as its own. The group cannot be rebuilt after a crash, so the
+            # episode restarts and the grant carries no rollout prefix.
+            tool_accesses.append(
+                DirectHTTPToolAccess(
+                    name=f"{self.config.resources_server.name}.direct_http",
+                    required=True,
+                    base_url=handles.tool_sidecar_url,
+                    cookies=handles.resources_cookies,
+                )
+            )
+        elif "direct_http" in self.config.resources_tool_transports:
             # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
             # so the grant carries this attempt's rollout prefix.
             # An agent that continues the session after a restore sends its calls under the replacement's prefix.
@@ -911,6 +1034,23 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     ) -> SingleAgentTurnResult:
         verifier_invocations = None
         sandbox_field = {}
+        attempt = handles.attempt_sandbox
+        if handles.tool_sidecar_url is not None and attempt is not None:
+            # The tool state the agent's calls left lives in the group's tool sidecar: copy it to the Resources Server
+            # before /verify grades it, and before the group is released, whether or not the verifier borrows it.
+            # State that cannot be copied is an infrastructure failure: the attempt is retried, never graded without it.
+            evidence = {
+                "partial_response": agent_response,
+                "agent_observations": observations,
+                "trajectory": trajectory,
+            }
+            tools_access = await self.attempt_sandbox_access(attempt, stage="verification", **evidence)
+            try:
+                await self._import_tool_sidecar_state(handles, tools_access)
+            except Exception as error:
+                raise dependency_failure(
+                    error, stage="verification", terminal=False, name_error_type=True, **evidence
+                ) from error
         # The attempt's sandbox group, lent to the verifier now that the agent has closed (NG_SANDBOX_ACCESS_KEY): the
         # one the agent borrowed (shared), or one started now for the verifier alone (separate).
         access = await self.verifier_sandbox_access(

@@ -55,6 +55,7 @@ class FakeSandbox:
 
     created: list[dict[str, Any]] = []
     killed: list[str] = []
+    written: list[tuple[str, str, bytes]] = []
     closed: list[str] = []
     renewed: list[tuple[str, float]] = []
     ran: list[tuple[str, Any]] = []
@@ -77,7 +78,7 @@ class FakeSandbox:
             get_background_command_logs=self._logs,
             interrupt=self._interrupt,
         )
-        self.files = SimpleNamespace(read_bytes_stream=self._read)
+        self.files = SimpleNamespace(read_bytes_stream=self._read, write_file=self._write)
 
     @classmethod
     async def create(cls, **kwargs: Any) -> "FakeSandbox":
@@ -146,6 +147,9 @@ class FakeSandbox:
 
         return chunks()
 
+    async def _write(self, path: str, stream: Any) -> None:
+        type(self).written.append((self.id, path, stream.read()))
+
     async def kill(self) -> None:
         # A closed SDK handle has no client left to send the delete with.
         if self.id == type(self).fail_kill or self.id in type(self).closed:
@@ -169,7 +173,7 @@ class FakeConnectionConfig:
 
 @pytest.fixture
 def provider(monkeypatch: pytest.MonkeyPatch) -> opensandbox_provider.OpenSandboxProvider:
-    FakeSandbox.created, FakeSandbox.killed, FakeSandbox.closed = [], [], []
+    FakeSandbox.created, FakeSandbox.killed, FakeSandbox.closed, FakeSandbox.written = [], [], [], []
     FakeSandbox.renewed, FakeSandbox.ran, FakeSandbox.interrupted = [], [], []
     FakeSandbox.fail_image = FakeSandbox.fail_kill = FakeSandbox.fail_connect = FakeSandbox.gone = None
     FakeSandbox.exits_image, FakeSandbox.exited = None, 0
@@ -275,18 +279,22 @@ async def test_a_sandbox_without_sidecars_gets_no_placement_group(provider) -> N
     assert PLACEMENT_GROUP_KEY not in FakeSandbox.created[0]["metadata"]
 
 
-async def test_sidecar_commands_and_downloads_go_to_the_sidecars_sandbox(provider, tmp_path: Path) -> None:
+async def test_sidecar_commands_and_file_transfers_go_to_the_sidecars_sandbox(provider, tmp_path: Path) -> None:
     sandbox = await AsyncSandbox(provider, _SPEC).start()
     streamed: list[str] = []
+    (tmp_path / "tools.json").write_bytes(b'{"port": 8000}')
 
     result = await sandbox.sidecar("tools").exec("serve", "--dir", "/my data", timeout_s=5, on_stdout=streamed.append)
     await sandbox.sidecar("tools").download("/out/log.txt", tmp_path / "log.txt")
+    await sandbox.sidecar("tools").upload(tmp_path / "tools.json", "/etc/tools.json")
 
     # The argv reaches execd as a list, with no shell to quote it for, and stdout arrives line by line, each line
     # ended once.
     assert result.stdout == "sandbox-1: ['serve', '--dir', '/my data']"
     assert streamed == ["PORT 8080\n", "ready\n"]
     assert (tmp_path / "log.txt").read_text() == "sandbox-1:/out/log.txt"
+    # The sidecar is created first, so it is sandbox-1; nothing is written to the main sandbox.
+    assert FakeSandbox.written == [("sandbox-1", "/etc/tools.json", b'{"port": 8000}')]
 
 
 async def test_a_sidecar_command_needs_an_sdk_that_sends_argv(provider, monkeypatch: pytest.MonkeyPatch) -> None:

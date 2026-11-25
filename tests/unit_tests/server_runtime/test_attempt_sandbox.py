@@ -268,6 +268,11 @@ class _SidecarProvider(_Provider):
     ) -> None:
         pass
 
+    async def upload_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: Path, target_path: str
+    ) -> None:
+        pass
+
     def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
         return sidecar
 

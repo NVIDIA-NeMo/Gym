@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.environment import ToolSidecarResources, ToolSidecarResourcesConfig
 from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
@@ -33,13 +33,14 @@ from nemo_gym.server_runtime import (
     ResourcesSessionFences,
     ResourcesSessionLocks,
     SimpleResourcesServer,
+    VerifierMode,
     observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 
 
-class SimpleWeatherResourcesServerConfig(BaseResourcesServerConfig):
+class SimpleWeatherResourcesServerConfig(ToolSidecarResourcesConfig):
     pass
 
 
@@ -63,9 +64,14 @@ class SimpleWeatherVerifier:
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
-class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
+# With `tool_sidecar` set, get_weather runs in a sidecar of the attempt's sandbox group instead of this process; the tool
+# keeps no state, so grading reads only the agent's response.
+class SimpleWeatherResourcesServer(ToolSidecarResources, SimpleWeatherVerifier, SimpleResourcesServer):
     # Tool results depend only on the request, so a continuation needs no session state.
     checkpoint_mode = "stateless"
+    # The verifier only reads the response's tool calls, so it supports only `none`: /verify runs here and is lent no
+    # sandbox.
+    verifier_mode: ClassVar[VerifierMode] = "none"
     config: SimpleWeatherResourcesServerConfig
     _episode_by_session: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
@@ -96,7 +102,9 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
             identity = self._episode_by_session.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
-        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+        return ResourcesSeedSessionResponse(
+            resources_session_id=resources_session_id, **self.sandbox_declaration(body)
+        )
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         # Sessions are keyed by resources_session_id, not the cookie's session id, so the body names the session.

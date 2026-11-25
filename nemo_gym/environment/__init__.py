@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.environment.manifest import EnvironmentManifest, load_manifest, resolve_manifest_config_path
     from nemo_gym.environment.registry import discover_environment_catalog
+    from nemo_gym.environment.tool_sidecar import ToolSidecarResources, ToolSidecarResourcesConfig
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -37,6 +38,8 @@ _PUBLIC_API = {
     "RolloutOutcome": "in_process",
     "TaskFailure": "in_process",
     "TaskRunner": "in_process",
+    "ToolSidecarResources": "tool_sidecar",
+    "ToolSidecarResourcesConfig": "tool_sidecar",
     "discover_agents": "agent_registry",
     "discover_environment_catalog": "registry",
     "is_deliverable": "deliverables",

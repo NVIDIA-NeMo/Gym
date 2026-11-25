@@ -1,0 +1,44 @@
+# The example through the single-agent-turn Environment Server (example_single_tool_call_single_agent_turn.yaml), with
+# get_weather served from a sidecar of each attempt's sandbox group on OpenSandbox. The Resources Server starts its own
+# class there as the tool host, and Simple Agent runs its loop in the group's agent container and calls
+# http://tools:8000/get_weather. No tool call reaches the Resources host. See the README.
+#
+# Set OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY. The deployment must enforce egress policies at the packet level
+# (`enforces_network_policy`), and its sandboxes must reach the model server's host.
+config_paths:
+  - resources_servers/example_single_tool_call/configs/example_single_tool_call_single_agent_turn.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+sandbox:
+  opensandbox:
+    networking:
+      # The agent container reaches the sidecar by its name, and each member's egress is enforced.
+      enabled: true
+      enforces_network_policy: true
+      # The agent container's model_only rule opens only the sidecar's tool port, which needs an egress layer that
+      # applies a rule's ports; without it the provider refuses the create.
+      rule_ports_enforced: true
+
+example_single_tool_call:
+  resources_servers:
+    example_single_tool_call:
+      verified: false
+      tool_sidecar:
+        # A stock image: the Resources Server installs the tool host's runtime at the first prepare of each group.
+        image: python:3.13-slim
+
+example_single_tool_call_single_agent_turn:
+  environment_servers:
+    single_agent_turn_legacy:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /workspace
+        # Above the episode timeout plus the cleanup timeout.
+        ttl_s: 25200
+        # The tools are in the group, so the agent container needs only the model server.
+        network: model_only
+        model_server: policy_model
+      verifier:
+        # The verifier only reads the response, so /verify runs in the Resources Server.
+        mode: none

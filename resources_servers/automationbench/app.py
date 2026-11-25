@@ -10,6 +10,11 @@ zeroes the task) by default, with upstream's ``partial_credit`` and the guardrai
 
 The tools and the rubric are the ones ``verifiers_agent`` runs for this benchmark, imported from
 ``automationbench_env``; only the tool loop moves to the agent.
+
+With ``tool_sidecar`` set, the api toolset and each session's world run in a sidecar of the attempt's sandbox group
+instead of this process: the sidecar runs this same class, seeded with the same task. Before ``/verify``, the world the
+agent's tool calls left is copied back here (``export_tool_state`` there, ``import_tool_state`` here), and the rubric
+scores it as before.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import logging
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -27,15 +32,16 @@ from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.environment import ToolSidecarResources, ToolSidecarResourcesConfig
 from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ResourcesSeedRejectedError,
     ResourcesSessionLostError,
     SimpleResourcesServer,
+    VerifierMode,
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -66,7 +72,7 @@ NO_TOOLS_REASON = (
 )
 
 
-class AutomationBenchResourcesServerConfig(BaseResourcesServerConfig):
+class AutomationBenchResourcesServerConfig(ToolSidecarResourcesConfig):
     # Which score is the reward. Both are always reported, as the verifiers recipe reports them.
     reward_fn: Literal["aa_headline", "partial_credit"] = "aa_headline"
     # Adds every assertion's verdict to the verify response (`assertion_results`).
@@ -158,9 +164,21 @@ class _Episode:
     state: Dict[str, Any]
 
 
-class AutomationBenchResourcesServer(SimpleResourcesServer):
+class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer):
     config: AutomationBenchResourcesServerConfig
     seed_request_model = AutomationBenchSeedRequest
+    # The rubric reads the world copied out of the tool sidecar before the group stops, and executes nothing, so it
+    # supports only `none`: /verify runs here and is lent no sandbox.
+    verifier_mode: ClassVar[VerifierMode] = "none"
+    # What the tool host in a tool sidecar imports beyond Gym, as this server's pyproject.toml pins them.
+    tool_sidecar_requirements: ClassVar[tuple[str, ...]] = (
+        "verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@b2e4e8157783b2c0dffc7821044c87f29f1c3ccf",
+        "automation-bench @ git+https://github.com/zapier/AutomationBench.git@4a8e1061254004d9dac807054eed33fad7d1ff14",
+        "datasets",
+    )
+    tool_sidecar_sources: ClassVar[dict[str, str]] = {
+        "benchmarks/automationbench/automationbench_env": "automationbench_env"
+    }
 
     _episodes: Dict[str, _Episode] = PrivateAttr(default_factory=dict)
 
@@ -192,6 +210,36 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
 
     async def release_session_state(self, session_id: str) -> None:
         self._episodes.pop(session_id, None)
+
+    def tool_host_task_data(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """The task as the tool sidecar gets it: the world and the services in scope, without the answer key.
+
+        The tools read neither the assertions nor the answer; the services in scope come from each assertion's type
+        alone (``compute_allowed_services``), so only the types go to the sidecar's seed, which code in the agent
+        container can reach through the tool routes. The ``automation-bench`` package installed in the sidecar still
+        holds the public tasks' assertions on its filesystem, which only the provider's exec daemon reaches.
+        """
+        info = dict(task_data.get("info") or {})
+        info["assertions"] = [{"type": assertion.get("type")} for assertion in info.get("assertions") or []]
+        return {**task_data, "info": info, "answer": ""}
+
+    def export_tool_state(self, session_id: str) -> Dict[str, Any]:
+        """In the tool sidecar: the session's world, the only state the tools change."""
+        episode = self._episodes.get(session_id)
+        if episode is None:
+            # Never None for a seeded session: an empty export would let /verify score the untouched world.
+            raise ResourcesSessionLostError("No seeded AutomationBench session to export the world of")
+        return {"world": episode.state["world"].model_dump(mode="json")}
+
+    async def import_tool_state(self, session_id: str, state: Dict[str, Any]) -> None:
+        """On this host: the world the agent's tool calls left in the sidecar replaces the session's untouched one."""
+        from automationbench.schema.world import WorldState
+
+        async with self.session_lock(session_id):
+            episode = self._episodes.get(session_id)
+            if episode is None:
+                raise ResourcesSessionLostError("No seeded AutomationBench session to import the world into")
+            episode.state["world"] = WorldState.model_validate(state["world"])
 
     async def call_tool(self, request: Request, tool_name: str, arguments: Any = Body(None)) -> PlainTextResponse:
         """Run one tool on the session's world.

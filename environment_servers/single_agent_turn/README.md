@@ -117,12 +117,38 @@ At seed, the Resources Server may declare what the group holds, as `sandbox_grou
 
 | Hook on the Resources Server | Declares |
 |------|------|
-| `sandbox_group(body)` | The task's `image`, `workdir`, `env`, text `files` delivered before anyone borrows the group, and `sidecars` that serve its environment tools. `image` and `workdir` fall back to `sandbox_config`. Each sidecar gets its own egress, never the main container's: only its `egress_hosts` (`hosts_only`), or none (`no_network`). `tools_port` names the port on which it serves the Resources Server's HTTP tools; an Environment Server that does not grant those tools to the agent (`grants_tool_sidecars`, not yet set here) refuses such a sidecar. Sidecars need a provider that starts them and applies those rules. |
+| `sandbox_group(body)` | The task's `image`, `workdir`, `env`, text `files` delivered before anyone borrows the group, and `sidecars` that serve its environment tools. `image` and `workdir` fall back to `sandbox_config`. Each sidecar gets its own egress, never the main container's: only its `egress_hosts` (`hosts_only`), or none (`no_network`). `tools_port` names the port on which it serves the Resources Server's HTTP tools; an Environment Server that does not grant those tools to the agent (`grants_tool_sidecars`) refuses such a sidecar; this one grants them (see "Tools in a sidecar"). Sidecars need a provider that starts them and applies those rules. |
 | `verifier_mode = "shared"` or `"separate"` | Where `/verify` runs when `verifier.mode` is unset (see below); the class attribute, left at `"none"`, keeps it in the Resources Server with no sandbox. |
 | `supported_verifier_modes` | Every mode its `/verify` can run in, `verifier_mode` among them; unset, only `verifier_mode`. A `/verify` that grades in a sandbox when it is lent one and in its own process otherwise supports `none` too. |
 | `prepare_sandbox(body)` | Serves `/prepare_sandbox`: once the group has started, this server sends the seed's `task_data` and operate-scope access to the group, and the Resources Server prepares the task through `borrow()`, such as starting a sidecar's tool service, before the agent or the verifier borrows it. |
 
 A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both. An episode that holds a group this server starts is a restart: no checkpoint exports it, and the declared files and environment variables never reach a checkpoint.
+
+### Tools in a sidecar
+
+A Resources Server whose config sets `tool_sidecar` serves its HTTP tools from a sidecar of the group instead of its
+own process (`ToolSidecarResources` in `nemo_gym.environment`). Its seed declares the sidecar, and at
+`/prepare_sandbox` it starts its own class there as the tool host. This server then:
+
+| Step | What it does |
+|------|------|
+| Grant | Grants the agent the address the provider gives for the sidecar's tool port (`sidecar(name).url(port)`, `http://<name>:<port>` on OpenSandbox) as `direct_http`, with the Resources session's cookies, which the tool host reads as its own, in place of the Resources host. An address on the agent container's own loopback is refused: the tool host's seed and state routes trust loopback callers. |
+| Check | Probes that address from the agent container before the agent is seeded, with `python3` or else `bash`; an agent image with neither fails the attempt for good. |
+| Import state | After the agent closes and before `/verify`, asks the Resources Server to copy the session's tool state out of the sidecar (`/tool_sidecar/import_state`), so the grader reads what the tool calls left. It runs before the group stops, whatever the verifier mode, so a verifier that executes nothing keeps `none`. The Resources Server refuses `/verify` (HTTP 409) for a session whose state was never copied. |
+
+The pairing needs `sandbox_provider`, `sandbox_config`, `resources_tool_transports: [direct_http]` and a provider
+that runs sidecars; startup refuses anything else. Since the tools run in the group,
+`network: model_only` is enough for the agent container. A group without the declared sidecar fails the attempt for
+good; a tool host that does not start, cannot be reached from the agent container, or whose state cannot be copied
+fails it as a retryable infrastructure failure. No tool call falls back to the Resources host.
+
+The Resources Server refuses every tool call itself (HTTP 409), and the tool host answers its seed and state routes
+only from inside the sidecar. Code in the agent container can still reach the sidecar's other ports, such as the
+provider's exec daemon on OpenSandbox, so a tool sidecar holds no secret: a config that would copy a credential there is
+refused, and a server keeps what only grading reads out of the tool host's seed (`tool_host_task_data`). For the same
+reason, until the provider limits the agent container to the sidecar's tools port, pair a tool sidecar only with an
+agent that runs no model-written code in the agent container, such as Simple Agent without a code-execution tool: such
+code could change the tool state the grader reads.
 
 ### Where it runs
 

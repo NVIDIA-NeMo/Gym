@@ -704,6 +704,12 @@ class SupportsSandboxSidecars(Protocol):
         """Download one file from ``sidecar`` to the local filesystem."""
         ...
 
+    async def upload_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: Path, target_path: str
+    ) -> None:
+        """Upload one local file into ``sidecar``, for example a service's runtime or its configuration."""
+        ...
+
     def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
         """The host name or address at which the sandbox reaches ``sidecar``'s ports; it need not resolve elsewhere."""
         ...

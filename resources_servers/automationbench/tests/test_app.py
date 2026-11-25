@@ -299,3 +299,84 @@ def test_close_releases_the_world_and_the_session_follows_the_contract():
         holds_state=lambda session_id: session_id in server._episodes,
         verify_body=_verify_body(),
     )
+
+
+# Operate-scope access to an attempt's group with a tool sidecar, as the Environment Server sends it.
+_SANDBOX_ACCESS = {
+    "connection": {
+        "kind": "direct",
+        "provider_config_ref": "attempt_sandboxes",
+        "descriptor": {"sandbox_id": "group-1", "sidecars": [{"name": "tools", "image": "python:3.13-slim"}]},
+    },
+    "workdir": "/workspace",
+}
+
+
+def test_the_world_a_tool_sidecar_hands_back_is_what_verify_scores(monkeypatch):
+    host_server = _server(tool_sidecar={"image": "python:3.13-slim"})
+    # The tool host runs this same class without tool_sidecar, seeded with the task as the host hands it over.
+    sidecar_tool = _server()
+    sidecar_seed = _seed()
+    sidecar_seed.task_data = host_server.tool_host_task_data(sidecar_seed.task_data)
+    with TestClient(sidecar_tool.setup_webserver()) as sidecar, TestClient(host_server.setup_webserver()) as host:
+        _post_seed(sidecar, sidecar_seed)
+        seeded = _post_seed(host, _seed()).json()
+        # The seed declares the tool sidecar in the attempt's group, and the host runs no tool itself.
+        assert seeded["sandbox_group"]["sidecars"][0]["name"] == "tools"
+        assert host.post("/api_search", json={"query": "salesforce"}).status_code == 409
+        # The tool host signs sessions with the host's key, so the agent's calls carry the host's cookie.
+        sidecar.cookies.clear()
+        sidecar.cookies.update(dict(host.cookies))
+        _win_the_deal(sidecar)
+
+        # The world crosses a process boundary as JSON: the tool host's state route answers in the sidecar, and the
+        # host reads it back before /verify, which grades only a world read back.
+        assert host.post("/verify", json=_verify_body()).status_code == 409
+
+        class _Group:
+            def sidecar(self, name):
+                return name
+
+            async def disconnect(self):
+                return None
+
+        async def borrow(access):
+            return _Group()
+
+        async def call(sidecar, python, port, method, path, body, *, cookies):
+            state = sidecar_tool.export_tool_state("session")
+            return {"status": 200, "body": json.dumps({"state": state}), "cookies": {}}
+
+        monkeypatch.setattr("nemo_gym.environment.tool_sidecar.borrow", borrow)
+        monkeypatch.setattr("nemo_gym.environment.tool_sidecar._call", call)
+        imported = host.post("/tool_sidecar/import_state", json={"sandbox_access": _SANDBOX_ACCESS})
+        assert imported.json() == {"imported": True}
+        on_host = _verify(host)
+        # A resent /verify gets the grade the server kept, not a refusal for a world no longer read back.
+        assert _verify(host)["reward"] == on_host["reward"]
+
+    # Graded on the host with the real assertions, the sidecar's world scores as a world built in one process does.
+    with TestClient(_server().setup_webserver()) as in_process:
+        _post_seed(in_process, _seed())
+        _win_the_deal(in_process)
+        expected = _verify(in_process)
+    for score in ("reward", "aa_headline", "partial_credit", "objectives_passed", "guardrails_violated"):
+        assert on_host[score] == expected[score], score
+    assert on_host["objectives_passed"] == 1.0
+
+
+def test_the_tool_sidecar_gets_no_answer_key():
+    task_data = _seed().task_data
+    handed = _server(tool_sidecar={"image": "python:3.13-slim"}).tool_host_task_data(task_data)
+
+    assert handed["info"]["assertions"] == [{"type": a["type"]} for a in task_data["info"]["assertions"]]
+    assert handed["answer"] == ""
+    assert handed["info"]["initial_state"] == task_data["info"]["initial_state"]
+    # The services in scope, which the tools enforce, are the same as with the full assertions.
+    full, redacted = app_module.new_world_state(task_data["info"]), app_module.new_world_state(handed["info"])
+    assert full["world"].meta.allowed_services == redacted["world"].meta.allowed_services
+
+
+def test_a_session_the_sidecar_lost_is_never_exported_as_an_empty_world():
+    with pytest.raises(app_module.ResourcesSessionLostError):
+        _server(tool_sidecar={"image": "python:3.13-slim"}).export_tool_state("never-seeded")
