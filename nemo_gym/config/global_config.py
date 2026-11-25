@@ -266,6 +266,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "pool_agent",
         "prime_agent",
         "qwen_code_agent",
+        "robolab_agent",
         "simple_agent",
         "simple_strands_agent",
         "stirrup_agent",
