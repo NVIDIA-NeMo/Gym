@@ -138,7 +138,10 @@ that dies before flushing leaves no file: the rollout is collected as usual and 
 ## Sandbox worker supervision
 
 `sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. Exhausting that
-budget is an ungradable, non-retryable execution failure, rather than a retryable model or provider outage.
+budget ends the rollout where it stands: the last checkpoint is returned as an `incomplete` response with termination
+reason `timeout_exceeded`, and the benchmark grades it (Terminal-Bench scores it as a miss). It is never retried as a
+model or provider outage. A worker that leaves no checkpoint at all raises a terminal `agent_timeout` failure instead,
+which Gym records without retrying.
 Partial checkpoints remain available for failure inspection; they never authorize grading. Transient artifact
 transfer failures receive one retry within the existing capture deadline. Worker startup and supervisor failures
 retain up to 2,000 characters of output-log diagnostics after artifact capture.

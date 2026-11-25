@@ -60,6 +60,7 @@ def test_termination_projection_preserves_status_and_wire_values(
             "max_iterations_exceeded",
             "max_output_tokens_exceeded",
             "loop_detected",
+            "timeout_exceeded",
             "cancelled",
         }:
             assert serialized_response["error"] is None

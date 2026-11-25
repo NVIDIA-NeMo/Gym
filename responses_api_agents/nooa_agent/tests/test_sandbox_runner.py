@@ -197,7 +197,6 @@ async def test_limit_result_survives_worker_boundary_and_cleanup(reason: NOOATer
     [
         cleanup_receipt(return_code=7),
         cleanup_receipt(return_code=None),
-        cleanup_receipt(timed_out=True),
         cleanup_receipt(error="supervisor failed"),
     ],
 )
@@ -865,19 +864,49 @@ async def test_retry_cannot_exceed_artifact_capture_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_worker_deadline_preserves_checkpoint_without_retryable_dependency_error() -> None:
+async def test_worker_deadline_grades_the_checkpoint_as_a_timeout() -> None:
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    result = await r.run(payload().request)
+    # The budget ran out with evidence in hand: the rollout ends as a timeout and is returned for grading.
+    assert result.termination_reason is NOOATerminationReason.TIMEOUT_EXCEEDED
+    assert result.termination_error == "NOOA sandbox worker exceeded its execution deadline"
+    assert result.episode.response.status == "incomplete"
+    assert result.episode.response.error is None
+    assert result.episode.response.output == checkpoint_artifact().response.output
+    assert "partial_checkpoint" in {gap.code for gap in r.observations.gaps}
+    response, observations = finalize_run_result(result)
+    assert response.status == "incomplete"
+    assert any("execution deadline" in (gap.detail or "") for gap in observations.gaps)
+    await r.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_deadline_with_a_published_result_is_graded_as_a_timeout() -> None:
+    r, s = runner()
+    complete_files(r, s)
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    result = await r.run(payload().request)
+    assert result.termination_reason is NOOATerminationReason.TIMEOUT_EXCEEDED
+    assert result.episode.response.status == "incomplete"
+    assert result.episode.response.output == artifact().response.output
+    await r.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_deadline_without_evidence_is_a_terminal_timeout_failure() -> None:
     from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
 
     r, s = runner()
     s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
-    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline") as caught:
+    with pytest.raises(NgFailureEvent) as caught:
         await r.run(payload().request)
+    # Nothing to grade: Gym records the timeout as terminal instead of retrying it as an outage.
+    assert caught.value.failure_kind == "agent_timeout"
+    assert caught.value.boundary == "agent"
+    assert "execution deadline" in caught.value.failure_reason
     assert not is_transient_infrastructure_error(caught.value)
-    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
-    assert caught.value.result.episode.response.status == "failed"
-    assert caught.value.result.episode.response.output == checkpoint_artifact().response.output
-    assert "partial_checkpoint" in {gap.code for gap in r.observations.gaps}
     await r.close()
 
 
@@ -930,7 +959,6 @@ async def test_cancel_without_any_artifact_preserves_bare_cancellation() -> None
     "receipt,message",
     [
         (cleanup_receipt(return_code=137), "worker did not exit successfully (exit 137)"),
-        (cleanup_receipt(timed_out=True), "worker exceeded its execution deadline"),
         (cleanup_receipt(error="startup failed"), "supervisor failed: startup failed"),
     ],
 )
@@ -975,6 +1003,46 @@ async def test_capture_error_does_not_hide_confirmed_worker_failure(
         assert caught.value.result.episode.response.output == checkpoint_artifact().response.output
         assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
     s.exec.return_value = SandboxExecResult("", "", 0)
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_error_type", [RuntimeError, ConnectionError])
+@pytest.mark.parametrize("has_checkpoint", [False, True])
+async def test_capture_error_does_not_hide_a_worker_deadline(
+    capture_error_type: type[Exception], has_checkpoint: bool
+) -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    s.files[r.directory + "/output.log"] = "still transcribing frame 4000"
+    if has_checkpoint:
+        s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    download = s.download
+    capture_error = capture_error_type("docker cp download failed: artifact unavailable")
+
+    async def download_artifact(source: str, destination: Path) -> None:
+        if source.endswith("/result.json") or (not has_checkpoint and source.endswith("/checkpoint.json")):
+            raise capture_error
+        await download(source, destination)
+
+    s.download = download_artifact
+    if has_checkpoint:
+        # The deadline, not the capture error, decides the outcome: the checkpoint is graded as a timeout.
+        result = await r.run(payload().request)
+        assert result.termination_reason is NOOATerminationReason.TIMEOUT_EXCEEDED
+        assert result.episode.response.output == checkpoint_artifact().response.output
+    else:
+        with pytest.raises(NgFailureEvent) as caught:
+            await r.run(payload().request)
+        assert caught.value.failure_kind == "agent_timeout"
+        assert not is_transient_infrastructure_error(caught.value)
+    assert r.session.capture_error is capture_error
+    gaps = {gap.code: gap.detail for gap in r.observations.gaps}
+    assert gaps["sandbox_worker_diagnostics"] == "still transcribing frame 4000"
+    assert str(capture_error) in gaps["sandbox_capture_failed"]
     await r.close()
     s.disconnect.assert_awaited_once()
 

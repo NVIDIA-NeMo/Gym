@@ -12,6 +12,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from nemo_gym.agents import SandboxCommand, SandboxSession, resolve_agent_timeout
+from nemo_gym.core import AGENT_TIMEOUT, NgFailureEvent
 from nemo_gym.sandbox import AsyncSandbox, read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
@@ -23,6 +24,13 @@ from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class NOOAWorkerDeadlineExceeded(RuntimeError):
+    """The sandbox worker ran past its execution budget.
+
+    The rollout ends where its last checkpoint stands and is graded as a timeout; it is not an outage to retry.
+    """
 
 
 class SandboxNOOARunner:
@@ -135,8 +143,8 @@ class SandboxNOOARunner:
             ):
                 await self._collect_diagnostics()
             if cleanup["timed_out"]:
-                # Exhausting the worker budget is not a retryable dependency outage.
-                raise RuntimeError("NOOA sandbox worker exceeded its execution deadline")
+                # Exhausting the worker budget ends the rollout; it is not a retryable dependency outage.
+                raise NOOAWorkerDeadlineExceeded("NOOA sandbox worker exceeded its execution deadline")
             if cleanup["error"]:
                 raise RuntimeError(f"NOOA sandbox supervisor failed: {cleanup['error']}")
             if cleanup["return_code"] != 0:
@@ -160,11 +168,12 @@ class SandboxNOOARunner:
                 request.resource_cookies.update(evidence.resource_cookies)
                 if evidence.response is not None:
                     result = evidence.run_result()
-                    reason = (
-                        NOOATerminationReason.CANCELLED
-                        if isinstance(error, asyncio.CancelledError)
-                        else NOOATerminationReason.INFRASTRUCTURE_ERROR
-                    )
+                    if isinstance(error, NOOAWorkerDeadlineExceeded):
+                        reason = NOOATerminationReason.TIMEOUT_EXCEEDED
+                    elif isinstance(error, asyncio.CancelledError):
+                        reason = NOOATerminationReason.CANCELLED
+                    else:
+                        reason = NOOATerminationReason.INFRASTRUCTURE_ERROR
                     detail = str(error) or "NOOA execution was cancelled"
                     result.termination_reason = reason
                     result.termination_error = detail
@@ -174,10 +183,23 @@ class SandboxNOOARunner:
                         observations=self.observations or result.episode.observations,
                     )
                     self.observations = result.episode.observations
+                    if reason is NOOATerminationReason.TIMEOUT_EXCEEDED:
+                        # The budget ran out with evidence in hand: the rollout is complete as a timeout and
+                        # is returned for grading, the way Gym's other sandboxed harnesses end a timed-out turn.
+                        return result
                     if isinstance(error, asyncio.CancelledError):
                         error.nooa_result = result
                     else:
                         raise NOOARunFailure(error, result) from error
+            if isinstance(error, NOOAWorkerDeadlineExceeded):
+                # No checkpoint to grade: record a terminal timeout, which Gym keeps without retrying.
+                raise NgFailureEvent(
+                    boundary="agent",
+                    failure_kind=AGENT_TIMEOUT,
+                    failure_reason=str(error),
+                    operation="sandbox_runner.run",
+                    stage="agent",
+                ) from error
             raise
 
     async def _collect_diagnostics(self) -> None:

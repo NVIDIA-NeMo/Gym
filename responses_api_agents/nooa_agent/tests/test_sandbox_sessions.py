@@ -340,10 +340,9 @@ async def test_failed_connect_closes_provider_without_retaining_seeded_state(set
     sandbox.disconnect.assert_not_awaited()
 
 
-async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_outage(setup) -> None:
+async def test_worker_budget_exhaustion_is_graded_as_a_timeout_not_retried(setup) -> None:
     import json
 
-    from responses_api_agents.nooa_agent.runner import NOOARunFailure
     from responses_api_agents.nooa_agent.tests.test_sandbox_runner import checkpoint_artifact, cleanup_receipt
 
     instance, sandbox, _, _ = setup
@@ -351,10 +350,16 @@ async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_out
     runner = instance._require_agent_session("session").runner
     sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
     sandbox.files[runner.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline"):
-        await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    # The exhausted worker budget ends the rollout as a timeout the benchmark grades; no error reaches Gym.
+    response = await instance.responses(
+        request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task")
+    )
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.output == checkpoint_artifact().response.output
     receipt = await close(instance)
-    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+    assert NOOATerminationReason.TIMEOUT_EXCEEDED in {gap.code for gap in receipt.agent_observations.gaps}
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR not in {gap.code for gap in receipt.agent_observations.gaps}
 
 
 async def test_cancelled_request_stays_cancelled_even_when_session_is_closing(setup) -> None:

@@ -25,14 +25,16 @@ def set_response_lifecycle(
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
         NOOATerminationReason.LOOP_DETECTED,
+        # The worker's execution budget ran out: the rollout ends where it stands and is graded as such,
+        # like any other policy termination, so the benchmark scores the miss instead of retrying it.
+        NOOATerminationReason.TIMEOUT_EXCEEDED,
     }:
         return response.model_copy(update={"status": "incomplete", "error": None})
     if reason is NOOATerminationReason.CANCELLED:
         return response.model_copy(update={"status": "cancelled", "error": None})
-    status = "incomplete" if reason is NOOATerminationReason.TIMEOUT_EXCEEDED else "failed"
     return response.model_copy(
         update={
-            "status": status,
+            "status": "failed",
             "error": ResponseError(
                 # Responses error codes are a closed OpenAI enum. Keep the
                 # NOOA-specific reason in the message and rollout metadata.
