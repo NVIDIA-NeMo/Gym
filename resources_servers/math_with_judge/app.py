@@ -385,10 +385,6 @@ class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
-    # The verifier runs nothing from the answer (see the README's Sandbox section), so an Environment Server may let
-    # /verify run here instead of in the attempt's sandbox group (sandbox_opt_out.verifier). A subclass whose
-    # verifier runs model output sets False.
-    verifier_executes_nothing: ClassVar[bool] = True
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not

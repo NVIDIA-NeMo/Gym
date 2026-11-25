@@ -54,8 +54,8 @@ gym dataset collate \
 
 # Sandbox
 
-The verifier runs nothing from the answer, so this server declares `verifier_executes_nothing`, and an Environment
-Server may let `/verify` run here instead of in the attempt's sandbox group (`sandbox_opt_out.verifier: true`):
+The verifier runs nothing from the answer, so a config may let `/verify` run in this server instead of in the
+attempt's sandbox group (`sandbox_opt_out.verifier: true`):
 
 - Math-Verify reads a LaTeX answer with latex2sympy2_extended's ANTLR parser, which builds SymPy objects. Names it
   dispatches on come from fixed lists in its grammar and code; any other name becomes an undefined SymPy function.
