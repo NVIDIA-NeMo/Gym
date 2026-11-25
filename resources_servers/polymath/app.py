@@ -73,6 +73,9 @@ class PolyMathVerifyResponse(LibraryJudgeMathVerifyResponse):
 class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge + difficulty-weighted aggregation + per-language metrics."""
 
+    # This verify rebuilds the request without the lent sandbox, so it runs only in this server.
+    supported_verifier_modes = None
+
     config: PolyMathResourcesServerConfig
 
     async def verify(self, body: PolyMathVerifyRequest) -> PolyMathVerifyResponse:  # type: ignore[override]

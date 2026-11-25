@@ -29,25 +29,19 @@ aime25_math_with_judge_environment_server:
         name: aime25_math_with_judge_resources_server
       agent_server:
         name: aime25_math_with_judge_simple_agent
-      # Math-Verify parses the model's answer with SymPy, so it grades in a sandbox: for each attempt this server starts
-      # one with no network for /verify alone, and the Math-Verify check runs there (see the math_with_judge README).
-      # The task calls no tools, so it opts out and the agent loop runs in the Agent Server's process. Add a provider
-      # config named `sandbox` that can apply `no_network` (Docker, E2B, or OpenSandbox with
-      # `networking.enforces_network_policy: true`). To run the agent loop in that sandbox too, set `task: false` and
-      # `network: model_only` with `model_server: policy_model`, use a provider that can apply `model_only` (E2B or that
-      # OpenSandbox), and set `use_absolute_ip: true` with `absolute_ip_server_types: [responses_api_models]` so the
-      # sandbox reaches the model server. A provider that cannot apply the rule refuses to start; nothing falls back to
-      # the host.
+      # Math-Verify hands answer text to SymPy's evaluating parser, so this pairing grades in a sandbox: for each
+      # attempt this server starts one with no network for /verify alone, and the check runs there (see the
+      # math_with_judge README). The task calls no tools, so there is no task sandbox: the agent loop runs in the
+      # Agent Server's process. Add a provider config named `sandbox` that applies `no_network`, such as Docker or
+      # OpenSandbox; Enroot does not, so this server refuses to start on it.
       sandbox_provider: sandbox
-      sandbox_config:
-        image: python:3.13-slim
-        workdir: /workspace
-        ttl_s: 25200  # above the episode timeout plus the cleanup timeout
-        network: no_network
-        resources:
-          # Above the check's own cap (library_verifier_memory_limit_mb, 4096), so an answer that allocates too much
-          # fails in the check's child and scores 0 instead of the sandbox running out of memory.
-          memory_mib: 6144
-      sandbox_opt_out:
-        task: true
-        verifier: false
+      verifier:
+        mode: separate
+        sandbox:
+          image: python:3.13-slim
+          workdir: /workspace
+          ttl_s: 25200  # above the episode timeout plus the cleanup timeout
+          resources:
+            # Above the check's own cap (library_verifier_memory_limit_mb, 4096), so an answer that allocates too
+            # much fails in the check's child and scores 0 instead of the sandbox running out of memory.
+            memory_mib: 6144

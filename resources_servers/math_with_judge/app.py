@@ -47,6 +47,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    VerifierMode,
     borrow,
 )
 from nemo_gym.telemetry import MeteredSemaphore, resources_operation
@@ -404,6 +405,11 @@ class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
+    # Unless the pairing's verifier.mode says otherwise, /verify runs the check in this server, lent nothing. With
+    # verifier.mode: separate it is lent a sandbox and runs the check there (_verify_answer_in_lent_sandbox); see the
+    # README's Where it runs.
+    verifier_mode: ClassVar[VerifierMode] = "none"
+    supported_verifier_modes: ClassVar[frozenset[VerifierMode] | None] = frozenset({"none", "separate"})
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not

@@ -170,6 +170,8 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
 
     JUDGE_TRUE_LABEL: ClassVar[str] = "TRUE"
     JUDGE_FALSE_LABEL: ClassVar[str] = "FALSE"
+    # This verify calls _verify_answer itself and never sees a lent sandbox, so it runs only in this server.
+    supported_verifier_modes = None
 
     config: UGPhysicsJudgeResourcesServerConfig
 

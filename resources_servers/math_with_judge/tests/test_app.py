@@ -33,6 +33,7 @@ from nemo_gym.core import (
     PROVIDER_REQUEST_FAILED,
     PROVIDER_UNAVAILABLE,
     VERIFIER_ERROR,
+    EpisodeId,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
@@ -41,9 +42,10 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NgFailureEvent,
+    TaskId,
 )
 from nemo_gym.sandbox import SandboxAccess, SandboxExecResult
-from nemo_gym.server_runtime import ReverifyMode
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ReverifyMode
 from nemo_gym.telemetry import ResourcesOperation
 from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge import app as math_with_judge_app
@@ -1843,3 +1845,34 @@ class TestLentSandboxCheck:
 
         assert completed.returncode == 0, completed.stderr
         assert json.loads(completed.stdout) == {"reward": 0.0, "extracted_answer": None, "outcome": "timeout"}
+
+
+async def test_the_seed_reply_defaults_to_none_and_offers_separate() -> None:
+    # Unless the pairing sets verifier.mode, /verify runs in this server; a pairing may choose a separate sandbox.
+    server = LibraryJudgeMathResourcesServer(
+        config=LibraryJudgeMathResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="math_judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    reply = await server.seed_session(
+        ResourcesSeedSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="0-0"),
+            task_id=TaskId(taskset="aime25", task_id="0"),
+            task_data={"question": "What is 2 + 2?", "expected_answer": "4"},
+        )
+    )
+
+    assert reply.sandbox_group is None
+    assert reply.verifier_mode == "none"
+    assert reply.supported_verifier_modes == ["none", "separate"]
+    wire = reply.model_dump()
+    assert "verifier_mode" not in wire
+    assert wire["supported_verifier_modes"] == ["none", "separate"]
