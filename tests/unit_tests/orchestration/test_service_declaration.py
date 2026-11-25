@@ -318,6 +318,18 @@ def test_a_slurm_job_maps_each_gpu_uuid_to_the_services_on_its_node(
 
 
 @needs_shell
+def test_each_gpu_carries_its_model_when_nvidia_smi_lists_a_plain_name(tmp_path):
+    listing = '0, GPU-aaaa-0, NVIDIA H100 80GB HBM3\n1, GPU-aaaa-1, Bad "name"\n2, GPU-aaaa-2'
+    declaration = _run_job_start(tmp_path, {"policy": _vllm()}, {"gpu": _pool(1)}, listings={"n0": listing})
+    # A name with characters that could break the JSON is left out, as is a missing one; the GPU row stays.
+    assert [(g.gpu_uuid, g.gpu_name) for g in declaration.gpus] == [
+        ("GPU-aaaa-0", "NVIDIA H100 80GB HBM3"),
+        ("GPU-aaaa-1", None),
+        ("GPU-aaaa-2", None),
+    ]
+
+
+@needs_shell
 def test_the_router_node_lists_its_gpus_without_the_router(tmp_path):
     declaration = _run_job_start(tmp_path, {"policy": _pd()}, _PD_POOLS, listings={"n0": "0, GPU-aaaa-0"})
     assert declaration.nodes[0].services == ["gym-vllm/policy-prefill", "gym-vllm/policy"]
