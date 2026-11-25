@@ -106,8 +106,10 @@ BIRD's authors have revised the dev questions since the release Gym has used. `-
 them run on the same 11 SQLite databases from `dev.zip`, and every other option combines with them. Without eval.sh,
 `+prepare_script_args.version=<version>` does the same for `gym eval prepare --benchmark birdbench` and
 `gym eval run --benchmark birdbench`: `config.yaml` derives the dataset file from it, so the cache check and the run
-use that version's file, never the default's. This holds on SQLite dev; another dialect or split also changes the
-server, so use eval.sh for those.
+use that version's file, never the default's. Pass the same override to both commands. This holds on SQLite dev only:
+another dialect or split also changes the server, so use eval.sh for those. Setting `prepare_script_args.dialect` or
+`split` directly, or a version or prompt format not listed here, stops while the config is resolved, before anything
+is prepared or reused.
 
 ```bash
 gym eval prepare --benchmark birdbench +use_cached_prepared_benchmarks=true +prepare_script_args.version=minidev_20261028
@@ -188,7 +190,9 @@ per-column sample with per-question BM25 hits on the question text; see `build_d
 - **Column descriptions** come from `--dscp`, an ordered list of `name`, `col_dscp` (column_description) and `val_dscp`
   (value_description). The default, `name_or_col_dscp`, shows exactly one of name or description (name if non-blank);
   e.g. `--dscp name,col_dscp,val_dscp` shows all three.
-- Through `gym eval prepare` these are `prepare_script_args.{dialect,split,dscp,include_evidence}`.
+- Through `gym eval prepare` these are `prepare_script_args.{dscp,include_evidence,version,prompt_format}`; for
+  another dialect or split use eval.sh (see "Versions"). `+use_cached_prepared_benchmarks=true` reuses a file by its
+  name alone, which `dscp` and `include_evidence` don't change, so prepare without it after changing either.
 
 ## Files
 

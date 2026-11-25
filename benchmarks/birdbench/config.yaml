@@ -23,15 +23,22 @@ prepare_script_args:
   prompt_format: default
 
 # The dataset below follows prepare_script_args.version and prompt_format, so setting either one directly selects the
-# file prepare() writes for it and the matching prompt. File names mirror prepare.output_fpath_for on SQLite dev: the
-# default version's file is named by the split and any other by the version; any prompt format but the default adds
-# `_<format>`. An unknown value reaches prepare(), which rejects it. Another dialect or split also changes the server;
-# eval.sh handles those and replaces the whole dataset entry.
+# file prepare() writes for it and the matching prompt (names as in prepare.output_fpath_for). These tables list every
+# accepted value: anything else, and any dialect or split but SQLite dev, fails while the config is resolved, before
+# the cache is looked up, instead of reusing another file. Another dialect or split also changes the server, so
+# eval.sh handles those; it replaces the whole dataset entry, so these tables don't apply to it.
 birdbench_prepared_file:
-  name_for_version:
-    dev_20240627: dev  # every other version: the version
-  suffix_for_prompt_format:
-    default: ""  # every other prompt format: _<format>
+  prefix_for_dialect_and_split:
+    sqlite:
+      dev: birdbench_sqlite_
+  name_for_version:  # every key of prepare.VERSIONS
+    dev_20240627: dev
+    dev_20251106: dev_20251106
+    minidev_20250704: minidev_20250704
+    minidev_20261028: minidev_20261028
+  suffix_for_prompt_format:  # every value of prepare.PROMPT_FORMATS
+    default: ""
+    schema_only: _schema_only
 
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_bird_sql_resources_server:
@@ -47,7 +54,7 @@ birdbench_bird_sql_simple_agent:
         - name: birdbench
           type: benchmark
           # benchmarks/birdbench/data/birdbench_sqlite_dev.jsonl by default (see birdbench_prepared_file above)
-          jsonl_fpath: benchmarks/birdbench/data/birdbench_sqlite_${oc.select:birdbench_prepared_file.name_for_version.${prepare_script_args.version},${prepare_script_args.version}}${oc.select:birdbench_prepared_file.suffix_for_prompt_format.${prepare_script_args.prompt_format},_${prepare_script_args.prompt_format}}.jsonl
+          jsonl_fpath: benchmarks/birdbench/data/${birdbench_prepared_file.prefix_for_dialect_and_split.${prepare_script_args.dialect}.${prepare_script_args.split}}${birdbench_prepared_file.name_for_version.${prepare_script_args.version}}${birdbench_prepared_file.suffix_for_prompt_format.${prepare_script_args.prompt_format}}.jsonl
           prompt_config: benchmarks/birdbench/prompts/${prepare_script_args.prompt_format}_sqlite.yaml
           prepare_script: benchmarks/birdbench/prepare.py
           prepare_project: benchmarks/birdbench
