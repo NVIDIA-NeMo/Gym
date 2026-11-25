@@ -14,6 +14,7 @@ config_paths:
 - resources_servers/ether0/configs/ether0.yaml
 - resources_servers/equivalence_rule/configs/lc.yaml
 - resources_servers/instruction_following/configs/instruction_following.yaml
+- /path/to/gdpval_single_step_tool_use_with_argument_comparison.yaml
 - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
 - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
 - resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml
