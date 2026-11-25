@@ -38,7 +38,7 @@ permissions:
 
 jobs:
   code-freeze:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_code_freeze.yml@5c4f67f882e3ce38f5b3ebd3df5114b4b042da8c
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_code_freeze.yml@55cc5446f6f10455191f78eb2c8f53bc9028aa97
     with:
       release-environment: gym-release
       library-name: NeMo-Gym
