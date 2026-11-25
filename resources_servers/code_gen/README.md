@@ -57,8 +57,9 @@ The pairing needs three things the old one did not:
 - a provider that applies `model_only` and lends sandboxes, such as OpenSandbox with
   `networking.enforces_network_policy: true`. Docker and Enroot refuse `model_only` at startup;
 - servers at an address the sandbox reaches (`default_host` or `use_absolute_ip`), not a loopback address;
-- an image that also runs Simple Agent's runtime, which unpacks a glibc Python build under `/tmp`. The
-  `sandbox/Dockerfile` image does.
+- an image that also runs Simple Agent's runtime: Linux on x86_64 or aarch64, glibc 2.17 or later or musl, with
+  `bash`, `tar` and a writable `/tmp`. The Agent Server uploads a Python build that matches the image, so the image's
+  own Python is not used. The `sandbox/Dockerfile` image qualifies.
 
 It also holds one sandbox per running attempt for the whole generation, where code_gen alone held at most
 `num_processes` short-lived ones. For a trusted local setup on Docker or Enroot, override the rule explicitly:
