@@ -6,9 +6,10 @@
     },
     "jsonl_fpath": "resources_servers/hotpotqa_qa/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": null,
+    "license": "CC BY-SA 4.0",
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 5,
@@ -19,10 +20,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 120.0,
-        "Min": 112.0,
-        "Max": 131.0,
-        "Standard deviation": 8.86
+        "Average": 90.8,
+        "Min": 87.0,
+        "Max": 96.0,
+        "Standard deviation": 3.96
     },
     "Number of turns": {
         "Total # non-null values": 5,

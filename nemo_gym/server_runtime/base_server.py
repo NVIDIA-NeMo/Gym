@@ -14,16 +14,18 @@
 # limitations under the License.
 import asyncio
 import atexit
+import hashlib
 import json
 import logging
 import resource
+import secrets
 import signal
 import socket
 import sys
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
-from functools import partial
+from functools import cached_property, partial
 from ipaddress import ip_network
 from os import environ, getenv
 from traceback import format_exception, print_exception
@@ -38,7 +40,7 @@ from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
-from pydantic import BaseModel, PositiveInt, model_validator
+from pydantic import BaseModel, PositiveInt, ValidationError, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
@@ -151,9 +153,29 @@ class BaseServer(BaseModel):
         server_config_dict = get_first_server_config_dict(global_config_dict, config_path_str)
 
         server_config_cls: Type[BaseRunServerInstanceConfig] = cls.model_fields["config"].annotation
-        server_config = server_config_cls.model_validate(
-            OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
-        )
+        try:
+            server_config = server_config_cls.model_validate(
+                OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
+            )
+        except ValidationError as exc:
+            # Name the source setting when a required field interpolates an unset value.
+            unresolved = OmegaConf.to_container(server_config_dict, resolve=False)
+            missing = set()
+            for error in exc.errors():
+                if error.get("input") is None and error["loc"]:
+                    source = unresolved.get(error["loc"][0])
+                    if isinstance(source, str) and source.startswith("${") and source.endswith("}"):
+                        key = source[2:-1]
+                        if key in global_config_dict and global_config_dict[key] is None:
+                            missing.add(key)
+            if missing:
+                settings = ", ".join(sorted(missing))
+                overrides = " ".join(f"++{key}=<value>" for key in sorted(missing))
+                raise ValueError(
+                    f"Required settings for {config_path_str} are unset: {settings}. "
+                    f"Provide them in a config file or via CLI overrides: {overrides}"
+                ) from None
+            raise
 
         return server_config
 
@@ -249,6 +271,26 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+# The variables that carry each server's run secret (run_session_secret) to its workers, by a hash of its name.
+RUN_SESSION_SECRET_ENV_PREFIX = "NEMO_GYM_RUN_SESSION_SECRET_"
+
+
+def run_session_secret(server_name: str) -> str:
+    """The random secret that signs one server's sessions for this run.
+
+    The first call in a process without it makes one and sets it in the environment, under a variable named after the
+    server, so servers that share a process keep one secret each. A multi-worker server reads it in its main process
+    (``setup_webserver``) before uvicorn starts the workers, so every worker inherits it and reads the cookies and
+    tokens another worker signed, as Environment Servers do with ``episode_token_secret``. A server that starts
+    again makes a new one, which ends the sessions signed with the old.
+    """
+    variable = RUN_SESSION_SECRET_ENV_PREFIX + hashlib.sha256(server_name.encode()).hexdigest()[:16].upper()
+    secret = environ.get(variable)
+    if not secret:
+        secret = environ[variable] = secrets.token_urlsafe(32)
+    return secret
+
+
 def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
     """Raise when the server asks for several workers but cannot run with them."""
     if not server.config.num_workers or server.config.num_workers <= 1:
@@ -275,6 +317,10 @@ class SimpleServer(BaseServer):
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
+    # Sign session cookies and MCP session tokens with a secret made for the run (run_session_secret), not with the
+    # public key get_session_middleware_key() derives from the server's class and name: for a server whose routes code
+    # it does not trust can call, such as code in a sandbox it lends. mcp_bearer_token turns it on as well.
+    signs_sessions_with_run_secret: ClassVar[bool] = False
 
     def owned_session_routing(self) -> dict[str, Any]:
         """Arguments to ``install_session_routing``: where requests name their session, and how long ownership lasts.
@@ -346,9 +392,47 @@ class SimpleServer(BaseServer):
         instrument_fastapi_app(app)
 
     def get_session_middleware_key(self) -> str:
-        # This method is here to override in case we want to ever use an actual session middleware secret key.
-        # e.g. for an actual product.
+        # Names this server in logs and error text, and by default its session cookie, so it is public.
+        # To sign sessions with a secret, set signs_sessions_with_run_secret (or override get_session_secret).
         return f"{self.__class__.__name__}___{self.config.name}"
+
+    def get_session_secret(self) -> str:
+        """The key that signs this server's session cookies and MCP session tokens; callers read it once, through
+        ``session_secret``.
+
+        With ``signs_sessions_with_run_secret``, or with ``mcp_bearer_token`` in the config, it is a secret made for
+        the run (``run_session_secret``), so callers that can reach the server's routes, such as code in a sandbox
+        the server lends, cannot forge another session's cookie or token. Otherwise it is
+        ``get_session_middleware_key()``, which anyone who knows the server's class and name can compute.
+        Only the signing changes: the cookie keeps its name (``get_session_cookie_name()``).
+
+        An override must return the same secret in every worker of the server, because a cookie or token signed by
+        one worker is read by another (session routing reads it to find the session's worker). And every cookie and
+        token signed with a secret is invalid once the secret changes: a secret made when the process starts ends
+        every open session at a restart, so it suits a server whose sessions cannot outlive its process anyway.
+        """
+        if (
+            getattr(type(self), "signs_sessions_with_run_secret", False) is True
+            or getattr(self.config, "mcp_bearer_token", False) is True
+        ):
+            return run_session_secret(self.config.name)
+        return self.get_session_middleware_key()
+
+    @cached_property
+    def session_secret(self) -> str:
+        """``get_session_secret()``, resolved once per server: the session middleware, session routing and the MCP
+        endpoint of a process all sign and read with one key, even under an override that answers differently from
+        call to call. The instance's ``__dict__`` keeps it, so it holds however the server was built."""
+        return self.get_session_secret()
+
+    def get_session_cookie_name(self) -> str:
+        """The name of this server's session cookie, for SessionMiddleware and the session router that reads it.
+
+        The default is ``get_session_middleware_key()``. Callers see the name in every answer that sets the cookie,
+        so a server whose routes code in a sandbox can reach may return one that says nothing of the server.
+        It must stay unique per server: a client keeps one cookie per name and host, and servers share hosts.
+        """
+        return self.get_session_middleware_key()
 
     def setup_session_middleware(self, app: FastAPI) -> None:
         if getattr(app.state, "nemo_gym_session_middleware_installed", False):
@@ -362,8 +446,9 @@ class SimpleServer(BaseServer):
         # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
         app.add_middleware(SessionIDMiddleware)
 
-        session_middleware_key = self.get_session_middleware_key()
-        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+        app.add_middleware(
+            SessionMiddleware, secret_key=self.session_secret, session_cookie=self.get_session_cookie_name()
+        )
 
     def setup_exception_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ExceptionHandlingMiddleware, failure_reply=partial(SimpleServer._failure_reply, self))
@@ -537,15 +622,15 @@ repr(e): {repr(e)}"""
         mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.server_runtime.mcp_auto_exposure import (
-                TOKEN_HEADER,
                 maybe_auto_expose,
+                session_token_header,
                 session_token_serializer,
             )
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
             mcp_token_routing = dict(
-                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+                mcp_token_header=session_token_header(server), mcp_token_serializer=session_token_serializer(server)
             )
         server.setup_liveness(app)
         server.set_ulimit()
@@ -566,12 +651,12 @@ repr(e): {repr(e)}"""
         if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
             # Outside SessionMiddleware and the exception middleware:
             # a forwarded request is handled only by the worker that owns its session.
-            session_cookie = server.get_session_middleware_key()
             install_session_routing(
                 app,
                 socket_dir=session_socket_dir,
-                session_cookie=session_cookie,
-                secret_key=session_cookie,
+                session_cookie=server.get_session_cookie_name(),
+                # Reads the cookie as SessionMiddleware does, so with the same key.
+                secret_key=server.session_secret,
                 backlog=backlog,
                 **mcp_token_routing,
                 **server.owned_session_routing(),

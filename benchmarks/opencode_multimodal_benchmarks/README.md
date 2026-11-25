@@ -247,26 +247,43 @@ The benchmark verifier accepts only `tool_rewards: null` (the default) and never
 adds tool rewards. Non-null settings are rejected. Tool shaping is available only
 through the training adapters below; `tool_rewards: {}` selects their default schedule.
 The default applies penalties only to correct answers, with no positive bonuses.
-Zero to two bash attempts have no count penalty; three, four, five, and six or more
-attempts incur penalties of 0.025, 0.05, 0.075, and 0.10 respectively. Failed bash
-calls incur an additional 0.05 penalty; consecutive successful duplicate calls
-incur a 0.02 penalty. Other tools do not incur failure penalties. Override individual
-`tool_rewards` fields to change this schedule.
+Select one shell with `tool_rewards.shell_tool_name` (default `bash`), or several
+with `tool_rewards.shell_tool_names: [terminal, bash, shell, exec, exec_command]`.
+The list must contain nonempty names and shares one count and bonus schedule.
+Do not set a singular name together with a non-null list; omitted/null lists retain
+the singular setting. Identical commands sent to different tools are not duplicates.
+Zero to two shell attempts have no count penalty; three, four, five, and six or more
+attempts incur penalties of 0.025, 0.05, 0.075, and 0.10 respectively. Failed calls
+selected by `tool_rewards.invalid_tool_call_names` incur an additional 0.05 penalty; consecutive successful duplicate calls
+incur a 0.02 penalty. When omitted, `invalid_tool_call_names` follows the configured shell names;
+other tools do not incur failure penalties. An explicit list selects eligible tools,
+`null` includes all tools and `[]` disables failure penalties. For example:
+
+```yaml
+tool_rewards:
+  shell_tool_name: shell
+  # invalid_tool_call_names defaults to [shell].
+```
+
+A non-null shell name must be a nonempty string. Override individual `tool_rewards` fields
+to change this schedule.
 Scoring reads tool execution outcomes from the shared trajectory
 or observation bundle; it never interprets model-visible output as an exit status.
+A nonzero shell exit must be reported as a failed tool observation. The configured
+shell names control call counting, duplicate normalization and success bonuses.
 
 For existing math, MCQA, string-match, and generic LLM-judge training tasks, use the
-`opencode_math_tool_rewards`, `opencode_mcqa_tool_rewards`,
-`opencode_string_match_tool_rewards`, or `llm_judge_tool_rewards` Resources component,
-respectively, each with `entrypoint: app.py`. Each component owns its inherited
-grader's dataset schema, so strict dataset collation accepts native training rows
-without visual benchmark metadata. These thin adapters import the
+`math_tool_rewards`, `mcqa_tool_rewards`, `string_match_tool_rewards`, or
+`llm_judge_tool_rewards` Resources component, respectively, each with
+`entrypoint: app.py`. Each component owns its inherited grader's dataset schema,
+so strict dataset collation accepts native training rows without visual benchmark
+metadata. These thin adapters import the
 existing graders and retain their task schemas. For example:
 
 ```yaml
 training_string:
   resources_servers:
-    opencode_string_match_tool_rewards:
+    string_match_tool_rewards:
       entrypoint: app.py
       tool_rewards: {}
 ```

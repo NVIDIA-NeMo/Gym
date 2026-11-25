@@ -54,6 +54,12 @@ Run sandboxes as local Apptainer instances on a host or HPC node.
 <Badge minimal outlined>provider</Badge> <Badge minimal outlined>apptainer</Badge>
 </Card>
 
+<Card title="Bubblewrap Provider" href="/infrastructure/sandbox/bwrap">
+Run each command in fresh bubblewrap namespaces over a per-sandbox directory; no daemon or image unpack.
+
+<Badge minimal outlined>provider</Badge> <Badge minimal outlined>bwrap</Badge>
+</Card>
+
 <Card title="Docker Provider" href="/infrastructure/sandbox/docker">
 Run sandboxes as containers on the local Docker daemon for local and CI runs.
 
@@ -135,6 +141,12 @@ python first_sandbox.py
 ```
 
 `exec()` returns a `SandboxExecResult`. Nonzero process exits are reported in `return_code`; providers should reserve exceptions for sandbox runtime failures such as allocation, transport, or lifecycle errors.
+
+`exec()` also takes a list of strings instead of shell text, such as `await sandbox.exec(["python", "/sandbox/hello.py"])`. The list runs as the program's argv without a shell, so its arguments need no quoting and no shell program of the sandbox takes part. Docker, Apptainer, Local and OpenSandbox (with `opensandbox>=1.1.0`) run it; other providers, and a `user` a provider can switch to only through `su`, raise `SandboxExecArgvUnsupportedError` before anything runs, and `preserve_background_services=True` takes shell text only.
+
+An argument list is not a trust boundary on its own. No shell runs, but the program, its dynamic loader and libraries, and files such as `/etc/ld.so.preload` still come from the sandbox's file system. To run a program you trust in a sandbox that an agent has modified, upload a statically linked binary or mount the program read-only.
+
+On Docker, Apptainer and Local, a program in an argument list that cannot be started is a command failure, as with shell text: `error_type` is `None` and `return_code` is `127` when the program is not found or `126` when it is not executable.
 
 ## Provider Config Blocks
 
@@ -345,6 +357,24 @@ finally:
     await sandbox.stop()
 ```
 
+`stop()` finishes even when the request that calls it is cancelled, for example when a client disconnects: it is shielded from anyio cancellation. It is bounded in time by `timeout_s`, `STOP_TIMEOUT_S` (120 seconds) by default:
+
+- A stop that does not finish in time raises `TimeoutError`, and one whose provider call fails raises that error. Either way a later `stop()` tries again:
+  - If the provider had not yet torn the sandbox down, the later `stop()` tears it down.
+  - If it had, the sandbox stays stopped, and the later `stop()` retries only the release of the provider's client.
+- Pass your own limit as `stop(timeout_s=...)`, or `None` for no limit. Do not wrap `stop()` in `asyncio.timeout` or `asyncio.wait_for`: that cancels the stop natively, and the stop's own default still applies inside it.
+- `disconnect()`, which releases a client without ending the sandbox, is shielded and bounded the same way.
+- `AsyncSandboxCompose.stop()` stops each member with its own limit and has no limit for the group unless you pass one.
+
+To test code that starts, stops or borrows sandboxes, run a real `AsyncSandbox` over `FakeSandboxProvider` from `nemo_gym.sandbox.testing`, and script the provider rather than the sandbox. `fake_sandbox()` builds a started sandbox on one:
+
+```python
+from nemo_gym.sandbox.testing import fake_sandbox
+
+sandbox = fake_sandbox()
+sandbox.provider.on_close.side_effect = RuntimeError("provider unreachable")
+```
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.
@@ -396,6 +426,7 @@ in follow-up changes:
 | Provider | Config key |
 | --- | --- |
 | Apptainer | `apptainer` |
+| bwrap | `bwrap` |
 | Daytona | `daytona` |
 | Docker | `docker` |
 | E2B | `e2b` |

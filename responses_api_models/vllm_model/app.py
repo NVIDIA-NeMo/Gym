@@ -37,6 +37,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
+from nemo_gym.config import model_call_sampling_config
 from nemo_gym.core import (
     MODEL_SAMPLING_HEADER,
     MODEL_SAMPLING_NULL,
@@ -54,7 +55,6 @@ from nemo_gym.core import (
     current_rollout_id,
     current_session_key,
     failure_report_for,
-    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -438,6 +438,9 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
                 continue
         else:
             context[field] = value
+    identity = request.scope.get("state", {}).get("nemo_gym_model_call_identity")
+    if isinstance(identity, dict):
+        context.update({key: identity[key] for key in ("rollout_id", "model_call_id")})
     return context
 
 
@@ -1836,8 +1839,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata.pop("audio_path", None)
         elif metadata.get("audio_paths"):
             paths = metadata["audio_paths"]
-            if not isinstance(paths, list):
-                raise ValueError(f"metadata.audio_paths must be a list, got {type(paths).__name__}.")
+            if isinstance(paths, str):
+                try:
+                    paths = json.loads(paths)
+                except json.JSONDecodeError as error:
+                    raise ValueError("metadata.audio_paths must be a list or JSON-encoded list of paths") from error
+            if not isinstance(paths, list) or not paths or any(not isinstance(p, str) or not p for p in paths):
+                raise ValueError("metadata.audio_paths must be a nonempty list of path strings")
             audio_urls.extend(self._resolve_audio_path_to_url(p) for p in paths)
             metadata.pop("audio_paths", None)
         elif "audio_ref" in metadata:

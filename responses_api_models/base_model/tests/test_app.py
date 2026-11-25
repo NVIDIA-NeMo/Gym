@@ -191,6 +191,106 @@ class TestParseBashToolCall:
         assert BM.parse_bash_tool_calls("I think the fix is to edit foo.py") == []
 
 
+class TestParseToolCalls:
+    """The generic parser, for tool sets other than `bash` (here AutomationBench's)."""
+
+    NAMES = ("api_search", "api_fetch", "base64_encode")
+
+    def test_calls_to_any_listed_tool_are_kept_in_order(self):
+        raw = (
+            '[{"name": "api_search", "arguments": {"query": "gmail send"}}, '
+            '{"function": {"name": "api_fetch", "arguments": "{\\"method\\": \\"GET\\", \\"url\\": \\"https://x\\"}"}}]'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "gmail send"}},
+            {"name": "api_fetch", "arguments": {"method": "GET", "url": "https://x"}},
+        ]
+
+    def test_arguments_pass_through_unchanged(self):
+        # Nested objects and empty objects are the tool's business, not the parser's.
+        raw = (
+            '[{"name": "api_fetch", "arguments": {"method": "POST", "url": "u", "params": {}, "body": {"a": [1, 2]}}}]'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES)[0]["arguments"] == {
+            "method": "POST",
+            "url": "u",
+            "params": {},
+            "body": {"a": [1, 2]},
+        }
+
+    def test_unlisted_tool_is_dropped(self):
+        raw = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "api_search", "arguments": {"query": "q"}}]'
+        assert [c["name"] for c in BM.parse_tool_calls(raw, self.NAMES)] == ["api_search"]
+
+    def test_non_object_arguments_are_dropped(self):
+        assert BM.parse_tool_calls('[{"name": "api_search", "arguments": "not json"}]', self.NAMES) == []
+
+    def test_truncated_inside_a_string_fails(self):
+        assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "https://x', self.NAMES) == []
+
+    def test_calls_completed_before_a_cut_are_kept(self):
+        raw = (
+            '[{"function": {"name": "api_search", "arguments": "{\\"query\\": \\"a\\"}"}}, '
+            '{"name": "api_fetch", "arguments": {"url": "u"}}, '
+            '{"function": {"name": "api_fetch", "arguments": "{\\"url\\": \\"trunc'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}},
+            {"name": "api_fetch", "arguments": {"url": "u"}},
+        ]
+
+    def test_a_cut_inside_the_first_call_still_fails(self):
+        assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "tr', self.NAMES) == []
+
+    FIRST = '{"name": "api_search", "arguments": {"query": "a"}}'
+
+    @pytest.mark.parametrize(
+        "cut",
+        [
+            '{"name"',  # after a key
+            '{"name": "api_fetch", "arguments": ',  # after a colon
+            '{"name": "api_search", "arguments": {"query": "b", "exact": tr',  # inside a literal
+            '{"name": "api_search", "arguments": {"query": "b"',  # after a value: arguments may be partial
+            '{"name": "api_search", "arguments": {"query": "b", "limit": 10',  # inside a number
+        ],
+    )
+    def test_a_truncated_generation_keeps_only_its_completed_calls(self, cut):
+        raw = f"[{self.FIRST}, {cut}"
+        assert BM.parse_tool_calls(raw, self.NAMES, truncated=True) == [
+            {"name": "api_search", "arguments": {"query": "a"}}
+        ]
+
+    @pytest.mark.parametrize("tail", ["", "\nTool result: [", " and then"])
+    def test_a_cut_on_or_after_the_closing_bracket_keeps_the_whole_batch(self, tail):
+        raw = f"[{self.FIRST}, {self.FIRST}]{tail}"
+        assert (
+            BM.parse_tool_calls(raw, self.NAMES, truncated=True)
+            == [{"name": "api_search", "arguments": {"query": "a"}}] * 2
+        )
+
+    def test_an_unclosed_array_the_model_stopped_on_is_kept_whole(self):
+        # Not truncated: the model stopped, so brackets it left open are closed as before.
+        raw = f'[{self.FIRST}, {{"name": "api_search", "arguments": {{"query": "b"}}'
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}},
+            {"name": "api_search", "arguments": {"query": "b"}},
+        ]
+
+    def test_an_unparseable_close_falls_back_to_the_completed_calls(self):
+        assert BM.parse_tool_calls(f'[{self.FIRST}, {{"name"', self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}}
+        ]
+
+    def test_bash_parser_stays_strict_about_cuts(self):
+        raw = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "bash", "arguments": {"command": "ca'
+        assert BM.parse_bash_tool_calls(raw) == []
+
+    def test_cap_applies(self):
+        raw = "[" + ", ".join(f'{{"name": "api_search", "arguments": {{"query": "q{i}"}}}}' for i in range(6)) + "]"
+        assert len(BM.parse_tool_calls(raw, self.NAMES)) == 3
+        assert len(BM.parse_tool_calls(raw, self.NAMES, max_calls=6)) == 6
+
+
 class TestCloseJsonPrefix:
     def test_cuts_at_first_complete_value(self):
         assert BM.close_json_prefix("[1, 2] trailing [3]") == "[1, 2]"
@@ -220,7 +320,9 @@ class TestClientSideStop:
         cfg = dict(
             wire=wire, tool_definitions_json=None, extra_body={}, openai_model="m", max_tokens=1024, temperature=0.6
         )
-        object.__setattr__(server, "config", type("C", (), cfg | dict(top_p=None, debug=False))())
+        object.__setattr__(
+            server, "config", type("C", (), cfg | dict(top_p=None, debug=False, render_assistant_text=False))()
+        )
         server._steer, server._primer, server._prefill = defaults["steer"], defaults["primer"], defaults["prefill"]
         server._stop = list(defaults["stop"])
         server._semaphore = asyncio.Semaphore(1)
@@ -257,7 +359,7 @@ class TestFunctionCallingWire:
     def _server(self, **overrides):
         # Build the prompt without constructing the web server: mirror
         # model_post_init's wire resolution on a bare object.
-        cfg = dict(wire="function_calling", tool_definitions_json=self.TOOLS) | overrides
+        cfg = dict(wire="function_calling", tool_definitions_json=self.TOOLS, render_assistant_text=False) | overrides
         defaults = BM.WIRE_DEFAULTS[cfg["wire"]]
         server = BM.BaseModelServer.__new__(BM.BaseModelServer)
         object.__setattr__(server, "config", type("C", (), cfg)())
@@ -287,6 +389,27 @@ class TestFunctionCallingWire:
         assert rendered.startswith("\nAssistant (tool call): [")
         assert "ignored prose" not in rendered
 
+    def test_assistant_text_renders_before_its_calls_when_enabled(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        message = {"role": "assistant", "content": " Found it; now edit. ", "tool_calls": calls}
+        assert BM.render_transcript([message], assistant_text=True) == (
+            "\nAssistant: Found it; now edit." + BM.render_transcript([message])
+        )
+
+    def test_assistant_text_flag_skips_turns_without_text(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        for content in (None, "", "  \n", [{"type": "output_text", "text": ""}]):
+            message = {"role": "assistant", "content": content, "tool_calls": calls}
+            assert BM.render_transcript([message], assistant_text=True) == BM.render_transcript([message])
+
+    def test_assistant_text_flag_leaves_the_primer_on_the_tool_call_line(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "look", "tool_calls": calls}]
+        prompt = self._server(render_assistant_text=True).build_prompt(messages)
+        assert "\nAssistant: look\nAssistant (tool call): [" in prompt
+        assert prompt.endswith(BM.BASH_TOOL_STEER + "\nAssistant (tool call): " + '[{"')
+        assert "look" not in self._server().build_prompt(messages)
+
     def test_tool_calls_render_in_litellm_key_order(self):
         # The reference bridge rendered calls as mini re-sent them, i.e. after
         # litellm's re-serialization -- not in the order the trace stores.
@@ -295,6 +418,20 @@ class TestFunctionCallingWire:
             '\nAssistant (tool call): [{"function": {"arguments": "{\\"command\\": \\"ls\\"}", "name": "bash"}, '
             '"id": "c", "type": "function"}]'
         )
+
+    def test_tool_names_select_the_generic_parser(self):
+        raw = '[{"name": "api_search", "arguments": {"query": "q"}}, {"name": "bash", "arguments": {"command": "ls"}}]'
+        generic = self._server(tool_names=["api_search"], max_tool_calls_per_turn=8)
+        assert generic._parse_calls(raw) == [{"name": "api_search", "arguments": {"query": "q"}}]
+        # Unset, the wire stays mini-swe-agent's: bash only.
+        bash_only = self._server(tool_names=None, max_tool_calls_per_turn=3)
+        assert bash_only._parse_calls(raw) == [{"name": "bash", "arguments": {"command": "ls"}}]
+
+    def test_truncation_reaches_the_generic_parser(self):
+        raw = '[{"name": "api_search", "arguments": {"query": "a"}}, {"name": "api_search", "arguments": {"query": "b"'
+        server = self._server(tool_names=["api_search"], max_tool_calls_per_turn=8)
+        assert len(server._parse_calls(raw)) == 2
+        assert server._parse_calls(raw, truncated=True) == [{"name": "api_search", "arguments": {"query": "a"}}]
 
 
 @pytest.fixture
@@ -322,7 +459,13 @@ def configured_server(monkeypatch):
             **overrides,
         )
         server = BM.BaseModelServer(config=config, server_client=MagicMock(spec=ServerClient))
-        create_client.assert_called_once_with(base_url=config.openai_base_url, api_key=config.openai_api_key)
+        create_client.assert_called_once_with(
+            base_url=config.openai_base_url,
+            api_key=config.openai_api_key,
+            request_timeout_seconds=config.request_timeout_seconds,
+            max_connection_retries=config.max_connection_retries,
+            connection_retry_timeout_s=config.connection_retry_timeout_s,
+        )
         assert server._semaphore._value == 2
         return server, backend
 
@@ -451,3 +594,28 @@ def test_multiworker_import_exports_app(monkeypatch, module_name, worker):
     else:
         assert not hasattr(worker_module, "app")
         start.assert_not_called()
+
+
+def test_the_endpoint_call_is_unbounded_unless_bounds_are_configured(configured_server) -> None:
+    configured_server()  # the fixture asserts the client got exactly the configured values
+
+    config_defaults = BM.BaseModelServerConfig.model_fields
+    assert config_defaults["request_timeout_seconds"].default is None
+    assert config_defaults["max_connection_retries"].default is None
+    assert config_defaults["connection_retry_timeout_s"].default is None
+
+
+def test_configured_bounds_reach_the_client(configured_server) -> None:
+    server, _ = configured_server(
+        request_timeout_seconds=30.0, max_connection_retries=3, connection_retry_timeout_s=15.0
+    )
+
+    assert server.config.request_timeout_seconds == 30.0
+    assert server.config.max_connection_retries == 3
+    assert server.config.connection_retry_timeout_s == 15.0
+
+
+@pytest.mark.parametrize("field", ["request_timeout_seconds", "max_connection_retries", "connection_retry_timeout_s"])
+def test_a_bound_of_zero_is_rejected(configured_server, field: str) -> None:
+    with pytest.raises(ValueError):
+        configured_server(**{field: 0})

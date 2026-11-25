@@ -28,6 +28,7 @@ from responses_api_agents.agentic_mme_agent.app import (
     AgenticMMERunRequest,
     AgenticMMESessionState,
     PolicyRequestError,
+    TaskInputRejectedError,
 )
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval
 
@@ -470,8 +471,30 @@ async def test_no_tool_budget_and_missing_images() -> None:
     assert len(seen[0]["tools"]) == 14  # tools stay visible; any call would end the episode
     task = body()
     task.responses_create_params.input = "no image"
-    with pytest.raises(ValueError, match="at least one"):
+    with pytest.raises(TaskInputRejectedError, match="at least one") as refused:
         await agent.run(request(), task)
+    assert refused.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_oversized_input_image_is_a_422_task_error() -> None:
+    # body()'s input image is 8x4 = 32 pixels.
+    agent, seen = make_agent([response("red")], max_image_pixels=16)
+    with pytest.raises(TaskInputRejectedError, match="input image 8x4: image dimensions exceed") as refused:
+        await agent.run(request(), body())
+    assert refused.value.status_code == 422 and isinstance(refused.value, ValueError)
+    assert seen == []  # refused before any model call
+
+
+@pytest.mark.asyncio
+async def test_oversized_input_image_is_downscaled_when_enabled(caplog) -> None:
+    agent, seen = make_agent([response("red")], max_image_pixels=16, downscale_oversized_input_images=True)
+    original = image_data_url(Image.new("RGB", (8, 4), "red"))  # body()'s input image
+    assert (await agent.run(request(), body())).reward == 1
+    assert "input image 8x4 is over max_image_pixels=16; the tools use it at 5x2" in caplog.text
+    # The model still receives the task's original image; only the tools' copy is scaled.
+    sent = [part for part in seen[0]["input"][0]["content"] if part["type"] == "input_image"]
+    assert [part["image_url"] for part in sent] == [original]
 
 
 @pytest.mark.asyncio

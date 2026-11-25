@@ -24,7 +24,7 @@ import os
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -198,6 +198,18 @@ class RolloutRecord:
             if actual != self.expected_identity:
                 raise ConfigError(f"Saved record identity changed after indexing {self.path} at byte {self.offset}.")
         return row
+
+
+def read_record_rows(records: Iterable[RolloutRecord]) -> list[dict]:
+    """Read records in order through one open handle per file, for random access without an open per record."""
+    with ExitStack() as files:
+        handles = {}
+        rows = []
+        for record in records:
+            if record.path not in handles:
+                handles[record.path] = files.enter_context(record.path.open("rb"))
+            rows.append(record._read(handles[record.path]))
+        return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,6 +515,25 @@ def rejudgment_admission_closed_by(
     return False
 
 
+def is_parsed_judge_abstention(result: dict) -> bool:
+    """Whether a masked result records a completed, explicitly unresolved judge verdict."""
+    evaluations = result.get("judge_evaluations")
+    return (
+        result.get("mask_sample") is True
+        and result.get("evaluation_completed") is True
+        and result.get("failure_kind") is None
+        and result.get("grading_status") == "judge_unresolved"
+        and result.get("verdict") == "unresolved"
+        and "correctness" in result
+        and result.get("correctness") is None
+        and result.get("reward") == 0
+        and isinstance(evaluations, list)
+        and len(evaluations) == 1
+        and isinstance(evaluations[0], dict)
+        and evaluations[0].get("verdict_label") == "Judgement: unresolved"
+    )
+
+
 def is_rejudgment_of(failure: dict, result: dict) -> bool:
     """Whether ``result`` re-scores the saved answer of ``failure`` without a new model attempt.
 
@@ -512,14 +543,14 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
     """
     predecessor_id = rejudge_predecessor_id(failure)
     return (
-        failure.get("_ng_failure_class") in ("judge_failed", None)
+        (failure.get("_ng_failure_class") is None or matches_failure_class(failure, {"judge_failed"}))
         and _holds_saved_answer(failure)
         and predecessor_id is not None
         and result.get("_ng_failure_class") is None
         and type(result.get("reward")) in (int, float)
         and math.isfinite(result["reward"])
         and result.get("evaluation_completed") is not False
-        and not result.get("mask_sample")
+        and (not result.get("mask_sample") or is_parsed_judge_abstention(result))
         and result.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and result.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
         and result.get(REJUDGED_FAILURE_ID_KEY) == predecessor_id
@@ -530,10 +561,10 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
 def is_rejudgment_failure_of(failure: dict, row: dict) -> bool:
     """Whether ``row`` records that re-judging the saved answer of judge failure ``failure`` failed again."""
     return (
-        failure.get("_ng_failure_class") == "judge_failed"
+        matches_failure_class(failure, {"judge_failed"})
         and _holds_saved_answer(failure)
         and failure.get("_ng_failure_id") is not None
-        and row.get("_ng_failure_class") == "judge_failed"
+        and matches_failure_class(row, {"judge_failed"})
         and row.get("_ng_failure_id") not in (None, failure["_ng_failure_id"])
         and row.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
@@ -836,14 +867,7 @@ class RolloutRecords:
     def selected(self, disposition: str) -> list[dict]:
         # Existing consumers explicitly request materialized results. Keep reads
         # out of reconciliation/coverage and reuse handles for random access.
-        with ExitStack() as files:
-            handles = {}
-            rows = []
-            for record in self.selected_records(disposition).values():
-                if record.path not in handles:
-                    handles[record.path] = files.enter_context(record.path.open("rb"))
-                rows.append(record._read(handles[record.path]))
-            return rows
+        return read_record_rows(self.selected_records(disposition).values())
 
     def _retryable(self, identity: str) -> bool:
         payload = self.payloads.get((identity, self.latest.get(identity)))
@@ -889,6 +913,34 @@ class RolloutRecords:
             and payload.rerun_approved
             and self.disposition(identity) == "success"
         }
+
+    def masked_retryable(self, identity: str) -> bool:
+        """Whether this rollout's selected success is masked by infrastructure and still within its attempt cap.
+
+        A resume runs such a rollout again and a later attempt supersedes it, so it is selected but not complete.
+        """
+        return (
+            self.disposition(identity) == "success"
+            and self.payloads[(identity, self.latest[identity])].masked_infrastructure
+            and self._retryable(identity)
+            and self.failure_count(identity) < self.attempt_cap
+        )
+
+    def settled(self, identity: str) -> bool:
+        """Whether this rollout's outcome is final: a measured success, or a failure or omission no resume retries.
+
+        A success masked by infrastructure is never settled: below its attempt cap a resume runs it again, and at the
+        cap it stays unmeasured until a recovery extends the cap (``masked_exhausted`` in the coverage). A settled
+        judge failure keeps its saved answer, which the saved-answer re-judge pass can still grade again.
+        """
+        disposition = self.disposition(identity)
+        if disposition == "success":
+            return not (
+                self.payloads[(identity, self.latest[identity])].masked_infrastructure and self._retryable(identity)
+            )
+        if disposition in ("failure", "omitted"):
+            return not self._retryable(identity) or self.failure_count(identity) >= self.attempt_cap
+        return False
 
     def failure_count(self, identity: str) -> int:
         return self.attempt_counts[identity] + (
@@ -1015,13 +1067,7 @@ class RolloutRecords:
         # the score rather than counted as a zero. It is a failure, so it is never in ``masked``: report it here.
         failed_masked = sum(self.payloads[key].masked for key in failures)
         # Masked by infrastructure and still within its attempt cap: a resume runs it again, so it is not complete.
-        masked_retryable = sum(
-            self.payloads[(identity, self.latest[identity])].masked_infrastructure
-            and self._retryable(identity)
-            and self.failure_count(identity) < max_attempts
-            for identity in self.expected
-            if self.disposition(identity) == "success"
-        )
+        masked_retryable = sum(self.masked_retryable(identity) for identity in self.expected)
         # Masked by infrastructure at its attempt cap: a final failure, never measured, so the run is not complete
         # until a recovery (``--extend-attempts``) measures it.
         masked_exhausted = sum(
