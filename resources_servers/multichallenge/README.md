@@ -313,4 +313,4 @@ The LLM judge analyzes the model's response and returns `[[YES]]` or `[[NO]]`.
 ```
 /path/to/multichallenge
 ```
-Replace the placeholder with your local raw data path using `--data-dir`.
+Update `DEFAULT_RAW_DATA_DIR` in the script or use `--data-dir` to specify a different location.
