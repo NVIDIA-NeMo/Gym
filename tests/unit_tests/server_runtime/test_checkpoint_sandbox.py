@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SandboxSessionCheckpointer against a fake provider whose snapshots are independent filesystem copies."""
+"""OwnedSandboxes against a fake provider whose snapshots are independent filesystem copies."""
 
 import asyncio
 import dataclasses
@@ -32,13 +32,13 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
     SupportsSandboxSnapshot,
 )
-from nemo_gym.server_runtime._checkpoint import sandbox as checkpoint_sandbox
-from nemo_gym.server_runtime._checkpoint.sandbox import (
+from nemo_gym.server_runtime import owned_sandboxes as checkpoint_sandbox
+from nemo_gym.server_runtime.owned_sandboxes import (
     FORK_NOT_FOUND_RETRIES,
+    OwnedSandboxes,
     SandboxCheckpointConfig,
     SandboxCheckpointError,
     SandboxCheckpointState,
-    SandboxSessionCheckpointer,
     SnapshotDeleteIncompleteError,
     checkpoint_state_dir,
     name_hash,
@@ -201,15 +201,13 @@ SPEC = SandboxSpec(image="img:1", workdir="/work", env={"A": "1"}, resources={"c
 RESTORED_SPEC = dataclasses.replace(SPEC, image=None)
 
 
-def make_checkpointer(state_dir: Path, provider: Any, **kwargs: Any) -> SandboxSessionCheckpointer:
+def make_checkpointer(state_dir: Path, provider: Any, **kwargs: Any) -> OwnedSandboxes:
     """A checkpointer whose index lives under ``state_dir``; a second one over the same directory is a restart."""
     kwargs.setdefault("snapshot_retry_delay_s", 0.0)
-    return SandboxSessionCheckpointer(provider, state_dir=state_dir, server_name="server", **kwargs)
+    return OwnedSandboxes(provider, state_dir=state_dir, server_name="server", **kwargs)
 
 
-async def seeded(
-    provider: FakeSnapshotProvider, state_dir: Path, *keys: str, **kwargs: Any
-) -> SandboxSessionCheckpointer:
+async def seeded(provider: FakeSnapshotProvider, state_dir: Path, *keys: str, **kwargs: Any) -> OwnedSandboxes:
     checkpointer = make_checkpointer(state_dir, provider, **kwargs)
     for key in keys:
         sandbox = await checkpointer.create(key, SPEC)
@@ -544,7 +542,7 @@ def test_add_rejects_a_duplicate_or_a_sandbox_that_is_not_on_the_shared_provider
     # A sandbox that owned the provider would close it for every session when stopped.
     with pytest.raises(ValueError, match="'s2' owns its provider"):
         checkpointer.add("s2", AsyncSandbox(provider, SPEC), SPEC)
-    with pytest.raises(ValueError, match="'s2' is not on the checkpointer's provider"):
+    with pytest.raises(ValueError, match="'s2' is not on this instance's provider"):
         checkpointer.add("s2", AsyncSandbox(FakeSnapshotProvider(), SPEC, owns_provider=False), SPEC)
     assert checkpointer.keys == ["s1"]
 
@@ -718,7 +716,7 @@ def test_the_config_is_validated_and_builds_a_checkpointer(state_dir: Path) -> N
         parallelism=16, snapshot_attempts=3, snapshot_retry_delay_s=5.0
     )
     provider = FakeSnapshotProvider()
-    checkpointer = SandboxSessionCheckpointer.from_config(
+    checkpointer = OwnedSandboxes.from_config(
         provider, SandboxCheckpointConfig(parallelism=3), state_dir=state_dir, server_name="server"
     )
     assert checkpointer.provider is provider
@@ -1088,9 +1086,7 @@ async def test_a_fork_whose_rollback_stop_failed_is_logged_and_stopped_by_the_ne
     await fresh.settle()
 
 
-async def failed_restore_with_an_unstopped_fork(
-    state_dir: Path, provider: FakeSnapshotProvider
-) -> SandboxSessionCheckpointer:
+async def failed_restore_with_an_unstopped_fork(state_dir: Path, provider: FakeSnapshotProvider) -> OwnedSandboxes:
     """A restore that failed and whose rollback could not stop its one completed fork, sb-5."""
     states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
     provider.fail[("create", "sb-6")] = RuntimeError("quota")
@@ -1311,11 +1307,11 @@ async def test_a_closed_checkpointer_refuses_create_add_and_restore(state_dir: P
     await fresh.aclose()
     calls_before = list(provider.calls)
 
-    with pytest.raises(RuntimeError, match="checkpointer is closed"):
+    with pytest.raises(RuntimeError, match="owned sandboxes are closed"):
         await fresh.create("s2", SPEC)
-    with pytest.raises(RuntimeError, match="checkpointer is closed"):
+    with pytest.raises(RuntimeError, match="owned sandboxes are closed"):
         fresh.add("s3", AsyncSandbox(provider, SPEC, owns_provider=False), SPEC)
-    with pytest.raises(RuntimeError, match="checkpointer is closed"):
+    with pytest.raises(RuntimeError, match="owned sandboxes are closed"):
         await fresh.restore(states)
 
     assert provider.calls == calls_before and fresh.keys == []
@@ -1428,7 +1424,7 @@ def test_the_index_directory_is_created_at_construction_and_a_bad_one_fails_ther
     with pytest.raises(OSError):
         make_checkpointer(tmp_path / "file", FakeSnapshotProvider())
     with pytest.raises(ValueError, match="server name"):
-        SandboxSessionCheckpointer(FakeSnapshotProvider(), state_dir=tmp_path, server_name="a/b")
+        OwnedSandboxes(FakeSnapshotProvider(), state_dir=tmp_path, server_name="a/b")
 
 
 class NonConnectableSnapshotProvider(FakeSnapshotProvider):
@@ -1495,7 +1491,7 @@ async def test_release_sweeps_this_servers_snapshots_the_index_never_recorded(st
     dropped = provider.add_snapshot(checkpointer.snapshot_name("c1", "s1", 1))
     kept = provider.add_snapshot(checkpointer.snapshot_name("c2", "s9", 1))
     # Not this checkpointer's: another server, another run sharing the provider, and a name it never gives.
-    other_server = SandboxSessionCheckpointer(provider, state_dir=state_dir, server_name="other")
+    other_server = OwnedSandboxes(provider, state_dir=state_dir, server_name="other")
     foreign = [
         provider.add_snapshot(other_server.snapshot_name("c1", "s1", 1)),
         provider.add_snapshot(f"ng-00000000-{name_hash('server')}-{name_hash('c1')}-{name_hash('s1')}-1"),
@@ -1656,7 +1652,7 @@ async def test_a_release_cancelled_while_deleting_leaves_the_rest_for_the_next_r
     assert provider.snapshots == {} and checkpointer.indexed_snapshots == {}
 
 
-def lock_index(checkpointer: SandboxSessionCheckpointer) -> int:
+def lock_index(checkpointer: OwnedSandboxes) -> int:
     """Hold the index's release lock as another worker's release would; returns the descriptor to close."""
     descriptor = os.open(checkpointer._index.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1829,8 +1825,8 @@ async def test_a_release_skips_a_checkpoint_folder_that_vanishes_while_the_index
 
 async def test_servers_sharing_a_state_dir_release_only_their_own_snapshots(state_dir: Path) -> None:
     provider = FakeSnapshotProvider()
-    first = SandboxSessionCheckpointer(provider, state_dir=state_dir, server_name="first")
-    second = SandboxSessionCheckpointer(provider, state_dir=state_dir, server_name="second")
+    first = OwnedSandboxes(provider, state_dir=state_dir, server_name="first")
+    second = OwnedSandboxes(provider, state_dir=state_dir, server_name="second")
     await first.create("s1", SPEC)
     await second.create("s1", SPEC)
     await first.export(["s1"], checkpoint_id="c1")
@@ -1862,7 +1858,7 @@ async def test_a_snapshot_id_that_cannot_name_a_file_fails_the_export(state_dir:
 
 async def test_without_a_state_dir_sandboxes_are_tracked_but_never_exported() -> None:
     provider = FakeSnapshotProvider()
-    checkpointer = SandboxSessionCheckpointer(provider, state_dir=None, server_name="server")
+    checkpointer = OwnedSandboxes(provider, state_dir=None, server_name="server")
     await checkpointer.create("s1", SPEC)
 
     with pytest.raises(SandboxCheckpointError, match="without a state_dir"):
@@ -1938,7 +1934,7 @@ async def test_the_index_is_listed_once_per_checkpoint_however_many_exports_it_t
 
 
 async def test_a_checkpointer_without_a_state_dir_has_no_index_to_warn_of(caplog: pytest.LogCaptureFixture) -> None:
-    checkpointer = SandboxSessionCheckpointer(FakeSnapshotProvider(), state_dir=None, server_name="server")
+    checkpointer = OwnedSandboxes(FakeSnapshotProvider(), state_dir=None, server_name="server")
     with caplog.at_level(logging.WARNING, logger=checkpoint_sandbox.__name__):
         assert await checkpointer.export([], checkpoint_id="c1") == {}
     assert unreleased_warnings(caplog) == []
