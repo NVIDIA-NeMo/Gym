@@ -60,7 +60,7 @@ class SandboxOptOut(BaseModel):
         task: A pure QA task, whose model calls no tools: the agent is lent no sandbox, so an agent whose loop runs in
             the Agent Server's process, such as Simple Agent, runs it there. Refused for a task that declares tools,
             for an episode that grants tools, and for a sandbox group with sidecars.
-        verifier: A verifier that executes nothing and calls no tools, such as rules, math-verify or a judge call:
+        verifier: A verifier that executes nothing and calls no tools, such as rules or a judge call:
             ``/verify`` runs in the Resources Server and is lent no sandbox. The configuration's explicit choice: it
             is never the default, and nothing else is checked for it.
     """

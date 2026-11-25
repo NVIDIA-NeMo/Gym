@@ -124,7 +124,7 @@ environment_servers:
 Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed. The task opt-out is checked at seed, and a refused one fails the attempt for good (a terminal seed failure), since every attempt would fail alike:
 
 - `task` is refused for a task that declares tools (`responses_create_params.tools`), for an episode that grants tools (`resources_tool_transports` or `tool_servers`; also refused at startup), and for a group with sidecars. A `resources_tool_transports` grant counts even when its Resources Server serves no tools: drop it from a pure QA pairing. With `task` set, the provider must apply `no_network`, which startup checks. Pair it with an agent whose loop runs in its own process, such as Simple Agent: an agent that runs a harness in a sandbox of its own is not pure QA.
-- `verifier` is the configuration's explicit choice, for a verifier that executes nothing and calls no tools (rules, math-verify, a judge call). It is never the default, and nothing else is checked for it.
+- `verifier` is the configuration's explicit choice, for a verifier that executes nothing and calls no tools (rules, a judge call). A verifier that hands model output to an evaluating parser, as math-verify does with SymPy, does not qualify. It is never the default, and nothing else is checked for it.
 
 A group no attempt can start (no image or working directory, or sidecars on a provider that cannot start them) is also refused at seed, before the agent's turn. A group for the verifier alone that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
 
