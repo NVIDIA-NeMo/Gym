@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The resources server's session lifecycle, tools and scoring, on a real AutomationBench example task."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -299,3 +300,32 @@ def test_close_releases_the_world_and_the_session_follows_the_contract():
         holds_state=lambda session_id: session_id in server._episodes,
         verify_body=_verify_body(),
     )
+
+
+def test_the_world_a_tool_sidecar_hands_back_is_what_verify_scores():
+    # The tool sidecar runs this same class with the same config; the host never sees the tool calls.
+    sidecar_tool = _server(tool_sidecar={"image": "python:3.13-slim"})
+    host_server = _server(tool_sidecar={"image": "python:3.13-slim"})
+    with TestClient(sidecar_tool.setup_webserver()) as sidecar, TestClient(host_server.setup_webserver()) as host:
+        _post_seed(sidecar, _seed())
+        seeded = _post_seed(host, _seed()).json()
+        # The seed declares the tool sidecar in the attempt's group.
+        assert seeded["sandbox_group"]["sidecars"][0]["name"] == "tools"
+        # The tool host signs sessions with the host's key, so the agent's calls carry the host's cookie.
+        sidecar.cookies.clear()
+        sidecar.cookies.update(dict(host.cookies))
+        _win_the_deal(sidecar)
+
+        # The world crosses a process boundary as JSON.
+        exported = json.loads(json.dumps(sidecar_tool.export_tool_state("session")))
+        asyncio.run(host_server.import_tool_state("session", exported))
+        on_host, in_sidecar = _verify(host), _verify(sidecar)
+
+    for score in ("reward", "aa_headline", "partial_credit", "objectives_passed", "guardrails_violated"):
+        assert on_host[score] == in_sidecar[score], score
+    assert on_host["objectives_passed"] == 1.0
+
+
+def test_a_session_the_sidecar_lost_is_never_exported_as_an_empty_world():
+    with pytest.raises(app_module.ResourcesSessionLostError):
+        _server(tool_sidecar={"image": "python:3.13-slim"}).export_tool_state("never-seeded")

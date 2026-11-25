@@ -1,0 +1,48 @@
+# AutomationBench (benchmarks/automationbench/config.yaml) with its SaaS tools in a sidecar of each attempt's sandbox
+# group, on OpenSandbox. Simple Agent runs its loop in the agent container and calls the api toolset at
+# http://tools:8000; each session's world lives in the sidecar, and the world the agent's calls left is copied back to
+# the Resources Server before /verify scores it. No tool call reaches the Resources host.
+#
+# Set OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY. The deployment must enforce egress policies at the packet level
+# (`enforces_network_policy`), and its sandboxes must reach the model server's host.
+config_paths:
+  - benchmarks/automationbench/config.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+sandbox:
+  opensandbox:
+    networking:
+      enabled: true
+      enforces_network_policy: true
+
+automationbench_resources_server:
+  resources_servers:
+    automationbench:
+      verified: false
+      tool_sidecar:
+        # A stock image: the Resources Server installs the tool host's runtime (Gym, verifiers, AutomationBench) at
+        # the first prepare of each group.
+        image: python:3.13-slim
+        resources:
+          cpu: 1
+          memory_mib: 4096
+        install_timeout_seconds: 1800
+
+automationbench:
+  responses_api_agents:
+    simple_agent:
+      sandboxed: true
+
+automationbench_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        # A directory the image has: the provider does not create it.
+        workdir: /tmp
+        # Above the episode timeout plus the cleanup timeout.
+        ttl_s: 25200
+        # The tools are in the group, so the agent container needs only the model server.
+        network: model_only
+        model_server: policy_model

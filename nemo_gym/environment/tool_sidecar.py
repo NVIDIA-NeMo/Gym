@@ -197,13 +197,13 @@ class ToolSidecarResources(BaseModel):
 
     Attributes:
         tool_sidecar_requirements: Packages the server's own module needs beyond Gym's, as requirement strings.
-        tool_sidecar_sources: Directories of packages the server imports that are not installed from an index, such
-            as a benchmark's own package, as paths relative to the repository root. The server's own directory is
-            always included.
+        tool_sidecar_sources: Packages the server imports that are not installed from an index, such as a benchmark's
+            own package: each directory, relative to the repository root, and the path it is imported from in the
+            sidecar. The server's own directory is always included, at its own path.
     """
 
     tool_sidecar_requirements: ClassVar[tuple[str, ...]] = ()
-    tool_sidecar_sources: ClassVar[tuple[str, ...]] = ()
+    tool_sidecar_sources: ClassVar[Mapping[str, str]] = {}
     # The seed each session's tool host is seeded with at /prepare_sandbox, kept from /seed_session until then.
     _tool_sidecar_seeds: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
 
@@ -306,8 +306,10 @@ class ToolSidecarResources(BaseModel):
     def _tool_host_sources(self) -> tuple[tuple[str, str], ...]:
         server_dir = Path(inspect.getfile(type(self))).resolve().parent
         root = server_dir.parents[1]
-        names = [str(server_dir.relative_to(root)), *self.tool_sidecar_sources]
-        return tuple((str(root / name), name) for name in names)
+        own = str(server_dir.relative_to(root))
+        return tuple(
+            (str(root / source), target) for source, target in {own: own, **self.tool_sidecar_sources}.items()
+        )
 
     def tool_host_runtime(self) -> SandboxPythonRuntime:
         return SandboxPythonRuntime(
