@@ -3481,6 +3481,63 @@ def test_sandbox_environment_inheritance_is_opt_in(setup, inherit) -> None:
     }
 
 
+def test_sandbox_access_env_reaches_codex(setup) -> None:
+    agent, sandbox = setup
+    request = seed()
+    # The last name contains a reserved prefix without beginning with it.
+    env = {"TASK_API_TOKEN": "task-value", "HOME": "/task-home", "TASK_OPENAI_BASE_URL": "http://task.example"}
+    request.sandbox_access.env = env
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert payload["env"] == {
+        **env,
+        "CODEX_HOME": f"{sandbox.directory}/home/.codex",
+        "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+    }
+
+
+@pytest.mark.parametrize(
+    ("env", "rejected"),
+    [
+        ({"HOME": "/task-home", "OPENAI_BASE_URL": "http://model.invalid"}, "OPENAI_BASE_URL"),
+        ({"CODEX_HOME": "/codex-home-value"}, "CODEX_HOME"),
+        ({"OPENAI_API_KEY": "openai-key-value"}, "OPENAI_API_KEY"),  # pragma: allowlist secret
+        ({"NEMO_GYM_SUPERVISOR": "supervisor-value"}, "NEMO_GYM_SUPERVISOR"),
+        (
+            {
+                "OPENAI_BASE_URL": "http://model.invalid",
+                "TASK_API_TOKEN": "task-value",
+                "NEMO_GYM_SUPERVISOR": "supervisor-value",
+                "CODEX_OTHER": "codex-other-value",
+            },
+            "CODEX_OTHER, NEMO_GYM_SUPERVISOR, OPENAI_BASE_URL",
+        ),
+    ],
+    ids=["allowed_and_reserved", "codex", "openai", "nemo_gym", "several_sorted"],
+)
+def test_sandbox_access_env_with_reserved_names_is_rejected_before_connecting(setup, env, rejected) -> None:
+    agent, sandbox = setup
+    request = seed()
+    request.sandbox_access.env = env
+    with (
+        patch("responses_api_agents.codex_agent.app.AsyncSandbox") as factory,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        refused = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+    assert refused.status_code == 422, refused.text
+    # The refusal names only the reserved variables, in sorted order, and none of the values.
+    assert refused.json()["detail"].endswith(f": {rejected}")
+    assert not any(value in refused.text for value in env.values())
+    factory.connect.assert_not_awaited()
+    sandbox.exec.assert_not_awaited()
+    assert request.agent_session_id not in agent._session_records
+
+
 @pytest.mark.parametrize("status", [400, 401, 429, 503])
 async def test_native_model_error_is_reported_with_classification(setup, status):
     agent, sandbox = setup

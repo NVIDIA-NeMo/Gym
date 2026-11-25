@@ -833,6 +833,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(
                     "Codex network_access applies only to a sandbox it creates, not a borrowed one"
                 )
+            # CODEX_* and OPENAI_* variables could redirect Codex's configuration or model calls, and Gym sets
+            # NEMO_GYM_* variables for the harness itself. The refusal lists names only: a value can be a credential.
+            reserved = sorted(
+                name for name in body.sandbox_access.env if name.startswith(("CODEX_", "OPENAI_", "NEMO_GYM_"))
+            )
+            if reserved:
+                raise AgentSeedRejectedError(
+                    "Codex does not accept SandboxAccess.env variables named CODEX_*, OPENAI_* or NEMO_GYM_*: "
+                    + ", ".join(reserved)
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in PurePosixPath(workdir).parts:
@@ -1163,6 +1173,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
+        access = state.request.sandbox_access
         payload = {
             "directory": state.session.session_dir,
             "command": command,
@@ -1172,6 +1183,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
+                # SandboxAccess.env; the seed refuses one that holds a CODEX_*, OPENAI_* or NEMO_GYM_* variable.
+                **(access.env if access else {}),
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
