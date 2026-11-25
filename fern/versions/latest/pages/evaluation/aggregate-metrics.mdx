@@ -108,7 +108,7 @@ The output file is a JSON array with one entry per agent:
 
 | Field | Description |
 |---|---|
-| `agent_ref` | Agent identity: `name` is the entry's label, usually the agent server instance name, and `implementation` is the agent type that ran, the key under the instance's `responses_api_agents` (for example `opencode_agent`). `implementation` comes from the `ng_agent_implementation` recorded on the entry's rollouts, so re-aggregating saved rollouts under another config keeps it; rollouts saved without it fall back to the running config. It is absent when neither names an agent type, or when the entry's rollouts do not establish a single one: they recorded different types, or a run that recorded one is scored together with a run that recorded none |
+| `agent_ref` | Agent identity: `name` is the entry's label and `implementation` is the agent type that ran. `implementation` is omitted when the entry's rollouts do not name a single agent type |
 | `agent_metrics` | Overall stats, custom metrics, `num_repeats` (distinct repeat indices), and cross-repeat aggregates |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
