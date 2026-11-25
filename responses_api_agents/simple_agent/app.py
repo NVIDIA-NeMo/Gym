@@ -1378,7 +1378,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             body = self._strip_resource_only_metadata(body)
         payload = {
             # Only the settings the loop reads; the sandbox runs the loop itself, so its copy runs in process there.
-            "config": self.config.model_dump(mode="json", exclude_unset=True, include=_SANDBOX_LOOP_CONFIG),
+            # With defaults, which a subclass's config may change (a one-step agent's max_steps), since the runner
+            # validates them as SimpleAgentConfig; without None, which its typed fields (max_steps) take only unset.
+            "config": self.config.model_dump(mode="json", exclude_none=True, include=_SANDBOX_LOOP_CONFIG),
             "model_server": {"host": host, "port": port},
             "body": body.model_dump(mode="json", exclude_unset=True),
             "loop": kwargs

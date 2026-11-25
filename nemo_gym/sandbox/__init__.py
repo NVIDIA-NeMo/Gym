@@ -137,7 +137,6 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-    from nemo_gym.sandbox.adapters.docker_compose import PLACEMENT_GROUP_KEY
     from nemo_gym.sandbox.compose_config import (
         adapt_non_root_sidecars,
         deployment_platform,
@@ -151,7 +150,11 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.failures import sandbox_failure
     from nemo_gym.sandbox.harness_config import HarnessSandboxConfig
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
-    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
+    from nemo_gym.sandbox.providers.base import (
+        ORPHAN_REAP_TIMEOUT_S,
+        PLACEMENT_GROUP_KEY,
+        sandbox_credentials_rejected,
+    )
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
     from nemo_gym.sandbox.providers.e2b.provider import E2BProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
@@ -185,7 +188,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "PLACEMENT_GROUP_KEY": "adapters.docker_compose",
+    "PLACEMENT_GROUP_KEY": "providers.base",
     "ApptainerProvider": "providers.apptainer.provider",
     "CPU_CAP_ENV_VARS": "utils",
     "DirectSandboxConnection": "access",

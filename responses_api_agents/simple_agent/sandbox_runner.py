@@ -100,11 +100,21 @@ def main(argv: list[str]) -> int:
         return 0
     input_path, output_path = Path(argv[1]), Path(argv[2])
     payload = json.loads(input_path.read_text())
-    try:
-        output = asyncio.run(run_loop(payload))
-    except Exception as error:
-        # The agent server raises it again; the loop's own failures, such as a rejected model call, are in the response.
-        output = error_output(error)
+    # The input holds the tool grant's and the model server's cookies: keep them only in this process.
+    input_path.unlink(missing_ok=True)
+    from nemo_gym.core import RequestFailureLog
+
+    # As the agent server's request middleware does, collect the failures observed while the loop runs, such as a
+    # model call a retry replaced, so the agent server's reply carries them as the in-process loop's does.
+    with RequestFailureLog.capture() as log:
+        try:
+            output = asyncio.run(run_loop(payload))
+        except Exception as error:
+            # The agent server raises it again; the loop's own failures, such as a rejected model call, are in the
+            # response.
+            output = error_output(error)
+    if log.report.events or log.report.omitted:
+        output["failure_log"] = log.report.model_dump(mode="json")
     partial = output_path.with_name(f".{output_path.name}.{os.getpid()}")
     partial.write_text(json.dumps(output))
     partial.replace(output_path)

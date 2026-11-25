@@ -353,6 +353,10 @@ class SandboxLoop:
         output = await self.session.execute(
             stage_activation=stage, collect=collect, timeout=timeout, close_timeout=close_timeout
         )
+        observed = output.pop("failure_log", None)
+        if observed is not None and (log := RequestFailureLog.current()) is not None:
+            # The failures the loop observed in the sandbox, as this request's own observations.
+            log.add_saved(observed)
         if output.get("error") is not None:
             raise loop_error(output)
         return output

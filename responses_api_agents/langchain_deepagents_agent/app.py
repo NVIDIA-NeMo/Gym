@@ -42,6 +42,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionCapabilitiesResponse,
     AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
@@ -302,6 +303,15 @@ class DeepAgentsAgent(SimpleAgent):
         self._sem = asyncio.Semaphore(self.config.concurrency)
         if self.config.tool_profile == "tavily_search":
             self.agent = self.build_agent(GymResponsesChatModel(agent=self))
+
+    async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
+        """Declare where the loop runs by tool profile: tavily_search runs in process and refuses a lent sandbox;
+        builtin runs deepagents in a sandbox, so an Environment Server must lend it one even for a task without
+        tools. Simple Agent's own answer (True) would leave the builtin profile without one."""
+        capabilities = await super().agent_session_capabilities()
+        return capabilities.model_copy(
+            update={"runs_loop_without_sandbox": self.config.tool_profile == "tavily_search"}
+        )
 
     async def retire_agent_session(self, session_key: str) -> None:
         """Release the graph and sandbox before retiring a checkpoint attempt."""
