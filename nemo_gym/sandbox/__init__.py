@@ -24,6 +24,7 @@ from nemo_gym.sandbox.config import (
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     ExecResult,
+    NetworkRule,
     SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -50,6 +51,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxExecArgv,
     SupportsSandboxExecScopedProcesses,
     SupportsSandboxNetwork,
+    SupportsSandboxNetworkRules,
     SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
     SupportsSandboxPortForwarding,
@@ -112,6 +114,8 @@ __all__ = [
     "SupportsSandboxSharedStorage",
     "SupportsSandboxSidecars",
     "SupportsSandboxSnapshot",
+    "NetworkRule",
+    "SupportsSandboxNetworkRules",
     "SupportsSandboxPty",
     "SupportsSandboxPtyAttach",
     "create_provider",
@@ -143,8 +147,9 @@ if TYPE_CHECKING:
         sandbox_platform,
     )
     from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
-    from nemo_gym.sandbox.config import SandboxConfig
+    from nemo_gym.sandbox.config import NetworkRuleOptions, SandboxConfig
     from nemo_gym.sandbox.failures import sandbox_failure
+    from nemo_gym.sandbox.harness_config import HarnessSandboxConfig
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
@@ -191,7 +196,9 @@ _PUBLIC_API = {
     "MEDIA_DIRECTORY": "utils",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
+    "NetworkRuleOptions": "config",
     "SandboxAccess": "access",
+    "HarnessSandboxConfig": "harness_config",
     "SandboxConfig": "config",
     "SandboxProbeError": "transfer",
     "SandboxTransferError": "transfer",
