@@ -1218,17 +1218,7 @@ class SearchResourcesServer(SimpleResourcesServer):
                 f"left out of the quality metrics",
                 file=sys.stderr,
             )
-        metrics = await super().aggregate_metrics(body)
-        # The same mean reward over every row, masked ones included with their reward: an evaluation's
-        # full-denominator number, which a budget ending does not shrink.
-        rows = body.verify_responses
-        if rows:
-            metrics.agent_metrics["all_rows/mean/reward"] = sum(float(vr.get("reward") or 0.0) for vr in rows) / len(
-                rows
-            )
-            metrics.agent_metrics["all_rows/count"] = len(rows)
-            metrics.agent_metrics["masked/count"] = masked
-        return metrics
+        return await super().aggregate_metrics(body)
 
     async def verify(self, request: Request, body: SearchVerifyRequest) -> SearchVerifyResponse:
         """Grade the final answer, once per session.

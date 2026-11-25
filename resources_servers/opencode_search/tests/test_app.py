@@ -544,19 +544,3 @@ class TestExaProxyServerKey:
         request = SimpleNamespace(url=SimpleNamespace(query="exaApiKey=row-key"))
         await server._exa_forward(request, b"{}")
         assert seen == [server.config.exa_upstream_url + "?exaApiKey=row-key"]
-
-
-async def test_aggregate_metrics_reports_a_mean_over_every_row(monkeypatch) -> None:
-    from nemo_gym.config.config_types import AggregateMetricsRequest
-
-    server = _server(monkeypatch, 1.0)
-    rows = [
-        {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0},
-        {"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 0.0},
-        {"_ng_task_index": 2, "_ng_rollout_index": 0, "reward": 1.0, "mask_sample": True},
-        {"_ng_task_index": 3, "_ng_rollout_index": 0, "reward": 0.0, "mask_sample": True},
-    ]
-    metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
-    assert metrics.agent_metrics["all_rows/mean/reward"] == 0.5
-    assert metrics.agent_metrics["all_rows/count"] == 4
-    assert metrics.agent_metrics["masked/count"] == 2

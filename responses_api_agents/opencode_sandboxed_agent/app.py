@@ -54,6 +54,8 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import SESSION_ID_KEY, get_server_url, raise_for_status
 from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
     ModelServerRef,
     ResourcesServerRef,
     get_first_server_config_dict,
@@ -1288,6 +1290,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # Fail loudly rather than letting opencode start with a plugin list pointing at a file
         # that is not there -- that is the silent mode this whole method exists to prevent.
         raise RuntimeError(f"opencode plugin {local.name} did not land in the sandbox at {remote}: {last}")
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Gym's aggregate metrics, plus the mean reward over every row.
+
+        Gym's quality metrics leave rows with mask_sample out, and the search environment masks a rollout that ended
+        on its budget (max_iteration, context_window, agent_timed_out) while keeping its judged reward. An
+        evaluation's headline over all its questions therefore needs all_rows/mean/reward: every row, masked ones
+        with their reward. all_rows/count and masked/count give its denominator and how many rows were masked.
+        """
+        metrics = await super().aggregate_metrics(body)
+        rows = body.verify_responses
+        if rows:
+            metrics.agent_metrics["all_rows/mean/reward"] = sum(float(r.get("reward") or 0.0) for r in rows) / len(
+                rows
+            )
+            metrics.agent_metrics["all_rows/count"] = len(rows)
+            metrics.agent_metrics["masked/count"] = sum(1 for r in rows if r.get("mask_sample"))
+        return metrics
 
     async def responses(
         self,
