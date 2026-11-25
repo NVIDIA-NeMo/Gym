@@ -64,3 +64,23 @@ def test_attach_routed_experts_skips_steps_without_rollout_details():
 
     assert metrics.extra == {}
     agent._dump_trajectory.assert_not_called()
+
+
+async def test_a_crash_the_harness_catches_is_written_to_the_flags_file(monkeypatch, tmp_path):
+    import json
+
+    async def crashing_run(self, instruction, environment, context):
+        raise RuntimeError("harness crashed")
+
+    monkeypatch.setattr(Terminus2NemoGym.__mro__[1], "run", crashing_run)
+    agent = Terminus2NemoGym.__new__(Terminus2NemoGym)
+    agent.logger = MagicMock()
+    agent.logs_dir = tmp_path
+    agent._llm = None
+    agent._attach_routed_experts_to_trajectory = MagicMock()
+
+    await Terminus2NemoGym.run(agent, "task", MagicMock(), MagicMock())  # the crash is caught, as before
+
+    flags = json.loads((tmp_path / "agent_error_flags.json").read_text())
+    assert flags["agent_run_error"] == "RuntimeError: harness crashed"
+    assert flags["memory_limit_exceeded"] is False

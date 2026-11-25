@@ -279,6 +279,7 @@ def _harbor_run_mocks(
     trial_result: Optional[Dict[str, Any]] = None,
     trajectory: Optional[Dict[str, Any]] = None,
     side_effect: Optional[Exception] = None,
+    agent_error_flags: Optional[Dict[str, Any]] = None,
 ):
     """Patch external deps and wire up mocks for HarborAgent.run()."""
     with (
@@ -301,10 +302,13 @@ def _harbor_run_mocks(
         else:
             trial_dir = tempfile.mkdtemp(prefix="harbor_trial_")
             (Path(trial_dir) / "result.json").write_text(json.dumps(trial_result or DEFAULT_TRIAL_RESULT))
-            if trajectory is not None:
+            if trajectory is not None or agent_error_flags is not None:
                 agent_dir = Path(trial_dir) / "agent"
                 agent_dir.mkdir(parents=True, exist_ok=True)
+            if trajectory is not None:
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
+            if agent_error_flags is not None:
+                (agent_dir / "agent_error_flags.json").write_text(json.dumps(agent_error_flags))
         mock_ray.remote.side_effect = lambda *a, **k: _resolve_future()
         mock_ray.options.return_value.remote.side_effect = lambda *a, **k: _resolve_future()
 
@@ -451,6 +455,34 @@ class TestApp:
         assert "prompt_token_ids" not in out[0]
         assert "I will look at foo.py" in out[0]["content"][0]["text"]
         assert response.response.usage.total_tokens == 1380
+
+    @pytest.mark.parametrize(
+        ("flags", "recorded"),
+        [
+            ({"agent_run_error": "RuntimeError: harness crashed"}, True),
+            ({"agent_run_error": None, "memory_limit_exceeded": False}, False),
+            ({"agent_run_error": "ContextLengthExceededError: too long", "context_length_exceeded": True}, False),
+            ({}, False),
+        ],
+        ids=["crashed", "clean", "context-length", "no-flags"],
+    )
+    async def test_a_crash_the_harness_caught_is_recorded_beside_the_verified_result(self, flags, recorded):
+        server = _make_server()
+        with (
+            RequestFailureLog.capture() as log,
+            _harbor_run_mocks(trajectory=DEFAULT_TRAJECTORY, agent_error_flags=flags),
+        ):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 1.0  # the verifier's reward is unchanged
+        events = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        if recorded:
+            (event,) = events
+            assert (event.boundary.value, event.failure_kind, event.stage) == ("agent", "agent_run_error", "agent")
+            assert "RuntimeError: harness crashed" in event.failure_reason
+        else:
+            assert events == []
+        assert log.report.failure_id is None
 
     async def test_run_failed_execution(self):
         server = _make_server()

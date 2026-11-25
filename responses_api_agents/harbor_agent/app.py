@@ -316,6 +316,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 # Trajectories can be many MB; parse off the event loop.
                 trial_result, trajectory, agent_error_flags = await asyncio.to_thread(_read_trial_files)
 
+                # A harness that catches its own crash lets the trial go on to the verifier. The reward is the
+                # verifier's, as before; the crash is recorded so the rollout is not mistaken for a clean run.
+                agent_run_error = agent_error_flags.get("agent_run_error")
+                if agent_run_error and not agent_error_flags.get("context_length_exceeded"):
+                    observe_scored_despite_failure(
+                        boundary=FailureBoundary.AGENT,
+                        failure_kind=AGENT_RUN_ERROR,
+                        failure_reason=f"The agent harness crashed and the rollout was scored: {agent_run_error}",
+                        stage="agent",
+                    )
+
                 # Extract reward from verifier result
                 verifier_result = trial_result.get("verifier_result")
                 reward = HarborAgentUtils.extract_reward(verifier_result)

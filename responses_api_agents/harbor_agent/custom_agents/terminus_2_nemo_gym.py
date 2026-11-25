@@ -110,6 +110,7 @@ class Terminus2NemoGym(Terminus2):
         entire rollout batch.
         """
         self._memory_limit_exceeded = False
+        self._agent_run_error = None
         try:
             await super().run(instruction, environment, context)
         except MemoryLimitExceededError as e:
@@ -117,6 +118,9 @@ class Terminus2NemoGym(Terminus2):
             self.logger.info(f"Agent error: {type(e).__name__}: {e}. Returning history from completed turns.")
         except Exception as e:
             self.logger.info(f"Agent error: {type(e).__name__}: {e}. Returning history from completed turns.")
+            # The trial goes on to the verifier, so the crash would otherwise leave no trace outside this log:
+            # the flags file carries it to the server, which records the rollout as scored despite it.
+            self._agent_run_error = f"{type(e).__name__}: {e}"[:500]
         finally:
             self._attach_routed_experts_to_trajectory()
             self._write_agent_error_flags()
@@ -160,8 +164,9 @@ class Terminus2NemoGym(Terminus2):
     def _write_agent_error_flags(self) -> None:
         """Write agent error flags to disk for app.py to pick up."""
         try:
-            flags: dict[str, bool] = {
+            flags: dict[str, bool | str | None] = {
                 "memory_limit_exceeded": self._memory_limit_exceeded,
+                "agent_run_error": getattr(self, "_agent_run_error", None),
             }
             llm = getattr(self, "_llm", None)
             if llm and isinstance(llm, NemoGymLLM):
