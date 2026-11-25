@@ -18,6 +18,7 @@ import json
 import logging
 import zlib
 from asyncio import Semaphore
+from contextlib import nullcontext
 from time import time
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
@@ -245,8 +246,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 )
             )
 
-        # 4) run in a fresh provider sandbox
-        async with self._semaphore:
+        # 4) run in the sandbox lent to /verify, or else in a fresh provider sandbox. num_processes caps only the
+        # sandboxes this server starts: a lent sandbox is the attempt's own, so its grade does not queue behind them.
+        async with nullcontext() if body.ng_sandbox_access is not None else self._semaphore:
             """
             Sample looks like this:
             ```json
@@ -270,7 +272,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             ```
             """
 
-            # We can directly measure here since we are inside the semaphore.
+            # We can directly measure here since nothing queues past this point.
             start_time = time()
 
             task_args = (
@@ -342,8 +344,12 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                     config=self.config.sandbox_config,
                 )
             finally:
-                # Releases this server's client only: the Environment Server that lent the sandbox stops it.
-                await sandbox.disconnect()
+                # Releases this server's client only: the Environment Server that lent the sandbox stops it. A failed
+                # release must not replace the grade or the error above it.
+                try:
+                    await sandbox.disconnect()
+                except Exception:
+                    LOG.warning("code_gen could not release its client of the lent sandbox", exc_info=True)
         provider, sandbox_metadata = self._resolve_sandbox_target()
         return await check_correctness_in_sandbox(
             *task_args,
