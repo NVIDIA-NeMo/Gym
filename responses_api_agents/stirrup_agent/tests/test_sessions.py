@@ -298,6 +298,9 @@ def test_a_run_stopped_once_its_task_has_ended_answers_as_completed_and_ends_wit
     assert body["output"][-1]["type"] == "function_call"
     assert (root / "report.txt").read_text() == "draft\n"
     assert closed.status_code == 200, closed.text
+    # The close says the run completed, as its response does (report_completed_rollout_stop).
+    (invocation,) = [r for r in closed.json()["agent_observations"]["records"] if r["kind"] == "agent_invocation"]
+    assert invocation["status"] == "completed"
 
 
 @pytest.mark.parametrize("completed", [True, False])
@@ -359,6 +362,8 @@ def test_a_stop_before_the_runner_starts_answers_without_a_model_call(
     assert not (root / "ran").exists()
     assert closed.status_code == 200, closed.text
     assert closed.json()["resources_cookies"] == {"session": "seeded"}
+    (invocation,) = [r for r in closed.json()["agent_observations"]["records"] if r["kind"] == "agent_invocation"]
+    assert invocation["status"] == ("completed" if completed else "incomplete")
 
 
 def test_a_run_stopped_before_it_starts_answers_as_an_empty_stopped_run(agent, root, monkeypatch):
