@@ -911,8 +911,12 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         """A new episode, built in workspace mode (``_seed_in_workspace``), with how its harness reaches its apps:
         by its row's exposure (SANDBOX_EXPOSURES). Its MCP token admits the row's tools, none for a `cli` episode,
         whose apps are commands, and for an `api_search` one the finding tools its exposure lists, whose documentation
-        tool is named as the row's exposure names it."""
-        reply = self._seed_in_workspace(session_id, body.task_data)
+        tool is named as the row's exposure names it. The row keeps the task's ``responses_create_params``, as on the
+        OfficeEnv server, so ``tool_drift`` compares its tools with the ones the server serves."""
+        params = body.responses_create_params
+        reply = self._seed_in_workspace(
+            session_id, body.task_data | ({"responses_create_params": params} if params else {})
+        )
         session = self.service.store.get(session_id)
         tools = list(reply.body["tools"])
         exposure = session.describe()["exposure"]["mode"]
