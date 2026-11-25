@@ -21,6 +21,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.metrics.looping import LoopingAssessment, LoopingCounts, LoopingReason, assess_looping
     from nemo_gym.metrics.metrics_config import Stat
     from nemo_gym.metrics.reward_profile import (
         MASK_SAMPLE_FIELD,
@@ -41,10 +42,14 @@ if TYPE_CHECKING:
 _PUBLIC_API = {
     "AggregateMetricsMixin": "reward_profile",
     "MASK_SAMPLE_FIELD": "reward_profile",
+    "LoopingAssessment": "looping",
+    "LoopingCounts": "looping",
+    "LoopingReason": "looping",
     "RewardProfiler": "reward_profile",
     "Stat": "metrics_config",
     "add_avg_sample_std_dev": "reward_profile",
     "add_perf_metrics": "reward_profile",
+    "assess_looping": "looping",
     "compute_aggregate_metrics": "reward_profile",
     "compute_pass_majority_metrics": "reward_profile",
     "compute_subset_metrics": "reward_profile",
