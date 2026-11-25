@@ -782,6 +782,28 @@ async def test_expire_while_running_requests_the_timeout_path_once(session, rece
     await session.close(timeout=1)
 
 
+async def test_an_expiry_for_an_ended_task_is_kept_as_completed(session, receipt_reader):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file /session/expire.request" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    session.sandbox.exec.side_effect = exec_
+    async with _launched(session, launched) as activation:
+        assert await session.expire(timeout=1, reason="task_ended", completed=True) is True
+        assert (session.expire_reason, session.expire_completed) == ("task_ended", True)
+        session.sandbox.exec.side_effect = None
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and session.expire_completed
+    await session.close(timeout=1)
+
+
 async def test_expire_before_launch_marks_the_launch_expired(session, receipt_reader):
     assert await session.expire(timeout=1) is True
     session.sandbox.exec.assert_not_awaited()
@@ -906,14 +928,15 @@ async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(sess
     session.sandbox.upload.side_effect = upload
     async with _launched(session, launched) as activation:
         with pytest.raises(RuntimeError, match="Could not request test expiry"):
-            await session.expire(timeout=1, reason="budget")
-        assert session.expire_reason is None
+            await session.expire(timeout=1, reason="budget", completed=True)
+        assert (session.expire_reason, session.expire_completed) == (None, False)
         # The harness ends at a timeout: the stop's if its marker landed, its own deadline otherwise.
         receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
         finish.set()
         assert await asyncio.wait_for(activation, 5) == "transcript"
     assert session.expired is marker_landed
     assert session.expire_reason == ("budget" if marker_landed else None)
+    assert session.expire_completed is marker_landed
     await session.close(timeout=1)
 
 
@@ -1081,8 +1104,9 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
         ("opensandbox", {"operations": {"background_exec": True}}, True),
         # A running foreground command holds one of the shared HTTP pool's connections.
         ("opensandbox", {"operations": {"background_exec": False}}, False),
+        # Uploads take a bound of their own, apart from the CLI slots running commands hold.
+        ("docker", None, True),
         # Uploads share the CLI slots or worker threads that running commands hold.
-        ("docker", None, False),
         ("apptainer", None, False),
         ("enroot", None, False),
         ("openshell", None, False),
@@ -1095,7 +1119,7 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
 def test_which_sandboxes_can_stop_a_running_harness(name, options, independent):
     provider_class = get_provider_class(name)
     if options is None:
-        assert not issubclass(provider_class, SupportsSandboxIndependentUploads)
+        assert issubclass(provider_class, SupportsSandboxIndependentUploads) is independent
         provider = MagicMock(spec=provider_class)
     else:
         provider = provider_class(**options)

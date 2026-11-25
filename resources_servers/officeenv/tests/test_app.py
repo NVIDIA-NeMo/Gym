@@ -12,6 +12,8 @@ import asyncio
 import base64
 import json
 import shutil
+import threading
+import time
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,7 @@ from officeenv.apps import available
 from officeenv.artifacts import externalize
 from officeenv.emit import gym_row
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
@@ -198,6 +200,102 @@ def test_every_exposure_reaches_the_apps_through_the_tool_route(client: TestClie
     assert verified["reward"] == 1.0 and verified["policy_calls"] == 1.0, verified["officeenv_checks"]
 
 
+# The user app beside SPEC's Slack, without its fault: a task the model ends with user_complete_task.
+DONE_SPEC = {**SPEC, "apps": {**SPEC["apps"], "user": {}}, "faults": []}
+
+
+@pytest.mark.parametrize("mode", ["tools", "api_search", "cli", "mcp"])
+def test_the_task_state_says_when_complete_task_ended_the_task(client: TestClient, mode: str) -> None:
+    seeded = client.post("/seed_session", json=gym_row({**DONE_SPEC, "exposure": {"mode": mode}}, PROMPT))
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}
+
+    tool, args = _user_op(mode, "complete_task", {"answer": "done"})
+    assert client.post(f"/{tool}", json=args, cookies=seeded.cookies).status_code == 200
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": True}
+
+
+def test_a_task_without_the_user_app_never_ends_before_verification(client: TestClient) -> None:
+    seeded = client.post("/seed_session", json=gym_row(SPEC, PROMPT))
+    client.post("/slack_post_message", json=POST, cookies=seeded.cookies)
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}
+
+
+def test_the_task_state_of_a_session_the_server_does_not_hold_is_refused(client: TestClient) -> None:
+    seed = seed_request()
+    seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+    client.post("/close_session", json=close_body(seed), cookies=seeded.cookies)
+    assert client.get("/task_state", cookies=seeded.cookies).status_code == 404
+    assert client.get("/task_state").status_code == 404
+
+
+def test_the_task_state_is_published_when_the_whole_call_is_over() -> None:
+    # A call that ends the task and reopens it before returning (as a requester who wakes on complete_task and asks
+    # one more thing will) never shows the end: neither to a read during the call nor after it, nor to tool closing.
+    server = make_server(close_tools_on_task_end=True)
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+    (session_id,) = server.service.store.sessions
+    run = server.service.call
+    seen_during: list[bool] = []
+
+    def complete_then_reopen(session: str, tool: str, body: bytes | str) -> Any:
+        reply = run(session, tool, body)
+        assert server._task_ended(session)  # the op itself ended the task ...
+        seen_during.append(_run_now(server.task_state(_request(session))).task_ended)
+        for row in server.service.store.get(session).world.collection("user", "tasks").rows.values():
+            row["status"] = "pending"  # ... and the rest of the call reopens it
+        return reply
+
+    server.service.call = complete_then_reopen
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+    server.service.call = run
+    assert seen_during == [False]
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}
+    assert client.post("/slack_post_message", json=POST, cookies=seeded.cookies).json()["ok"] is True
+    assert session_id in server._task_ends
+
+    # the published end, then nothing kept once verification has released the world
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": True}
+    client.post("/verify", json=dict(gym_row(DONE_SPEC, PROMPT), response=RESPONSE), cookies=seeded.cookies)
+    assert session_id not in server._task_ends
+
+
+def _run_now(coroutine: Any) -> Any:
+    """The result of a handler that awaits nothing, run from inside a call the event loop is already running."""
+    try:
+        coroutine.send(None)
+    except StopIteration as stop:
+        return stop.value
+    raise AssertionError("the handler awaited")
+
+
+def _request(session_id: str) -> Any:
+    """A request from Gym's node whose session names ``session_id``, for calling a handler directly."""
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: session_id}
+    request.client.host = "127.0.0.1"
+    return request
+
+
+@pytest.mark.parametrize("close_tools", [False, True])
+def test_tools_close_once_the_task_has_ended_only_when_configured(close_tools: bool) -> None:
+    client = TestClient(
+        make_server(close_tools_on_task_end=close_tools).setup_webserver(), cookies=StatelessCookieJar()
+    )
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+    assert client.post("/slack_post_message", json=POST, cookies=seeded.cookies).json()["ok"] is True
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+
+    after = client.post("/slack_post_message", json=POST, cookies=seeded.cookies)
+    if close_tools:
+        assert after.status_code == 409 and after.json()["detail"] == "The task has ended: its tools are closed"
+    else:
+        assert after.status_code == 200 and after.json()["ok"] is True
+    verified = client.post("/verify", json=dict(gym_row(DONE_SPEC, PROMPT), response=RESPONSE), cookies=seeded.cookies)
+    assert verified.json()["policy_calls"] == (2.0 if close_tools else 3.0)
+
+
 @pytest.mark.parametrize("forbidden", [False, True])
 def test_structured_reports_round_trip_through_http(client: TestClient, forbidden: bool) -> None:
     content = {"fields": ["answer"], "path": "rows", "key": "id", "expected": [{"id": "x", "tags": ["a", "b"]}]}
@@ -343,6 +441,24 @@ def test_an_environment_server_episode_runs_under_its_resources_session_id(
     assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
 
 
+@pytest.mark.parametrize("stale", [False, True])
+def test_an_episode_seed_reports_the_tool_drift_of_its_rows_tools(client: TestClient, stale: bool) -> None:
+    # The seed carries the task's responses_create_params, as a seed of the whole row does, so a row whose tools
+    # differ from the ones the server serves is still flagged.
+    params = gym_row(SPEC, PROMPT)["responses_create_params"]
+    tools = [dict(tool) for tool in params["tools"]]
+    if stale:
+        tools[0]["description"] = "An old description of the tool"
+    seed = seed_request().model_copy(update={"responses_create_params": {**params, "tools": tools}})
+    seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+    assert seeded.status_code == 200, seeded.text
+
+    verified = client.post("/verify", json=environment_verify_body(seed), cookies=seeded.cookies)
+
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["tool_drift"] == (1.0 if stale else 0.0)
+
+
 def test_a_seed_binds_its_id_to_one_episode_and_close_releases_an_unverified_world(
     client: TestClient, server: OfficeEnvResourcesServer
 ) -> None:
@@ -375,6 +491,25 @@ def test_retiring_a_session_releases_its_world(client: TestClient, server: Offic
     asyncio.run(server.retire_session_state(session_id))
     assert len(server.service.store) == 0
     assert client.post("/slack_list_channels", json={}, cookies=cookies).status_code == 404
+
+
+def test_a_retired_attempts_ended_task_does_not_carry_into_its_replacement() -> None:
+    # A retired attempt is never closed, and its replacement seeds the same session ID with its own episode: that
+    # episode starts with its task open and its tools open, whatever the retired attempt did.
+    server = make_server(close_tools_on_task_end=True)
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    attempt = seed_request(DONE_SPEC)
+    cookies = client.post("/seed_session", json=attempt.model_dump(mode="json")).cookies
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=cookies).status_code == 200
+    assert client.get("/task_state", cookies=cookies).json() == {"task_ended": True}
+
+    asyncio.run(server.retire_session_state(attempt.resources_session_id))
+    replacement = attempt.model_copy(update={"episode_id": EpisodeId(rollout_id="r1", attempt=1)})
+    reseeded = client.post("/seed_session", json=replacement.model_dump(mode="json"))
+
+    assert reseeded.status_code == 200, reseeded.text
+    assert client.get("/task_state", cookies=reseeded.cookies).json() == {"task_ended": False}
+    assert client.post("/slack_post_message", json=POST, cookies=reseeded.cookies).json()["ok"] is True
 
 
 # Artifacts beside the rows: large TaskSpec strings named by SHA-256, read back at seed.
@@ -667,3 +802,128 @@ def test_the_length_penalty_spares_low_rewards_and_is_capped() -> None:
 def test_model_turns_count_the_model_responses() -> None:
     assert model_turns(NeMoGymResponse.model_validate(RESPONSE | {"output": EPISODE})) == 3
     assert model_turns(NeMoGymResponse.model_validate(RESPONSE)) == 0
+
+
+# A watched session (GET /task_state?watch=true): the environment server stops the session's run once its task ends,
+# so the call that ends the task is answered only once that server releases it (POST /task_state/release).
+def _in_thread(call: Any) -> tuple[threading.Thread, list[Any]]:
+    """Run ``call`` in a thread of its own (a request the server holds): its result lands in the returned list."""
+    results: list[Any] = []
+    thread = threading.Thread(target=lambda: results.append(call()), daemon=True)
+    thread.start()
+    return thread, results
+
+
+def test_the_call_that_ends_a_watched_task_is_answered_once_the_environment_server_releases_it() -> None:
+    with TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+        assert client.get("/task_state", params={"watch": "true"}, cookies=seeded.cookies).json() == {
+            "task_ended": False
+        }
+
+        ending, answers = _in_thread(
+            lambda: client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies)
+        )
+        # A read waiting for the end answers once the call has ended the task, while the call itself is held.
+        waited = client.get("/task_state", params={"watch": "true", "wait_s": "5"}, cookies=seeded.cookies)
+        assert waited.json() == {"task_ended": True}
+        ending.join(0.3)
+        assert ending.is_alive() and answers == []
+
+        assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": True}
+        ending.join(5)
+        assert answers[0].status_code == 200 and answers[0].json()["status"] == "success"
+        # Nothing waits any more, and the session is no longer watched.
+        assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": False}
+
+
+def test_an_unwatched_sessions_ending_call_is_answered_at_once() -> None:
+    server = make_server(task_end_hold_seconds=30)
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": True}
+    assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": False}
+    assert server._task_end_releases == {}
+
+
+def test_a_held_call_is_answered_after_the_hold_bound() -> None:
+    with TestClient(make_server(task_end_hold_seconds=0.2).setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+        client.get("/task_state", params={"watch": "true"}, cookies=seeded.cookies)
+
+        started = time.monotonic()
+        answer = client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies)
+
+        assert answer.status_code == 200
+        assert time.monotonic() - started >= 0.15
+        assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": False}
+
+
+@pytest.mark.parametrize("ending", ["verify", "close"])
+def test_a_held_call_and_a_waiting_read_are_answered_when_the_sessions_world_goes(ending: str) -> None:
+    with TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seed = seed_request(dict(DONE_SPEC))
+        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        client.get("/task_state", params={"watch": "true"}, cookies=seeded.cookies)
+        held, answers = _in_thread(
+            lambda: client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies)
+        )
+        assert client.get("/task_state", params={"wait_s": "5"}, cookies=seeded.cookies).json() == {"task_ended": True}
+
+        if ending == "verify":
+            client.post("/verify", json=environment_verify_body(seed), cookies=seeded.cookies)
+        else:
+            client.post("/close_session", json=close_body(seed), cookies=seeded.cookies)
+        held.join(5)
+        assert not held.is_alive() and answers[0].status_code == 200
+        # A read that waits on a session the server no longer holds is refused as lost.
+        assert client.get("/task_state", params={"wait_s": "5"}, cookies=seeded.cookies).status_code == 404
+
+
+def test_a_waiting_read_answers_when_its_session_goes_before_the_task_ends() -> None:
+    with TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seed = seed_request(dict(DONE_SPEC))
+        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        reading, answers = _in_thread(
+            lambda: client.get("/task_state", params={"watch": "true", "wait_s": "5"}, cookies=seeded.cookies)
+        )
+        reading.join(0.2)
+        assert reading.is_alive()
+
+        client.post("/close_session", json=close_body(seed), cookies=seeded.cookies)
+        reading.join(5)
+        assert answers[0].status_code == 404
+
+
+def test_a_waiting_read_answers_the_state_once_its_wait_runs_out() -> None:
+    client = TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+
+    started = time.monotonic()
+    assert client.get("/task_state", params={"wait_s": "0.1"}, cookies=seeded.cookies).json() == {"task_ended": False}
+    assert time.monotonic() - started >= 0.08
+    assert client.get("/task_state", params={"wait_s": "61"}, cookies=seeded.cookies).status_code == 422
+
+
+def test_a_reopened_task_is_waited_for_again(
+    server: OfficeEnvResourcesServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+    (session_id,) = server.service.store.sessions
+    state = {"ended": True}
+    monkeypatch.setattr(OfficeEnvResourcesServer, "_task_ended", lambda self, session: state["ended"])
+
+    async def scenario() -> None:
+        server._watched.add(session_id)
+        assert server._publish_task_state(session_id) is True  # the call that ended it, held for the release
+        assert server._task_end_signals[session_id].is_set() and session_id in server._task_end_releases
+        assert server._publish_task_state(session_id) is False  # a later call leaves it ended
+        state["ended"] = False
+        assert server._publish_task_state(session_id) is False  # ... and one reopens it: a read waits again
+        assert session_id not in server._task_end_signals
+
+    asyncio.run(scenario())
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}
