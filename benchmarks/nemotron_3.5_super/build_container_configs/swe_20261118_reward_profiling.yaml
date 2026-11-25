@@ -19,7 +19,8 @@ run:
     EXPERIMENT_NAME: swe_20261118/super_3.5_GA-BF16-p6d6-rewardprofiling
     SBATCH_TIMELIMIT: "12:00:00"
   # The input JSONL supplies the tasks. Clear R2E's unused catalog entry, whose
-  # free-form license string is rejected by Gym's dataset schema.
+  # free-form license string is rejected by Gym's dataset schema. Disable
+  # compaction/pruning for the six agents not covered by sandbox_utils.yaml.
   args: |
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config resources_servers/swe_rebench/configs/swe_rebench_opencode.yaml \
@@ -33,6 +34,18 @@ run:
     --config resources_servers/swe_gym/configs/swe_gym_opencode.yaml \
     --config resources_servers/swemer_oml/configs/swemer_oml_opencode.yaml \
     --config resources_servers/swe_internal_v1/configs/swe_internal_v1_opencode.yaml \
+    ++deepswe_external1_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.auto=false \
+    ++deepswe_external1_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.prune=false \
+    ++swemer_ultra_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.auto=false \
+    ++swemer_ultra_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.prune=false \
+    ++r2e_gym_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.auto=false \
+    ++r2e_gym_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.prune=false \
+    ++swe_gym_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.auto=false \
+    ++swe_gym_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.prune=false \
+    ++swemer_oml_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.auto=false \
+    ++swemer_oml_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.prune=false \
+    ++swe_internal_v1_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.auto=false \
+    ++swe_internal_v1_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.compaction.prune=false \
     ++r2e_gym_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.datasets=[] \
     ++input_jsonl_fpath=data/swe_20261118.jsonl \
     ++num_repeats=8 \
