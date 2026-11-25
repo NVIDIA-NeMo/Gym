@@ -273,6 +273,11 @@ def test_a_step_sent_again_after_it_answered_gets_its_reply_without_running_agai
     assert again.json() == first.json()
     assert again.cookies.get("model_session") == first.cookies.get("model_session") == "m1"
     assert (model_calls.await_count, tool_calls.await_count) == (1, 1)
+    # The session keeps the latest step's run, and only until it closes.
+    state = agent._session_state("agent-session")
+    assert state.step_run.index == 1
+    _invocations(client)
+    assert state.step_run is None
 
 
 async def test_a_step_sent_again_while_it_runs_shares_its_run_after_the_first_caller_went_away(

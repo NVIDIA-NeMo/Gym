@@ -202,7 +202,8 @@ class SimpleAgentSessionState(AgentSessionState):
     # The turns of every continuation activation, returned at close.
     trajectory: TrajectoryRecord | None = None
     # Without checkpointing, the latest step of a session a caller drives one step per activation
-    # (AGENT_EPISODE_STEP_LIMIT_HEADER): a step sent again, as after a dropped connection, shares its run.
+    # (AGENT_EPISODE_STEP_LIMIT_HEADER): a step sent again, as after a dropped connection, shares its run. Only the
+    # latest step is kept, and the close drops it.
     step_run: "_StepRun | None" = None
 
 
@@ -490,10 +491,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleAgentSessionState):
             raise TypeError("Expected Simple Agent session state")
-        if state.step_run is not None and not state.step_run.task.done():
+        step_run, state.step_run = state.step_run, None
+        if step_run is not None and not step_run.task.done():
             # A step whose caller went away ends with the session, as it would have ended with its request.
-            state.step_run.task.cancel()
-            await asyncio.gather(state.step_run.task, return_exceptions=True)
+            step_run.task.cancel()
+            await asyncio.gather(step_run.task, return_exceptions=True)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations,
@@ -1252,7 +1254,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         as after a dropped connection, gets the same reply and cookies, and runs neither its model call nor its tool
         calls again: the step is keyed by its session and its activation's index. The step runs apart from the request
         that sent it, so a disconnect that cancels that request does not cut the step short; closing the session
-        cancels a step still running. A step older than the session's latest is refused."""
+        cancels a step still running. A step older than the session's latest is refused.
+
+        Only these steps need it. With checkpointing, the activation tracking (``_activation_target``) already gives a
+        repeated activation its saved reply. Any other activation is the episode's only one, or a continuation
+        session's turn on new input, so a resend of it is as before; a step-driven episode makes up to
+        ``max_episode_steps`` such calls, each of which the environment server's client sends again after a dropped
+        connection."""
         run = state.step_run
         if run is not None and index < run.index:
             raise AgentSessionConflictError(
