@@ -60,6 +60,7 @@ from nemo_gym.server_runtime.episode_tools import EpisodeToolset, ToolArgumentsE
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import (
+    END_ACTIVATION_HEADER,
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
     DirectHTTPToolAccess,
@@ -764,6 +765,7 @@ class _ToolOutcome:
     status: int
     output: JsonValue
     is_error: bool
+    ends_activation: bool = False
 
 
 class _EpisodeTokensOpenOnlyTools:
@@ -1035,11 +1037,12 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         except ValueError:
             arguments = None
         outcome = await self._run_tool(episode, tool_name, arguments, request.headers.get(TOOL_CALL_ID_HEADER) or None)
-        return JSONResponse(
-            status_code=outcome.status,
-            content=outcome.output,
-            headers={TOOL_ERROR_HEADER: "true"} if outcome.is_error else None,
-        )
+        headers = {}
+        if outcome.is_error:
+            headers[TOOL_ERROR_HEADER] = "true"
+        if outcome.ends_activation:
+            headers[END_ACTIVATION_HEADER] = "true"
+        return JSONResponse(status_code=outcome.status, content=outcome.output, headers=headers or None)
 
     def _mount_mcp_endpoint(self, app: FastAPI) -> None:
         # Imported here, so the MCP SDK loads only in a server that grants MCP.
@@ -1110,7 +1113,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     ) -> _ToolOutcome:
         """Run one call, under the episode's rollout, and record it, including a call to a tool it does not have."""
         started = perf_counter()
-        status, is_error = 200, False
+        status, is_error, ends_activation = 200, False, False
 
         def record(output: JsonValue) -> None:
             episode.calls.append(
@@ -1144,7 +1147,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
                         status, is_error = 504, True
                         output = {"detail": f"Tool {name!r} did not finish within {timeout} seconds"}
                     else:
-                        output, is_error = result.output, result.is_error
+                        output, is_error, ends_activation = result.output, result.is_error, result.ends_activation
         except ToolArgumentsError as error:
             status, is_error, output = 422, True, {"detail": str(error)}
         except asyncio.CancelledError:
@@ -1157,10 +1160,10 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             if is_handled_episode_failure(error) and episode.failure is None:
                 episode.failure = error
         if not _is_json(output):
-            status, is_error = 500, True
+            status, is_error, ends_activation = 500, True, False
             output = {"detail": f"Tool {name!r} returned a value that is not JSON, such as NaN or Infinity"}
         record(output)
-        return _ToolOutcome(status=status, output=output, is_error=is_error)
+        return _ToolOutcome(status=status, output=output, is_error=is_error, ends_activation=ends_activation)
 
 
 def _is_json(value: JsonValue) -> bool:

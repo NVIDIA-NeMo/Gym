@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Data-only simulator and grading live in Resources; Gym's existing agent drives /reset and /step.
+recorded_context_package_dir: benchmarks/partner_if/data/ngc_replay/registry
+recorded_context_runtime_contract_path: null
+recorded_context_runtime_contract_sha256: null
+
+partner_if_recorded_context:
+  resources_servers:
+    partner_if:
+      entrypoint: recorded_context_app.py
+      domain: instruction_following
+      verified: false
+      num_workers: 1
+      judge_model_server: {type: responses_api_models, name: partner_if_judge}
+      allow_provisional_rubrics: true
+      judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
+      judge_max_concurrency: 2
+      policy_model_server: {type: responses_api_models, name: partner_if_recorded_context_model}
+      policy_model: ${policy_model_name}
+      max_parent_turns: 6
+      replay:
+        package_dir: ${recorded_context_package_dir}
+        runtime_contract_path: ${recorded_context_runtime_contract_path}
+        runtime_contract_sha256: ${recorded_context_runtime_contract_sha256}
+        coverage_profile: expanded-v4
+        temporal_history: true
+        capture_stdout: true
+        shell_control_flow: true
+        missing_runtime_reads: true
+        max_policy_calls: 8
+        max_delegate_turns: 6
+        max_tokens: 8192
+        timeout_s: 180
+        temperature: 0.7
+        top_p: 0.95
+
+partner_if_recorded_context_model:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: ${partner_if_recorded_context.resources_servers.partner_if.replay.temperature}
+        top_p: ${partner_if_recorded_context.resources_servers.partner_if.replay.top_p}
+        max_tokens: ${partner_if_recorded_context.resources_servers.partner_if.replay.max_tokens}
+        max_completion_tokens: ${partner_if_recorded_context.resources_servers.partner_if.replay.max_tokens}
+      max_num_tries: 1
+      max_http_attempts: 1
+      request_timeout_seconds: ${partner_if_recorded_context.resources_servers.partner_if.replay.timeout_s}
+
+partner_if_recorded_context_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: partner_if_recorded_context}
+      model_server: {type: responses_api_models, name: partner_if_recorded_context_model}
+      max_steps: ${partner_if_recorded_context.resources_servers.partner_if.max_parent_turns}
+      text_only_history: false
+      model_server_transport_max_attempts: 1
+
+partner_if_recorded_context_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server: {type: responses_api_agents, name: partner_if_recorded_context_agent}

@@ -22,6 +22,7 @@ import shutil
 import signal
 import tempfile
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 from nemo_gym.sandbox.providers.base import (
@@ -88,17 +89,26 @@ class LocalProvider:
             raw={"workspace": workspace, "env": dict(spec.env), "owned": owned},
         )
 
+    def exec_takes_argv(self) -> bool:
+        """An argument list starts as the subprocess's argv (``SupportsSandboxExecArgv``)."""
+        return True
+
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        """Kill the process group on timeout or cancellation."""
+        """Run shell text under the configured shell, an argument list without one.
+
+        Kill the process group on timeout or cancellation. An argument list whose program cannot be started is a
+        command failure with a shell's exit status: 127 when the program is not found, 126 when it cannot be
+        executed. A working directory or shell that cannot be used raises its ``OSError``.
+        """
         if user is not None:
             raise ValueError("The local sandbox provider cannot run commands as another user")
         inst = handle.raw
@@ -108,17 +118,27 @@ class LocalProvider:
         if cwd and inst["owned"] and not exec_cwd.is_absolute():
             exec_cwd = inst["workspace"] / exec_cwd
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
+        process_argv = [self._shell, "-c", command] if isinstance(command, str) else list(command)
         async with self._semaphore:
-            process = await asyncio.create_subprocess_exec(
-                self._shell,
-                "-c",
-                command,
-                cwd=str(exec_cwd),
-                env={**os.environ, **inst["env"], **(env or {})},
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *process_argv,
+                    cwd=str(exec_cwd),
+                    env={**os.environ, **inst["env"], **(env or {})},
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                # Only an argument list's own program that cannot be started is a command failure. The error names
+                # the file it is about, so a missing working directory still raises, as does shell text whose shell
+                # is missing and a process that could not be created at all.
+                if isinstance(command, str) or error.filename != process_argv[0]:
+                    raise
+                not_found = isinstance(error, (FileNotFoundError, NotADirectoryError))
+                return SandboxExecResult(
+                    stdout=None, stderr=str(error), return_code=127 if not_found else 126, error_type=None
+                )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:

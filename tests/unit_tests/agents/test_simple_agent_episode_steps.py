@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+from nemo_gym.agents.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.agents.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AGENT_EPISODE_STEP_LIMIT_HEADER,
@@ -78,6 +79,7 @@ def _session(
     *,
     max_steps: int | None = None,
     raise_server_exceptions: bool = True,
+    continuation: bool = False,
 ) -> tuple[TestClient, AsyncMock]:
     """A simple agent with an open session whose tool calls answer ``{}``, and its model's replies in order."""
     config = SimpleAgentConfig(
@@ -108,6 +110,7 @@ def _session(
             tool_accesses=[
                 DirectHTTPToolAccess(name="weather.direct_http", required=True, base_url="http://resources:8000")
             ],
+            continuation=AgentContinuationRequirements() if continuation else None,
         ).model_dump(mode="json"),
     )
     assert seed.status_code == 200
@@ -244,7 +247,7 @@ def test_a_step_sent_again_keeps_its_number(monkeypatch: pytest.MonkeyPatch) -> 
     assert invocation["status"] == "completed"
 
 
-@pytest.mark.parametrize(("driven", "sent"), [(True, [None, {"model_session": "m1"}]), (False, [None, None])])
+@pytest.mark.parametrize(("driven", "sent"), [(True, [{}, {"model_session": "m1"}]), (False, [None, None])])
 def test_the_steps_keep_the_episodes_model_server_session(
     monkeypatch: pytest.MonkeyPatch, driven: bool, sent: list
 ) -> None:
@@ -259,6 +262,22 @@ def test_the_steps_keep_the_episodes_model_server_session(
             assert client.post(ACTIVATION_PATH, json={"input": TASK}).status_code == 200
 
     assert [call.kwargs["cookies"] for call in model_calls.await_args_list] == sent
+
+
+def test_a_continuation_session_is_not_driven_one_step_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each activation of a continuation session runs a whole turn on new input, so a caller that names a step limit
+    is refused before the model is called."""
+    client, model_calls = _session(monkeypatch, [_model_reply(1)], continuation=True)
+
+    refused = client.post(
+        ACTIVATION_PATH,
+        json={"input": TASK},
+        headers={AGENT_ACTIVATION_HEADER: "1", AGENT_EPISODE_STEP_LIMIT_HEADER: "5"},
+    )
+
+    assert refused.status_code == 422
+    assert AGENT_EPISODE_STEP_LIMIT_HEADER in refused.json()["detail"]
+    assert model_calls.await_count == 0
 
 
 def test_a_step_that_raises_ends_the_episodes_invocation_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:

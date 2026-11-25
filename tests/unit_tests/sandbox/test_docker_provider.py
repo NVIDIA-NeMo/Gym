@@ -714,6 +714,38 @@ async def test_exec_uses_handle_shell(fake_binary: str, monkeypatch: pytest.Monk
     assert rec.calls[0]["argv"][-4:] == ["nemo-gym-x", "bash", "-c", "source x && echo hi"]
 
 
+async def test_exec_hands_an_argument_list_to_docker_without_the_shell(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The list is the tail of the ``docker exec`` command line: the program's argv, with no ``<shell> -c``."""
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    assert provider.exec_takes_argv()
+    handle = _make_handle(shell="bash", env={"BASE": "1"})
+
+    await provider.exec(handle, ("printf", "%s", "a;b $HOME"), cwd="/work", env={"KEY": "v"}, user="alice", stdin=b"")
+    await provider.exec(handle, "printf %s $HOME", user="root")
+
+    # User, environment, working directory and stdin are handled as for shell text.
+    assert rec.calls[0]["argv"] == [
+        fake_binary,
+        "exec",
+        "-i",
+        "-w",
+        "/work",
+        "--env",
+        "BASE=1",
+        "--env",
+        "KEY=v",
+        "--user",
+        "alice",
+        "nemo-gym-x",
+        "printf",
+        "%s",
+        "a;b $HOME",
+    ]
+    assert rec.calls[1]["argv"][-4:] == ["nemo-gym-x", "bash", "-c", "printf %s $HOME"]
+
+
 @pytest.mark.parametrize(
     "user,expect_user_flag",
     [(None, None), ("root", "0"), (0, "0"), ("alice", "alice"), (1000, "1000")],

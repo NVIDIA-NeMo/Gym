@@ -20,13 +20,13 @@ from nemo_gym.agents import (
     ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    SandboxPlatform,
     SandboxPythonRuntime,
     SandboxSession,
     agent_tools,
     raises_agent_failure,
 )
 from nemo_gym.agents.utils import sandbox_python
-from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId

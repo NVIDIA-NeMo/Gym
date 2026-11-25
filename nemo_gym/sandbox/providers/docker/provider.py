@@ -25,7 +25,7 @@ import shlex
 import shutil
 import signal
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -711,10 +711,14 @@ class DockerProvider:
             if probe.stable_delay_s > 0:
                 await asyncio.sleep(probe.stable_delay_s)
 
+    def exec_takes_argv(self) -> bool:
+        """``docker exec`` runs an argument list as the container process's argv (``SupportsSandboxExecArgv``)."""
+        return True
+
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -724,6 +728,7 @@ class DockerProvider:
     ) -> SandboxExecResult:
         """Run ``<shell> -c <command>`` via ``docker exec``; never raises for command failure.
 
+        An argument list goes to ``docker exec`` as the program and its arguments, without the shell.
         ``user`` maps to ``--user`` (root/0 -> 0). A timeout kills the local docker client only; the
         in-container process is reaped when the sandbox is closed.
         """
@@ -744,14 +749,15 @@ class DockerProvider:
     def _exec_argv(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         user: str | int | None = None,
         stdin: bytes | None = None,
     ) -> list[str]:
-        """The ``docker exec`` command line that runs ``<shell> -c <command>`` in the container."""
+        """The ``docker exec`` command line that runs ``<shell> -c <command>`` in the container, or an argument
+        list as its program and arguments."""
         inst = handle.raw
         flags: list[str] = []
         if stdin is not None:
@@ -766,7 +772,8 @@ class DockerProvider:
         if user is not None:
             flags += ["--user", _user_flag(user)]
         flags += list(self._exec_config.extra_exec_args)
-        return [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
+        process_argv = [inst.shell, "-c", command] if isinstance(command, str) else list(command)
+        return [self._binary, "exec", *flags, inst.name, *process_argv]
 
     def _pty_argv(self, handle: SandboxHandle, spec: SandboxPtySpec, session_id: str) -> list[str]:
         """The ``docker exec`` command line of one PTY session: interactive, with a terminal in PTY mode.
