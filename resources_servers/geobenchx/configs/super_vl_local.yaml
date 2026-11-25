@@ -1,0 +1,39 @@
+# Policy model for a local vLLM server running a Nemotron 3.5 Super VL GA
+# candidate (see resources_servers/geobenchx/local_model/serve_super_vl.sh).
+#
+# Pair with geobenchx.yaml. Candidates are served one at a time on port 8300.
+# Set in env.yaml, changing the model name with the variant being served:
+#   policy_base_url: http://127.0.0.1:8300/v1
+#   policy_api_key: EMPTY
+#   policy_model_name: nvidia/super-vl-ga-bf16
+#     (or nvidia/super-vl-ga-nvfp4, nvidia/super-vl-ga-lilicorr, nvidia/super-vl-base)
+#
+# Sampling follows the model card (temperature 1.0, top-p 0.95) and overrides the
+# rows' temperature 0, so evals and GRPO rollouts sample the same way. At
+# temperature 0 these hybrid reasoning models tend to loop until max_tokens.
+# Run evals with --num-repeats 4 or more and report the mean.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      chat_template_kwargs:
+        enable_thinking: true
+        # Keep earlier reasoning in the prompt so multi-turn GRPO token
+        # sequences stay contiguous (see responses_api_agents/harbor_agent).
+        truncate_history_thinking: false
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
+        max_tokens: 32768
+      extra_body: null
+      default_headers: {}
+      endpoint_file: null
+      endpoint_stale_grace_s: 300.0
+      endpoint_connection_retries: 8
+      endpoint_check_interval_s: 10.0
