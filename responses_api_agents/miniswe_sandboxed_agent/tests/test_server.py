@@ -1484,8 +1484,10 @@ async def test_a_storage_eviction_found_by_process_cleanup_is_a_settled_zero_thr
             HARNESS_TERMINATION_UNCONFIRMED,
         )
         assert decision.action.value == "resubmit" and decision.counts == {"retryable": 1, "scored": 1}
-        # The strict gate publishes no score for the incomplete run.
-        assert aggregated == [] and not aggregate.exists()
+        # The strict gate publishes no complete score for the incomplete run, only the marked partial one over the
+        # settled row.
+        assert not aggregate.exists() and output.with_name("rollouts_partial_aggregate_metrics.json").exists()
+        assert [[row["_ng_task_index"] for row in rows] for rows in aggregated] == [[1]]
         return
 
     (metrics,) = json.loads(aggregate.read_text())
