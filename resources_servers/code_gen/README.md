@@ -23,22 +23,10 @@ alarm of `unit_test_timeout_secs`, an overall deadline of
 `(unit_test_timeout_secs + 1) * num_tests + 5` seconds, 4 GiB `RLIMIT_DATA` and
 `RLIMIT_STACK`, and disabled destructive builtins. The stack limit cannot exceed the provider's hard limit.
 
-### One sandbox per attempt
-The shipped pairing (`code_gen_environment_server`) runs each attempt in one sandbox group that the Environment
-Server owns (see "A sandbox for each attempt" in the `single_agent_turn` README). At seed, code_gen declares that the
-group starts from its `sandbox_config.image`. The model calls no tools, so the group reaches only the model server
-(`network: model_only`).
-
-| Step | Where it runs |
-|---|---|
-| Simple Agent's loop | In the attempt's sandbox group, started from `CODE_GEN_SANDBOX_IMAGE`. |
-| Unit tests (`/verify`) | In the same group, after the agent closes. code_gen borrows it from the `ng_sandbox_access` field of the `/verify` body, uploads the runner and harness into a fresh directory, runs them, and releases its client. |
-| Stop | The Environment Server stops the group after the episode. code_gen never stops it. |
-
-code_gen is a pure QA task, so for sandbox capacity on large runs it may run the agent loop in the Agent Server's
-process instead. The Environment Server then starts a group for the verifier alone after the agent closes, with no
-egress (`no_network`, whatever `sandbox_config.network` says), and lends it to `/verify`. The provider must apply
-`no_network`, so Docker can take this opt-out and Enroot cannot.
+### A sandbox for grading each attempt
+The shipped pairing (`code_gen_environment_server`) states both sandbox opt-out switches (see "A sandbox for each
+attempt" in the `single_agent_turn` README). code_gen is a pure QA task whose verifier runs the candidate's code, so
+the task opts out and the verifier does not:
 
 ```yaml
 code_gen_environment_server:
@@ -46,48 +34,69 @@ code_gen_environment_server:
     single_agent_turn_legacy:
       sandbox_opt_out:
         task: true
+        verifier: false
 ```
 
-The verifier runs the candidate's code, so it should not opt out. A configuration that still sets
-`sandbox_opt_out.verifier: true` lends `/verify` nothing, and so does a caller such as a re-verification: code_gen
-then runs the tests in a fresh sandbox from its own `sandbox_provider` and `sandbox_config`, as before. A sandbox that
-cannot be borrowed or runs no tests masks the sample as below; the tests never run on the server's host.
+| Step | Where it runs |
+|---|---|
+| Simple Agent's loop | In the Agent Server process. The model calls no tools. |
+| Grading group | Right before `/verify`, the Environment Server starts a group for the verifier alone, with no egress (`no_network`), from code_gen's `sandbox_config.image`, which code_gen declares at seed. |
+| Unit tests (`/verify`) | code_gen borrows the group from the `ng_sandbox_access` field of the `/verify` body, uploads the runner and harness into a fresh directory, runs them, and releases its client. |
+| Stop | The Environment Server stops the group after the episode. code_gen never stops it. |
+
+So no sandbox runs while the model generates, and each grade gets a short-lived sandbox with no egress, as code_gen's
+own verifier sandbox had. The provider must apply `no_network` and lend sandboxes: OpenSandbox and Docker do.
+`num_processes` caps only the sandboxes code_gen starts itself; the Environment Server starts one group per attempt
+that reaches `/verify`, bounded only by its `max_concurrent_episodes` when that is set.
+
+A caller that lends no sandbox to `/verify`, such as a re-verification, gets a fresh sandbox from code_gen's own
+`sandbox_provider` and `sandbox_config`, as before; so does a configuration that sets `sandbox_opt_out.verifier:
+true`, which code_gen should never get, since its verifier runs model code. A sandbox that cannot be borrowed or runs
+no tests masks the sample as below; the tests never run on the server's host.
 
 The LiveCodeBench benchmark configs (`benchmarks/livecodebench*/`) define their own Environment Server blocks with
 `_inherit_from: code_gen_environment_server`, so they run the same way. Overrides are merged before `_inherit_from` is
-resolved, so an override on `code_gen_environment_server`, like the ones below, reaches them too. A
+resolved, so an override on `code_gen_environment_server`, like the one below, reaches them too. A
 `single_agent_turn` pairing of code_gen without `sandbox_provider` fails every attempt at seed, because code_gen
 declares a group that nothing starts; nothing falls back to the host.
 
-The pairing needs three things the old one did not:
-
-- a provider that applies `model_only` and lends sandboxes, such as OpenSandbox with
-  `networking.enforces_network_policy: true`. Docker and Enroot refuse `model_only` at startup;
-- a model server at an address the sandbox reaches, not a loopback address. `code_gen.yaml` sets
-  `use_absolute_ip: true` with `absolute_ip_server_types: [responses_api_models]`, so only model servers advertise
-  this host's address and every other server stays on loopback. These keys apply to every config that composes
-  `code_gen.yaml`, and on a host whose name resolves to a loopback address startup asks for `default_host` instead;
-- an image that also runs Simple Agent's runtime: Linux on x86_64 or aarch64, glibc 2.17 or later or musl, with
-  `bash`, `tar` and a writable `/tmp`. The Agent Server uploads a Python build that matches the image, so the image's
-  own Python is not used. The `sandbox/Dockerfile` image qualifies.
-
-It also holds one sandbox per running attempt for the whole generation, where code_gen alone held at most
-`num_processes` short-lived ones. For a trusted local setup on Docker or Enroot, override the rule explicitly (Enroot
-applies only `inherit`, so it cannot take `sandbox_opt_out.task` either):
+#### Variant: one group shared by the agent and the verifier
+A harness that must run in a container turns the task opt-out off. The group then starts at seed: the agent borrows it
+for its loop, and `/verify` borrows it after the agent closes.
 
 ```yaml
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
 code_gen_environment_server:
   environment_servers:
     single_agent_turn_legacy:
+      sandbox_opt_out:
+        task: false
+        verifier: false
       sandbox_config:
-        network: inherit
-        model_server: null
+        network: model_only
+        model_server: policy_model
 ```
 
-In the shared group, grading keeps the egress rule the group started with, because providers cannot change a
-running sandbox's egress yet. Candidate code can therefore reach the model server's address while it is graded, where
-code_gen's own verifier sandbox allowed no egress at all. With `sandbox_opt_out.task`, the verifier's group has no
-egress.
+This shape needs:
+
+- a provider that applies `model_only` and lends sandboxes, such as OpenSandbox with
+  `networking.enforces_network_policy: true`. Docker and Enroot refuse `model_only` at startup;
+- a model server at an address the sandbox reaches. `use_absolute_ip` with
+  `absolute_ip_server_types: [responses_api_models]` makes only model servers advertise this host's address, and
+  every other server stays on loopback. On a host whose name resolves to a loopback address, startup asks for
+  `default_host` instead;
+- an image that also runs the harness. For Simple Agent: Linux on x86_64 or aarch64, glibc 2.17 or later or musl,
+  with `bash`, `tar` and a writable `/tmp`. The Agent Server uploads a Python build that matches the image, so the
+  image's own Python is not used. The `sandbox/Dockerfile` image qualifies;
+- one sandbox per running attempt for the whole generation.
+
+Grading in the shared group keeps the agent's `model_only` egress, because providers cannot change a running
+sandbox's egress yet, so candidate code can reach the model server's address while it is graded. For a trusted local
+test of this variant on Docker, `network: inherit` with `model_server: null` gives the group the host's network.
+
+Enroot can take neither shape: it applies only `inherit`, so it refuses `no_network` (the shipped default) and
+`model_only` (the variant) at startup.
 
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)

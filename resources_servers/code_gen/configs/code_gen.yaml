@@ -1,8 +1,3 @@
-# The attempt's sandbox (code_gen_environment_server below) calls the model server, so model servers advertise this
-# host's address instead of loopback. The head server and every other server stay on loopback.
-use_absolute_ip: true
-absolute_ip_server_types: [responses_api_models]
-
 code_gen:
   resources_servers:
     code_gen:
@@ -79,16 +74,19 @@ code_gen_environment_server:
       agent_server:
         type: responses_api_agents
         name: code_gen_simple_agent
-      # Each attempt runs in one sandbox group this server owns: Simple Agent's loop runs in it, then code_gen runs
-      # the unit tests in it at /verify, and this server stops it. code_gen declares the group's image (its
-      # sandbox_config.image) at seed. The agent calls no tools, so the group reaches only the model server.
-      # Providers that cannot apply model_only (Docker, Enroot) refuse to start; see the README, which also shows
-      # sandbox_opt_out.task for running the loop in the Agent Server process.
+      # code_gen is a pure QA task whose verifier runs the candidate's code. Simple Agent's loop runs in the Agent
+      # Server process (task opted out), and right before /verify this server starts a sandbox group for the verifier
+      # alone, from code_gen's verifier image, with no egress. code_gen runs the unit tests in it, and this server
+      # stops it. The verifier runs model code, so it never opts out. The README shows the variant for a harness that
+      # must run in the sandbox: one group from seed, shared by the agent and the verifier.
+      sandbox_opt_out:
+        task: true
+        verifier: false
       sandbox_provider: sandbox
       sandbox_config:
         workdir: /tmp
-        network: model_only
-        model_server: policy_model
+        # What a group for the verifier alone gets whatever this says; stated so the config reads as it runs.
+        network: no_network
         # Above the default episode timeout plus the cleanup timeout; the provider reclaims a sandbox this server
         # could not stop.
         ttl_s: 25200
