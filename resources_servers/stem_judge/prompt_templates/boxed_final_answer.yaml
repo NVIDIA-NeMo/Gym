@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+user: |-
+  {question}
+
+  Solve the problem step by step. Put your final answer, and only your final answer, in \boxed{{}}.
