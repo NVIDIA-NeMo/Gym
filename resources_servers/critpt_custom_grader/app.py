@@ -9,6 +9,7 @@ bodies, validation details, provider exceptions or task sources; the stock typed
 ``/aggregate_metrics``) keep core's behaviour.
 """
 
+import dataclasses
 import json
 import logging
 import re
@@ -418,7 +419,11 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             return None
         named = get_global_config_dict() if isinstance(cfg.sandbox_provider, str) else None
         spec = cfg.sandbox_spec
-        values = spec.model_dump()
+        if spec.network not in (None, "inherit"):
+            # Its egress comes from provider_options; a typed rule dropped here would leave the provider's default.
+            raise ValueError("critpt's agentic execution sandbox does not apply a typed network rule")
+        # Only the fields a SandboxSpec has: SandboxConfig also carries the typed network rule's fields.
+        values = spec.model_dump(include={field.name for field in dataclasses.fields(SandboxSpec)})
         values["metadata"] = {
             **resolve_provider_metadata(cfg.sandbox_provider, named),
             **spec.metadata,

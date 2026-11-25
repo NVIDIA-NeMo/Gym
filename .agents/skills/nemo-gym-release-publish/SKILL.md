@@ -11,8 +11,12 @@ publish. A PyPI upload cannot be undone or overwritten.
 
 ## Workflow facts
 
-- Workflow: `.github/workflows/release.yaml`, which calls the shared
-  `_release_library.yml` template from `NVIDIA-NeMo/FW-CI-templates`.
+- Workflow: `.github/workflows/release.yaml`. Version preparation, artifact
+  build/validation, and finalization call `_release_bump.yml`,
+  `_build_test_wheel.yml`, and `_release_finalize.yml` from
+  `NVIDIA-NeMo/FW-CI-templates`. The repository-owned `publish-wheel` job uses
+  trusted publishing in the `pypi` environment.
+- The `release-workflow-tests` CPU job must pass before version preparation.
 - Trigger it from `main`. The `release-ref` SHA decides what gets released,
   not the branch you trigger from.
 - The template restricts the run to repository admins.
@@ -104,10 +108,11 @@ gh run view <RUN_ID> -R $REPO --json conclusion,jobs \
   -q '{conclusion, jobs: [.jobs[] | {name, conclusion}]}'
 ```
 
-The run passes when `conclusion` is `success`. The `build-wheel`,
-`validate-wheel`, `publish-wheel`, and `create-gh-release` jobs succeed, and in
-a dry run they compute without publishing. `test-wheel`, `build-docs`, and
-`publish-docs` are skipped by design.
+The dry run passes when `conclusion` and `release-summary` are `success`.
+The `release-workflow-tests`, version preparation, `build-wheel`,
+`validate-wheel`, and `create-gh-release` jobs succeed without publishing.
+The `publish-wheel`, `test-wheel`, `build-docs`, and `publish-docs` jobs are
+skipped by design. A skipped upload is required for a healthy dry run.
 
 Then confirm that the dry run published nothing: PyPI still returns `404`, the
 latest GitHub release is unchanged, and `BRANCH` has not moved.
@@ -148,7 +153,9 @@ publish the SHA that was already dry-run. Never switch SHAs silently.
 dispatch false
 ```
 
-Find and watch the run ID as in step 3.
+Find and watch the run ID as in step 3. For a real release, require
+`publish-wheel` and `release-summary` to succeed; a failed, cancelled, or
+skipped upload must not finalize the release.
 
 ## 6. Verify the release
 

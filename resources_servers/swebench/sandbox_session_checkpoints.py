@@ -6,12 +6,15 @@
 seed, verify, close, fences and expiry it keeps as they are:
 
 - a commit snapshots each session's task sandbox, through
-  ``nemo_gym.server_runtime._checkpoint.sandbox.SandboxSessionCheckpointer``, and exports the seed, the agent's working
+  ``nemo_gym.server_runtime.OwnedSandboxes``, and exports the seed, the agent's working
   directory, the patch verify captured (if it has) and the task state the server keeps;
 - a restore forks every task sandbox from its snapshot, all or none, and installs each session for the attempt that
   replaces the one the checkpoint saved. That attempt's episode seed gets the fork without setting the task up again,
   and a verify after the restore grades the patch the checkpoint saved instead of capturing it again;
 - a release deletes the snapshots of checkpoints the controller no longer keeps.
+
+What a snapshot holds depends on the provider: always the sandbox's files, and its running processes too when the
+provider's ``capabilities.snapshot_keeps`` says so (a VM memory snapshot).
 
 With checkpointing on, a server exports its sessions only when its sandbox provider can snapshot; otherwise it runs
 ``restart_only``, and its episodes start over after a crash. A server whose grader needs something a snapshot of its
@@ -55,11 +58,11 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import (
     CheckpointMode,
+    OwnedSandboxes,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionLocks,
     SandboxCheckpointConfig,
-    SandboxSessionCheckpointer,
     checkpoint_state_dir,
     next_attempt,
 )
@@ -91,7 +94,7 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._provider: SandboxProvider | None = None
-        self._sandbox_checkpointer: SandboxSessionCheckpointer | None = None
+        self._sandbox_checkpointer: OwnedSandboxes | None = None
         # Held by a commit's export and by every stop of a task sandbox, so a commit never snapshots one being stopped.
         # Separate from the session lock, which verify holds while it grades.
         self._export_locks = ResourcesSessionLocks()
@@ -129,13 +132,13 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
         """Whether checkpointing is on and this server exports its sessions; known once the app is set up."""
         return self._checkpoint is not None and self._checkpoint.mode == "exported"
 
-    def _checkpointer(self) -> SandboxSessionCheckpointer:
+    def _checkpointer(self) -> OwnedSandboxes:
         if self._sandbox_checkpointer is None:
             state_dir: Path | None = None
             if self._exports_sessions():
                 # Fails at startup, not at the first commit, when checkpointing is on without a usable state_dir.
                 state_dir = checkpoint_state_dir(getattr(self.server_client, "global_config_dict", None))
-            self._sandbox_checkpointer = SandboxSessionCheckpointer.from_config(
+            self._sandbox_checkpointer = OwnedSandboxes.from_config(
                 self.shared_provider(),
                 self.config.sandbox_checkpoint,
                 state_dir=state_dir,
@@ -253,7 +256,7 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
         The checkpointer stops what it still tracks, which does nothing to a sandbox that already stopped.
         """
         key = self._sandbox_key(session_id)
-        if self._sandbox_checkpointer is not None and key in self._sandbox_checkpointer:
+        if self._sandbox_checkpointer is not None and key in self._sandbox_checkpointer.keys:
             await self._sandbox_checkpointer.stop(key)
 
     # -- partial-rollout checkpoint hooks ----------------------------------------------------------------------
@@ -279,7 +282,10 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             for session_id in locks.keys() - set(exported):
                 await locks[session_id].aclose()
             for session_id in exported:
-                if session_id in self._session_id_to_sandbox and self._sandbox_key(session_id) not in checkpointer:
+                if (
+                    session_id in self._session_id_to_sandbox
+                    and self._sandbox_key(session_id) not in checkpointer.keys
+                ):
                     raise RuntimeError(
                         f"{type(self).__name__} started the task sandbox of session {session_id!r} without "
                         "new_task_sandbox, so a checkpoint cannot snapshot it"

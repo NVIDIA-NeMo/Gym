@@ -23,7 +23,7 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | Pi (`pi_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Declared | Declared | Yes |
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Off by default (`token_id_capture`) | Declared | Declared | Yes |
 | Kilo (`kilocode_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Declared | Not declared | With `--agent kilocode_agent/kilocode_sandboxed` and `++use_absolute_ip=true` |
-| OpenCode (`opencode_agent`: OpenCode 1.17.11, or 2.2.7 with `opencode_version: "2.2.7"`) | Chat Completions | MCP only | Off by default; the session path is evaluation only | Not declared | Declared | Yes |
+| OpenCode (`opencode_agent`: OpenCode 1.19.6, or 2.3.2 with `opencode_version: "2.3.2"`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Not declared | Declared | Yes |
 | OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Not declared | Declared | Yes |
 | WildClawBench native bridge (`wildclawbench_agent`) | Chat Completions | None; required grants and borrowed sandboxes rejected | Not captured; evaluation only | Not declared | Not declared | No; pinned native WildClawBench pairing only |
 | Cline (`cline_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Not declared | Not validated |
@@ -329,6 +329,13 @@ retries, skipped indices, and overlapping new activations fail. The existing
 `metadata.agent_timeout_sec` sets the per-activation budget, including preparation,
 queueing and staging. Setup and cleanup retain their separate bounds.
 
+`simple_agent` also resumes its session, without a sandbox: it keeps the conversation in the
+session and sends each activation's input after it. The first activation's settings (tools,
+tool choice, sampling and the rest) hold for the session, and a later activation that changes
+one gets HTTP 422. `max_steps` bounds each activation. The close returns the trajectory of
+every activation. Under checkpointing, the session restarts. A subclass of `simple_agent` supports continuation only when it sets
+`continuation_supported` itself.
+
 Adapters that support continuation override `_agent_continuation_capabilities()` to return
 the supported mode and observations, implement `_validate_agent_activation()` before
 binding an index, `_activate_agent_session_state()` for execution, and
@@ -352,6 +359,39 @@ carry only new output, usage and evidence; close supplies the cumulative record.
 termination receipt fails the activation and skips verification; close releases
 the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
 the connection remain retryable.
+
+## OpenCode partial-rollout checkpoints
+
+With checkpointing on (the top-level `checkpoint` block sets `enabled: true`), an `opencode_agent`
+session with one activation in a borrowed sandbox takes part in partial-rollout checkpoints. At a
+checkpoint the activation parks and OpenCode's processes are paused in place with `SIGSTOP`, then
+continued with `SIGCONT`. The Resources Server snapshots the sandbox. Two agent settings apply:
+
+| Setting | Default | Constraint |
+| --- | --- | --- |
+| `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on storage the sandbox snapshot covers. The saved conversation lives here; a restore that does not find it starts the task afresh. |
+| `checkpoint_pause_allowance_seconds` | `3600` | Bounds the time a launch spends paused. Size it to cover the longest checkpoint commit. |
+
+- **Pause limits.** Paused time does not count against the agent's `timeout`. A launch paused for
+  longer than the allowance fails the execution. One pause that lasts longer than the allowance
+  makes the process supervisor end OpenCode as at its time limit, so OpenCode is not left paused
+  if the Agent Server dies during a checkpoint.
+- **Clocks.** A pause stops OpenCode's processes, not their clocks. A tool that runs across a
+  pause can hit its own timeout when OpenCode continues. Model calls are not affected.
+- **Pause and continue versus crash recovery.** Pause and continue keep OpenCode's processes. If a
+  pause is not confirmed, OpenCode is stopped and relaunched after the checkpoint. After a crash no
+  process is kept: the restore forks the sandbox snapshot, the Environment Server seeds the session
+  again, and the agent re-binds the session to the fork. A re-sent activation gets the reply the
+  session already gave if it is the same request, and otherwise relaunches OpenCode. A relaunch
+  reprompts the saved conversation without adding a user turn when it starts with the task's
+  prompt and the model answered at least once. Otherwise it sets the saved conversation aside and
+  starts the task afresh.
+- **Restart-only sessions.** Sandboxes the agent owns, multi-turn continuation sessions, sessions
+  that continue an imported conversation (`session_import_path`), and OpenCode 2 sessions start
+  over after a crash.
+
+See [Partial-rollout checkpoints](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md#partial-rollout-checkpoints)
+in the `opencode_agent` README for the relaunch rules, interrupted tool calls and the reply metadata.
 
 ## NOOA worker checkpoints
 

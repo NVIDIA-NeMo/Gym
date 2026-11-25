@@ -243,6 +243,33 @@ A call that sets its own limit uses that limit and not the budget. Set the budge
 without a time limit, as before. Model connection retries are separate: `connection_retry_timeout_s`
 on a model client stays unset by default.
 
+### Optional Limits on Waits
+
+These settings add bounds without changing existing defaults. When unset, they keep the corresponding client's or
+provider's behavior, including existing finite timeouts. Set a limit above the longest time the wait can legitimately
+take, because a limit that is too short ends good work and changes what a run measures.
+
+| Setting | Where | What it bounds |
+|---|---|---|
+| `request_timeout_seconds`, `max_connection_retries`, `connection_retry_timeout_s` | `base_model`, `inference_provider` and `switchyard_model` configs (`vllm_model` and `openai_model` have their own) | Each HTTP attempt to the endpoint (not the whole call), the number of connection-error attempts (`N` allows N, so `1` means no retry; HTTP-status retries are counted separately), and the time spent retrying connection errors. A timed-out attempt is retried like any transport error; a timeout while reading the response body is not resent. None of these is a deadline for the whole call. |
+| `verify_timeout_seconds` | `gym eval reverify` config | Each `/verify` and `/aggregate_metrics` call, including its retries. A call that runs out fails the pass, as a lost outcome does, and is not resent. |
+| `runner_timeout_seconds` | `harness_exa_search` config | The harness command in its sandbox. |
+| `external_judge_wait_timeout_seconds`, `external_judge_request_timeout_seconds` | `proof_judge` and `proof_verification` configs | The wait for an external judge server (`JUDGE_SERVER_ARGS`), and each request to it (4 hours by default, as before). |
+| `server_ready_timeout_seconds` | `local_vllm_model` config | Startup, while the launched vLLM server is not yet answering. |
+| `model_server_wait_timeout_seconds` | `local_vllm_model_proxy` config | Startup, while the referenced `local_vllm_model` server is not up, and its config request. |
+| `prepare_timeout_seconds` | `gym eval prepare` config | Installing a dataset's `prepare_dependencies`, and each prepare script that runs in an isolated environment (`prepare_project`). A prepare script that runs in the Gym process itself cannot be interrupted. |
+
+Commands that Gym runs on a Slurm login host over SSH take four environment variables, read when the connection
+opens. Each is a positive whole number, and a bad value is an error:
+
+- `NEMO_GYM_SSH_CONNECT_TIMEOUT_S` is `ssh -o ConnectTimeout`, the limit on the connect and the handshake.
+- `NEMO_GYM_SSH_SERVER_ALIVE_INTERVAL_S` and `NEMO_GYM_SSH_SERVER_ALIVE_COUNT_MAX` make ssh probe a quiet link and
+  drop it after that many unanswered probes.
+- `NEMO_GYM_SSH_COMMAND_TIMEOUT_S` limits each ssh or rsync command from start to finish, including the remote reader
+  that recovery and status runs on the login host. A command still running at the limit is killed, which ends its
+  remote shell as an interruption does. Set it above the longest copy you expect and above the reader's bound (see
+  `NEMO_GYM_REMOTE_READER_TIMEOUT_S`, which can reach four hours).
+
 ### Listen Backlog
 
 `uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them
@@ -325,6 +352,20 @@ use".
 
 With checkpointing on, `/run` is never resent, so a reset connection in a dead worker's queue fails that episode
 attempt. Prefer enabling the setting only on the servers that need it, such as the model server.
+
+### Partial-Rollout Checkpoints (`checkpoint`)
+
+Checkpointing is off unless the top-level `checkpoint` block sets `enabled: true`.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Turn on the checkpoint participants and control routes of every server. |
+| `control_auth_token` | none | Bearer token required on every `/ng-control/v1/checkpoint` route. Required when `enabled` is true. |
+| `lease_grace_seconds` | `600` | How long past a control call's deadline a server stays closed without hearing from the controller before it resumes on its own. |
+| `state_dir` | none | Absolute directory where servers record external state their checkpoints keep, such as sandbox snapshots, so a release can delete it after a crash too. Required by servers that checkpoint sandboxes. One per job and its restarts, on a filesystem every restart can read and whose `flock` holds across nodes (on Lustre, mount with `-o flock`). |
+
+See [Make a Resources Server Checkpointable](/main/environment-tutorials/checkpointable-resources-server) and
+[Make a Harness Checkpointable](/main/agent-server/checkpointable-harness).
 
 ### Model Server Fields
 
