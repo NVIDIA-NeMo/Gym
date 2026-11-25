@@ -733,7 +733,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         return not (opt_out.task and opt_out.verifier)
 
     def check_sandbox_provider(self) -> None:
-        """Refuse at startup what the server's sandbox providers cannot do; see ``SimpleServer.check_sandbox_provider``.
+        """Refuse at startup what the server's sandbox providers cannot do (``SimpleServer.check_sandbox_provider``).
 
         A server that starts attempt sandboxes must also declare that it owns and lends them, and its provider is
         built now, so a bad provider block fails startup instead of every attempt. With the task opted out, it starts
@@ -751,8 +751,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             not ATTEMPT_SANDBOX_BLOCKS.items() <= dict(self.owned_sandbox_blocks).items() or not self.lends_sandboxes
         ):
             raise ValueError(
-                f"{type(self).__name__} starts attempt sandboxes from sandbox_config, so it sets lends_sandboxes = True "
-                "and lists ATTEMPT_SANDBOX_BLOCKS in owned_sandbox_blocks"
+                f"{type(self).__name__} starts attempt sandboxes from sandbox_config, so it sets "
+                "lends_sandboxes = True and lists ATTEMPT_SANDBOX_BLOCKS in owned_sandbox_blocks"
             )
         super().check_sandbox_provider()
         if starts:
@@ -931,9 +931,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         its own rule (``SandboxGroupSidecar.network``), never the main container's. Its working directory is
         created before anyone borrows it, since not every provider creates it. Register ``stop_attempt_sandbox`` in
         the episode's cleanup first, so a cancelled start still stops what it created. ``prepare`` runs when the seed
-        declared ``prepare``: it asks the Resources Server to prepare the task through the access. There is no host fallback: a group that cannot start or be
-        described fails the attempt as a retryable infrastructure failure at ``stage``, with ``evidence`` kept, and
-        records no reward; a failed prepare is retried when the Resources Server's error is.
+        declared ``prepare``: it asks the Resources Server to prepare the task through the access. There is no host
+        fallback: a group that cannot start or be described fails the attempt as a retryable infrastructure failure at
+        ``stage``, with ``evidence`` kept, and records no reward; a failed prepare is retried when the Resources
+        Server's error is.
         """
         settings = self._attempt_sandbox_settings()
         assert settings is not None and settings.sandbox_config is not None  # plan_attempt_sandbox returned a plan
