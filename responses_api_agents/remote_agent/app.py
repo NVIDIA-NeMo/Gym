@@ -71,8 +71,8 @@ from nemo_gym.core import (
     NgFailureEvent,
     accumulate_response_usage,
     observe_failure,
+    observe_transport_resend,
 )
-from nemo_gym.core.failure_transport import observe_transport_resend
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
