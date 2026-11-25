@@ -10,6 +10,7 @@ modality: text
 licensing: CC-BY-4.0 AND MIT
 authors:
 - wprazuch
+- jonathanlli
 reward:
   range:
   - 0.0
