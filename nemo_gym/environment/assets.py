@@ -28,12 +28,15 @@ ASSETS = {
 _CATALOG_FLAGS = frozenset({"benchmark", "environment"})
 
 
-def _manifest_config_path(root: Path, flag: str, value: str) -> Path | None:
+def _manifest_config_path(root: Path, flag: str, value: str, *, shadowed: bool) -> Path | None:
     """The config that the manifest named ``value`` points at in one root, or None when the root has none.
 
     The catalog lists a manifest under its folder path, whether or not its config sits in that folder
     (``config_path: ../opencode.yaml``), so the selector reads the manifest the same way the catalog does. A manifest
-    that fails to load is skipped, as the catalog skips it, and the config paths below decide instead.
+    that fails to load is skipped, as the catalog skips it, and the config paths below decide instead. A manifest the
+    catalog refuses (a wrong name or kind, or a missing config) is refused here too, unless ``shadowed``: a
+    higher-priority root already claims the name, so the catalog never reads this manifest and it cannot veto that
+    root's config.
     """
     tree_dir = root / ASSETS[flag][0]
     manifest_path = tree_dir / value / "manifest.yaml"
@@ -41,20 +44,25 @@ def _manifest_config_path(root: Path, flag: str, value: str) -> Path | None:
         return None
     # Imported here: the registry pulls in config parsing that the CLI does not otherwise load at startup.
     from nemo_gym.environment.manifest import ManifestError
-    from nemo_gym.environment.registry import _manifest_entry
+    from nemo_gym.environment.registry import RegistryError, _manifest_entry
 
     try:
         return _manifest_entry(tree_dir, manifest_path, flag).config_path
     except ManifestError as error:
         logger.warning(f"`--{flag} {value}` ignores manifest `{manifest_path}`, which does not load: {error}")
         return None
+    except RegistryError:
+        if shadowed:
+            return None
+        raise
 
 
-def _config_in_root(root: Path, flag: str, value: str, path: str) -> Path | None:
+def _config_in_root(root: Path, flag: str, value: str, path: str, *, shadowed: bool) -> Path | None:
     """The config ``--<flag> <value>`` selects in one root: its manifest's config, then ``<value>/config.yaml``,
-    then the ``<server>/<flavor>.yaml`` path every asset flag accepts."""
+    then the ``<server>/<flavor>.yaml`` path every asset flag accepts. ``shadowed`` means a higher-priority root
+    already selected a config."""
     if flag in _CATALOG_FLAGS:
-        if (manifest_config := _manifest_config_path(root, flag, value)) is not None:
+        if (manifest_config := _manifest_config_path(root, flag, value, shadowed=shadowed)) is not None:
             return manifest_config
         nested = root / ASSETS[flag][0] / value / "config.yaml"
         if "/" in value and nested.is_file():
@@ -87,7 +95,7 @@ def asset_config_path(flag: str, value: str) -> str:
     roots = component_search_roots()
     matches: list[Path] = []
     for root in roots:
-        candidate = _config_in_root(root, flag, value, path)
+        candidate = _config_in_root(root, flag, value, path, shadowed=bool(matches))
         if candidate is not None and (resolved := candidate.resolve()) not in matches:
             matches.append(resolved)
 

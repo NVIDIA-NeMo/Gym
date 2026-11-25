@@ -179,19 +179,19 @@ def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     return sorted(p for p in config_paths if _is_benchmark_config(p))
 
 
-def _catalog_names_by_config(benchmarks_dir: Path) -> Dict[Path, str]:
-    """The catalog name of each config that a loadable benchmark manifest under ``benchmarks_dir`` points at."""
+def _catalog_names_by_config(benchmarks_dir: Path) -> dict[Path, list[str]]:
+    """The catalog names of each config that loadable benchmark manifests under ``benchmarks_dir`` point at."""
     # Imported here: the registry imports this module.
     from nemo_gym.environment.manifest import ManifestError
     from nemo_gym.environment.registry import RegistryError, _manifest_entry, _manifest_paths
 
-    names: Dict[Path, str] = {}
+    names: dict[Path, list[str]] = {}
     for manifest_path in _manifest_paths(benchmarks_dir):
         try:
             entry = _manifest_entry(benchmarks_dir, manifest_path, "benchmark")
         except (ManifestError, RegistryError):
             continue  # the catalog skips or refuses it; the config keeps its path name
-        names.setdefault(entry.config_path.resolve(), entry.name)
+        names.setdefault(entry.config_path.resolve(), []).append(entry.name)
     return names
 
 
@@ -199,9 +199,10 @@ def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConf
     """Map benchmark name -> :class:`BenchmarkConfig` for every benchmark config under one dir.
 
     A config that a manifest points at is listed under the manifest's catalog name, which ``--benchmark`` selects;
-    any other config under its path name.
+    any other config under its path name, unless that name is a catalog name, which selects the manifest's config.
     """
     catalog_names = _catalog_names_by_config(benchmarks_dir)
+    claimed = {name for names in catalog_names.values() for name in names}
     benchmarks_dict = dict()
     for config_path in _benchmark_config_paths(benchmarks_dir):
         try:
@@ -219,10 +220,13 @@ def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConf
         if not maybe_bc:
             continue
 
-        name = catalog_names.get(config_path.resolve()) or _benchmark_config_name(
-            config_path.relative_to(benchmarks_dir)
-        )
-        benchmarks_dict[name] = maybe_bc
+        names = catalog_names.get(config_path.resolve())
+        if names is None:
+            path_name = _benchmark_config_name(config_path.relative_to(benchmarks_dir))
+            if path_name in claimed:
+                continue
+            names = [path_name]
+        benchmarks_dict.update(dict.fromkeys(names, maybe_bc))
 
     return benchmarks_dict
 
