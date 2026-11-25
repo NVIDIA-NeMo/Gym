@@ -201,6 +201,9 @@ class SimpleAgentSessionState(AgentSessionState):
     model_server_cookies: dict[str, str] = field(default_factory=dict)
     # The turns of every continuation activation, returned at close.
     trajectory: TrajectoryRecord | None = None
+    # Without checkpointing, the latest step of a session a caller drives one step per activation
+    # (AGENT_EPISODE_STEP_LIMIT_HEADER): a step sent again, as after a dropped connection, shares its run.
+    step_run: "_StepRun | None" = None
 
 
 def _dump_reply(reply: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -487,6 +490,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleAgentSessionState):
             raise TypeError("Expected Simple Agent session state")
+        if state.step_run is not None and not state.step_run.task.done():
+            # A step whose caller went away ends with the session, as it would have ended with its request.
+            state.step_run.task.cancel()
+            await asyncio.gather(state.step_run.task, return_exceptions=True)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations,
@@ -1056,6 +1063,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        return await self._respond(request, response, body)
+
+    async def _respond(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        share_step: bool = True,
+    ) -> NeMoGymResponse:
+        """Answer ``/v1/responses``. ``share_step`` lets a caller-driven step without checkpointing run once
+        (``_run_step_once``); the step's own run sets it false."""
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
@@ -1084,6 +1103,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         episode_step = _episode_step(request) if state is not None else None
         participant = self.checkpoint_participant
         target = self._activation_target(state, rollout_id)
+        if share_step and episode_step is not None and target is None:
+            return await self._run_step_once(state, episode_step.index, request, response, body)
         index = None
         if target is None:
             # Without checkpointing nothing is tracked.
@@ -1217,6 +1238,34 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     if index is not None
                     else None
                 )
+        return model_response
+
+    async def _run_step_once(
+        self,
+        state: SimpleAgentSessionState,
+        index: int,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponse:
+        """Run a caller-driven step once, without checkpointing. A step sent again while it runs, or after it answered,
+        as after a dropped connection, gets the same reply and cookies, and runs neither its model call nor its tool
+        calls again: the step is keyed by its session and its activation's index. The step runs apart from the request
+        that sent it, so a disconnect that cancels that request does not cut the step short; closing the session
+        cancels a step still running. A step older than the session's latest is refused."""
+        run = state.step_run
+        if run is not None and index < run.index:
+            raise AgentSessionConflictError(
+                f"step {index} of agent session {state.request.agent_session_id!r} is older than its step {run.index}"
+            )
+        if run is None or run.index != index:
+            step_response = Response()
+            task = asyncio.create_task(self._respond(request, step_response, body, share_step=False))
+            # A step whose every caller went away still ends; its failure is read here, not left unread.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            run = state.step_run = _StepRun(index=index, task=task, response=step_response)
+        model_response = await asyncio.shield(run.task)
+        response.raw_headers.extend(header for header in run.response.raw_headers if header[0] == b"set-cookie")
         return model_response
 
     async def _create_session_episode(
@@ -1579,6 +1628,18 @@ class _EpisodeStep:
     index: int
     # The episode's step limit, which the caller owns.
     limit: int
+
+
+@dataclass
+class _StepRun:
+    """The run of a caller-driven step without checkpointing (``SimpleAgent._run_step_once``)."""
+
+    # The step's activation index.
+    index: int
+    # The step's run, which answers with its reply.
+    task: "asyncio.Task[NeMoGymResponse]"
+    # Where the run sets the reply's cookies, which every caller of the step gets.
+    response: Response
 
 
 def _positive_header(request: Request, name: str) -> int | None:
