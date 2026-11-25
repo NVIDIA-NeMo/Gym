@@ -1,0 +1,15 @@
+{
+  "profiles": {
+    "ascend": {
+      "prompt_override": {
+        "system_prompt": "",
+        "user_prompt": "Transcribe the audio word for word in the original language. Preserve repetitions, hesitations, false starts, incomplete words, and the speaker's grammar. Do not translate, summarize, correct the wording, or complete an unfinished phrase. Return only the transcript and stop when the speech ends. Write Mandarin in simplified Chinese characters and English in the Latin alphabet. Use a plain transcript without sentence punctuation."
+      },
+      "request": "greedy",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=ascend ++eval_config.cleanup_generation_loops=true",
+        "METRICS_TYPE": "ascend"
+      }
+    }
+  }
+}
