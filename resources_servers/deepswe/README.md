@@ -96,10 +96,10 @@ gym env start \
 
 `benchmarks/deepswe/hermes.yaml` runs `hermes_agent` on the same episode: the same agent sandbox, three-hour budget,
 episode bound and verifier as the OpenCode recipe. The Agent Server stages Hermes's runtime into the sandbox, so
-nothing has to be mounted and the sandbox needs no network. The recipe sets no effective step limit (`max_turns` is
-far above what three hours allow), so the three-hour budget is the bound, as for OpenCode. Hermes keeps its own
-per-command timeout (180 seconds) and toolsets, and declares the 262144-token context window; match that value to the
-serving window when you change it.
+nothing has to be mounted and the sandbox needs no network. The recipe raises Hermes's step limit to 1000 model calls
+(`max_turns`); its default of 90 ends runs on these tasks within minutes. To compare the two harnesses under the same
+limit, give OpenCode `opencode_config.agent.build.steps: 1000`. Hermes keeps its own per-command timeout (180 seconds)
+and toolsets, and declares the 262144-token context window; match that value to the serving window when you change it.
 
 ```bash
 gym env start \
