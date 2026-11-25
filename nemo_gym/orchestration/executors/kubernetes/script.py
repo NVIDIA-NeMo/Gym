@@ -26,6 +26,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.artifacts.run_files import ARTIFACTS_DIRNAME
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
     KubernetesComputeConfig,
@@ -39,7 +40,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args, render_target_args
-from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
+from nemo_gym.orchestration.jobs import LOGS_DIRNAME, ROLLOUTS_FILENAME
 
 
 GPU_RESOURCE_KEY = "nvidia.com/gpu"

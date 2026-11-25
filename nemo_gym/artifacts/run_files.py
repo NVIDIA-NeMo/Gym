@@ -24,4 +24,11 @@ ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
 QUALITY_SUMMARY_SOURCES_KEY = "rollouts"
 
 
+# Where a submitted job keeps what a benchmark produced, beside the logs: the artifacts directory holds the rollouts and
+# the status files, and the export step writes one typed result per exporter into the exports directory, named
+# ``<exporter><EXPORT_RESULT_SUFFIX>``. The export step writes them and `gym eval status` reads them.
+ARTIFACTS_DIRNAME = "artifacts"
+EXPORTS_DIRNAME = "exports"
+EXPORT_RESULT_SUFFIX = ".result.json"
+
 AGGREGATION_ERROR_KEY = "aggregation_error"

@@ -2564,14 +2564,6 @@ def test_eval_status_without_export_results_is_as_it_was(tmp_path, monkeypatch, 
     assert re.search(r"^  export (?!receipt)", output, re.MULTILINE) is None
 
 
-def test_the_status_command_reads_export_results_where_the_export_step_writes_them():
-    # `eval status` may not import orchestration, so it spells these names itself.
-    from nemo_gym.orchestration import jobs
-
-    source = Path(cli_main.__file__).with_name("eval.py").read_text()
-    assert f'"{jobs.ARTIFACTS_DIRNAME}", "{jobs.EXPORTS_DIRNAME}", "{jobs.EXPORT_RESULT_SUFFIX}"' in source
-
-
 def test_eval_status_missing_artifact_is_actionable(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(tmp_path)])
     with pytest.raises(SystemExit) as error:

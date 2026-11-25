@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.artifacts.exporter_registry import RUN_EXPORTER_CONFIGS
-from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, EXPORT_RESULT_SUFFIX, EXPORTS_DIRNAME, ROLLOUTS_FILENAME
+from nemo_gym.artifacts.run_files import ARTIFACTS_DIRNAME, EXPORT_RESULT_SUFFIX, EXPORTS_DIRNAME
+from nemo_gym.orchestration.jobs import ROLLOUTS_FILENAME
 
 
 if TYPE_CHECKING:

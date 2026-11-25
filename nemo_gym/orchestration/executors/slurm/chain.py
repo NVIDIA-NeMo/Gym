@@ -28,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from nemo_gym.artifacts.run_files import ARTIFACTS_DIRNAME
 from nemo_gym.config.global_config import (
     DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
@@ -121,7 +122,6 @@ from nemo_gym.orchestration.executors.slurm.script import (
     build_sbatch_script,
 )
 from nemo_gym.orchestration.jobs import (
-    ARTIFACTS_DIRNAME,
     RESOLVED_CONFIG_NAME,
     ROLLOUTS_FILENAME,
     BenchmarkJob,
