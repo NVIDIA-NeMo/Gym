@@ -15,6 +15,8 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from nemo_gym.client import ServerClient
 from responses_api_agents.proof_refinement_agent.app import (
     ModelServerRef,
@@ -150,6 +152,61 @@ class TestApp:
         expected_usage = _usage(2118, 1424, cached=400, reasoning=1200)
         expected_usage["input_tokens_details"]["cache_write_tokens"] = None
         assert result.response.usage.model_dump() == expected_usage
+
+    @pytest.mark.parametrize("recovered", [True, False], ids=["recovered", "last-turn-capped"])
+    async def test_only_the_scored_turns_marker_survives_the_correction_turns(self, recovered: bool) -> None:
+        from nemo_gym.core import RequestFailureLog, observe_scored_despite_failure
+
+        config = ProofRefinementAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="proof_refinement_agent",
+            resources_server=ResourcesServerRef(type="resources_servers", name="math_formal_lean"),
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            max_correction_turns=1,
+        )
+        body = ProofRefinementRunRequest(responses_create_params={"input": "Prove it."})
+        first = _model_response("resp-0", "proof attempt", _usage(1, 1))
+        second = _model_response("resp-1", "fixed proof", _usage(1, 1))
+        verifies = iter([True, not recovered])  # whether each turn's /verify reply carried the sandbox marker
+
+        async def post(*, url_path: str, **kwargs: Any) -> _FakeResp:
+            if url_path == "/seed_session":
+                return _FakeResp({})
+            if url_path == "/verify":
+                # The HTTP client merges a reply's failure events into the request being served.
+                if next(verifies):
+                    observe_scored_despite_failure(
+                        boundary="resources_server",
+                        failure_kind="verifier_error",
+                        failure_reason="sandbox",
+                        stage="verification",
+                    )
+                last = kwargs["json"]["turn_index"] == 1
+                return _FakeResp(
+                    body.model_dump()
+                    | {
+                        "response": second if last else first,
+                        "reward": 1.0 if last else 0.0,
+                        "proof_status": "success" if last else "error",
+                        "needs_correction": not last,
+                        "correction_prompt": None if last else "Fix the proof.",
+                    }
+                )
+            return _FakeResp(second if kwargs["json"] is not body.responses_create_params else first)
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=post)
+        agent = ProofRefinementAgent(config=config, server_client=server_client)
+
+        with RequestFailureLog.capture() as log:
+            result = await agent.run(MagicMock(cookies={}), body)
+
+        assert result.total_turns == 2
+        operations = sorted(event.operation for event in log.report.events.values())
+        # The first turn's marker is downgraded once its result is replaced; the scored turn's stays.
+        assert operations == (["discarded_attempt"] if recovered else ["discarded_attempt", "scored_despite_failure"])
 
     async def test_correction_turns_keep_the_callers_sampling_params(self) -> None:
         config = ProofRefinementAgentConfig(

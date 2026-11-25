@@ -44,6 +44,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    RequestFailureLog,
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import (
@@ -164,9 +165,12 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
         current_input = body.responses_create_params
         turn_index = 0
         usage: Optional[NeMoGymResponseUsage] = None
+        failure_log = RequestFailureLog.current()
 
         while True:
             LOG.info("Turn %d: Generating proof attempt", turn_index)
+            # What this turn swallows is told apart from what earlier turns left in the request's log.
+            known_events = set(failure_log.report.events) if failure_log is not None else set()
 
             # 2. Generate proof attempt
             gen_response = await self.server_client.post(
@@ -269,6 +273,10 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
                 if value is not None:
                     current_input[key] = value
 
+            # This turn's result is replaced by the next turn's, so what it swallowed (a verifier that could not
+            # reach its sandbox) must not mark the result of the turn that is scored.
+            if failure_log is not None:
+                failure_log.discard_scored_despite_failures(known_events)
             turn_index += 1
 
         # Build final response
