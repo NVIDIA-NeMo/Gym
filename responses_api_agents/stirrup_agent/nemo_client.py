@@ -175,6 +175,33 @@ _TRUNCATION_RECOVERY_NUDGE = (
 )
 
 
+def _signed_thinking(msg: Any) -> Reasoning | None:
+    """The provider-signed thinking of a chat-completions message, or ``None``.
+
+    Anthropic models served through a LiteLLM-compatible endpoint return their thinking as ``thinking_blocks``, each
+    carrying a ``signature``; the model keeps its reasoning across tool calls only when the signed block comes back on
+    the next turn. Stirrup's serializer emits a signed ``Reasoning`` as ``thinking_blocks``; whether the provider
+    history keeps that field is the allowlist's decision in ``stirrup_utils``. The block's text is kept verbatim,
+    since the signature covers it.
+    """
+    blocks = getattr(msg, "thinking_blocks", None)
+    if not isinstance(blocks, list):
+        return None
+    candidates = [block for block in blocks if isinstance(block, dict)]
+    if len(candidates) > 1:
+        # Stirrup's Reasoning holds one signed block, so only the first can be sent back.
+        LOGGER.warning("response carries %d thinking blocks; keeping only the first signed one", len(candidates))
+    for block in candidates:
+        if block.get("type", "thinking") != "thinking":
+            continue
+        # LiteLLM names the field ``signature``; Stirrup's own LiteLLM client reads ``thinking_signature``.
+        signature = block.get("signature") or block.get("thinking_signature")
+        if signature:
+            thinking = block.get("thinking")
+            return Reasoning(signature=signature, content=thinking if isinstance(thinking, str) else "")
+    return None
+
+
 def _without_images(
     messages: list[NeMoGymChatCompletionMessageParam],
 ) -> tuple[list[NeMoGymChatCompletionMessageParam], int]:
@@ -444,6 +471,9 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
             # vLLM >= 0.16.0 emits `reasoning` (Responses-API convention) instead of
             # `reasoning_content`; e.g. DeepSeek-V4's `--reasoning-parser deepseek_v4`.
             reasoning = Reasoning(content=msg.reasoning)
+        signed = _signed_thinking(msg)
+        if signed is not None:
+            reasoning = signed
 
         tool_calls = [
             ToolCall(
