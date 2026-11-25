@@ -47,6 +47,7 @@ from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
     LibraryJudgeMathVerifyRequest,
+    _cap_address_space,
     _extract_last_boxed_answer,
     _extract_unboxed_answer_candidate,
     _prepare_format_tolerant_response,
@@ -56,6 +57,17 @@ from resources_servers.math_with_judge.app import (
 
 def _geometric_series_terms(num_terms: int) -> str:
     return "+".join("1" if exponent == 0 else f"x^{exponent}" for exponent in range(num_terms))
+
+
+def _allocate_after_cap(limit_mb: int | None, allocate_mb: int, result_connection: Any) -> None:
+    _cap_address_space(limit_mb)
+    try:
+        bytearray(allocate_mb * 1024 * 1024)
+        result_connection.send("allocated")
+    except MemoryError:
+        result_connection.send("MemoryError")
+    finally:
+        result_connection.close()
 
 
 def _verify_pathological_sympy_expression(result_connection: Any) -> None:
@@ -885,21 +897,29 @@ class TestApp:
         assert "pathlib" not in evaluated
 
     @mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_AS is enforced on Linux only")
-    async def test_verifier_child_memory_is_capped(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
-        # Uncapped, this answer allocates until the timeout; capped, its child fails fast and scores 0.
+    @mark.parametrize(("limit_mb", "outcome"), [(64, "MemoryError"), (None, "allocated")])
+    def test_a_capped_child_cannot_allocate_past_the_cap(self, limit_mb: int | None, outcome: str) -> None:
+        ctx = mp.get_context("fork")
+        result_connection, child_connection = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_allocate_after_cap, args=(limit_mb, 512, child_connection))
+        process.start()
+        child_connection.close()
+        process.join(timeout=30)
+
+        assert result_connection.poll(timeout=0) and result_connection.recv() == outcome
+
+    @mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_AS is enforced on Linux only")
+    async def test_the_verifier_scores_an_answer_past_the_memory_cap_0(
+        self, config: LibraryJudgeMathResourcesServerConfig
+    ) -> None:
         server = LibraryJudgeMathResourcesServer(
-            config=config.model_copy(
-                update={"library_verifier_timeout_seconds": 60.0, "library_verifier_memory_limit_mb": 256}
-            ),
+            config=config.model_copy(update={"library_verifier_memory_limit_mb": 256}),
             server_client=MagicMock(spec=ServerClient),
         )
-        loop = asyncio.get_running_loop()
-        started = loop.time()
 
-        result = await server._verify_answer_with_library_async("1", "\\boxed{\\operatorname{eye}(1000000000)}")
+        reward, _ = await server._verify_answer_with_library_async("1", "\\boxed{\\operatorname{eye}(1000000000)}")
 
-        assert result == (0.0, None)
-        assert loop.time() - started < 30
+        assert reward == 0.0
         # The cap leaves room for an ordinary answer.
         assert (await server._verify_answer_with_library_async("4", "\\boxed{4}"))[0] == approx(1.0)
 
