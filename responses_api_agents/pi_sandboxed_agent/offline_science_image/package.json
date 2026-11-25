@@ -2,6 +2,6 @@
   "name": "gym-sandbox-harnesses",
   "private": true,
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1"
+    "@earendil-works/pi-coding-agent": "1.5.2"
   }
 }
