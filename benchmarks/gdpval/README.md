@@ -436,6 +436,9 @@ gym eval run \
     '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 0.95}'
 ```
 
+- Atom (`atom.yaml`) has no `finish` tool, so `prompts/atom.yaml` tells it to save its deliverables in `/root/outputs/`,
+  and the NOOA adapter (`invoke_atom_with_submission`) calls `finish` with those files when its turn ends. An empty
+  folder submits nothing. The prompt differs from the other harnesses', so these are not AA v2 scores either.
 - Pi runs in the task sandbox the resources server lends it, with `/root` as its working directory. It installs
   Node.js and Pi there at the start of each episode, from nodejs.org and the npm registry.
 - It calls `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page` over MCP: the resources server sets

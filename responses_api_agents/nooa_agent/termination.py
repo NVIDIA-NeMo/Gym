@@ -3,11 +3,12 @@
 
 """NOOA termination reasons shared by runtime and response projection."""
 
+import inspect
 from enum import StrEnum
 from types import FrameType
 
 from aiohttp import ClientResponseError
-from nooa.errors import GenerationError, IterationLimitExceeded, LoopDetectedError
+from nooa.errors import GenerationError, IterationLimitExceeded, LoopDetectedError, RetryLimitExceeded
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
 
@@ -26,6 +27,8 @@ class NOOATerminationReason(StrEnum):
     MAX_OUTPUT_TOKENS_EXCEEDED = "max_output_tokens_exceeded"
     LOOP_DETECTED = "loop_detected"
     INVALID_POLICY_OUTPUT = "invalid_policy_output"
+    CODE_RETRIES_EXHAUSTED = "code_retries_exhausted"
+    RESULT_VALIDATION_EXHAUSTED = "result_validation_exhausted"
     MODEL_REJECTED = "model_rejected"
     TIMEOUT_EXCEEDED = "timeout_exceeded"
     CANCELLED = "cancelled"
@@ -79,6 +82,20 @@ def _is_codeact_text_only_stop(error: BaseException) -> bool:
     return isinstance(session, CodeActSession) and type(limit) is int and 0 < limit <= session.consecutive_text_only
 
 
+def _raised_in(error: BaseException, *functions: object) -> bool:
+    frame = _raising_frame(error)
+    return frame is not None and frame.f_code in {inspect.unwrap(function).__code__ for function in functions}
+
+
+def _is_atom_missing_task_result(error: BaseException) -> bool:
+    if type(error) is not RuntimeError or not str(error).startswith("Atom ended without a TaskResult"):
+        return False
+    # Imported here: the task runtime must not load nooa_atom's dependencies, and only Atom raises this message.
+    from nooa_atom.gym import AtomHarness
+
+    return _raised_in(error, AtomHarness.solve, AtomHarness._solve_plain)
+
+
 def policy_termination(
     error: BaseException | None, *, model_error: BaseException | None = None
 ) -> tuple[NOOATerminationReason | None, str | None]:
@@ -104,6 +121,18 @@ def policy_termination(
             return NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, str(error)
         if _is_codeact_loop_stop(error):
             return NOOATerminationReason.LOOP_DETECTED, str(error)
+        # Model-caused stops, recognized by the pinned NOOA/Atom code that raised them (agent code can raise the same
+        # types). Model API errors have their own budget and error, so they stay failures.
+        if type(error) is RetryLimitExceeded and _raised_in(error, CodeActStrategy._run_generation):
+            return NOOATerminationReason.CODE_RETRIES_EXHAUSTED, str(error)
+        if (
+            type(error) is GenerationError
+            and error.__cause__ is not None
+            and _raised_in(error, CodeActStrategy._handle_return_result)
+        ):
+            return NOOATerminationReason.RESULT_VALIDATION_EXHAUSTED, str(error)
+        if _is_atom_missing_task_result(error):
+            return NOOATerminationReason.INVALID_POLICY_OUTPUT, str(error)
         frame = _generation_error_frame(error)
         if frame is None or frame.f_code not in (
             CodeActStrategy._run_generation.__code__,

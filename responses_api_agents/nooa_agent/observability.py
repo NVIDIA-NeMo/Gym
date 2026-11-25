@@ -483,6 +483,8 @@ class GymTraceHooks:
                 tools=create_params.tools,
                 tool_choice=create_params.tool_choice,
                 parallel_tool_calls=create_params.parallel_tool_calls,
+                reasoning=create_params.reasoning
+                or (latest_response.reasoning if latest_response is not None else None),
                 usage=(
                     NeMoGymResponseUsage.sum_from_list(usages) if all(usage is not None for usage in usages) else None
                 ),
