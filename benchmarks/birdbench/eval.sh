@@ -147,6 +147,15 @@ fi
 # (Hydra cannot override one list item, so the whole `datasets` list is replaced; `gym eval prepare` also requires
 # prepare()'s output path to equal the dataset's jsonl_fpath). num_repeats is 1: the dataset is never repeated.
 # (File naming mirrors prepare.output_fpath_for and prepare.prompt_config_fpath_for.)
+# (The versions are prepare.VERSIONS. An unlisted one would build a file name that can match another cached file, e.g.
+# `dev_schema_only`, and then reuse it without prepare() ever checking the version.)
+case "${VERSION}" in
+    dev_20240627|dev_20251106|minidev_20250704|minidev_20261028) ;;
+    *)
+        echo "Unsupported --version '${VERSION}'; expected dev_20240627, dev_20251106, minidev_20250704 or minidev_20261028." >&2
+        exit 1
+        ;;
+esac
 if [[ "${SPLIT}" != "dev" && "${VERSION}" != "dev_20240627" ]]; then
     echo "--version picks a release of BIRD dev; it can't be used with --split ${SPLIT}." >&2
     exit 1

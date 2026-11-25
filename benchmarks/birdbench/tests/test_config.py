@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for ``benchmarks/birdbench/config.yaml`` and its manifest."""
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -104,6 +105,14 @@ def test_the_file_name_tables_list_exactly_the_accepted_values():
     tables = OmegaConf.load(BENCHMARK_DIR / "config.yaml").birdbench_prepared_file
     assert set(tables.name_for_version) == set(birdbench_prepare.VERSIONS)
     assert set(tables.suffix_for_prompt_format) == set(birdbench_prepare.PROMPT_FORMATS)
+
+
+def test_eval_sh_accepts_exactly_the_known_versions():
+    # eval.sh builds the file name from --version itself, so an unlisted value could name another cached file. It is
+    # read, not run: its exit trap reaps orphaned server processes.
+    script = (BENCHMARK_DIR / "eval.sh").read_text()
+    (accepted,) = re.findall(r'case "\$\{VERSION\}" in\n\s*([\w|]+)\) ;;', script)
+    assert set(accepted.split("|")) == set(birdbench_prepare.VERSIONS)
 
 
 @pytest.mark.parametrize(
