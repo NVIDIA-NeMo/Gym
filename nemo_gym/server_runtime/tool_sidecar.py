@@ -25,6 +25,8 @@ from nemo_gym.server_runtime.owned_sandboxes import check_network_rule
 
 
 TOOL_SIDECAR_IMPORT_STATE_PATH = "/tool_sidecar/import_state"
+# The tool host's readiness route, which anyone may call.
+TOOL_HOST_READY_PATH = "/_tool_sidecar/ready"
 
 
 class ToolSidecarConfig(BaseModel):
@@ -168,7 +170,7 @@ def tool_sidecar_to_grant(
     return serving[0]
 
 
-async def check_tool_sidecar_reachable(sandbox: AsyncSandbox, host: str, port: int) -> bool:
+async def tool_sidecar_reachable(sandbox: AsyncSandbox, host: str, port: int) -> bool:
     """Probe the tool host from the agent container, as the agent's tool calls will reach it.
 
     With ``python3`` the probe asks the tool host whether it is ready, without any proxy the container's environment
@@ -178,7 +180,7 @@ async def check_tool_sidecar_reachable(sandbox: AsyncSandbox, host: str, port: i
     Raises:
         RuntimeError: If the agent container cannot reach the tool host.
     """
-    ready = shlex.quote(f"http://{host}:{port}/_tool_sidecar/ready")
+    ready = shlex.quote(f"http://{host}:{port}{TOOL_HOST_READY_PATH}")
     fetch = (
         "import sys, urllib.request; "
         "urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1], timeout=10)"

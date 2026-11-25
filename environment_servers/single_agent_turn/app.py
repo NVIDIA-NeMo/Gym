@@ -82,7 +82,6 @@ from nemo_gym.server_runtime import (
     ToolAccess,
     ToolSidecarConfig,
     ToolSidecarImportStateRequest,
-    check_tool_sidecar_reachable,
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
@@ -90,6 +89,7 @@ from nemo_gym.server_runtime import (
     seed_restarts,
     seed_verify_step_type,
     tool_sidecar_config_of,
+    tool_sidecar_reachable,
     tool_sidecar_to_grant,
 )
 from nemo_gym.trajectory import (
@@ -642,7 +642,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             sandbox = self.sandboxes.get(handles.attempt_sandbox.key)
             if sandbox is None:
                 raise RuntimeError("the attempt's sandbox group is gone before its tool sidecar was checked")
-            checked = await check_tool_sidecar_reachable(sandbox, sidecar.name, sidecar.tools_port)
+            checked = await tool_sidecar_reachable(sandbox, sidecar.name, sidecar.tools_port)
         except Exception as error:
             raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
         if not checked:

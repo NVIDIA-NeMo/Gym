@@ -3,13 +3,15 @@
 """The tool sidecar a Resources Server declares, as the Environment Server adds it to the attempt's group."""
 
 import asyncio
+import http.server
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator, Mapping, Sequence
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +22,10 @@ from pydantic import ValidationError
 from nemo_gym.sandbox.providers.base import SandboxCapabilities, SandboxExecResult
 from nemo_gym.server_runtime.attempt_sandbox import SandboxGroupSidecar, SandboxGroupSpec
 from nemo_gym.server_runtime.tool_sidecar import (
+    TOOL_HOST_READY_PATH,
     ToolSidecarConfig,
-    check_tool_sidecar_reachable,
     tool_sidecar_config_of,
+    tool_sidecar_reachable,
     tool_sidecar_to_grant,
 )
 
@@ -56,13 +59,6 @@ class _NoSidecars:
 
 class _OpenEgressOnly(_SidecarProvider):
     capabilities = SandboxCapabilities(network_rules=frozenset({"inherit"}))
-
-
-class _UnconnectedGroups(_SidecarProvider):
-    """Runs sidecars on a deployment that does not connect a group's members, as OpenSandbox without networking."""
-
-    def validate_networking(self) -> None:
-        raise NotImplementedError("OpenSandbox networking requires networking.enabled=true")
 
 
 def test_the_seed_declares_the_tool_sidecar_and_the_agent_reaches_it_by_its_name() -> None:
@@ -108,31 +104,79 @@ def test_the_environment_server_reads_the_declaration_from_the_resources_config_
         tool_sidecar_config_of({"tool_sidecar": {"image": "python:3.13-slim", "portt": 9000}})
 
 
-class _ToolHost(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        self.send_response(200 if self.path == "/_tool_sidecar/ready" else 404)
-        self.end_headers()
+class _LocalShell:
+    """The agent container as a local shell: the probe's script runs for real."""
 
+    def __init__(self, *, exit_code: int | None = None, error_type: str | None = None) -> None:
+        self.commands: list[str] = []
+        self.exit_code = exit_code
+        self.error_type = error_type
+
+    async def exec(self, command: str, *, cwd: str, timeout_s: float) -> SandboxExecResult:
+        self.commands.append(command)
+        if self.exit_code is not None or self.error_type is not None:
+            return SandboxExecResult(stdout="", stderr=None, return_code=self.exit_code, error_type=self.error_type)
+        process = await asyncio.create_subprocess_exec(
+            "sh", "-c", command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
+        return SandboxExecResult(stdout=stdout.decode(), stderr=stderr.decode(), return_code=process.returncode)
+
+
+class _Ready(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args: Any) -> None:
-        return None
+        pass
+
+    def do_GET(self) -> None:
+        self.send_response(200 if self.path == TOOL_HOST_READY_PATH else 404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 @pytest.fixture
-def tool_host_port() -> Iterator[int]:
-    """A port on this host where a stand-in tool host answers its ready route."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _ToolHost)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+def tool_host_port() -> Any:
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Ready)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server.server_address[1]
     server.shutdown()
     server.server_close()
 
 
+@pytest.mark.skipif(shutil.which("python3") is None, reason="the probe runs python3 from a shell")
+async def test_the_probe_passes_once_the_tool_host_answers_from_the_agent_container(tool_host_port: int) -> None:
+    shell = _LocalShell()
+
+    assert await tool_sidecar_reachable(shell, "127.0.0.1", tool_host_port) is True  # type: ignore[arg-type]
+    assert f"http://127.0.0.1:{tool_host_port}/_tool_sidecar/ready" in shell.commands[0]
+
+
+@pytest.mark.skipif(shutil.which("python3") is None, reason="the probe runs python3 from a shell")
+async def test_a_tool_host_the_agent_container_cannot_reach_fails_the_probe() -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+
+    with pytest.raises(RuntimeError, match=f"cannot reach the tool sidecar at 127.0.0.1:{closed}"):
+        await tool_sidecar_reachable(_LocalShell(), "127.0.0.1", closed)  # type: ignore[arg-type]
+
+
+async def test_an_agent_image_without_python3_or_bash_is_not_checked_and_an_exec_error_fails() -> None:
+    assert await tool_sidecar_reachable(_LocalShell(exit_code=127), "tools", 8000) is False  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="tools:8000: timeout"):
+        await tool_sidecar_reachable(_LocalShell(error_type="timeout"), "tools", 8000)  # type: ignore[arg-type]
+
+
+class _UnconnectedGroups(_SidecarProvider):
+    """Runs sidecars on a deployment that does not connect a group's members, as OpenSandbox without networking."""
+
+    def validate_networking(self) -> None:
+        raise NotImplementedError("OpenSandbox networking requires networking.enabled=true")
+
+
 def _closed_port() -> int:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _ToolHost)
-    port = server.server_address[1]
-    server.server_close()
-    return port
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 class _AgentContainer:
@@ -168,12 +212,12 @@ async def test_the_agent_container_reaches_the_tool_host_with_python_and_ignores
 ) -> None:
     container = _AgentContainer(tmp_path / "bin", {"python3": sys.executable})
 
-    assert await check_tool_sidecar_reachable(container, "127.0.0.1", tool_host_port) is True  # type: ignore[arg-type]
+    assert await tool_sidecar_reachable(container, "127.0.0.1", tool_host_port) is True  # type: ignore[arg-type]
     closed = _closed_port()
     with pytest.raises(
         RuntimeError, match=f"(?s)cannot reach the tool sidecar at 127.0.0.1:{closed}: .*Connection refused"
     ):
-        await check_tool_sidecar_reachable(container, "127.0.0.1", closed)  # type: ignore[arg-type]
+        await tool_sidecar_reachable(container, "127.0.0.1", closed)  # type: ignore[arg-type]
 
 
 @needs_bash
@@ -182,25 +226,10 @@ async def test_an_agent_container_with_only_bash_checks_that_the_tool_hosts_port
 ) -> None:
     container = _AgentContainer(tmp_path / "bin", {"bash": "/bin/bash"})
 
-    assert await check_tool_sidecar_reachable(container, "127.0.0.1", tool_host_port) is True  # type: ignore[arg-type]
+    assert await tool_sidecar_reachable(container, "127.0.0.1", tool_host_port) is True  # type: ignore[arg-type]
     closed = _closed_port()
     with pytest.raises(RuntimeError, match=f"cannot reach the tool sidecar at 127.0.0.1:{closed}"):
-        await check_tool_sidecar_reachable(container, "127.0.0.1", closed)  # type: ignore[arg-type]
-
-
-async def test_an_agent_container_with_neither_python3_nor_bash_is_not_checked(tmp_path: Path) -> None:
-    container = _AgentContainer(tmp_path / "bin", {})
-
-    assert await check_tool_sidecar_reachable(container, "127.0.0.1", _closed_port()) is False  # type: ignore[arg-type]
-
-
-async def test_a_probe_the_provider_could_not_finish_names_why() -> None:
-    class _TimedOut:
-        async def exec(self, command: str, *, cwd: str, timeout_s: float) -> SandboxExecResult:
-            return SandboxExecResult(stdout=None, stderr=None, return_code=None, error_type="timeout")
-
-    with pytest.raises(RuntimeError, match="cannot reach the tool sidecar at tools:8000: timeout"):
-        await check_tool_sidecar_reachable(_TimedOut(), "tools", 8000)  # type: ignore[arg-type]
+        await tool_sidecar_reachable(container, "127.0.0.1", closed)  # type: ignore[arg-type]
 
 
 def _group(*sidecars: SandboxGroupSidecar) -> SandboxGroupSpec:
@@ -208,6 +237,8 @@ def _group(*sidecars: SandboxGroupSidecar) -> SandboxGroupSpec:
 
 
 _TOOLS = ToolSidecarConfig(image="python:3.13-slim").group_sidecar()
+
+
 _GRANT = {"resources_server": "ledger", "configured": True, "lent_to_agent": True, "transports": ["direct_http"]}
 
 
