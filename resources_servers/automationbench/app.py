@@ -41,6 +41,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedRejectedError,
     ResourcesSessionLostError,
     SimpleResourcesServer,
+    VerifierMode,
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -166,6 +167,9 @@ class _Episode:
 class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer):
     config: AutomationBenchResourcesServerConfig
     seed_request_model = AutomationBenchSeedRequest
+    # The rubric reads the world copied out of the tool sidecar before the group stops, and executes nothing, so
+    # /verify runs here and is lent no sandbox.
+    verifier_mode: ClassVar[VerifierMode] = "none"
     # What the tool host in a tool sidecar imports beyond Gym, as this server's pyproject.toml pins them.
     tool_sidecar_requirements: ClassVar[tuple[str, ...]] = (
         "verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@b2e4e8157783b2c0dffc7821044c87f29f1c3ccf",

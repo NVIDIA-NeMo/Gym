@@ -26,8 +26,7 @@ Configuration (`configs/automationbench.yaml`):
   `/verify`, the world the agent's calls left is copied back here (`export_tool_state` there, `import_tool_state` here),
   and the rubric scores it as before; a world that cannot be copied fails the attempt as an infrastructure failure.
   The sidecar is seeded without the answer key: each assertion keeps only its type, which scopes the services the tools
-  allow. The rubric executes nothing, so the config opts the verifier out of the group
-  (`sandbox_opt_out.verifier: true`), which stops once the world is copied back.
+  allow.
 
 A row whose `responses_create_params` carries no tools was prepared before this server existed. `/seed_session` refuses
 it with HTTP 422 before any model call, reading the params the typed seed carries beside `task_data`, and the message
@@ -48,6 +47,16 @@ overrides. verifiers stays a dependency without it: `automation-bench` itself re
 dispatch adds is the git pin: `pyproject.toml` pins verifiers at the same revision as `verifiers_agent` and copies its
 uv constraint, override and exclude lists. Calling upstream's tools directly, with those `api_fetch` overrides carried
 here, would let the pin relax to upstream's range.
+
+## Where it runs
+
+With the tool sidecar (`configs/automationbench_tool_sidecar.yaml`):
+
+| Agent | Verifier | Why |
+|------|------|------|
+| attempt group | `none` | The task's tools run in a sidecar of the group; the verifier only reads the world copied out of the sidecar. |
+
+The rules are in the [single-agent-turn Environment Server's README](../../environment_servers/single_agent_turn/README.md#where-it-runs).
 
 ## Licensing information
 

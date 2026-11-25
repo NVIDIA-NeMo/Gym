@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
@@ -33,6 +33,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionFences,
     ResourcesSessionLocks,
     SimpleResourcesServer,
+    VerifierMode,
     observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -68,6 +69,8 @@ class SimpleWeatherVerifier:
 class SimpleWeatherResourcesServer(ToolSidecarResources, SimpleWeatherVerifier, SimpleResourcesServer):
     # Tool results depend only on the request, so a continuation needs no session state.
     checkpoint_mode = "stateless"
+    # The verifier only reads the response's tool calls, so /verify runs here and is lent no sandbox.
+    verifier_mode: ClassVar[VerifierMode] = "none"
     config: SimpleWeatherResourcesServerConfig
     _episode_by_session: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
