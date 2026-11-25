@@ -20,6 +20,8 @@ WORKDIR /app
 RUN chown node:node /app
 USER node
 
+# overrides: motion-dom/motion-utils keep motion's internals in lockstep; sharp is a security floor for the
+# copies colorthief and ndarray-pixels pull in (both still declare ^0.33). Drop it once they require >=0.35.
 COPY --chown=node:node <<'EOF' /app/package.json
 {
   "name": "ui-next",
@@ -220,7 +222,8 @@ COPY --chown=node:node <<'EOF' /app/package.json
   },
   "overrides": {
     "motion-dom": "12.23.28",
-    "motion-utils": "12.23.28"
+    "motion-utils": "12.23.28",
+    "sharp": "0.35.5"
   }
 }
 EOF
