@@ -2,7 +2,7 @@
 # sandbox (a container from sandbox/Dockerfile), reaches the apps the way its row's exposure says (MCP tools, commands
 # or endpoints), and moves file content over the episode's file API (README.md in the workspace). Each harness config
 # composes it with a harness and the environment server that binds the two: configs/officeenv_sandbox.yaml (Pi) and
-# configs/officeenv_sandbox_<harness>.yaml (Codex CLI, mini-SWE, OpenCode, OpenClaw, Terminus 2).
+# configs/officeenv_sandbox_<harness>.yaml (Codex CLI, OpenCode, OpenClaw, Terminus 2).
 #
 # The instances a harness config adds are named after the harness (officeenv_sandbox_<harness>_agent, which inherits
 # Gym's instance of the harness, and officeenv_sandbox_<harness>_environment_server), so several harness configs
