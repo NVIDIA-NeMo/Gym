@@ -16,12 +16,26 @@ K rollouts of a row (`num_repeats`) give its mean reward (pass@1) and pass@K. Th
 on either of its wires: `backticks` or `function_calling` (see `responses_api_models/base_model`). The observations it
 renders mirror the captured harness exactly, because the candidate reads them.
 
+## Environments without a sandbox
+
+Some environments keep their state in the resources server and serve their tools as `POST /<tool name>` on the seeded
+session (AutomationBench). With `tool_executor: resources_server` the agent attaches to no sandbox: every call, replayed
+or generated, goes to that endpoint with the session's cookies, the server's reply text is the tool turn, and `/verify`
+scores the state the calls left. Every named call is sent, so the server answers an unknown tool or bad arguments the
+way the captured harness did. A call the server fails to answer (a non-2xx reply or a dropped connection) aborts the
+attempt and masks the sample, as a sandbox failure does. This executor needs the `function_calling` wire; the git and
+network options below are sandbox-only and are refused with it.
+
 ## Configuration
 
 | field | default | notes |
 |---|---|---|
 | `wire` | `backticks` | must match the wire the trajectories were captured on |
-| `max_forwards` | 3 | candidate turns after the handover |
+| `tool_executor` | `sandbox` | `sandbox`: commands run in the task container; `resources_server`: calls go to the resources server's tool endpoints (above) |
+| `sandbox_provider` | none | required with `tool_executor: sandbox` |
+| `max_forwards` | 3 | candidate turns after the handover; `null` takes each row's `prefix_pass_k.max_forwards` |
+| `on_unparsed_forward` | `resample` | a forward with no usable call: `resample` spends it and samples again from the same transcript (the SWE reference bridge); `stop` ends the candidate's turns, as a verifiers-style harness ends a rollout on a turn without tool calls |
+| `replay_assistant_text` | false | keep the captured assistant text of function-calling prefix turns next to their calls; the model server decides whether it reaches the prompt |
 | `step_timeout` | 60 | seconds per command |
 | `interpreter` | none | e.g. `[bash, -c]`: run each command in a fresh interpreter, as mini-swe-agent does, so `BASH_ENV` is sourced |
 | `exec_env` | UTF-8 locale | variables exported before every command |
@@ -68,7 +82,8 @@ or generating candidate commands.
 
 Both checks take no model turns, so run them at `num_repeats` 1:
 
-- **gold check** (`replay_through_target: true`): replays turns 1..T; every row must resolve.
+- **gold check** (`replay_through_target: true`): replays turns 1..T, then the row's `prefix_pass_k.suffix` (turns
+  T+1..N) where it carries one, for pools whose decisive turn is not the last one the task needs; every row must resolve.
 - **contamination screen** (`max_forwards: 0`): replays turns 1..T-1; no row may resolve.
 
 A pass@K of 0 is more often a broken replay than a weak model.
@@ -91,8 +106,8 @@ Two fields make a rollout re-gradable without the model:
 
 ## Usage
 
-See `benchmarks/prefix_pass_k/README.md`: `verified.yaml` (SWE-bench Verified, backticks) and `deepswe.yaml`
-(DeepSWE, function calling).
+See `benchmarks/prefix_pass_k/README.md`: `verified.yaml` (SWE-bench Verified, backticks), `deepswe.yaml`
+(DeepSWE, function calling) and `pro.yaml` (SWE-bench Pro, backticks).
 
 ## Tests
 

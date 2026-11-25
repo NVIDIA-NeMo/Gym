@@ -29,6 +29,12 @@ observation back) or function calling (`bash` tool calls, a JSON observation
 per call), with a sentinel echo to submit. The loop is small; the part that
 must not drift is the *wire* — see `ACTION_FENCE`, `render_observation` and
 `render_tool_observation`, which mirror the captured harness exactly.
+
+With `tool_executor: resources_server` the same loop drives an environment
+whose state lives in the resources server rather than in a container
+(AutomationBench): every call, replayed or generated, goes to the server's
+`POST /<tool name>` on the seeded session, its text comes back as the tool
+turn, and `/verify` scores the state the calls left.
 """
 
 import asyncio
@@ -44,7 +50,7 @@ from uuid import uuid4
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import Request
 from omegaconf import OmegaConf
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -279,6 +285,30 @@ def tool_call_commands(tool_calls: Optional[List[Dict[str, Any]]]) -> List[tuple
     return pairs
 
 
+def tool_call_requests(tool_calls: Optional[List[Dict[str, Any]]]) -> List[tuple]:
+    """(call_id, tool name, arguments) for every named call, in order, for `tool_executor: resources_server`.
+
+    Unlike `tool_call_commands`, no call is filtered by tool or argument shape: the resources server answers an
+    unknown tool or malformed arguments with error text, as the captured harness did, and that answer is part of
+    the transcript. Arguments that are a JSON string are decoded; anything else is sent as it is. Blank placeholder
+    entries some gateways leave in the array are skipped.
+    """
+    requests = []
+    for call in tool_calls or []:
+        function = call.get("function") or {}
+        name = (function.get("name") or "").strip()
+        if not name:
+            continue
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                pass
+        requests.append((call.get("id") or "", name, arguments))
+    return requests
+
+
 def _default_commit_outcome_policy() -> StageOutcomePolicyConfig:
     """Count Git rejection as zero; leave execution failures ungraded without retrying commits."""
     shared = StageOutcomePolicyConfig()
@@ -342,9 +372,17 @@ class PrefixPassKAgentConfig(BaseResponsesAPIAgentConfig):
     # is the traces' native message shape.
     wire: Literal["backticks", "function_calling"] = "backticks"
 
+    # Where actions run. sandbox: bash in the task container the resources
+    # server creates (the SWE pools). resources_server: each tool call is sent
+    # to the resources server's `POST /<tool name>` on the seeded session, for
+    # environments that hold their state there (AutomationBench); it needs the
+    # function_calling wire, and none of the sandbox or git options apply.
+    tool_executor: Literal["sandbox", "resources_server"] = "sandbox"
+
     # Only the provider is needed: the container is created by the resources
-    # server and this agent attaches to the handle it returns.
-    sandbox_provider: str
+    # server and this agent attaches to the handle it returns. Required with
+    # `tool_executor: sandbox`.
+    sandbox_provider: Optional[str] = None
 
     # Exported before every replayed command. SWE-bench images run Python under
     # conda, and `Path.read_text()` uses the locale's preferred encoding: with no
@@ -362,13 +400,29 @@ class PrefixPassKAgentConfig(BaseResponsesAPIAgentConfig):
     interpreter: Optional[List[str]] = None
 
     # Turns the candidate may take after the handover. The reference arms use 3:
-    # the decisive turn plus a little room to recover from a format error.
-    max_forwards: int = 3
+    # the decisive turn plus a little room to recover from a format error. None
+    # takes each row's own `prefix_pass_k.max_forwards`, for pools whose budget
+    # depends on how much of the trajectory remains; 0 is the contamination
+    # screen (the prefix alone must not resolve the task).
+    max_forwards: Optional[int] = 3
     step_timeout: int = 60
+
+    # What a forward with no usable call costs. resample: the forward is spent
+    # and the next one sees the same transcript (the SWE reference bridge).
+    # stop: the candidate's turn ends, as a verifiers-style harness ends a
+    # rollout on a turn without tool calls.
+    on_unparsed_forward: Literal["resample", "stop"] = "resample"
+
+    # Replay the captured assistant text of function-calling prefix turns next
+    # to their calls. Off keeps `content: None`, as the SWE traces were
+    # replayed; the model server decides whether the text reaches the prompt.
+    replay_assistant_text: bool = False
 
     # Gold check: replay 1..T INCLUSIVE and take no model turns, which must
     # reproduce the trajectory's resolving patch. Run this before trusting any
     # score — a pass@K of 0 is more often a broken replay than a weak model.
+    # Rows whose decisive turn is not the resolving one carry the rest of the
+    # trajectory as `prefix_pass_k.suffix`, which is replayed after it.
     replay_through_target: bool = False
 
     # Commit the working tree before verification. DeepSWE v1.1 grading reads
@@ -406,6 +460,22 @@ class PrefixPassKAgentConfig(BaseResponsesAPIAgentConfig):
 
     debug: bool = False
 
+    @model_validator(mode="after")
+    def check_tool_executor(self) -> "PrefixPassKAgentConfig":
+        if self.tool_executor == "sandbox" and not self.sandbox_provider:
+            raise ValueError("tool_executor: sandbox needs a sandbox_provider")
+        if self.tool_executor == "resources_server":
+            if self.wire != "function_calling":
+                raise ValueError("tool_executor: resources_server needs wire: function_calling")
+            sandbox_only = [
+                name
+                for name in ("commit_worktree", "uncommit_worktree", "record_git_state", "offline")
+                if getattr(self, name)
+            ]
+            if sandbox_only:
+                raise ValueError(f"{', '.join(sandbox_only)} need tool_executor: sandbox")
+        return self
+
 
 class PrefixPassKRunRequest(BaseRunRequest):
     # Rows carry the SWE-bench schema plus a `prefix_pass_k` block.
@@ -431,6 +501,41 @@ class SandboxExecError(Exception):
     def __init__(self, failure_kind: str, reason: str) -> None:
         super().__init__(reason)
         self.failure_kind = failure_kind
+
+
+class ResourcesServerTools:
+    """The seeded session's tools on the resources server, standing in for the sandbox.
+
+    `tool_executor: resources_server` passes one of these wherever the sandbox
+    executor passes its container. A call that the server fails to answer (not
+    an error text it returns for the model, but a non-2xx reply or a broken
+    connection) raises SandboxExecError: like a sandbox failure, the call may
+    already have changed the state, so the attempt is aborted and masked.
+    """
+
+    def __init__(self, server_client: Any, server_name: str, cookies: Dict[str, Any]) -> None:
+        self.server_client = server_client
+        self.server_name = server_name
+        self.cookies = cookies
+
+    async def call(self, name: str, arguments: Any) -> str:
+        try:
+            response = await self.server_client.post(
+                server_name=self.server_name, url_path=f"/{name}", json=arguments, cookies=self.cookies
+            )
+            body = (await response.content.read()).decode()
+        except Exception as exc:
+            print("prefix_pass_k: tool call failed", format_exc(), file=sys.stderr)
+            kind = (
+                TRANSPORT_PEER_DROP if isinstance(exc, (ConnectionError, ClientConnectionError)) else AGENT_RUN_ERROR
+            )
+            raise SandboxExecError(kind, f"tool call {name} failed: {type(exc).__name__}: {exc}"[:500]) from exc
+        if not 200 <= response.status < 300:
+            raise SandboxExecError(AGENT_RUN_ERROR, f"tool call {name} failed: HTTP {response.status}: {body}"[:500])
+        return body
+
+    async def stop(self) -> None:
+        """The resources server releases the session at /verify; there is no container to stop."""
 
 
 class PrefixPassKAgent(SimpleResponsesAPIAgent):
@@ -536,6 +641,8 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         two can never be replayed differently.
         """
         action = step.get("action")
+        if isinstance(sandbox, ResourcesServerTools):
+            return await self._replay_tool_step(sandbox, messages, step, stats)
         if self.config.wire == "function_calling":
             tool_calls = step.get("tool_calls") or []
             commands = tool_call_commands(tool_calls)
@@ -580,6 +687,30 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             observation = step.get("observation") or format_error_observation(0)
         messages.append({"role": "user", "content": observation})
         return submitted
+
+    async def _replay_tool_step(
+        self,
+        tools: ResourcesServerTools,
+        messages: List[Dict[str, Any]],
+        step: Dict[str, Any],
+        stats: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Replay one captured function-calling turn through the resources server's tools.
+
+        Every call runs, in order, and is answered with the server's text. There
+        is no submission: the episode ends when the calls run out.
+        """
+        tool_calls = step.get("tool_calls") or []
+        content = (step.get("content") or None) if self.config.replay_assistant_text else None
+        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+        captured = dict(zip([call.get("id") for call in tool_calls], step.get("captured_observations") or []))
+        for call_id, name, arguments in tool_call_requests(tool_calls):
+            observation = await tools.call(name, arguments)
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": observation})
+            if stats is not None and call_id in captured:
+                stats["prefix_observations_compared"] += 1
+                stats["prefix_observations_identical"] += observation == captured[call_id]
+        return False
 
     async def _replay_prefix(
         self,
@@ -805,6 +936,11 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         sandbox = self._session_id_to_sandbox[session_key]
         row: Dict[str, Any] = getattr(request.state, "_ng_prefix_pass_k_row", {}) or {}
         spec = row.get("prefix_pass_k") or {}
+        max_forwards = self.config.max_forwards
+        if max_forwards is None:
+            if spec.get("max_forwards") is None:
+                raise ValueError("max_forwards is None, so every row needs prefix_pass_k.max_forwards")
+            max_forwards = int(spec["max_forwards"])
 
         messages: List[Dict[str, Any]] = [dict(item) for item in (body.input or [])]
         if self.config.wire == "function_calling":
@@ -814,6 +950,7 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         stats: Dict[str, Any] = {
             "target_turn": spec.get("target_turn"),
             "n_prefix_turns": len(spec.get("prefix") or []),
+            "max_forwards": max_forwards,
             "forwards": 0,
             # Forwards whose output carried no usable action. The reference
             # measured ~20% on this wire at 1024 tokens, almost all truncations;
@@ -839,10 +976,15 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             await self._replay_prefix(sandbox, messages, spec.get("prefix") or [], stats)
 
             if self.config.replay_through_target:
-                # Gold check: play the captured decisive turn instead of generating.
+                # Gold check: play the captured decisive turn instead of generating,
+                # then the rest of the trajectory where the row carries it.
                 stats["submitted"] = await self._replay_step(sandbox, messages, spec.get("target") or {})
+                for step in spec.get("suffix") or []:
+                    if stats["submitted"]:
+                        break
+                    stats["submitted"] = await self._replay_step(sandbox, messages, step)
             elif self.config.wire == "function_calling":
-                for _ in range(self.config.max_forwards):
+                for _ in range(max_forwards):
                     message, finish_reason = await self._generate_chat(request, messages, body)
                     stats["forwards"] += 1
                     stats["candidate_turns"].append(
@@ -863,7 +1005,10 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                         stats["context_overflow"] = True
                         break
                     tool_calls = message.get("tool_calls")
-                    commands = tool_call_commands(tool_calls)
+                    if isinstance(sandbox, ResourcesServerTools):
+                        commands = tool_call_requests(tool_calls)
+                    else:
+                        commands = tool_call_commands(tool_calls)
                     if not commands:
                         # Resample from the SAME transcript: the reference bridge
                         # answers an unparseable generation with a 502 and mini
@@ -871,8 +1016,15 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                         # forward and the model never sees it.
                         stats["unparsed_forwards"] += 1
                         stats["truncated_forwards"] += finish_reason == "length"
+                        if self.config.on_unparsed_forward == "stop":
+                            break
                         continue
                     messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+                    if isinstance(sandbox, ResourcesServerTools):
+                        for call_id, name, arguments in commands:
+                            observation = await sandbox.call(name, arguments)
+                            messages.append({"role": "tool", "tool_call_id": call_id, "content": observation})
+                        continue
                     for call_id, command in commands:
                         observation, submitted = await self._exec(sandbox, command)
                         messages.append({"role": "tool", "tool_call_id": call_id, "content": observation})
@@ -884,7 +1036,7 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                     if stats["submitted"]:
                         break
             else:
-                for _ in range(self.config.max_forwards):
+                for _ in range(max_forwards):
                     text, _usage = await self._generate(request, messages, body)
                     stats["forwards"] += 1
                     stats["candidate_turns"].append({"content": text})
@@ -894,6 +1046,8 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                         stats["unparsed_forwards"] += 1
                         n_actions = len(ACTION_FENCE.findall(text or ""))
                         messages.append({"role": "user", "content": format_error_observation(n_actions)})
+                        if self.config.on_unparsed_forward == "stop":
+                            break
                         continue
                     observation, submitted = await self._exec(sandbox, action)
                     messages.append({"role": "user", "content": observation})
@@ -967,7 +1121,11 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         cookies = cookies | seed_session_response.cookies
         seed_session_result = await seed_session_response.json()
 
-        sandbox = await self._connect_sandbox(seed_session_result)
+        uses_sandbox = self.config.tool_executor == "sandbox"
+        if uses_sandbox:
+            sandbox = await self._connect_sandbox(seed_session_result)
+        else:
+            sandbox = ResourcesServerTools(self.server_client, self.config.resources_server.name, cookies)
         self._session_id_to_sandbox[session_key] = sandbox
         try:
             if self.config.offline:
@@ -975,7 +1133,7 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
 
             # The starting commit, not the row's `base_commit`: task images need not
             # sit at that hash, and the question is whether the rollout committed.
-            initial_head = await self._head(sandbox)
+            initial_head = await self._head(sandbox) if uses_sandbox else None
 
             request._cookies = cookies
             # The row carries the prefix; `responses` is the Responses-API surface
@@ -990,7 +1148,7 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             stats = self._session_id_to_stats.setdefault(session_key, {})
             aborted = stats.get("exec_errors", 0) > 0
             commit_decision = None
-            if not aborted:
+            if not aborted and uses_sandbox:
                 commit_decision = await self._prepare_worktree(sandbox, initial_head, stats)
 
             verify_request = PrefixPassKVerifyRequest.model_validate(body.model_dump() | {"response": response})
