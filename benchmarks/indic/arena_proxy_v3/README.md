@@ -1,14 +1,12 @@
 # Indic Arena Proxy v3
 
 Evaluates the next assistant reply using the complete conversation history and
-pairwise comparisons against frozen GPT-5.4-mini answers. The integration uses
-NeMo Gym's existing `simple_agent`, `single_agent_turn_legacy` environment server,
-`vllm_model`, and `arena_judge` resources server.
+pairwise comparisons against frozen GPT-5.4-mini answers in NeMo Gym.
 
 ## Dataset
 
-Dataset registry: **`lmarena_v3_indic`, version `0.0.1`**. Preparation uses the same
-Gym GitLab downloader as [`lmarena_v3`](../../lmarena_v3/prepare.py).
+Dataset: **`lmarena_v3_indic`, version `0.0.1`**, stored in Gym's internal GitLab
+dataset registry.
 
 The 24 source JSONL files contain 4,800 prompts and 4,800 frozen reference answers
 across Bengali, Gujarati, Hindi, Kannada, Malayalam, Marathi, Nepali, Odia,
@@ -37,7 +35,7 @@ cached downloads.
 
 Install the repository and component dependencies using the standard NeMo Gym
 setup, including the `mlflow` extra for registry access. Configure Gym's registry
-settings using your deployment's standard `env.yaml`, as for `lmarena_v3`. Keep
+settings using your deployment's standard `env.yaml`. Keep
 credentials outside tracked files and command-line arguments. Run commands from
 the repository root in the appropriate Python environment.
 
@@ -54,9 +52,7 @@ datasets are excluded from Git.
 
 For an English comparison, explicitly provide the original, checksum-matching
 files with `--source-dir` and `--languages en`. English is scored separately.
-The former Hugging Face download and `--revision` option have been replaced by the
-pinned registry version. Dataset licensing: NVIDIA internal, derived from
-arena-proxy-v3.
+Dataset licensing: NVIDIA internal, derived from arena-proxy-v3.
 
 ## Generation and judging
 
@@ -70,7 +66,7 @@ gym eval submit --config benchmarks/indic/arena_proxy_v3/submit/generate.yaml --
 gym eval submit --config benchmarks/indic/arena_proxy_v3/submit/judge.yaml --dry-run
 ```
 
-Set `TEMPERATURE=0.6` for that sampling experiment. Select languages and a
+Set `TEMPERATURE=0.6` to use that sampling temperature. Select languages and a
 per-language `--limit` during preparation; the workers use those exact inputs.
 
 Generation uses `gym eval run` with verification deferred. Judging uses
@@ -88,28 +84,24 @@ Generation defaults are:
 | Maximum output | 120,000 tokens |
 | Thinking | Enabled |
 
-The benchmark extends Gym's vLLM model server through its request and conversion
-hooks. It preserves the processed request, including model-profile stop settings,
-penalties, reasoning options, and chat-template kwargs. Template settings follow
-Gym's precedence: config defaults, then direct request kwargs, then
+Generation uses the model profile's stop settings, penalties, reasoning options,
+and chat-template kwargs. Template settings follow this precedence: config
+defaults, then direct request kwargs, then
 `metadata.chat_template_kwargs`. Set template kwargs through these fields;
 nesting them inside `extra_body` is rejected.
 
-It sends the original text messages to the chat-completions endpoint and measures
-their token count using the same prompt-affecting settings as generation. The
+The prompt token count uses the same settings as generation. The
 output budget is `min(requested_output_tokens, context_length - prompt_tokens - 64)`.
 The requested cap defaults to 120,000; `MAX_OUTPUT_TOKENS` can lower it. A cap above
 120,000, conflicting budget aliases, disabled thinking, prompt truncation,
 assistant-prefix continuation, tools, and multiple completions are rejected
 explicitly. Incompatible model-server modes also fail configuration validation.
-The adapter retains the reference's measured budget and 64-token reserve; Gym's
-error-triggered budget refitting must remain disabled for this protocol.
+Keep `refit_output_budget_to_window` and `refit_output_budget_to_prompt` disabled
+to use this measured budget and 64-token reserve.
 
 A preflight check verifies that reasoning and the final answer are separated.
-Parser and parallelism settings must match the evaluated model. Extra profile
-settings are now honored and can change answers: use identical effective settings
-in the reference run when comparing scores. The default reference request payload
-and final-answer extraction are unchanged.
+Parser and parallelism settings must match the evaluated model. Use identical
+model-profile settings in runs whose scores you compare.
 
 The submission records provide each job ID and artifact directory. Outputs include:
 
@@ -133,36 +125,21 @@ as described in the submission guide. Keep model, data, sampling, and judge sett
 unchanged. A judge retry reuses saved policy answers. If generation is resubmitted,
 submit a dependent judge job against the replacement Slurm ID.
 
-### Five-sample Gemma smoke run
-
-With deployment settings configured for `google/gemma-4-31B-it`, prepare:
-
-```bash
-python -m benchmarks.indic.arena_proxy_v3.prepare \
-  --output-dir "$RUN_DIR/inputs" --languages hi bn ta te ur --limit 1
-```
-
-Then follow the submission guide using `submit/gemma31b.yaml` for generation and
-`JUDGE_CONCURRENCY=5`. The profile preserves the previous smoke's context, top-k,
-parsers, parallelism, and five concurrent tasks. This selects five translations
-of the first conversation, one per language. Use a fresh run directory.
-
 ## Scoring
 
 The default judge is Gemini 3.8 Flash with temperature 0, reasoning effort low,
 and a 32,768-token output limit. Each task receives two judgments with candidate
 and reference positions swapped. Creative-writing tasks use their own prompt.
-Only the final answer after thinking removal is judged. The stripper recognizes
-literal `<think>` / `</think>` markers and also processes the judge's reply;
-other reasoning delimiters are unchanged. This retains the current Gemini judge
-protocol.
+Only the final answer after thinking removal is judged. Literal `<think>` /
+`</think>` markers are recognized in candidate, reference, and judge replies;
+other reasoning delimiters are retained.
 
 Scoring uses Arena-Elo with strong-verdict weight 3, an MLE fit, and 100 bootstrap
 rounds with seed 42. Each language has overall, single-turn, multi-turn, and seven
 group scores. **The headline is the arithmetic mean of the 12 Indic overall
 scores. English is reported separately.** Mean per-row reward is not the headline.
 
-The resources server publishes the official headline as **`arena_elo/indic/score`**
+The official headline is **`arena_elo/indic/score`**
 in Gym's agent, key, and repeat metrics, on a 0–100 scale (higher is better).
 Use this metric for comparisons and downstream reports. Language breakdowns use
 `arena_elo/language/<lang>/<slice>/score`, where the slice is `all`, `single_turn`,
@@ -171,8 +148,8 @@ Use this metric for comparisons and downstream reports. Language breakdowns use
 
 `gym eval run` and `gym eval reverify` export these metrics through Gym's normal
 aggregate-metrics and tracking paths. Comparison suites should select
-`arena_elo/indic/score` with bounds 0 and 100. The offline command below uses the
-same server-owned reducer and formats the headline as `metrics.json`'s `_avg.all`.
+`arena_elo/indic/score` with bounds 0 and 100. The summary command below writes the
+headline as `metrics.json`'s `_avg.all`.
 
 Coverage is checked against the prepared inputs and their adjacent
 `preparation_report.json`. When using a custom preparation directory, export
@@ -191,11 +168,11 @@ python -m benchmarks.indic.arena_proxy_v3.summarize "$JUDGE_DIR/artifacts/rollou
 
 Both server metrics and the summary reject duplicate or mismatched tasks.
 Missing, failed, or masked judgments suppress incomplete language scores and the
-Indic headline. Smoke subsets do not produce an official headline. Unavailable
+Indic headline. Partial datasets do not produce an official headline. Unavailable
 scores are omitted from Gym metrics and formatted as JSON null in the summary;
 `arena_elo/coverage/headline_available` records availability. Successfully
-recovered judgments count when their saved-answer identity matches the historical
-failure. The headline requires all 4,799 eligible Indic tasks, with 399 Tamil tasks
+recovered judgments count when they refer to the same saved answer as the failed
+attempt. The headline requires all 4,799 eligible Indic tasks, with 399 Tamil tasks
 and 400 in every other Indic language.
 
 ## Comparing setups
@@ -218,41 +195,11 @@ English reference judgments only when you explicitly prepared English inputs. Th
 validates task coverage and metadata, records artifact hashes, and reports verdict
 differences and the Indic average difference. Both sets are scored in the same
 prepared-input order, so asynchronous completion order cannot change their
-bootstrap comparison. Historical reference confidence intervals may use a different
-row order. Judgment files alone do not establish matching generation settings.
+bootstrap comparison.
 
 Compare completed runs with valid provider responses and no aborted reference
-generations. Gym retains its transport retries, cancellation handling, and response
-validation; unresolved failures do not produce an official headline.
+generations; unresolved failures do not produce an official headline.
 
-The existing English `benchmarks/lmarena_v3` integration is unchanged and uses
-the separate `arena` resources server. An explicitly prepared chat-400 English
-slice uses the Indic Arena Proxy v3 comparison protocol; report its results
-separately from that existing benchmark.
-
-## Validation
-
-```bash
-pytest tests/unit_tests/benchmarks/test_indic_arena_proxy_v3*.py \
-  resources_servers/arena_judge/tests/test_app.py
-```
-
-On November 20, 2026, a live smoke run with `google/gemma-4-31B-it` at revision
-`842da3794eaa0b77d5f08bae87a17459d91ff475` and vLLM 0.26.0 completed both stages:
-
-- Five of five samples generated and judged across English, Hindi, Bengali,
-  Tamil, and Telugu. That historical run used the original data source; the
-  registry-only example above selects Urdu instead of English.
-- Ten valid verdicts from the default judge, covering both answer positions for
-  every sample, with zero current failures or invalid verdicts.
-- Conversation inputs, frozen baselines, and saved policy responses preserved
-  through judging and retry recovery.
-- Complete coverage of the selected subset, with English separate and the
-  official Indic headline suppressed.
-
-This historical smoke used the former Slurm wrappers and validates generation,
-judging, recovery, and summary behavior. Subsequent change validation is
-recorded separately in [validation.md](validation.md).
-It covers one conversation across five languages and does not establish aggregate
-model quality or score agreement with a separate reference run. The integration
-remains experimental pending full benchmark evaluation and reference comparison.
+An explicitly prepared chat-400 English slice uses the Indic Arena Proxy v3
+comparison protocol. Report its results separately from the English LMArena v3
+benchmark.

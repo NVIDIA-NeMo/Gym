@@ -19,7 +19,7 @@ indic_arena_proxy_v3_agent:
           type: benchmark
           jsonl_fpath: benchmarks/indic/arena_proxy_v3/data/arena_proxy_v3_benchmark.jsonl
           prepare_script: benchmarks/indic/arena_proxy_v3/prepare.py
-          # No prompt_config: the prepared input already contains the full conversation.
+          # Prepared inputs contain the full conversation.
           num_repeats: 1
           license: NVIDIA internal, derived from arena-proxy-v3
 

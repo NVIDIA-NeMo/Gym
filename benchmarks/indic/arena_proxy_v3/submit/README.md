@@ -6,16 +6,13 @@ verification deferred. `judge.yaml` requests one CPU node and runs
 `gym eval reverify` after the generation job succeeds. Gym renders the batch
 scripts and owns service health checks, cleanup, submission records, and logs.
 
-The configs use Gym's supported benchmark `command` field to retain the preflight
-and run reverification. Both commands explicitly use `--resume`; automatic
-`resumable` chains and submission-level exporters do not apply to command jobs.
-The Gym commands still write rollout stores and aggregate metrics normally.
+Use `gym eval resubmit` for retries. Automatic `resumable` chains and
+submission-level exporters do not apply to these command jobs.
 
 ## Deployment settings
 
-Run from a clean Gym checkout containing this integration, using the standard
-Gym installation. Publish its commit before submission so both drivers can install
-the same source revision. Configure these variables for your deployment:
+Run from the repository root using the standard Gym installation. Configure these
+variables for your deployment:
 
 | Variable | Meaning |
 | --- | --- |
@@ -35,17 +32,16 @@ If the deployment requires additional mounts, configure both `driver.mounts`
 and `services.policy.mounts` as appropriate.
 
 The partition defaults are `interactive` and `cpu_interactive`; override with
-`GPU_PARTITION` and `CPU_PARTITION`. Sampling defaults remain temperature 1.0,
+`GPU_PARTITION` and `CPU_PARTITION`. Sampling defaults are temperature 1.0,
 top-p 0.95, top-k −1, and seed 42. `TEMPERATURE`, `TOP_P`, `TOP_K`, `CONTEXT`,
-`MAX_OUTPUT_TOKENS`, `TP`, `DP`, `GPU_UTIL`, and `CONCURRENCY` retain their generation
-overrides; `JUDGE_CONCURRENCY` defaults to 12. `ARENA_JUDGE_BASE_URL` and
-`ARENA_JUDGE_MODEL` retain the judge overrides.
+`MAX_OUTPUT_TOKENS`, `TP`, `DP`, `GPU_UTIL`, and `CONCURRENCY` control generation;
+`JUDGE_CONCURRENCY` defaults to 12. `ARENA_JUDGE_BASE_URL` and
+`ARENA_JUDGE_MODEL` select the judge endpoint and model.
 
-The former `EP`, `PARSER`, `TOOL_PARSER`, `EAGER`, and `MAX_BATCHED_TOKENS` shell
-switches are now explicit flags in `services.policy.extra_args`. Edit a deployment
-profile or use Hydra overrides; these old variables are no longer read.
-`services.policy.port` replaces `VLLM_PORT`, and `health_check.timeout_seconds`
-replaces the startup-attempt count. Review the resolved config before submitting.
+Configure reasoning and tool parsers, expert parallelism, and batching through
+`services.policy.extra_args` in your deployment profile. Set the serving port with
+`services.policy.port` and the startup timeout with `health_check.timeout_seconds`.
+Review the resolved config before submitting.
 
 ## Prepare and submit
 
@@ -107,7 +103,7 @@ Each submission writes `gym-job.json`, `resolved-config.yaml`, generated job
 scripts, and logs under `RUN_DIR/jobs`. `GENERATION_DIR/artifacts` contains
 `rollouts.jsonl` and `rollouts_materialized_inputs.jsonl`. `JUDGE_DIR/artifacts`
 contains the judged `rollouts.jsonl`, `rollouts_aggregate_metrics.json`, and the
-formatted `metrics.json`. The benchmark's metric names and scoring are unchanged.
+formatted `metrics.json`.
 
 For an unchanged run, `gym eval resubmit GYM_JOB_ID generation` or
 `gym eval resubmit GYM_JOB_ID judging` requeues the recorded command in the same
@@ -118,17 +114,10 @@ again with that new `GENERATION_JOB_ID` and the same `GENERATION_DIR`. A judge-o
 retry reuses the original successful generation. Use a fresh run directory when
 inputs, checkpoints, or evaluation settings change.
 
-The former `slurm/submit.sh`, `.sbatch` scripts, and `common.sh` are replaced by
-these configs. For existing runs, the standard `gym eval reverify` command accepts
-their saved rollout and materialized-input paths directly; set `INPUT_JSONL` to
-that run's original prepared file so its metrics use the correct population.
+## Gemma profile
 
-## Five-sample Gemma profile
-
-For `google/gemma-4-31B-it`, prepare a fresh run with
-`--languages hi bn ta te ur --limit 1`, then use `submit/gemma31b.yaml` as
-`GENERATION_CONFIG` in the commands above and set `JUDGE_CONCURRENCY=5`.
+For `google/gemma-4-31B-it`, prepare the dataset as described above and use
+`submit/gemma31b.yaml` as `GENERATION_CONFIG` in the submission commands.
 The profile fixes context 131,072, top-k 64, TP 8 / DP 1, Gemma reasoning and tool
-parsers, and no expert parallelism. It keeps the same temperature, top-p, seed,
-and 120,000-token output cap. These five rows are translations of one conversation;
-they cannot produce the official Indic headline.
+parsers, no expert parallelism, and five concurrent generation tasks. Temperature,
+top-p, seed, and the 120,000-token output cap use the defaults listed above.

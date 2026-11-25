@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Deployment settings belong here; the benchmark's generation model is unchanged.
 _generation:
   context: ${oc.env:CONTEXT,163840}
   top_k: ${oc.env:TOP_K,-1}
@@ -60,8 +59,6 @@ driver:
     CONCURRENCY: lit:${oc.env:CONCURRENCY,256}
   benchmarks:
     generation:
-      # A command retains the required parser preflight before Gym collection.
-      # Gym owns service startup, health checks, teardown, and job artifacts.
       command: |
         set +x
         umask 077
@@ -84,6 +81,5 @@ driver:
 
 job:
   output_path: ${oc.env:RUN_DIR}/jobs
-# No additional service is needed for this two-stage evaluation.
 otel:
   enabled: false

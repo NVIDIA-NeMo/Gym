@@ -4,7 +4,7 @@ defaults:
   - generate
   - _self_
 
-# Match the Gemma smoke's context, sampling and parsers; no expert parallelism.
+# Gemma context, sampling, and parsers.
 _generation:
   context: 131072
   top_k: 64
