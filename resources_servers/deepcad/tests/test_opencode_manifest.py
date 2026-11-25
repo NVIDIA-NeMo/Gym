@@ -10,12 +10,17 @@ import yaml
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
+from environment_servers.single_agent_turn_legacy.app import (
+    SingleAgentTurnLegacyEnvironmentServer,
+    SingleAgentTurnLegacyEnvironmentServerConfig,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import ModelCallSampling, NeMoGymResponseCreateParamsNonStreaming, model_sampling_path_segment
 from nemo_gym.rollouts import RolloutCollectionHelper
+from nemo_gym.server_runtime import SingleAgentTurnTaskInput
 from resources_servers.deepcad.dataset.augment_inputs import view_prompt
+from resources_servers.deepcad.opencode_app import WorkspaceSeedRequest
 from resources_servers.deepcad.operations import add_operation_hint
 from resources_servers.deepcad.prepare_opencode import prepare
 from resources_servers.deepcad.tests.test_opencode_sessions import seed
@@ -25,7 +30,7 @@ from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgent
 CONFIG = Path(__file__).parents[1] / "configs/opencode.yaml"
 
 
-def prepared(tmp_path, row=None):
+def prepared(tmp_path, row=None, *, file_input=False, harness="opencode"):
     row = deepcopy(row or seed().task_data)
     row["responses_create_params"]["input"].insert(0, {"role": "system", "content": "Try to use box/fillet."})
     row["responses_create_params"]["input"][-1]["content"].insert(
@@ -33,7 +38,7 @@ def prepared(tmp_path, row=None):
     )
     source, output = tmp_path / "source.jsonl", tmp_path / "prepared.jsonl"
     source.write_text(json.dumps(row) + "\n")
-    assert prepare(source, output) == 1
+    assert prepare(source, output, file_input=file_input, harness=harness) == 1
     return row, json.loads(output.read_text())
 
 
@@ -47,11 +52,22 @@ def test_preparation_preserves_images_metadata_hints_and_sampling(tmp_path):
         result["responses_create_params"]["input"][-1]["content"][-1]
         == source["responses_create_params"]["input"][-1]["content"][-1]
     )
-    assert result["responses_create_params"]["temperature"] == 0.8
-    assert result["responses_create_params"]["max_output_tokens"] == 32768
+    assert result["_ng_model_sampling"] == {"temperature": 0.8, "max_output_tokens": 32768}
+    assert "temperature" not in result["responses_create_params"]
+    assert "max_output_tokens" not in result["responses_create_params"]
+    assert result["target_images"] == [
+        part["image_url"]
+        for message in source["responses_create_params"]["input"]
+        if message["role"] == "user"
+        for part in message["content"]
+        if part["type"] == "input_image"
+    ]
     system = result["responses_create_params"]["input"][0]["content"]
-    assert "Try to use box/fillet." in system and "read tool" in system
-    assert "model.py" in system
+    assert "Try to use box/fillet." in system
+    assert "native execution tools" in system and "native image capabilities" in system
+    assert "with bash" not in system and "read tool" not in system
+    assert "python /workspace/.cad/cad_render.py /workspace/model.py --output /workspace/previews" in system
+    assert "final model.py is the ONLY artifact graded" in system
     assert "Output ONLY" not in json.dumps(result["responses_create_params"])
     assert "Dimensions 1, 2, 3." in json.dumps(result["responses_create_params"])
 
@@ -109,7 +125,7 @@ def test_cannot_overwrite_source_manifest(tmp_path):
         prepare(path, path)
 
 
-def test_composed_config_resolves_offline_without_a_legacy_agent_relay():
+def test_composed_config_resolves_offline_without_a_legacy_agent_relay(tmp_path, monkeypatch):
     root = CONFIG.parents[3]
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
@@ -130,10 +146,17 @@ def test_composed_config_resolves_offline_without_a_legacy_agent_relay():
         )
     )
     assert config.deepcad_opencode.resources_servers.deepcad.host == "127.0.0.1"
-    assert config.policy_model.responses_api_models.vllm_model.host == "192.0.2.10"
+    assert config.deepcad_policy_model.responses_api_models.vllm_model.host == "192.0.2.10"
     assert list(config.deepcad_opencode_environment_server.environment_servers) == ["single_agent_turn_legacy"]
-    assert config.policy_model.responses_api_models.vllm_model.return_token_id_information is True
-    assert config.policy_model.responses_api_models.vllm_model.supply_prefix_token_ids is True
+    assert config.deepcad_policy_model.responses_api_models.vllm_model.return_token_id_information is True
+    assert config.deepcad_policy_model.responses_api_models.vllm_model.supply_prefix_token_ids is True
+    from responses_api_models.vllm_model.app import VLLMModelConfig
+
+    model = VLLMModelConfig(
+        name="deepcad_policy_model",
+        **OmegaConf.to_container(config.deepcad_policy_model.responses_api_models.vllm_model, resolve=True),
+    )
+    assert model.inline_tool_output_images
     SingleAgentTurnLegacyEnvironmentServerConfig(
         name="deepcad_opencode_environment_server",
         **OmegaConf.to_container(
@@ -157,7 +180,79 @@ def test_operation_hint_after_single_turn_rules_survives_conversion(tmp_path):
     assert result["verifier_metadata"]["operation_hint_applied"] is True
 
 
-def test_lazy_preparation_defers_rendering_and_applies_workspace_prompt_after_materialization(tmp_path):
+@pytest.mark.parametrize("file_input", [False, True])
+def test_resource_seed_keeps_original_images_after_flat_materialization(tmp_path, file_input):
+    source, row = prepared(tmp_path, file_input=file_input)
+    task_input = SingleAgentTurnTaskInput.model_validate(
+        {key: value for key, value in row.items() if key not in {"task_source", "_ng_model_sampling"}}
+    )
+    resource_seed = WorkspaceSeedRequest.model_validate(task_input.task_data)
+    assert resource_seed.target_images == row["target_images"]
+    assert "responses_create_params" not in task_input.task_data
+    if file_input:
+        assert len(task_input.responses_create_params.input) == 1
+        assert task_input.responses_create_params.input[0].role == "user"
+        serialized = task_input.responses_create_params.model_dump_json()
+        assert "input_image" not in serialized and "data:image" not in serialized
+        prompt = task_input.responses_create_params.input[0].content
+        assert isinstance(prompt, str)
+        assert "/workspace/target-0.png" in prompt
+        assert "Try to use box/fillet." in prompt
+        assert "data:image" not in prompt
+        assert "reference_step" not in prompt
+
+
+@pytest.mark.parametrize("field,value", [("temperature", 0.8), ("top_p", 0.9), ("max_output_tokens", 32768)])
+def test_sampling_marker_preserves_values_and_rejects_conflicts(tmp_path, field, value):
+    row = deepcopy(seed().task_data)
+    row["responses_create_params"][field] = value
+    row["_ng_model_sampling"] = {field: value}
+    _, result = prepared(tmp_path, row, file_input=True)
+    assert getattr(ModelCallSampling.model_validate(result["_ng_model_sampling"]), field) == value
+    assert field not in result["responses_create_params"]
+    row["_ng_model_sampling"][field] = 1 if field == "max_output_tokens" else 0.5
+    conflict_dir = tmp_path / "conflict"
+    conflict_dir.mkdir()
+    with pytest.raises(ValueError, match="Conflicting model sampling"):
+        prepared(conflict_dir, row, file_input=True)
+
+
+@pytest.mark.parametrize("harness", ["pi", "codex", "claude_code", "openclaw"])
+def test_non_opencode_requires_file_input(tmp_path, harness):
+    with pytest.raises(ValueError, match="require --file-input"):
+        prepared(tmp_path, harness=harness)
+
+
+@pytest.mark.parametrize("existing_marker", [False, True])
+def test_empty_sampling_routes_through_native_episode_request(tmp_path, existing_marker):
+    source = deepcopy(seed().task_data)
+    for field in ("max_output_tokens", "temperature", "top_p"):
+        source["responses_create_params"].pop(field, None)
+    source.pop("_ng_model_sampling", None)
+    if existing_marker:
+        source["_ng_model_sampling"] = {}
+    _, row = prepared(tmp_path, source)
+    assert row["_ng_model_sampling"] == {}
+    row.update(_ng_task_index=0, _ng_rollout_index=0)
+    values = yaml.safe_load(CONFIG.read_text())["deepcad_opencode_environment_server"]["environment_servers"][
+        "single_agent_turn_legacy"
+    ]
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = OmegaConf.load(CONFIG)
+    environment = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
+            name="deepcad_opencode_environment_server", port=8080, **values
+        ),
+        server_client=client,
+    )
+    request = environment._episode_request_from_row(row)
+    assert request.model_sampling is not None
+    assert request.model_sampling.model_dump(exclude_none=True) == {}
+    segment = environment.model_sampling_segment(request, trained=True)
+    assert model_sampling_path_segment(segment) == "/ng-sampling/e30"
+
+
+def test_lazy_preparation_defers_rendering_and_applies_workspace_prompt_after_materialization(tmp_path, monkeypatch):
     from unittest.mock import patch
 
     from resources_servers.deepcad.dataset import lazy_inputs
@@ -180,13 +275,31 @@ def test_lazy_preparation_defers_rendering_and_applies_workspace_prompt_after_ma
         assert render.call_count == 1 and "deepcad_lazy" not in converted
         assert converted["task_source"] == "deepcad_opencode"
         assert converted["responses_create_params"]["max_output_tokens"] == 32768
+        assert converted["_ng_model_sampling"] == {"max_output_tokens": 32768}
+        converted.update(_ng_task_index=0, _ng_rollout_index=0)
+        values = OmegaConf.to_container(OmegaConf.load(CONFIG), resolve=True)
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = values
+        environment = SingleAgentTurnLegacyEnvironmentServer(
+            config=SingleAgentTurnLegacyEnvironmentServerConfig(
+                name="deepcad_opencode_environment_server",
+                port=8080,
+                **values["deepcad_opencode_environment_server"]["environment_servers"]["single_agent_turn_legacy"],
+            ),
+            server_client=client,
+        )
+        request = environment._episode_request_from_row(converted)
+        assert request.model_sampling.max_output_tokens == 32768
+        assert model_sampling_path_segment(environment.model_sampling_segment(request, trained=True)).startswith(
+            "/ng-sampling/"
+        )
         system = converted["responses_create_params"]["input"][0]["content"]
-        assert "model.py" in system and "read tool" in system and "Output ONLY" not in system
+        assert "model.py" in system and "native image capabilities" in system and "Output ONLY" not in system
     finally:
         fixture.doCleanups()
 
 
-def test_real_environment_task_conversion_keeps_resource_seed_images(tmp_path):
+def test_real_environment_task_conversion_keeps_resource_seed_images(tmp_path, monkeypatch):
     from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
     from resources_servers.deepcad.opencode_app import WorkspaceSeedRequest
 
@@ -208,3 +321,17 @@ def test_real_environment_task_conversion_keeps_resource_seed_images(tmp_path):
     assert "responses_create_params" not in task_data
     seeded = WorkspaceSeedRequest.model_validate(task_data)
     assert seeded.target_images == row["target_images"]
+
+
+@pytest.mark.parametrize("harness", ["opencode", "pi", "codex", "claude_code", "openclaw"])
+def test_lazy_file_input_requires_materialization_first(tmp_path, harness, monkeypatch):
+    source, output = tmp_path / "lazy.jsonl", tmp_path / "prepared.jsonl"
+    source.write_text(json.dumps({"deepcad_lazy": {}, "responses_create_params": {"input": []}}) + "\n")
+    original = source.read_bytes()
+    render = MagicMock(side_effect=AssertionError("manifest conversion rendered"))
+    monkeypatch.setattr("resources_servers.deepcad.dataset.lazy_inputs.subprocess.run", render)
+    with pytest.raises(ValueError, match="Materialize lazy CAD rows"):
+        prepare(source, output, file_input=True, harness=harness)
+    render.assert_not_called()
+    assert source.read_bytes() == original
+    assert output.read_text() == ""

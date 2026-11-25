@@ -185,10 +185,10 @@ if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
 fi
 mkdir -p "${OUTPUT_DIR}"
 
-if [[ ! -f "${PREPARED_JSONL}" ]]; then
-    echo "Preparing BIRD ${SPLIT} data for ${DIALECT} (one-time, shared across every model) -> ${PREPARED_JSONL} ..."
-    gym eval prepare --benchmark birdbench ${DIALECT_ARGS[@]+"${DIALECT_ARGS[@]}"}
-fi
+# Reuses ${PREPARED_JSONL} when it exists and prepare.py's is_prepared_data_current() accepts it (a Spark file
+# prepared before table names were sanitized is rebuilt); otherwise prepares it once, shared across every model.
+echo "Preparing BIRD ${SPLIT} data for ${DIALECT} if needed -> ${PREPARED_JSONL} ..."
+gym eval prepare --benchmark birdbench +use_cached_prepared_benchmarks=true ${DIALECT_ARGS[@]+"${DIALECT_ARGS[@]}"}
 
 MODEL_ARGS=(--model "${MODEL}")
 if [[ -n "${MODEL_URL}" ]]; then

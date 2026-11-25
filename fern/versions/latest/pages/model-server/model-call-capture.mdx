@@ -127,9 +127,12 @@ means `unknown`. NeMo RL masks a rollout containing a selected failed or unknown
 Source-history roots record `root_reason`: `first_call` (no committed history), `no_prefix_match`,
 `non_user_suffix` (an otherwise matching prefix followed by a non-observation item),
 `render_options_changed`, `worker_rooted` (the worker declined a source-compatible candidate),
-or `ambiguous_candidate` (several equally long prefixes match without unique identity).
-These are diagnostic observations, not proof that the harness performed compaction. Ordinary roots
-and continuations leave the field unset. An ambiguous source match starts a new root with no parent
+`ambiguous_candidate` (several equally long prefixes match without unique identity),
+or `model_server_changed` (a continuation whose only match was served by another model server for the
+same agent instance).
+These are diagnostic observations, not proof that the harness performed compaction. With fingerprint
+parent resolution, a root records `model_server_changed` when that is why it is a root; other ordinary
+roots and continuations leave the field unset. An ambiguous source match starts a new root with no parent
 or staging chain; it does not choose which earlier generation the harness accepted. The trainer must
 still validate training selection independently and reject ambiguous returned-history attribution.
 
@@ -154,8 +157,8 @@ ordinary rollout output for framework reconstruction instead of Gym's single-cha
 | Request | Source-history behavior |
 |---|---|
 | Responses with explicit history | Supported, including buffered SSE. |
-| Responses history item kinds | `message`, `reasoning`, `function_call`, and `function_call_output`. |
-| Other Responses history items, including `web_search_call`, `custom_tool_call`, `custom_tool_call_output`, and opaque `compaction` | Refused with HTTP 422 before capture intent. |
+| Responses history item kinds | `message`, `reasoning`, `function_call`, `function_call_output`, `custom_tool_call`, and `custom_tool_call_output`. The vLLM Chat Completions backend requires `custom_tool_strategy: function_bridge` for custom tool history. |
+| Other Responses history items, including `web_search_call` and opaque `compaction` | Refused with HTTP 422 before capture intent. |
 | Chat Completions with explicit history | Supported, including buffered SSE; one choice. Omitted or null `n` means one. |
 | Messages with explicit history | Supported, including buffered SSE. Responses are served as generated; capture reads a served turn without its blank text blocks, as Messages clients echo it. |
 | Messages content block kinds | `text`, `image`, `tool_use`, `tool_result`, `thinking`, and `redacted_thinking`, converted to Responses history items. Other block kinds, such as `server_tool_use`, are unsupported. |
