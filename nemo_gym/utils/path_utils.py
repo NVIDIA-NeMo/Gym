@@ -57,15 +57,6 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
 
 
-def partial_aggregate_metrics_path_for(output_fpath: Path) -> Path:
-    """`results/rollouts.jsonl` -> `results/rollouts_partial_aggregate_metrics.json`.
-
-    The score over the settled rollouts of a strict run that is not complete. It never stands in for the run's
-    aggregate, which is written only when the run completes.
-    """
-    return aggregate_metrics_path_for(output_fpath.with_stem(output_fpath.stem + "_partial"))
-
-
 def agent_complete_dir_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_agent_complete/`.
 

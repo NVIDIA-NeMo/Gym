@@ -3865,14 +3865,10 @@ class TestRolloutCollection:
             ".json"
         )
         if require_complete:
-            # An incomplete strict run publishes no aggregate. Its partial score covers the settled rollout only.
+            # An incomplete strict run publishes no score: nothing was aggregated or written, only the rows stay.
+            assert "verify_responses" not in aggregated
             assert not metrics_fpath.exists()
-            assert [r[TASK_INDEX_KEY_NAME] for r in aggregated["verify_responses"]] == [1]
-            partial_fpath = output_jsonl_fpath.with_name("output_partial_aggregate_metrics.json")
-            assert orjson.loads(partial_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 1.0
-            printed = capsys.readouterr().out
-            assert "Computing a partial score over the settled rollouts only" in printed
-            assert f"Partial score over the settled rollouts, not the run's score: {partial_fpath}" in printed
+            assert "Not computing aggregate metrics: the run is incomplete" in capsys.readouterr().out
             return
         # The failed rollout reaches neither the aggregator's input nor its denominator.
         assert [r[TASK_INDEX_KEY_NAME] for r in aggregated["verify_responses"]] == [1]
@@ -3932,9 +3928,6 @@ class TestRolloutCollection:
 
         assert not metrics_fpath.exists()
         assert not any("mean/reward" in str(metrics) for metrics in exported)
-        # The settled rollout still gets a score, in a file of its own that nothing exports.
-        partial_fpath = output_jsonl_fpath.with_name("output_partial_aggregate_metrics.json")
-        assert orjson.loads(partial_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 1.0
         assert [orjson.loads(line)[TASK_INDEX_KEY_NAME] for line in output_jsonl_fpath.read_bytes().splitlines()] == [
             1
         ]
@@ -3947,11 +3940,10 @@ class TestRolloutCollection:
         agent_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
         assert agent_metrics["mean/reward"] == 1.0
         assert any("mean/reward" in str(metrics) for metrics in exported)
-        assert not partial_fpath.exists()  # the complete aggregate supersedes the partial score
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in persisted) == [0, 1]
 
-    async def test_a_partial_score_that_cannot_be_computed_does_not_hide_the_rejection(
+    async def test_allow_incomplete_aggregate_waits_until_nothing_is_left_to_retry(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -3964,67 +3956,87 @@ class TestRolloutCollection:
         )
 
         async def post(server_name: str, url_path: str, json: dict, **kwargs):
-            if json.get("x") == 0:
+            if json["x"] == 0:
                 raise http_error(500, "unhandled tool-call json")
             return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
 
-        class Helper(RolloutCollectionHelper):
-            async def _call_aggregate_metrics(self, *args, **kwargs):
-                raise OSError("disk full")
-
+        # The failed rollout can still be retried, so the run is not yet at the point where its score is accepted.
         with pytest.raises(RuntimeError, match="EVAL FAILED: 1/2 samples completed"):
-            await Helper().run_from_config(
+            await RolloutCollectionHelper().run_from_config(
                 RolloutCollectionConfig(
                     input_jsonl_fpath=str(input_jsonl_fpath),
                     output_jsonl_fpath=str(tmp_path / "output.jsonl"),
                     route_failures_to_sidecar=True,
                     disable_health_check=True,
                     require_complete=True,
+                    allow_incomplete_aggregate=True,
                 )
             )
-        assert not (tmp_path / "output_partial_aggregate_metrics.json").exists()
+        assert not (tmp_path / "output_aggregate_metrics.json").exists()
 
-    async def test_a_partial_score_that_never_arrives_does_not_hold_the_rejection(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    @pytest.mark.parametrize("allow", [True, False])
+    async def test_allow_incomplete_aggregate_writes_the_settled_score_of_a_run_with_nothing_left_to_retry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+        allow: bool,
     ) -> None:
-        monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.PARTIAL_AGGREGATION_TIMEOUT_S", 0.05)
-        input_jsonl_fpath = tmp_path / "input.jsonl"
-        input_jsonl_fpath.write_text(
-            "\n".join(
-                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
-                for i in range(2)
-            )
-            + "\n"
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        rows = [
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for task_index in range(3)
+        ]
+        (tmp_path / "output_materialized_inputs.jsonl").write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+        # Two rollouts are scored, and the third is out of attempts: nothing is left to retry.
+        output_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps({**r, "reward": 1.0}) for r in rows[:2]) + b"\n")
+        _failures_path_for(output_jsonl_fpath).write_bytes(
+            orjson.dumps({**rows[2], NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_TERMINAL_KEY: True})
+            + b"\n"
         )
 
         async def post(server_name: str, url_path: str, json: dict, **kwargs):
-            if url_path == "/aggregate_metrics":
-                await asyncio.Event().wait()  # an aggregator that accepts the request and never replies
-            if json.get("x") == 0:
-                raise http_error(500, "unhandled tool-call json")
-            return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
+            assert url_path == "/aggregate_metrics"
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-        output = tmp_path / "output.jsonl"
 
-        with pytest.raises(RuntimeError, match="EVAL FAILED: 1/2 samples completed"):
-            await asyncio.wait_for(
-                RolloutCollectionHelper().run_from_config(
-                    RolloutCollectionConfig(
-                        input_jsonl_fpath=str(input_jsonl_fpath),
-                        output_jsonl_fpath=str(output),
-                        route_failures_to_sidecar=True,
-                        disable_health_check=True,
-                        require_complete=True,
-                    )
-                ),
-                timeout=30,
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
+                return []
+
+        with pytest.raises(
+            RuntimeError, match="EVAL FAILED: 2/3 samples completed. .*No tasks are eligible for retry"
+        ):
+            await Helper().run_from_config(
+                RolloutCollectionConfig(
+                    input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+                    output_jsonl_fpath=str(output_jsonl_fpath),
+                    resume_from_cache=True,
+                    allow_unsafe_resume=True,
+                    disable_health_check=True,
+                    require_complete=True,
+                    allow_incomplete_aggregate=allow,
+                )
             )
-        assert not (tmp_path / "output_partial_aggregate_metrics.json").exists()
-        assert not (tmp_path / "output_aggregate_metrics.json").exists()
-        assert (tmp_path / "output_coverage.json").exists()
+
+        metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        # The run stays rejected as incomplete either way. Only the opt-in publishes the score of the two settled rollouts.
+        assert metrics_fpath.exists() == allow
+        assert ("allow_incomplete_aggregate is set" in capsys.readouterr().out) == allow
+        if allow:
+            assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 1.0
+        # The coverage file beside the score is what marks the run as incomplete.
+        coverage = orjson.loads((tmp_path / "output_coverage.json").read_bytes())
+        assert (coverage["complete"], coverage["successful"], coverage["expected"]) == (False, 2, 3)
 
     async def test_a_complete_strict_run_writes_its_aggregate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -5783,13 +5795,9 @@ class TestRolloutCollection:
                 assert examples == []
                 return []
 
-            async def _call_aggregate_metrics(
-                self, results, rows, output_fpath, *, raise_on_error: bool = True, partial: bool = False
-            ):
-                aggregate_calls.append((len(results), partial))
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
                 return None
 
-        aggregate_calls: list[tuple[int, bool]] = []
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(tmp_path / "input.jsonl"),
             output_jsonl_fpath=str(output_jsonl_fpath),
@@ -5801,13 +5809,11 @@ class TestRolloutCollection:
         )
         with pytest.raises(RuntimeError, match="EVAL FAILED: 2/3 samples completed"):
             await Helper().run_from_config(config)
-        # Only the partial score is computed, over the two settled rollouts and any failure counted as zero.
-        assert aggregate_calls == [(3 if count_failures_as_zero else 2, True)]
 
         printed = capsys.readouterr().out
-        # The run is rejected and has no aggregate. Its partial score counts what the run was told to count.
-        assert "Computing a partial score over the settled rollouts only" in printed
-        assert ("Counting 1 failure row(s) as scored zeros" in printed) == count_failures_as_zero
+        # The run is rejected before it counts anything: no score, whatever would have been counted as zero.
+        assert "Not computing aggregate metrics: the run is incomplete" in printed
+        assert "Counting 1 failure row(s) as scored zeros" not in printed
         if not count_failures_as_zero:
             assert "Rollouts missing from the score: 1 of 3 materialized" in printed
             assert "Metrics cover: 2 of 3 rollouts" in printed
@@ -15692,20 +15698,16 @@ class TestCompletionCountsFinalZeros:
             with pytest.raises(RuntimeError, match=f"EVAL FAILED: {outcome} samples completed"):
                 await RolloutCollectionHelper().run_from_config(config)
 
-        if not disable_aggregation:
-            # The final zero and the metrics-only count enter the score, a judge failure does not. A rejected
-            # strict run scores the same rows into its partial file only.
+        if outcome is None and not disable_aggregation:
+            # The final zero and the metrics-only count enter the score, a judge failure does not.
             counted_zero = (
                 third.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True or third[NG_FAILURE_CLASS_KEY] in count_classes
             )
             assert len(aggregated["rows"]) == (3 if counted_zero else 2)
-            assert (tmp_path / "output_aggregate_metrics.json").exists() == (outcome is None)
-            assert (tmp_path / "output_partial_aggregate_metrics.json").exists() == (outcome is not None)
         else:
-            # Disabled aggregation publishes no score of either kind.
+            # A rejected strict run or disabled aggregation publishes no score.
             assert "rows" not in aggregated
             assert not (tmp_path / "output_aggregate_metrics.json").exists()
-            assert not (tmp_path / "output_partial_aggregate_metrics.json").exists()
 
         [failure] = [
             orjson.loads(line)
