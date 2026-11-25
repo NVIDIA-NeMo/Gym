@@ -28,13 +28,11 @@ Each output line contains the task data formatted for the simple_agent.
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 
-# Set MULTICHALLENGE_DATA_DIR to the source data directory before preprocessing.
-DEFAULT_RAW_DATA_DIR = Path(os.environ.get("MULTICHALLENGE_DATA_DIR", "/path/to/multichallenge"))
+DEFAULT_RAW_DATA_DIR = Path("/path/to/multichallenge")
 
 
 def build_input_messages(task: dict) -> list[dict]:

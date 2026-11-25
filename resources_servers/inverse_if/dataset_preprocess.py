@@ -32,14 +32,12 @@ Key transformations:
 
 import argparse
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
 
 
-# Set INVERSE_IF_DATA_DIR to the source data directory before preprocessing.
-DEFAULT_RAW_DATA_DIR = Path(os.environ.get("INVERSE_IF_DATA_DIR", "/path/to/inverse_if"))
+DEFAULT_RAW_DATA_DIR = Path("/path/to/inverse_if")
 
 
 # ---------------------------------------------------------------------------

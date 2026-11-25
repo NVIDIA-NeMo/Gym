@@ -288,4 +288,4 @@ inverse_if/
 ```
 /path/to/inverse_if
 ```
-Replace the placeholder with your local raw data path using `--data-dir` or `INVERSE_IF_DATA_DIR`.
+Replace the placeholder with your local raw data path using `--data-dir`.
