@@ -704,3 +704,32 @@ async def test_release_all_cuts_its_stops_at_its_time_limit_and_reports_what_may
     assert time.monotonic() - begun < 5
     assert left == {"lent": ["hangs"], "failed_seeds": [], "starting": []}
     assert "a reaper must stop them" in caplog.text and "['hangs']" in caplog.text
+
+
+async def test_release_all_stops_the_lent_sandboxes_while_a_lend_is_still_starting(
+    workdir, stopped, monkeypatch
+) -> None:
+    # A start that takes longer than the shutdown's time limit must not hold the stops of the sandboxes already lent:
+    # those would then run until their TTL.
+    lender = _lender(workdir, start_timeout_s=60)
+    await lender.lend("lent", TASK)
+    creating, go_on = asyncio.Event(), asyncio.Event()
+    real_create = LocalProvider.create
+
+    async def create(self: LocalProvider, spec):
+        creating.set()
+        await go_on.wait()
+        return await real_create(self, spec)
+
+    monkeypatch.setattr(LocalProvider, "create", create)
+    seed = asyncio.ensure_future(lender.lend("starting", TASK))
+    await creating.wait()
+
+    left = await asyncio.wait_for(lender.release_all(timeout_s=0.05), 5)
+
+    assert len(stopped) == 1 and left == {"lent": [], "failed_seeds": [], "starting": ["starting"]}
+    go_on.set()
+    # The lend that was starting stops its own sandbox once its start returns.
+    with pytest.raises(HTTPException):
+        await seed
+    assert len(stopped) == 2

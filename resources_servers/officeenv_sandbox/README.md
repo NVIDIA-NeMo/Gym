@@ -99,7 +99,8 @@ with no MCP tools. Each episode also:
    follows it, on every exposure. Otherwise the run ends at Pi's timeout or when the model stops.
    A harness whose type cannot stop a run in flight (not in `ROLLOUT_STOP_AGENT_TYPES`: today
    mini-SWE, OpenCode, OpenClaw and Terminus 2) runs until it stops by itself
-   (`close_tools_on_task_end` refuses its later calls). `/verify` first closes the episode's tools and file API and stops its sandbox, then
+   (`close_tools_on_task_end`, which `configs/officeenv_sandbox_episodes.yaml` sets for every
+   harness, refuses its later tool and file API calls, so they cannot change the grade). `/verify` first closes the episode's tools and file API and stops its sandbox, then
    grades the world as for any row: a process the harness left running in the background can act
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
@@ -336,7 +337,10 @@ On a cluster, `configs/officeenv_opensandbox.yaml` composes the same episodes wi
 provider, as Gym's SWE-bench and Terminal-Bench runs use it: the servers run on a cluster node,
 the sandboxes on the OpenSandbox cell, and `use_absolute_ip` with
 `absolute_ip_server_types: [responses_api_models, resources_servers]` advertises the node's address
-for the two servers a sandbox calls (the head server stays on loopback; no relay). Credentials go
+for the two servers a sandbox calls (the head server stays on loopback; no relay). An explicit
+`default_host`, which NeMo RL sets to the node's address, applies to every server instead, so each
+harness config pins its agent and environment servers to `127.0.0.1`: no sandbox calls them, and
+code in a sandbox cannot start a run on Gym's host or stop another episode's run. Credentials go
 in `env.yaml` under `sandbox.opensandbox.connection`. Until `sandbox/Dockerfile`'s image is
 published to a registry the cell pulls from, the config uses a stock `python:3.12-bookworm` image
 (pinned by digest) and installs pandas and openpyxl in the provider's setup commands.

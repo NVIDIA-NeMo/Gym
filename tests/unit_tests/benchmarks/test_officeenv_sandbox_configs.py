@@ -112,6 +112,8 @@ def check_harness(resolved: dict, harness: str) -> None:
     # The MCP endpoint lists itself under a company's name, never an instance's
     assert server["mcp_server_name"] == "company" and server["expose_tools_over_mcp"]
     assert server["sandbox_config"].get("mcp_tool_prefix", "") == (prefix or "")
+    # Calls after the task ended are refused, so they cannot change the grade: only Pi's run is stopped at the end.
+    assert server.get("close_tools_on_task_end") is True
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
@@ -207,6 +209,32 @@ def test_the_opensandbox_config_reaches_each_harness_server(monkeypatch, harness
         check_harness(resolved, harness)
         sandbox = resolved[resources_server_of(harness)]["resources_servers"]["officeenv_sandbox"]["sandbox_config"]
         assert sandbox["image"].startswith("python:3.12-bookworm@sha256:") and sandbox["resources"]["cpu"] == 2
+
+
+@pytest.mark.parametrize("provider", ["docker", "opensandbox"])
+def test_under_an_explicit_default_host_only_the_servers_a_sandbox_calls_take_the_node_address(
+    monkeypatch, provider: str
+) -> None:
+    # NeMo RL sets default_host to the node's address, and an explicit default_host applies to every server, not only
+    # to absolute_ip_server_types. A sandbox's network rule opens every port of an allowed host. So the agent and
+    # environment servers, which no sandbox calls, stay on 127.0.0.1: code in a sandbox cannot run Pi on Gym's host
+    # (/v1/responses), start an episode (/run) or stop another episode's run (/rollouts/{rollout_id}/stop).
+    node = "10.0.0.5"
+    if provider == "docker":
+        paths = [*(harness_config(harness) for harness in HARNESSES), DOCKER]
+    else:  # listed after the other harness configs, as test_the_opensandbox_config_reaches_each_harness_server says
+        monkeypatch.setenv("OPENSANDBOX_DOMAIN", "sandbox.invalid")
+        monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")  # pragma: allowlist secret
+        others = (harness_config(harness) for harness in HARNESSES if harness != "pi")
+        paths = [*others, f"{CONFIGS}/officeenv_opensandbox.yaml"]
+    _, _, resolved = resolve(*paths, default_host=node)
+
+    for harness, (_, agent_type, _, _) in HARNESSES.items():
+        agent = resolved[f"officeenv_sandbox_{harness}_agent"]["responses_api_agents"][agent_type]
+        environment = resolved[f"officeenv_sandbox_{harness}_environment_server"]["environment_servers"]
+        assert (agent["host"], environment["single_agent_turn_legacy"]["host"]) == ("127.0.0.1", "127.0.0.1")
+        assert resolved[resources_server_of(harness)]["resources_servers"]["officeenv_sandbox"]["host"] == node
+    assert resolved["policy_model"]["responses_api_models"]["vllm_model"]["host"] == node
 
 
 def test_the_episodes_config_runs_its_server_on_its_own() -> None:

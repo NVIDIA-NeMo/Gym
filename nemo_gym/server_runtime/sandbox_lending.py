@@ -229,7 +229,8 @@ class LentSandboxes:
 
     async def release_all(self, *, timeout_s: float | None = None) -> dict[str, list[str]]:
         """Stop every sandbox, as at server shutdown: the lent ones, those failed seeds left, and those still starting
-        once their lends stop them. From now on no lend starts a sandbox. A failed stop is logged and the rest go on.
+        once their lends stop them. The lent ones stop at once, without waiting for a start in flight. From now on no
+        lend starts a sandbox. A failed stop is logged and the rest go on.
 
         With ``timeout_s``, the time the server has to exit, the stops still running then are cut. Returns the
         sessions whose sandbox may outlive the process, by kind, and logs them for a reaper: ``lent`` (a stop that
@@ -246,12 +247,20 @@ class LentSandboxes:
                 except Exception:
                     LOGGER.exception("Failed to stop the sandbox lent for resources session %s", resources_session_id)
 
+        async def release_once_started(resources_session_id: str, started: asyncio.Event) -> None:
+            # A lend still starting stops its own sandbox once its start returns (it sees release_all). If that stop
+            # fails, the sandbox is kept among the failed seeds, and this stops it again.
+            await started.wait()
+            await release(resources_session_id)
+
         async def release_all() -> None:
-            # A lend still starting stops its own sandbox once its start returns (it sees release_all), so its wait
-            # comes first: its sandbox is then stopped or kept for this stop.
-            await asyncio.gather(*(started.wait() for started in list(self._starting.values())))
+            # The lent sandboxes stop at once, beside the waits for the lends still starting: a slow start must not
+            # hold their stops past the time limit.
             sessions = dict.fromkeys([*self._sandboxes, *self._failed_seed_sandboxes])
-            await asyncio.gather(*(release(resources_session_id) for resources_session_id in sessions))
+            await asyncio.gather(
+                *(release(resources_session_id) for resources_session_id in sessions),
+                *(release_once_started(session, started) for session, started in list(self._starting.items())),
+            )
 
         try:
             await asyncio.wait_for(release_all(), timeout_s)

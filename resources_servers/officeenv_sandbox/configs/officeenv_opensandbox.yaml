@@ -14,8 +14,10 @@ config_paths:
   - resources_servers/officeenv_sandbox/configs/officeenv_sandbox.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
-# A sandbox calls the model server and this resources server, so those two advertise the node's address. The head
-# server (whose config endpoint returns the merged config) and the other servers stay on loopback.
+# A sandbox calls the model server and this resources server, so those two advertise the node's address. Without an
+# explicit default_host, the other servers (the head server, whose config endpoint returns the merged config, among
+# them) stay on loopback. An explicit default_host (NeMo RL sets one) applies to every server, so the harness configs
+# pin their agent and environment servers to 127.0.0.1.
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models, resources_servers]
 

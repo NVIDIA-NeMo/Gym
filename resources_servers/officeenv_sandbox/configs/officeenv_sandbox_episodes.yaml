@@ -30,6 +30,10 @@ officeenv_sandbox_resources_server:
       # goes as a standard bearer token, which tools/list requires.
       mcp_server_name: company
       mcp_bearer_token: true
+      # Refuse a tool call or a file API call (409) once a call has ended the episode's task, so work done after
+      # complete_task cannot change what /verify grades. Pi's environment server also stops its run then
+      # (end_on_task_state); the other harnesses run on until they stop by themselves.
+      close_tools_on_task_end: true
       sandbox_provider: sandbox
       sandbox_config:
         image: officeenv-sandbox:pilot
