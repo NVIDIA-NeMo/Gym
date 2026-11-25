@@ -52,6 +52,8 @@ gym search benchmarks safety
 gym list benchmarks --json
 ```
 
+A benchmark with a manifest is listed under its catalog name, the folder path of its `manifest.yaml` under `benchmarks/`, which `--benchmark` selects. Any other benchmark config is listed under its path below `benchmarks/` without `.yaml`, such as `swebench/verified/hermes`. A top-level `<name>/config.yaml` is listed as `<name>`, while a nested config keeps its full path, such as `<group>/<name>/config`.
+
 ## Choosing a Benchmark
 
 Pick a benchmark that matches the capability you are actually measuring. Changing the model, harness, prompt, verifier, and dataset at the same time can still produce a useful score as a release gate — but it cannot explain what caused the difference. Vary one thing at a time.

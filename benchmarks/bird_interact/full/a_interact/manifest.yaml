@@ -1,0 +1,45 @@
+name: bird_interact/full/a_interact
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: BIRD-Interact Full, 600 interactive text-to-SQL tasks over 22 PostgreSQL database
+  sandboxes, in a-Interact (the agent calls tools, asking the user among them). The request
+  is ambiguous and part of the knowledge base is hidden, so the agent must ask a simulated
+  user before it writes SQL.
+modality: text
+licensing: CC-BY-SA-4.0
+authors:
+- Felipe Vieira Frujeri
+maintainers:
+- ffrujeri
+capabilities: unknown
+domains: unknown
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: allowlist
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: ../../full_a_interact.yaml
+resources_server: null
+agent_server: simple_agent
+datasets:
+- name: bird_interact_full_a_interact
+  type: benchmark
+  jsonl_fpath: benchmarks/bird_interact/data/full/a_interact.jsonl
+  prepare_script: benchmarks/bird_interact/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: dev
+# The Environment Server writes each prompt from the task; there is no prompt template.
+prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/birdsql/bird-interact-full
+  ref: 5d78b0722433c3821e1ebda5d8c39d24070049d7  # pragma: allowlist secret
+  reconciled: '2026-11-23'

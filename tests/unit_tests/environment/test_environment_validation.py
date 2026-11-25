@@ -31,19 +31,21 @@ from nemo_gym.environment.validation import (
 @pytest.mark.parametrize(
     "name",
     [
-        "terminal_bench_4/miniswe",
-        "terminal_bench_4/miniswe_legacy_agent",
-        "terminal_bench_science/miniswe",
-        "terminal_bench_science/miniswe_legacy_agent",
-        "terminal_bench_science/codex",
+        "terminal_bench_4",
+        "terminal_bench_science",
         "deepsearchqa",
+        "deepsearchqa/long_run",
         "widesearch",
+        "widesearch/long_run",
         "fukuyamabench",
         "moldetox",
         "scicodepile",
         "partner_if",
         # Its user simulator's endpoint is a deployment setting, so composition resolves without it.
-        "bird_interact",
+        "bird_interact/lite/c_interact",
+        "bird_interact/lite/a_interact",
+        "bird_interact/full/c_interact",
+        "bird_interact/full/a_interact",
     ],
 )
 def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:

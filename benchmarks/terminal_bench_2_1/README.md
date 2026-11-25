@@ -4,7 +4,7 @@ Terminal-Bench 2.1 evaluates agents on 89 terminal tasks, each in its own contai
 
 | Preset | Harness | Runs on |
 | --- | --- | --- |
-| `terminal_bench_2_1/terminus_2` | Harbor's Terminus 2 (`terminus_2_agent` agent sessions) | Harbor environment server |
+| `terminal_bench_2_1` (`terminus_2.yaml`) | Harbor's Terminus 2 (`terminus_2_agent` agent sessions) | Harbor environment server |
 | `terminal_bench_2_1/opencode` | OpenCode (`opencode_agent`) | Harbor environment server |
 | `terminal_bench_2_1/nooa` | NOOA | `single_agent_turn` on the `terminal_bench_2_1` resources server |
 | `terminal_bench_2_1/inkling_small` | Terminus 2, pinned rows with a terminal-interaction note | the resources server's `legacy_agent` relay |
@@ -12,7 +12,7 @@ Terminal-Bench 2.1 evaluates agents on 89 terminal tasks, each in its own contai
 
 ## Run
 
-`terminal_bench_2_1/terminus_2` and `terminal_bench_2_1/opencode` run the published task folders of
+`terminal_bench_2_1` and `terminal_bench_2_1/opencode` run the published task folders of
 [`environments/harbor/terminal_bench_2_1`](../../environments/harbor/terminal_bench_2_1/README.md), pinned by content
 hash, through the [`harbor` environment server](../../environment_servers/harbor/README.md). The server starts each
 task's prebuilt image as the sandbox, lends it to the harness's agent session, and then grades the episode with the
@@ -21,7 +21,7 @@ rollouts per task.
 
 ```bash
 gym dataset pull terminal_bench_2_1
-gym eval run --benchmark terminal_bench_2_1/terminus_2 --sandbox opensandbox --model-type vllm_model \
+gym eval run --benchmark terminal_bench_2_1 --sandbox opensandbox --model-type vllm_model \
   --only-tasks 'fix-git,regex-log' --num-repeats 1
 ```
 
@@ -100,7 +100,7 @@ server. Scores on the two paths are not interchangeable:
 
 ### From the resources-server commands
 
-`terminal_bench_2_1/terminus_2` and `terminal_bench_2_1/opencode` keep their names but no longer read the resources
+`terminal_bench_2_1` and `terminal_bench_2_1/opencode` no longer read the resources
 server's keys, and `++` keys merge without an error, so map them:
 
 - `gym eval prepare --benchmark ...`: `gym dataset pull terminal_bench_2_1` fetches the task folders.

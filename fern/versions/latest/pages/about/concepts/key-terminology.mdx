@@ -114,6 +114,8 @@ Other features use some of these words in their own senses and keep them:
 | --- | --- |
 | **Evaluation** | Run an agent on tasks, score results, and measure performance. See [Evaluation](/about/concepts/evaluation) and the [Evaluate](/evaluation) workflow. |
 | **Benchmark** | Repeatable, versioned evaluation built on an environment: canonical dataset split, prompt configuration, metrics, and comparison protocol. Not every environment is used as a benchmark. See [Benchmarks](/evaluation/benchmarks). |
+| **Catalog name** | The name `gym list` prints for a benchmark or environment and `--benchmark` or `--environment` selects: its manifest's `name`, which is the folder path of its `manifest.yaml` under `benchmarks/` or `environments/`, such as `swebench/verified`. It names a taskset, not the harness that runs it. A renamed catalog name keeps working, with a deprecation warning, through `nemo_gym/environment/catalog_renames.py`. |
+| **Run preset** | A config that runs a catalog entry's tasks with another harness or harness route, such as `benchmarks/swebench/verified/hermes.yaml` for `swebench/verified`. It has no manifest; select it by its path, such as `--benchmark swebench/verified/hermes`, or with `--config`. A config that changes the prompt, scoring, task limits, or tools is a catalog entry with its own manifest. |
 | **pass@k** | Fraction of tasks with at least one success among *k* rollouts. See [Aggregate Metrics](/evaluation/aggregate-metrics). |
 
 ### Training

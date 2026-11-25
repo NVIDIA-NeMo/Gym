@@ -62,6 +62,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.environment.catalog_renames import RENAMED_CATALOG_NAMES
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -1179,6 +1180,8 @@ def _inspect_environment(
         raise RegistryError(f"Unknown catalog kind '{kind}'.")
     # Scope the did-you-mean pool to the requested kind so it never suggests the kind the user did not ask for.
     matching_names = {entry.name: entry for entry in entries if kind is None or entry.kind == kind}
+    if name not in matching_names and RENAMED_CATALOG_NAMES.get(name) in matching_names:
+        name = resolve_catalog_entry(name, kind, entries=entries).name  # follows the rename, with a warning
     if name not in matching_names:
         # A `kind` is always set here when the name exists at all, since an unset one matches everything.
         known = next((entry for entry in entries if entry.name == name), None)

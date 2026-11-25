@@ -32,7 +32,7 @@ settings, sandbox settings, prompt, and dataset. The files do not inherit from
 a shared agent config. The `agent` field selects a name from Gym’s shared
 `harness_agent` registry, and `agent_kwargs` contains that agent’s settings.
 Switching agents also requires the matching settings and dependency setup;
-use the corresponding config copy as the starting point.
+use the corresponding config copy as the starting point. These copies run under longer limits than `config.yaml` (up to 200 turns or two hours per task, with no cap on searches), so they are scored as a catalog entry of their own, `deepsearchqa/long_run`, whose manifest points at the Claude Code copy; the other copies are its run presets.
 
 The Claude Code configs install Gym and the Claude CLI in a fresh sandbox
 using `setup_command`. No cluster runtime archive is required.

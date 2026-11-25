@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import os
 import shlex
 import signal
@@ -2141,6 +2142,21 @@ class TestListEnvironments:
         assert "resources servers: alpha" in out and "alpha_rs" not in out and "agent: simple_agent" in out
         assert "datasets: train, example" in out
         assert "gym env start --environment alpha --model-type vllm_model" in out
+
+    def test_inspect_follows_a_renamed_catalog_name_with_a_warning(
+        self, monkeypatch: MonkeyPatch, capsys, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from nemo_gym.environment.catalog_renames import RENAMED_CATALOG_NAMES
+
+        self._mock_inspect_alpha(monkeypatch)
+        self._mock_catalog(monkeypatch, overrides={"component_name": "alpha/old"}, entries=(self._ALPHA,))
+        monkeypatch.setitem(RENAMED_CATALOG_NAMES, "alpha/old", "alpha")
+
+        with caplog.at_level(logging.WARNING):
+            list_environments()
+
+        assert "gym env start --environment alpha --model-type vllm_model" in capsys.readouterr().out
+        assert "Catalog name `alpha/old` is deprecated: it was renamed to `alpha`" in caplog.text
 
     @pytest.mark.parametrize("view", ["list", "search", "inspect"])
     @pytest.mark.parametrize("json_output", [False, True])

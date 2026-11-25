@@ -4,12 +4,12 @@
 # BIRD-Interact Lite in c-Interact, on the bird_interact Environment Server with PostgreSQL. Each episode starts its
 # own database sandbox from the image that this folder's Dockerfile builds. See README.md.
 #
-#   gym eval prepare --benchmark bird_interact
-#   gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark \
+#   gym eval prepare --benchmark bird_interact/lite/c_interact
+#   gym eval run --benchmark bird_interact/lite/c_interact --model-type vllm_model --split benchmark \
 #     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --output results/bird_interact_lite_c.jsonl
 #
-# The other releases and modes chain this file: a_interact.yaml, full.yaml and full_a_interact.yaml, each run with
-# --config benchmarks/bird_interact/<file> in place of --benchmark bird_interact.
+# The other releases and modes chain this file: a_interact.yaml, full.yaml and full_a_interact.yaml, run as
+# bird_interact/lite/a_interact, bird_interact/full/c_interact and bird_interact/full/a_interact.
 
 config_paths:
   - environment_servers/bird_interact/configs/bird_interact.yaml
