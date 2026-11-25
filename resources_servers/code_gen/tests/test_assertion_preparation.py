@@ -3,16 +3,43 @@
 """Task syntax is validated independently of candidate behavior."""
 
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from assertion_harness import check
 from assertion_harness.check import InvalidAssertionTests, check_assertions
 
 
 _CODE_GEN = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("failure", ["compilation", "memory limit"])
+def test_worker_setup_failure_is_not_a_candidate_failure(monkeypatch, failure: str) -> None:
+    # Fork keeps the injected setup failure in the worker, without imposing a real memory cap on pytest.
+    monkeypatch.setattr(check, "multiprocessing", multiprocessing.get_context("fork"))
+    monkeypatch.setattr(check, "address_space_bytes", lambda: 0)
+    parent_pid = os.getpid()
+    compile_tests = check._compile_tests
+
+    def _compile(tests):
+        if failure == "compilation" and os.getpid() != parent_pid:
+            raise MemoryError("fixture compilation failed")
+        return compile_tests(tests)
+
+    def _limit(_):
+        if failure == "memory limit":
+            raise OSError("memory limit setup failed")
+        return {}
+
+    monkeypatch.setattr(check, "_compile_tests", _compile)
+    monkeypatch.setattr(check, "limit_address_space", _limit)
+    message = "fixture compilation failed" if failure == "compilation" else "memory limit setup failed"
+    with pytest.raises(RuntimeError, match=f"Assertion worker setup failed:.*{message}"):
+        check.check_assertions("answer = 42", ["assert answer == 42"], time_limit_s=1, memory_limit_mb=1, deadline_s=6)
 
 
 @pytest.mark.parametrize("generation", ["answer = 42", "raise SystemExit(0)", "def broken(:"])

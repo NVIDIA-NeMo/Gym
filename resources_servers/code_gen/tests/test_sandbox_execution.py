@@ -399,6 +399,30 @@ async def test_assertions_run_as_written(tmp_path, provider, config, generation,
     assert result == expected, metadata
 
 
+@pytest.mark.parametrize("provider, config", _ASSERTION_PROVIDERS)
+@pytest.mark.parametrize("memory_limit_mb", [1, 64])
+async def test_assertion_fixture_compilation_is_outside_candidate_memory_budget(
+    tmp_path, provider, config, memory_limit_mb
+) -> None:
+    table = ",".join(map(str, range(30_000)))
+    result, metadata = await check_assertions_in_sandbox(
+        "answer = 42",
+        [f"table = [{table}]", "assert len(table) == 30000", "assert answer == 42"],
+        time_limit_s=1,
+        memory_limit_mb=memory_limit_mb,
+        provider=provider,
+        config=config,
+        metadata={},
+        work_dir=str(tmp_path / "work"),
+    )
+    assert result == [True, True, True], metadata
+    memory = metadata["memory"]
+    assert (
+        memory["effective_address_space_limit_bytes"] - memory["baseline_address_space_bytes"]
+        == memory_limit_mb * 1024**2
+    )
+
+
 @pytest.mark.parametrize(
     "results, metadata, ok",
     [

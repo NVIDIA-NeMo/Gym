@@ -490,12 +490,17 @@ class TestSandboxVerify:
         assert response.failure_kind == VERIFIER_ERROR
         assert "Invalid assertion test at index 1" in response.failure_reason
 
-    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("test_format", ["unit-tests", "assertions"])
+    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch, test_format) -> None:
         async def _failing(*args, **kwargs):
             raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")
 
-        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _failing)
-        res = await self._sandbox_server().verify(_verify_request("print(9)"))
+        harness = "check_assertions_in_sandbox" if test_format == "assertions" else "check_correctness_in_sandbox"
+        monkeypatch.setattr(code_gen_app, harness, _failing)
+        request = _verify_request("print(9)")
+        if test_format == "assertions":
+            request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert True"]}
+        res = await self._sandbox_server().verify(request)
 
         assert res.mask_sample is True
         assert res.failure_kind == VERIFIER_ERROR

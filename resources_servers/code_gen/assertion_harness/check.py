@@ -47,18 +47,23 @@ def _timeout_handler(signum, frame) -> None:
 
 
 def _run_assertions(generation, tests, time_limit_s, memory_limit_mb, result, metadata_list) -> None:
-    memory = limit_address_space(memory_limit_mb)
-    devnull = os.open(os.devnull, os.O_RDONLY)
-    os.dup2(devnull, 0)
-    os.close(devnull)
-    # As when run as a script: the candidate and its tests share one __main__ module.
-    module = types.ModuleType("__main__")
-    sys.modules["__main__"] = module
+    try:
+        # Fixture compilation belongs to verifier setup, outside the candidate's memory allowance.
+        compiled_tests = _compile_tests(tests)
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(devnull, 0)
+        os.close(devnull)
+        # As when run as a script: the candidate and its tests share one __main__ module.
+        module = types.ModuleType("__main__")
+        sys.modules["__main__"] = module
+        memory = limit_address_space(memory_limit_mb)
+    except Exception as error:
+        metadata_list.append({"setup_error": repr(error)[:_MAX_ERROR_CHARS]})
+        return
     results: list[bool | int] = []
     metadata: dict[str, object] = {}
     # Bound before the candidate runs, so replacing these builtins cannot skip or empty the suite.
     execute, compile_source = exec, compile
-    compiled_tests = _compile_tests(tests)
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.setitimer(signal.ITIMER_REAL, time_limit_s)
     try:
@@ -136,6 +141,8 @@ def check_assertions(
         except (OSError, EOFError):
             # The candidate shares the child's process and can break its connection to the Manager.
             results, metadatas = [], []
+        if metadatas and isinstance(metadatas[0], dict) and "setup_error" in metadatas[0]:
+            raise RuntimeError(f"Assertion worker setup failed: {metadatas[0]['setup_error']}")
         if results:
             return _checked(results[0], metadatas[0] if metadatas else None, len(tests))
         if timed_out:
