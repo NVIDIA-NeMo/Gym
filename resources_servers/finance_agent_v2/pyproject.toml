@@ -22,9 +22,6 @@ constraint-dependencies = [
     "transformers>=5.17.0",
 ]
 override-dependencies = [
-    # finance-agent declares model-library>=0.1.41, which needs openai>=3 and anthropic>=2
-    # and cannot resolve against Gym's pins; the finance_agent.tools surface Gym imports runs on 0.1.25.
-    "model-library==0.1.25",
     "spacy>=3.8.13",
     "wcwidth; sys_platform == 'never'",
     "opencv-python-headless; sys_platform == 'never'",
@@ -35,6 +32,7 @@ override-dependencies = [
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
+    "model-library==0.1.25",
 ]
 exclude-dependencies = [
     "fasttext-wheel",
