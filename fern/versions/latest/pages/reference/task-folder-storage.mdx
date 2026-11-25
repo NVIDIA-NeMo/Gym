@@ -113,8 +113,9 @@ in `results/harbor/<taskset>/`, or under `+harbor_output_root`.
 Paths other than `dataset.folder` and `summary_dir` are relative to the summary's folder, so a results folder can
 move as a whole. A command writes the summary once it starts its servers, whatever happens next. So does a
 `gym dataset validate` in which no task has a `solution/`. A command refused earlier, while it prepares the tasks or
-on a `--resume` that no longer matches them, writes none. Neither does a resume that is rejected because its
-configuration differs from the saved run's (another agent or model, for example): the summary of the saved run stays.
+on a `--resume` that no longer matches them, writes none. Neither does a resume that data preparation stops, or
+that the collector refuses because its configuration differs from the saved run's (another agent or model, for
+example): the summary of the saved run stays.
 
 ## Verifier log folders
 

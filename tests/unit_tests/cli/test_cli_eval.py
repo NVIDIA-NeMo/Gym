@@ -278,10 +278,10 @@ def test_collect_rollouts_preserves_incomplete_exit_and_shuts_down_telemetry(
 
 
 @pytest.mark.parametrize("saved", [None, "policy_model_name: saved\n"])
-def test_collect_rollouts_keeps_the_saved_resolved_config_when_the_resume_is_refused(tmp_path, monkeypatch, saved):
-    """The resolved config is written before the collector checks a resume. A resume it refuses leaves the saved
-    rollouts as the earlier run's, so that run's resolved config is put back, or none is left where it had none.
-    Any other failure is this run's own, and its resolved config stays."""
+def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_accepted(tmp_path, monkeypatch, saved):
+    """A resume of saved rollouts writes its resolved config only once the collector has accepted it. A resume the
+    collector refuses leaves the saved rollouts as the earlier run's, and so that run's resolved config, or none
+    where it had none. A run with nothing saved under its output names writes the file before it collects."""
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
     from nemo_gym.rollouts.rollout_recovery import ResumeRefusedError
     from nemo_gym.telemetry import setup
@@ -290,34 +290,48 @@ def test_collect_rollouts_keeps_the_saved_resolved_config_when_the_resume_is_ref
     output = tmp_path / "output.jsonl"
     resolved_config = resolved_config_path_for(output)
     config = DictConfig(
-        {"input_jsonl_fpath": "input.jsonl", "output_jsonl_fpath": str(output), "policy_model_name": "current"}
+        {
+            "input_jsonl_fpath": "input.jsonl",
+            "output_jsonl_fpath": str(output),
+            "policy_model_name": "current",
+            "resume_from_cache": True,
+        }
     )
     monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
     for name in ("configure_telemetry_env", "init_telemetry", "shutdown_telemetry"):
         monkeypatch.setattr(setup, name, lambda *args, **kwargs: None)
-    seen = []
+    before_collection = []
 
-    def collect_raising(error):
-        async def collect(self, config):
-            seen.append(resolved_config.read_text())
-            raise error
+    def collect(*, saved_rollouts, accepts):
+        async def run_from_config(self, config):
+            before_collection.append(resolved_config.read_text() if resolved_config.exists() else None)
+            if not accepts:
+                raise ResumeRefusedError("Cannot resume with incompatible resolved configuration.")
+            self._on_run_accepted()
+            raise ConfigError("The input file is missing.")
 
-        monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collect)
-        if saved is None:
-            resolved_config.unlink(missing_ok=True)
-        else:
+        monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", run_from_config)
+        for path in (output, resolved_config):
+            path.unlink(missing_ok=True)
+        if saved_rollouts:
+            output.write_text("")
+        if saved is not None:
             resolved_config.write_text(saved)
         with pytest.raises(SystemExit) as stopped:
             cli_eval.collect_rollouts()
         assert stopped.value.code == 1
 
-    collect_raising(ResumeRefusedError("Cannot resume with incompatible resolved configuration."))
-    assert "policy_model_name: current" in seen[-1]
+    collect(saved_rollouts=True, accepts=False)
+    assert before_collection[-1] == saved
     assert (resolved_config.read_text() if resolved_config.exists() else None) == saved
-    assert list(tmp_path.iterdir()) == ([] if saved is None else [resolved_config])
+    assert sorted(tmp_path.iterdir()) == sorted([output] if saved is None else [output, resolved_config])
 
-    collect_raising(ConfigError("The input file is missing."))
+    collect(saved_rollouts=True, accepts=True)
+    assert before_collection[-1] == saved
     assert "policy_model_name: current" in resolved_config.read_text()
+
+    collect(saved_rollouts=False, accepts=False)
+    assert "policy_model_name: current" in before_collection[-1]
 
 
 @pytest.mark.parametrize("fails", [False, True])
