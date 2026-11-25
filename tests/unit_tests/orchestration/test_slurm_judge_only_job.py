@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import yaml
 from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from nemo_gym.cli import eval as eval_cli
@@ -45,11 +46,17 @@ from tests.unit_tests.orchestration.test_eval_resubmit import (
 
 
 def _model_served_run(
-    tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str | None = None, run: dict | None = None
+    tmp_path: Path,
+    *,
+    cpu_pool: bool = False,
+    judge_pool: str | None = None,
+    run: dict | None = None,
+    otel: bool = False,
 ) -> Path:
     """A submitted run with a vLLM policy on a GPU pool, whose managed Store holds one scored row and one result
     masked by a verify call lost in transport, with its chain accounting complete. With ``judge_pool`` it also serves
-    its judge as a vLLM service ``wildguard`` on that pool: "judge", a GPU pool of its own, or "gpu", the policy's."""
+    its judge as a vLLM service ``wildguard`` on that pool: "judge", a GPU pool of its own, or "gpu", the policy's.
+    With ``otel`` its collector is on (local export only)."""
     pools = {"gpu": {"partition": "gpu", "nodes": 1, "gpus_per_node": 8}}
     if cpu_pool:
         pools["scorer"] = {"partition": "cpu_long", "nodes": 1, "gpus_per_node": 0}
@@ -89,7 +96,7 @@ def _model_served_run(
                 },
             },
             "job": {"output_path": str(tmp_path)},
-            "otel": {"enabled": False},
+            "otel": {"enabled": True, "remote_export": False} if otel else {"enabled": False},
         }
     )
     run_dir = tmp_path / "gym-job-x"
@@ -355,6 +362,35 @@ def test_recover_queues_a_served_judge_job_on_the_runs_judge_pool(tmp_path, judg
     (listed,) = inspected.gate_task["judge_jobs"]
     assert listed["kind"] == "served-judge" and listed["services"] == ["wildguard"]
     assert any("judge-only job 4242 on gpu serving wildguard" in w for w in inspected.gate_task["warnings"])
+
+
+def test_a_served_judge_job_declares_and_scrapes_its_own_allocation_not_the_runs(tmp_path, judge_slurm_bin) -> None:
+    job_dir = _model_served_run(tmp_path, judge_pool="judge", otel=True)
+    # The run's own placement and the collector configuration staged for its two-pool allocation.
+    run_declaration = job_dir / "artifacts" / "rollouts_service_declaration.json"
+    run_declaration.write_text("the run's placement\n")
+    run_collector = job_dir / "otel" / "collector.yaml"
+    run_collector.parent.mkdir()
+    run_collector.write_text("the run's scrape targets\n")
+
+    out = recover(*_handle(job_dir))
+
+    assert out.ok and out.dispatched == "reverify", out.decision.reason
+    folder = Path(out.judge_job["output"]).parent
+    script = _queued_script(job_dir)
+    assert str(folder / "rollouts_service_declaration.json") in script and str(run_declaration) not in script
+    staged = folder / "otel" / "collector.yaml"
+    assert f"--config {staged}" in script and str(run_collector) not in script
+    # The judge runs beside the job's collector on its one node, so it is scraped there; the policy is not served.
+    engines = {
+        scrape["job_name"]: [target for group in scrape["static_configs"] for target in group["targets"]]
+        for scrape in yaml.safe_load(staged.read_text())["receivers"]["prometheus"]["config"]["scrape_configs"]
+        if scrape["job_name"].startswith("gym-vllm/")
+    }
+    assert engines == {"gym-vllm/wildguard": ["localhost:8001"]}
+    assert "GYM_OTEL_NODE_" not in script
+    assert run_declaration.read_text() == "the run's placement\n"
+    assert run_collector.read_text() == "the run's scrape targets\n"
 
 
 def test_a_judge_service_on_the_policys_pool_is_refused_and_nothing_is_queued(tmp_path, judge_slurm_bin) -> None:

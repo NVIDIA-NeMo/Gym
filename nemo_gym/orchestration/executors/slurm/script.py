@@ -771,15 +771,17 @@ def _with_vllm_traces(
 COLLECTOR_LOCAL_DIR_MARKER = f"export {COLLECTOR_LOCAL_DIR_ENV}="
 
 
-def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
+def _collector_command(config: SubmitConfig, remote_bench_dir: Path, collector_config: Path | None = None) -> str:
     """Run a node-local copy of the collector binary, then append its node-local jsonl into `<job dir>/otel/`.
 
     The copy-out runs in the collector's own step, the one place that sees its node-local directory: the
-    collector may run on another node than the batch script, or in a container.
+    collector may run on another node than the batch script, or in a container. `collector_config` is the
+    configuration it reads, `<job dir>/otel/collector.yaml` by default.
     """
     binary = shlex.quote(config.otel.binary)
     name = shlex.quote(Path(config.otel.binary).name)
     otel_dir = shlex.quote(str(remote_bench_dir / COLLECTOR_DIR))
+    collector_config = collector_config or collector_config_path(remote_bench_dir)
     script = "; ".join(
         [
             f'src=$(command -v {binary}) || {{ echo "OTel collector binary not found: "{binary} >&2; exit 127; }}',
@@ -787,7 +789,7 @@ def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
             f'{COLLECTOR_LOCAL_DIR_MARKER}"$dir"',
             # Slurm's TERM at the time limit reaches this shell too: pass it on and wait for the flush.
             'trap "kill -TERM \\$pid 2>/dev/null" TERM INT',
-            f'"$dir"/{name} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))} & pid=$!',
+            f'"$dir"/{name} --config {shlex.quote(str(collector_config))} & pid=$!',
             "wait $pid; rc=$?",
             "while kill -0 $pid 2>/dev/null; do wait $pid; rc=$?; done",
             # Appended, so the files keep every segment of a resumed run; ignoring TERM keeps the copy whole.
@@ -809,6 +811,7 @@ def _render_collector_service(
     driver_node: int | None = None,
     account: str | None = None,
     other_scrape_nodes: list[int] | None = None,
+    collector_config: Path | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
@@ -816,11 +819,11 @@ def _render_collector_service(
     Runs on exactly one node, beside the driver, so `localhost` reaches the OTLP endpoints and every
     model service API on that node. `other_scrape_nodes` are the nodes whose model services it scrapes
     by hostname (see `collector_scrape_hosts`); the step exports each one's hostname for the config to
-    expand. In a container the job directory is mounted for the config and the copied `otel/*.jsonl`;
-    on the node it is simply there, so no mounts or workdir are passed.
+    expand. In a container the job directory is mounted for the config (which lies under it) and the copied
+    `otel/*.jsonl`; on the node it is simply there, so no mounts or workdir are passed.
     """
     obs = config.otel
-    command = _collector_command(config, remote_bench_dir)
+    command = _collector_command(config, remote_bench_dir, collector_config)
     container_kwargs = (
         {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
         if obs.container is not None
@@ -859,7 +862,12 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
 
 
 def _render_collector_shutdown(
-    config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None, *, before_exit: str = ""
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    driver_node: int | None = None,
+    *,
+    before_exit: str = "",
+    collector_config: Path | None = None,
 ) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
     graceful stop, keeping the driver's exit code. `before_exit` runs last, just before the exit.
@@ -872,7 +880,7 @@ def _render_collector_shutdown(
     # Anchored to the node-local copy of the binary: the srun and the shell that launched it carry the same
     # `--config <path>` on their own command lines, and a TERM to srun makes Slurm kill the step outright.
     name = re.escape(Path(config.otel.binary).name)
-    config_path = re.escape(str(collector_config_path(remote_bench_dir)))
+    config_path = re.escape(str(collector_config or collector_config_path(remote_bench_dir)))
     pattern = (
         shlex.quote(f"^{re.escape(COLLECTOR_LOCAL_DIR_PREFIX)}")
         + '"$SLURM_JOB_ID"'
@@ -1073,7 +1081,7 @@ def _render_service_declaration(
     compute: SlurmComputeConfig,
     benchmark_name: str,
     remote_bench_dir: Path,
-    rollouts_fpath: Path,
+    declaration_path: Path,
     *,
     is_multi_node: bool,
     driver_node: int | None,
@@ -1104,7 +1112,7 @@ def _render_service_declaration(
         pin_nodes=placed,
         run_id=remote_bench_dir.parent.name,
         benchmark=benchmark_name,
-        declaration_path=service_declaration_path_for(rollouts_fpath),
+        declaration_path=declaration_path,
         account=compute.account,
     )
 
@@ -1246,7 +1254,16 @@ def build_sbatch_script(
     benchmark: BenchmarkRunConfig,
     compute: SlurmComputeConfig,
     remote_bench_dir: Path,
+    *,
+    service_declaration_path: Path | None = None,
+    collector_config: Path | None = None,
 ) -> str:
+    """The batch script of one benchmark job in `remote_bench_dir`.
+
+    A job that is not the run's own, such as a judge-only job, passes where it writes its service declaration and
+    which collector configuration it reads, instead of the run's `artifacts/rollouts_service_declaration.json` and
+    `otel/collector.yaml`.
+    """
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     resume = benchmark.resume_config
@@ -1261,6 +1278,15 @@ def build_sbatch_script(
     driver_node = _driver_node(config, compute) if is_multi_node else None
     # ABSOLUTE, not relative: see output_path below.
     rollouts_fpath = remote_bench_dir / ARTIFACTS_DIRNAME / ROLLOUTS_FILENAME
+    declaration = _render_service_declaration(
+        config,
+        compute,
+        benchmark_name,
+        remote_bench_dir,
+        service_declaration_path or service_declaration_path_for(rollouts_fpath),
+        is_multi_node=is_multi_node,
+        driver_node=driver_node,
+    )
     ray_prelude = "\n".join(
         block
         for block in (
@@ -1269,15 +1295,7 @@ def build_sbatch_script(
             else "",
             _render_pool_nodes(config, compute, is_multi_node),
             _render_ray_head_addresses(config, compute),
-            _render_service_declaration(
-                config,
-                compute,
-                benchmark_name,
-                remote_bench_dir,
-                rollouts_fpath,
-                is_multi_node=is_multi_node,
-                driver_node=driver_node,
-            ),
+            declaration,
         )
         if block
     )
@@ -1296,6 +1314,7 @@ def build_sbatch_script(
                     driver_node=driver_node,
                     account=compute.account,
                     other_scrape_nodes=_other_scrape_nodes(config, compute),
+                    collector_config=collector_config,
                 )
             ]
             if observed
@@ -1549,7 +1568,7 @@ def build_sbatch_script(
     end_snapshot = f"_gym_md_stats {END}\n" if md_stats else ""
     if observed:
         driver_command += "\n" + _render_collector_shutdown(
-            config, remote_bench_dir, driver_node, before_exit=end_snapshot
+            config, remote_bench_dir, driver_node, before_exit=end_snapshot, collector_config=collector_config
         )
     elif md_stats:
         # The snapshot returns the status before it, so the job's exit status is unchanged.
