@@ -929,9 +929,9 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         The group starts from ``sandbox_config`` with the declared image, working directory, environment variables,
         files and sidecars over it. A group for the verifier alone starts with ``no_network``, and each sidecar with
         its own rule (``SandboxGroupSidecar.network``), never the main container's. Its working directory is
-        created before anyone borrows it, since not every provider creates it. Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled
-        start still stops what it created. ``prepare`` runs when the seed declared ``prepare``: it asks the Resources
-        Server to prepare the task through the access. There is no host fallback: a group that cannot start or be
+        created before anyone borrows it, since not every provider creates it. Register ``stop_attempt_sandbox`` in
+        the episode's cleanup first, so a cancelled start still stops what it created. ``prepare`` runs when the seed
+        declared ``prepare``: it asks the Resources Server to prepare the task through the access. There is no host fallback: a group that cannot start or be
         described fails the attempt as a retryable infrastructure failure at ``stage``, with ``evidence`` kept, and
         records no reward; a failed prepare is retried when the Resources Server's error is.
         """
