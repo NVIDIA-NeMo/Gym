@@ -12,6 +12,7 @@ from openpyxl import Workbook
 from pptx import Presentation
 
 from resources_servers.apex_agents.artifacts import (
+    artifact_change_text,
     artifact_changes_text,
     artifact_text,
     safe_extract_snapshot,
@@ -210,8 +211,7 @@ def test_snapshot_changes_flattens_and_matches_pdf_pages(monkeypatch, tmp_path: 
     initial_path.write_bytes(b"original-pdf")
     final_path.write_bytes(b"final-pdf")
 
-    def extracted(path: Path, *, document_converter_image: str | None = None) -> ExtractedContent:
-        del document_converter_image
+    def extracted(path: Path, **_converter) -> ExtractedContent:
         if path == initial_path:
             values = ["Stable introduction", "Revenue was 10 million", "Stable appendix"]
         else:
@@ -281,7 +281,7 @@ def test_a_slide_whose_only_change_is_its_picture_is_a_change(tmp_path: Path) ->
     assert changes[0].embedded_images_old != changes[0].embedded_images_new
 
 
-def test_a_resaved_deck_with_the_same_pictures_is_not_a_change(tmp_path: Path) -> None:
+def test_a_resaved_deck_with_the_same_slides_is_one_file_level_change(tmp_path: Path) -> None:
     initial_root, initial_path, final_root, final_path = _roots(tmp_path, "deck.pptx")
     picture = _png(tmp_path / "red.png", (200, 0, 0))
     _deck_with_picture(initial_path, picture)
@@ -292,7 +292,14 @@ def test_a_resaved_deck_with_the_same_pictures_is_not_a_change(tmp_path: Path) -
     resaved.save(final_path)
     assert initial_path.read_bytes() != final_path.read_bytes()
 
-    assert snapshot_changes(initial_root, [initial_path], final_root, [final_path]) == []
+    changes = snapshot_changes(initial_root, [initial_path], final_root, [final_path])
+
+    # No slide differs by its text or pictures, so no slide is reported; the file whose bytes changed still is.
+    assert [(change.change_type, change.artifact_type, change.index) for change in changes] == [
+        ("modified", "file", None)
+    ]
+    assert changes[0].after_path == final_path
+    assert "Stable alpha content" in artifact_change_text(changes[0], max_chars=10_000)
 
 
 def _workbook_with_chart(path: Path, last_row: int) -> None:
@@ -344,3 +351,59 @@ def test_a_pdf_page_whose_only_change_is_its_image_is_a_change(tmp_path: Path) -
     assert [(change.change_type, change.artifact_type, change.index) for change in changes] == [
         ("modified", "page", 2)
     ]
+
+
+def test_a_deck_whose_only_change_is_its_speaker_notes_is_one_file_level_change(tmp_path: Path) -> None:
+    initial_root, initial_path, final_root, final_path = _roots(tmp_path, "deck.pptx")
+    for path, notes in ((initial_path, "Open with the market size"), (final_path, "Open with the customer story")):
+        presentation = Presentation()
+        _add_slide(presentation, "Alpha", "Stable alpha content")
+        presentation.slides[0].notes_slide.notes_text_frame.text = notes
+        presentation.save(path)
+
+    changes = snapshot_changes(initial_root, [initial_path], final_root, [final_path])
+
+    # Speaker notes are outside the slide fingerprints: the deck is kept, once, at file level.
+    assert [(change.path, change.change_type, change.artifact_type) for change in changes] == [
+        ("filesystem/deck.pptx", "modified", "file")
+    ]
+
+
+def test_byte_identical_office_files_are_still_not_changes(tmp_path: Path) -> None:
+    initial_root, initial_path, final_root, final_path = _roots(tmp_path, "deck.pptx")
+    _deck_with_picture(initial_path, _png(tmp_path / "red.png", (200, 0, 0)))
+    final_path.write_bytes(initial_path.read_bytes())
+
+    assert snapshot_changes(initial_root, [initial_path], final_root, [final_path]) == []
+
+
+def test_a_changed_file_is_read_once_however_often_it_is_rendered(monkeypatch, tmp_path: Path) -> None:
+    from resources_servers.apex_agents import artifacts
+
+    initial_root, initial_path, final_root, final_path = _roots(tmp_path, "notes.txt")
+    initial_path.write_text("first draft\n", encoding="utf-8")
+    final_path.write_text("first draft\nsecond thought\n", encoding="utf-8")
+    added_path = final_path.with_name("extra.txt")
+    added_path.write_text("an added file", encoding="utf-8")
+    reads: list[str] = []
+    read_text = artifacts._extract_text
+
+    def counting(path: Path, **converter) -> str:
+        reads.append(path.name)
+        return read_text(path, **converter)
+
+    monkeypatch.setattr("resources_servers.apex_agents.artifacts._extract_text", counting)
+
+    changes = snapshot_changes(initial_root, [initial_path], final_root, [added_path, final_path])
+    # Ten criteria each render every change for selection and for the grading prompt.
+    renders = [
+        (artifacts.artifact_change_content(change), artifacts.artifact_change_text(change, max_chars=10_000))
+        for _ in range(10)
+        for change in changes
+    ]
+
+    assert sorted(reads) == ["extra.txt", "notes.txt", "notes.txt"]
+    assert renders[0] == ("an added file", "<created_content>\nan added file\n</created_content>")
+    assert "+second thought" in renders[1][0]
+    assert "<diff>" in renders[1][1] and "+second thought" in renders[1][1]
+    assert "<updated_content>\nfirst draft\nsecond thought\n</updated_content>" in renders[1][1]

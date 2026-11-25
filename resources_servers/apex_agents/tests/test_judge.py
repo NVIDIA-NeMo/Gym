@@ -11,8 +11,12 @@ import pytest
 from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.apex_agents.artifacts import ArtifactChange
 from resources_servers.apex_agents.judge import (
+    _IMAGE_TOKEN_ESTIMATE,
+    _MAX_JUDGE_IMAGES,
     _artifact_xml,
+    _budget_images,
     _build_prompt,
+    _request_is_large,
     _selection_artifact_xml,
     expected_file_type,
     grade_apex_output,
@@ -440,14 +444,21 @@ def test_an_artifact_whose_wrapper_does_not_fit_is_left_out() -> None:
     assert _artifact_xml([_sheet_change("Summary", "value row\n" * 400)], character_budget=40) == ""
 
 
-async def _grade(client, tmp_path: Path, *, changes: list[ArtifactChange] | None = None, window: int = 1_000_000):
+async def _grade(
+    client,
+    tmp_path: Path,
+    *,
+    changes: list[ArtifactChange] | None = None,
+    window: int = 1_000_000,
+    response: str = "Done",
+):
     return await grade_apex_output(
         server_client=client,
         model_server_name="apex_judge_model",
         task_id="task-1",
         world_id="world-1",
         instruction="Do the task",
-        response="Done",
+        response=response,
         rubric=[{"verifier_id": "v1", "criteria": "Correct result"}],
         expected_output=None,
         artifact_changes=changes or [],
@@ -584,3 +595,360 @@ async def test_a_failed_artifact_selection_is_not_graded_as_no_artifacts(
     # Every request made was a selection request: no criterion was graded on an empty selection.
     for call in client.post.call_args_list:
         assert "preprocessing filter" in call.kwargs["json"]["messages"][0]["content"]
+
+
+def _verdict(passed: bool) -> dict:
+    return {"choices": [{"message": {"content": json.dumps({"rationale": "checked", "is_criteria_true": passed})}}]}
+
+
+def _http_error(status: int, body: str):
+    from aiohttp import ClientResponseError
+
+    error = ClientResponseError(request_info=MagicMock(), history=(), status=status, message="rejected")
+    error.response_content = body.encode("utf-8")
+    return error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, '{"error": {"code": "context_length_exceeded", "message": "maximum context length is 1000000 tokens"}}'),
+        (
+            400,
+            '{"error": {"message": "The input token count (1210000) exceeds the maximum number of tokens allowed"}}',
+        ),
+        (413, "Request Entity Too Large"),
+    ],
+)
+async def test_a_request_the_judge_refuses_for_its_size_scores_the_criterion_zero(
+    monkeypatch, tmp_path: Path, status: int, body: str
+) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def too_large(_response) -> None:
+        raise _http_error(status, body)
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", too_large)
+
+    # The final answer alone is some 600,000 estimated tokens: over half of the judge's 1,000,000-token window.
+    reward, scores, usage = await _grade(client, tmp_path, response="figure " * 180_000)
+
+    # The policy's oversized output, graded: a completed zero, not a masked judge failure.
+    assert reward == 0.0
+    assert scores["v1"]["score"] == 0.0
+    assert scores["v1"]["status"] == "completed"
+    assert scores["v1"]["values"]["judge_request_rejected"] == "request_too_large"
+    assert usage["scoring"]["scoring_method_result_values"]["failed_count"] == 1
+    # The refusal would repeat, so the request is not retried.
+    assert client.post.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, '{"error": {"message": "Unsupported parameter: reasoning_effort"}}'),
+        # A small request refused in the words of a size limit: the judge's setup, not the policy's output.
+        (
+            400,
+            "'max_tokens' is too large: 65536. This model's maximum context length is 65536 tokens "
+            "and your request has 512 input tokens",
+        ),
+        (413, "Request Entity Too Large"),
+        (500, '{"error": {"message": "maximum context length exceeded"}}'),
+        (503, "Service Unavailable"),
+        (429, "rate limited"),
+    ],
+)
+async def test_other_judge_http_errors_stay_judge_failures(
+    monkeypatch, tmp_path: Path, status: int, body: str
+) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def failing(_response) -> None:
+        raise _http_error(status, body)
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", failing)
+
+    with pytest.raises(Exception) as raised:
+        await _grade(client, tmp_path)
+
+    assert is_judge_failure(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_criterion_does_not_stop_the_other_criteria(monkeypatch, tmp_path: Path) -> None:
+    client = MagicMock()
+
+    async def post(**kwargs):
+        return "large" if "Criterion 0" in json.dumps(kwargs["json"]) else "fine"
+
+    client.post = post
+
+    async def status(response) -> None:
+        if response == "large":
+            raise _http_error(413, "payload too large")
+
+    async def reply(_response) -> dict:
+        return _verdict(True)
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", reply)
+
+    reward, scores, _usage = await grade_apex_output(
+        server_client=client,
+        model_server_name="apex_judge_model",
+        task_id="task-1",
+        world_id="world-1",
+        instruction="Do the task",
+        response="figure " * 180_000,
+        rubric=[
+            {"verifier_id": "v0", "criteria": "Criterion 0", "weight": 1},
+            {"verifier_id": "v1", "criteria": "Criterion 1", "weight": 3},
+        ],
+        expected_output=None,
+        artifact_changes=[],
+        final_root=tmp_path,
+        judge_model="judge",
+        judge_create_params_overrides=None,
+        judge_context_window_size=1_000_000,
+        scoring_method="weighted_average",
+    )
+
+    assert (scores["v0"]["score"], scores["v1"]["score"]) == (0.0, 1.0)
+    assert reward == 0.75
+
+
+def _image_block(size: int = 100) -> dict:
+    return {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * size}}
+
+
+def test_images_are_capped_by_count_with_a_note_for_the_judge() -> None:
+    blocks = [{"type": "text", "text": "\n0000__deck.pptx (rendered from Office):"}]
+    for page in range(_MAX_JUDGE_IMAGES + 5):
+        blocks += [{"type": "text", "text": f"Page {page + 1}"}, _image_block()]
+
+    kept, image_count = _budget_images(blocks, context_window_size=1_000_000)
+
+    assert image_count == _MAX_JUDGE_IMAGES
+    assert sum(block["type"] == "image_url" for block in kept) == _MAX_JUDGE_IMAGES
+    # An omitted image takes its page label with it, and the judge is told images are missing.
+    assert {"type": "text", "text": f"Page {_MAX_JUDGE_IMAGES + 1}"} not in kept
+    assert kept[-1]["text"] == "\n[5 further image(s) omitted: judge request size limit]"
+
+
+def test_images_are_capped_by_the_judge_window_and_by_encoded_size(monkeypatch) -> None:
+    blocks = [_image_block() for _ in range(10)]
+
+    # A quarter of a 40,000-token window holds three images at the fixed per-image cost.
+    assert _budget_images(blocks, context_window_size=40_000)[1] == 10_000 // _IMAGE_TOKEN_ESTIMATE == 3
+    # A window too small for any image sends none.
+    assert _budget_images(blocks, context_window_size=1_000) == ([], 0)
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge._MAX_JUDGE_IMAGE_CHARS", 450)
+    kept, image_count = _budget_images(blocks, context_window_size=1_000_000)
+    assert image_count == 3
+    assert sum(len(block["image_url"]["url"]) for block in kept if block["type"] == "image_url") <= 450
+
+
+def test_the_grading_prompt_is_budgeted_at_two_characters_per_token_less_the_images() -> None:
+    change = _sheet_change("Dense", "1234567890\t" * 50_000)
+
+    def prompt(reserved_tokens: int) -> str:
+        return _build_prompt(
+            instruction="Do the task",
+            response="Done",
+            criteria="Correct result",
+            file_type="Spreadsheets (.xlsx, .xls, .xlsm, .ods)",
+            changes=[change],
+            context_window_size=100_000,
+            reserved_tokens=reserved_tokens,
+        )
+
+    # 90% of the window at two characters per token, not four: the 550,000-character sheet is cut to fit.
+    assert len(prompt(0)) <= 100_000 * 0.9 * 2
+    assert "1234567890" in prompt(0)
+    # Tokens charged to images come out of the same window.
+    assert len(prompt(0)) - len(prompt(30_000)) >= 30_000 * 2 - 100
+
+
+@pytest.mark.asyncio
+async def test_criteria_sharing_an_id_are_all_counted(monkeypatch, tmp_path: Path) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=lambda **kwargs: json.dumps(kwargs["json"]))
+
+    async def status(_response) -> None:
+        return None
+
+    async def reply(request: str) -> dict:
+        return _verdict("First criterion" not in request)
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", reply)
+
+    reward, scores, usage = await grade_apex_output(
+        server_client=client,
+        model_server_name="apex_judge_model",
+        task_id="task-1",
+        world_id="world-1",
+        instruction="Do the task",
+        response="Done",
+        # The failing criterion comes first: an ID-keyed mapping would keep only the passing one.
+        rubric=[{"verifier_id": "v1", "criteria": "First criterion"}, {"verifier_id": "v1", "criteria": "Second"}],
+        expected_output=None,
+        artifact_changes=[],
+        final_root=tmp_path,
+        judge_model="judge",
+        judge_create_params_overrides=None,
+        judge_context_window_size=1_000_000,
+    )
+
+    values = usage["scoring"]["scoring_method_result_values"]
+    assert reward == 0.0
+    assert (values["passed_count"], values["failed_count"], values["total_count"]) == (1, 1, 2)
+    assert values["all_pass"] == 0.0
+    assert usage["verifier_count"] == 2
+    assert {key: score["score"] for key, score in scores.items()} == {"v1": 0.0, "v1#2": 1.0}
+
+
+def _slide_change(deck: Path, index: int) -> ArtifactChange:
+    return ArtifactChange(
+        path="filesystem/deck.pptx",
+        change_type="modified",
+        before_path=deck,
+        after_path=deck,
+        artifact_type="slide",
+        index=index,
+        original_index=index,
+        title=f"Slide {index + 1}",
+        old_content="old",
+        new_content="new",
+        content_diff="-old\n+new",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_changed_file_is_rendered_once_for_all_criteria_at_its_changed_slides(
+    monkeypatch, tmp_path: Path
+) -> None:
+    deck = tmp_path / "filesystem" / "deck.pptx"
+    deck.parent.mkdir(parents=True)
+    deck.write_bytes(b"deck")
+    renders: list[tuple[Path, int, set[int] | None, dict]] = []
+
+    def render(final_root: Path, path: Path, position: int, changed_indices: set[int] | None, **converter):
+        assert final_root == tmp_path
+        renders.append((path, position, changed_indices, converter))
+        return [{"type": "text", "text": "\n0000__deck.pptx:"}, {"type": "text", "text": "Slide 14"}, _image_block()]
+
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def status(_response) -> None:
+        return None
+
+    async def reply(_response) -> dict:
+        return _verdict(True)
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge._visual_blocks", render)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", reply)
+
+    reward, _scores, _usage = await grade_apex_output(
+        server_client=client,
+        model_server_name="apex_judge_model",
+        task_id="task-1",
+        world_id="world-1",
+        instruction="Do the task",
+        response="Done",
+        rubric=[{"verifier_id": f"v{index}", "criteria": f"Criterion {index}"} for index in range(4)],
+        expected_output=None,
+        artifact_changes=[_slide_change(deck, 13), _slide_change(deck, 2)],
+        final_root=tmp_path,
+        judge_model="judge",
+        judge_create_params_overrides=None,
+        judge_context_window_size=1_000_000,
+        document_converter_image="/images/archipelago.sif",
+    )
+
+    assert reward == 1.0
+    # One render for four criteria, asked for the changed slides rather than the deck's first pages.
+    assert renders == [
+        (deck, 0, {2, 13}, {"document_converter_image": "/images/archipelago.sif", "allow_host_document_tools": False})
+    ]
+    assert client.post.call_count == 4
+    for call in client.post.call_args_list:
+        content = call.kwargs["json"]["messages"][1]["content"]
+        assert [block["type"] for block in content] == ["text", "text", "text", "image_url"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_assembly_and_rendering_run_through_the_blocking_runner(monkeypatch, tmp_path: Path) -> None:
+    deliverable = tmp_path / "filesystem" / "notes.txt"
+    deliverable.parent.mkdir(parents=True)
+    deliverable.write_text("finished", encoding="utf-8")
+    change = ArtifactChange(path="filesystem/notes.txt", change_type="added", before_path=None, after_path=deliverable)
+    offloaded: list[str] = []
+
+    async def run_blocking(function, *args, **kwargs):
+        offloaded.append(getattr(getattr(function, "func", function), "__name__", "?"))
+        return await asyncio.to_thread(function, *args, **kwargs)
+
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def status(_response) -> None:
+        return None
+
+    async def reply(_response) -> dict:
+        return _verdict(True)
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", reply)
+
+    await grade_apex_output(
+        server_client=client,
+        model_server_name="apex_judge_model",
+        task_id="task-1",
+        world_id="world-1",
+        instruction="Do the task",
+        response="Done",
+        rubric=[{"verifier_id": "v1", "criteria": "Correct result"}],
+        expected_output=None,
+        artifact_changes=[change],
+        final_root=tmp_path,
+        judge_model="judge",
+        judge_create_params_overrides=None,
+        judge_context_window_size=1_000_000,
+        run_blocking=run_blocking,
+    )
+
+    assert offloaded == ["<lambda>", "_visual_blocks", "_build_prompt"]
+
+
+def test_a_refusal_counts_against_the_policy_only_when_the_request_was_large() -> None:
+    def request(text: str, images: int = 0, image_size: int = 100) -> dict:
+        content = [{"type": "text", "text": text}, *[_image_block(image_size) for _ in range(images)]]
+        return {
+            "model": "judge",
+            "messages": [{"role": "system", "content": "Grade."}, {"role": "user", "content": content}],
+        }
+
+    small = request("a short prompt")
+    # 120,000 characters are 60,000 estimated tokens, over half of a 100,000-token window.
+    long_text = request("x" * 120_000)
+    # Twenty images are charged 60,000 tokens.
+    many_images = request("a short prompt", images=20)
+    # One 1.5 MiB image is few tokens but a large payload.
+    heavy_payload = request("a short prompt", images=1, image_size=1_500_000)
+
+    for status in (400, 413):
+        assert not _request_is_large(small, status=status, context_window_size=100_000)
+        assert _request_is_large(long_text, status=status, context_window_size=100_000)
+        assert _request_is_large(many_images, status=status, context_window_size=100_000)
+    # Payload size speaks only to a payload-size refusal.
+    assert _request_is_large(heavy_payload, status=413, context_window_size=100_000)
+    assert not _request_is_large(heavy_payload, status=400, context_window_size=100_000)

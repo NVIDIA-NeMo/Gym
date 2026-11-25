@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""APEX output-grading prompts from the harness-pinned Archipelago grader."""
+"""APEX output-grading prompts from the harness-pinned Archipelago grader.
+
+Adapted source (https://github.com/Mercor-Intelligence/archipelago, revision b581241ed67deed520f8d7854d20e39569e259f5, Apache-2.0):
+  grading/runner/evals/output_llm/utils/prompts.py
+The upstream file carries no per-file copyright notice. NVIDIA modifications are licensed under Apache-2.0.
+"""
 
 from __future__ import annotations
 

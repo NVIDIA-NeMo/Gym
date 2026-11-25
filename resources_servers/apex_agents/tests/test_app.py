@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 import io
 import json
+import threading
 import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -456,3 +458,326 @@ async def test_verifier_fixture_cases_match_the_scorer(determinism: str) -> None
     if determinism != "seeded":
         expected = [row for row in expected if row[1] != "determinism"]
     assert observed == expected
+
+
+def _blocks_body(input_items) -> ApexVerifyRequest:
+    payload = _body().model_dump()
+    payload["responses_create_params"] = {"input": input_items}
+    payload["initial_artifact_snapshot_b64"] = _snapshot(None)
+    payload["artifact_snapshot_b64"] = _snapshot()
+    return ApexVerifyRequest.model_validate(payload)
+
+
+async def _judged_instruction(monkeypatch, body: ApexVerifyRequest) -> str:
+    seen: dict = {}
+
+    async def recording_judge(**kwargs):
+        seen.update(kwargs)
+        return 1.0, {}, {"ok": True}
+
+    monkeypatch.setattr("resources_servers.apex_agents.app.grade_apex_output", recording_judge)
+    result = await _server().verify(body)
+    assert result.reward == 1.0
+    assert "held out" not in seen["instruction"]
+    return seen["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_the_judge_receives_user_text_blocks_as_the_task_instruction(monkeypatch) -> None:
+    blocks = [{"role": "user", "content": [{"type": "input_text", "text": "Use EUR, not USD"}]}]
+    as_string = [{"role": "user", "content": "Use EUR, not USD"}]
+
+    assert await _judged_instruction(monkeypatch, _blocks_body(blocks)) == "Use EUR, not USD"
+    assert await _judged_instruction(monkeypatch, _blocks_body(as_string)) == "Use EUR, not USD"
+    assert await _judged_instruction(monkeypatch, _blocks_body("Use EUR, not USD")) == "Use EUR, not USD"
+
+
+@pytest.mark.asyncio
+async def test_the_task_instruction_keeps_user_message_order_and_only_user_text(monkeypatch) -> None:
+    image = {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto"}
+    items = [
+        {"role": "system", "content": "You are a careful analyst"},
+        {"role": "user", "content": [{"type": "input_text", "text": "First: build the model"}, image]},
+        {"role": "assistant", "content": "Understood"},
+        {"role": "user", "content": "Second: report in EUR"},
+    ]
+
+    instruction = await _judged_instruction(monkeypatch, _blocks_body(items))
+
+    assert instruction == "First: build the model\n\nSecond: report in EUR"
+
+
+@pytest.mark.asyncio
+async def test_document_preprocessing_does_not_block_the_event_loop(monkeypatch, tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    scratch: list[Path] = []
+
+    def slow_changes(initial_root: Path, *_args, **_kwargs):
+        scratch.append(initial_root.parent)
+        started.set()
+        # A document conversion that takes a long time, on whatever thread verify gave it.
+        assert release.wait(30)
+        return []
+
+    async def judge(**_kwargs):
+        return 1.0, {"v1": {"score": 1.0}}, {"ok": True}
+
+    monkeypatch.setattr("resources_servers.apex_agents.app.snapshot_changes", slow_changes)
+    monkeypatch.setattr("resources_servers.apex_agents.app.grade_apex_output", judge)
+    server = _server(world_cache_dir=str(tmp_path), artifact_output_dir=str(tmp_path / "saved"))
+
+    verifying = asyncio.ensure_future(server.verify(_body()))
+    await asyncio.to_thread(started.wait, 30)
+    # While the conversion is stuck the loop still turns, and an unrelated request is served.
+    ticks = 0
+    for _ in range(50):
+        await asyncio.sleep(0)
+        ticks += 1
+    await server._preflight_world_cache()
+    rejected = await server.verify(_body("not-base64"))
+    assert ticks == 50
+    assert "encoding" in rejected.verifier_error
+    assert not verifying.done()
+    assert scratch[0].is_dir()
+
+    release.set()
+    result = await asyncio.wait_for(verifying, 30)
+
+    assert result.reward == 1.0
+    assert Path(result.final_snapshot_path).is_file()
+    # The scratch directory is gone once verify returns, and not before the worker was done with it.
+    assert not scratch[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_verify_keeps_its_scratch_until_the_worker_returns(monkeypatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    scratch: list[Path] = []
+    survived: list[bool] = []
+
+    def slow_changes(initial_root: Path, *_args, **_kwargs):
+        scratch.append(initial_root.parent)
+        started.set()
+        assert release.wait(30)
+        survived.append((initial_root.parent / "final" / "filesystem" / "final.txt").is_file())
+        return []
+
+    monkeypatch.setattr("resources_servers.apex_agents.app.snapshot_changes", slow_changes)
+    server = _server()
+
+    verifying = asyncio.ensure_future(server.verify(_body()))
+    await asyncio.to_thread(started.wait, 30)
+    verifying.cancel()
+    await asyncio.sleep(0.05)
+    # A thread cannot be cancelled: the verify keeps its slot and its scratch directory until the worker is done.
+    assert not verifying.done()
+    assert scratch[0].is_dir()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(verifying, 30)
+
+    assert survived == [True]
+    assert not scratch[0].exists()
+
+
+def _judge_reply(passed: bool) -> MagicMock:
+    content = json.dumps({"rationale": "checked", "is_criteria_true": passed})
+    reply = MagicMock(ok=True)
+    reply.read = AsyncMock(
+        return_value=json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
+    )
+    return reply
+
+
+def _rubric_body(snapshot: str, criteria: int) -> ApexVerifyRequest:
+    payload = _body().model_dump()
+    payload["verifier_metadata"] = {
+        "rubric": [{"verifier_id": f"v{index}", "criteria": f"Criterion {index}"} for index in range(criteria)]
+    }
+    payload["initial_artifact_snapshot_b64"] = _snapshot(None)
+    payload["artifact_snapshot_b64"] = snapshot
+    return ApexVerifyRequest.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_verify_extracts_each_changed_file_once_for_all_criteria(monkeypatch) -> None:
+    from resources_servers.apex_agents import artifacts
+
+    reads: list[str] = []
+    read_text = artifacts._extract_text
+
+    def counting(path: Path, **converter) -> str:
+        reads.append(path.name)
+        return read_text(path, **converter)
+
+    monkeypatch.setattr("resources_servers.apex_agents.artifacts._extract_text", counting)
+    server = _server()
+    server.server_client.post = AsyncMock(side_effect=lambda **_kwargs: _judge_reply(True))
+
+    result = await server.verify(_rubric_body(_snapshot("the deliverable text"), criteria=10))
+
+    assert result.reward == 1.0
+    assert server.server_client.post.call_count == 10
+    assert reads == ["final.txt"]
+    for call in server.server_client.post.call_args_list:
+        assert "the deliverable text" in call.kwargs["json"]["messages"][1]["content"]
+
+
+def _workbook_snapshot() -> str:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active["A1"] = 2
+    workbook.active["A2"] = "=A1*21"
+    saved = io.BytesIO()
+    workbook.save(saved)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("filesystem/model.xlsx", saved.getvalue())
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_a_converter_that_cannot_run_masks_the_verify_instead_of_grading_text(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "archipelago.sif"
+    image.write_bytes(b"sif")
+    # The converter image is configured, but this host has no apptainer to enter it with.
+    monkeypatch.setattr("resources_servers.apex_agents.file_extraction.shutil.which", lambda _executable: None)
+    server = _server()
+    server.config.document_converter_image = str(image)
+    server.server_client.post = AsyncMock(side_effect=lambda **_kwargs: _judge_reply(True))
+
+    result = await server.verify(_rubric_body(_workbook_snapshot(), criteria=1))
+
+    assert result.reward == 0.0
+    assert result.mask_sample is True
+    assert result.model_dump()["failure_kind"] == "verifier_error"
+    assert "apptainer is not on PATH" in result.verifier_error
+    # The workbook's formulas were never recalculated, so the judge was not asked to grade their blanks.
+    assert server.server_client.post.call_count == 0
+
+    # With no converter configured the same workbook is graded on its text, with the judge told what is missing.
+    server.config.document_converter_image = None
+    graded = await server.verify(_rubric_body(_workbook_snapshot(), criteria=1))
+    assert graded.reward == 1.0
+    assert (
+        "formula cells could not be recalculated"
+        in (server.server_client.post.call_args.kwargs["json"]["messages"][1]["content"])
+    )
+
+
+def _docx_snapshot() -> str:
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("Quarterly memo")
+    saved = io.BytesIO()
+    document.save(saved)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("filesystem/memo.docx", saved.getvalue())
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_the_server_refuses_to_start_with_a_converter_it_cannot_run(monkeypatch, tmp_path: Path) -> None:
+    which = "resources_servers.apex_agents.file_extraction.shutil.which"
+    server = _server()
+    assert server._preflight_document_converter in server.setup_webserver().router.on_startup
+
+    # Nothing configured: nothing to check, whatever is installed.
+    monkeypatch.setattr(which, lambda _executable: None)
+    await server._preflight_document_converter()
+
+    # The shipped default image, on a host that does not have it.
+    monkeypatch.setattr(which, lambda executable: "/usr/bin/apptainer" if executable == "apptainer" else None)
+    server.config.document_converter_image = str(tmp_path / "images" / "archipelago.sif")
+    with pytest.raises(RuntimeError) as missing_image:
+        await server._preflight_document_converter()
+    message = str(missing_image.value)
+    assert "image not found" in message and "archipelago.sif" in message
+    # One message, with the three ways out.
+    for way_out in (
+        "`document_converter_image`",
+        "`allow_host_document_tools: true`",
+        "`document_converter_image: null`",
+    ):
+        assert way_out in message
+
+    # A registry image needs apptainer, not a local file.
+    server.config.document_converter_image = "docker://registry.example/apex/archipelago:1.0"
+    await server._preflight_document_converter()
+    monkeypatch.setattr(which, lambda _executable: None)
+    with pytest.raises(RuntimeError, match="apptainer is not on PATH"):
+        await server._preflight_document_converter()
+
+    # Host tools, allowed and installed, are a way out without apptainer.
+    monkeypatch.setattr(which, lambda executable: f"/usr/bin/{executable}" if executable != "apptainer" else None)
+    with pytest.raises(RuntimeError, match="apptainer is not on PATH"):
+        await server._preflight_document_converter()
+    server.config.allow_host_document_tools = True
+    await server._preflight_document_converter()
+
+
+@pytest.mark.asyncio
+async def test_without_a_converter_documents_are_graded_on_text_and_never_masked(monkeypatch) -> None:
+    # No converter configured, and nothing installed that could convert: the null setting needs neither.
+    monkeypatch.setattr("resources_servers.apex_agents.file_extraction.shutil.which", lambda _executable: None)
+    server = _server()
+    assert server.config.document_converter_image is None
+    server.server_client.post = AsyncMock(side_effect=lambda **_kwargs: _judge_reply(True))
+
+    for snapshot in (_docx_snapshot(), _workbook_snapshot()):
+        result = await server.verify(_rubric_body(snapshot, criteria=2))
+
+        assert result.reward == 1.0
+        assert result.mask_sample is not True
+        assert result.verifier_error is None
+        assert "document_conversion_timeouts" not in result.judge_response
+    request = server.server_client.post.call_args_list[0].kwargs["json"]
+    # Text only: the document's words in the prompt, and no image blocks.
+    assert isinstance(request["messages"][1]["content"], str)
+    assert "Quarterly memo" in request["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_conversion_timeout_is_recorded_in_the_grading_result(monkeypatch, tmp_path: Path) -> None:
+    import subprocess
+
+    image = tmp_path / "archipelago.sif"
+    image.write_bytes(b"sif")
+    monkeypatch.setattr(
+        "resources_servers.apex_agents.file_extraction.shutil.which",
+        lambda executable: "/usr/bin/apptainer" if executable == "apptainer" else None,
+    )
+
+    def hangs(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr("resources_servers.apex_agents.file_extraction.subprocess.run", hangs)
+    server = _server(artifact_output_dir=str(tmp_path / "saved"))
+    server.config.document_converter_image = str(image)
+    server.server_client.post = AsyncMock(side_effect=lambda **_kwargs: _judge_reply(True))
+
+    result = await server.verify(_rubric_body(_docx_snapshot(), criteria=3))
+
+    # Graded on the document's text, not masked, with the timeout on record: once, though three criteria used it.
+    assert result.reward == 1.0
+    assert result.mask_sample is not True
+    timeouts = [{"tool": "libreoffice", "file": "memo.docx", "timeout_seconds": 120}]
+    assert result.judge_response["document_conversion_timeouts"] == timeouts
+    grading = json.loads((Path(result.artifact_output_dir) / "grading.json").read_text())
+    assert grading["judge_response"]["document_conversion_timeouts"] == timeouts
+
+    # The next verify starts its own record.
+    monkeypatch.setattr(
+        "resources_servers.apex_agents.file_extraction.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, b"", b"Error"),
+    )
+    again = await server.verify(_rubric_body(_docx_snapshot(), criteria=1))
+    assert "document_conversion_timeouts" not in again.judge_response

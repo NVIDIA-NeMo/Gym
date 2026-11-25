@@ -1,7 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Safe extraction and judge-oriented preprocessing for Apex artifact snapshots."""
+"""Safe extraction and judge-oriented preprocessing for Apex artifact snapshots.
+
+The sub-artifact fingerprint, the title/hash/similarity matching order, the changed-file flattening and the content
+tags are adapted from the Mercor Archipelago grader; snapshot handling, limits and persistence are NeMo Gym code.
+
+Adapted source (https://github.com/Mercor-Intelligence/archipelago, revision 0cb5c476c219a9df637e0bd37fb86b2361f4ab89, Apache-2.0):
+  grading/runner/helpers/snapshot_diff/main.py
+  grading/runner/helpers/snapshot_diff/match_utils.py
+The upstream files carry no per-file copyright notice. NVIDIA modifications are licensed under Apache-2.0.
+"""
 
 from __future__ import annotations
 
@@ -10,19 +19,18 @@ import hashlib
 import shutil
 import sqlite3
 import stat
-import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from resources_servers.apex_agents.file_extraction import (
+    DocumentConverterError,
     SubArtifact,
     extract_file_content,
     extract_file_text,
-)
-from resources_servers.apex_agents.file_extraction import (
-    visual_content_blocks as render_visual_content_blocks,
+    read_text_bounded,
+    visual_blocks_for_file,
 )
 
 
@@ -138,18 +146,26 @@ def _read_sqlite(path: Path) -> str:
         connection.close()
 
 
-def _extract_text(path: Path) -> str:
+def _extract_text(
+    path: Path,
+    *,
+    document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
+) -> str:
     extension = path.suffix.lower()
     with path.open("rb") as stream:
-        header = stream.read(len(_SQLITE_HEADER))
-    if header == _SQLITE_HEADER:
+        header = stream.read(4096)
+    if header.startswith(_SQLITE_HEADER):
         return _read_sqlite(path)
     if extension:
-        return extract_file_text(path)
-    data = path.read_bytes()
-    if b"\x00" in data[:4096]:
-        return f"[Binary file, {len(data)} bytes]"
-    return data.decode("utf-8", errors="replace").strip()
+        return extract_file_text(
+            path,
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
+        )
+    if b"\x00" in header:
+        return f"[Binary file, {path.stat().st_size} bytes]"
+    return read_text_bounded(path)
 
 
 def _digest(path: Path) -> str:
@@ -245,18 +261,15 @@ def _sub_artifact_changes(
     before_path: Path | None,
     after_path: Path | None,
     document_converter_image: str | None,
+    allow_host_document_tools: bool = False,
 ) -> list[ArtifactChange] | None:
     """Flatten a changed presentation/workbook using Archipelago's diff semantics."""
-    before = (
-        extract_file_content(before_path, document_converter_image=document_converter_image).sub_artifacts
-        if before_path is not None
-        else []
-    )
-    after = (
-        extract_file_content(after_path, document_converter_image=document_converter_image).sub_artifacts
-        if after_path is not None
-        else []
-    )
+    converter: dict[str, Any] = {
+        "document_converter_image": document_converter_image,
+        "allow_host_document_tools": allow_host_document_tools,
+    }
+    before = extract_file_content(before_path, **converter).sub_artifacts if before_path is not None else []
+    after = extract_file_content(after_path, **converter).sub_artifacts if after_path is not None else []
     if (before_path is not None and not before) or (after_path is not None and not after):
         return None
 
@@ -366,8 +379,28 @@ def snapshot_changes(
     final_files: list[Path],
     *,
     document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
 ) -> list[ArtifactChange]:
-    """Compare safely extracted snapshots and return only induced changes."""
+    """Compare safely extracted snapshots and return only induced changes.
+
+    Each changed file is read here, once: its text, and for a modified file its diff, travel on the change, so
+    grading every criterion re-reads nothing.
+    """
+
+    def text_of(path: Path | None) -> str | None:
+        if path is None:
+            return None
+        try:
+            return _extract_text(
+                path,
+                document_converter_image=document_converter_image,
+                allow_host_document_tools=allow_host_document_tools,
+            )
+        except DocumentConverterError:
+            raise
+        except Exception as exc:
+            return f"[Error reading artifact: {exc}]"
+
     before = {path.relative_to(initial_root).as_posix(): path for path in initial_files}
     after = {path.relative_to(final_root).as_posix(): path for path in final_files}
     changes: list[ArtifactChange] = []
@@ -389,21 +422,49 @@ def snapshot_changes(
                     before_path=before_path,
                     after_path=after_path,
                     document_converter_image=document_converter_image,
+                    allow_host_document_tools=allow_host_document_tools,
                 )
+            except DocumentConverterError:
+                raise
             except Exception:
                 sub_changes = None
-            if sub_changes is not None:
+            if sub_changes:
                 changes.extend(sub_changes)
                 continue
+            # No slide, sheet or page differs by its text or pictures, yet the bytes do: speaker notes, formatting,
+            # comments, hidden sheets and vector graphics are outside those fingerprints. Keep the file as one
+            # change, so the judge still sees it and a file-type criterion is not failed for a missing deliverable.
+        old_content = text_of(before_path)
+        new_content = text_of(after_path)
+        content_diff: str | None = None
+        if change_type == "modified":
+            before_body, _, _ = _split_docx_review_sections(before_path, old_content or "")
+            after_body, _, _ = _split_docx_review_sections(after_path, new_content or "")
+            content_diff = _file_diff(relative, before_body, after_body)
         changes.append(
             ArtifactChange(
                 path=relative,
                 change_type=change_type,
                 before_path=before_path,
                 after_path=after_path,
+                old_content=old_content,
+                new_content=new_content,
+                content_diff=content_diff,
             )
         )
     return changes
+
+
+def _file_diff(path: str, before: str, after: str) -> str:
+    return "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"before/{path}",
+            tofile=f"after/{path}",
+            lineterm="",
+        )
+    )
 
 
 def _split_docx_review_sections(path: Path | None, content: str) -> tuple[str, str | None, str | None]:
@@ -467,20 +528,24 @@ def _render_tagged_sections(sections: list[tuple[str, str]], *, max_chars: int) 
     return render(bounded)
 
 
+def _stored_or_read(stored: str | None, path: Path | None, missing: str) -> str:
+    """A file-level change's text: what ``snapshot_changes`` read, else read now for a change built without it."""
+    if path is None:
+        return missing
+    if stored is not None:
+        return stored
+    try:
+        return _extract_text(path)
+    except Exception as exc:
+        return f"[Error reading artifact: {exc}]"
+
+
 def artifact_change_text(change: ArtifactChange, *, max_chars: int) -> str:
     """Render one change with Archipelago's exact content-tag structure."""
 
-    def render(path: Path | None, missing: str) -> str:
-        if path is None:
-            return missing
-        try:
-            return _extract_text(path)
-        except Exception as exc:
-            return f"[Error reading artifact: {exc}]"
-
     if change.artifact_type == "file":
-        before = render(change.before_path, "")
-        after = render(change.after_path, "")
+        before = _stored_or_read(change.old_content, change.before_path, "")
+        after = _stored_or_read(change.new_content, change.after_path, "")
         before_body, _, _ = _split_docx_review_sections(change.before_path, before)
         after_body, tracked_changes, comments = _split_docx_review_sections(change.after_path, after)
     else:
@@ -506,15 +571,7 @@ def artifact_change_text(change: ArtifactChange, *, max_chars: int) -> str:
     else:
         diff = change.content_diff
         if diff is None:
-            diff = "\n".join(
-                difflib.unified_diff(
-                    before_body.splitlines(),
-                    after_body.splitlines(),
-                    fromfile=f"before/{change.path}",
-                    tofile=f"after/{change.path}",
-                    lineterm="",
-                )
-            )
+            diff = _file_diff(change.path, before_body, after_body)
         if diff:
             sections.append(("diff", diff))
         if after_body:
@@ -525,14 +582,6 @@ def artifact_change_text(change: ArtifactChange, *, max_chars: int) -> str:
 def artifact_change_content(change: ArtifactChange, *, max_chars: int | None = None) -> str:
     """Render the content Archipelago exposes to its artifact-selection step."""
 
-    def render(path: Path | None, missing: str) -> str:
-        if path is None:
-            return missing
-        try:
-            return _extract_text(path)
-        except Exception as exc:
-            return f"[Error reading artifact: {exc}]"
-
     if change.artifact_type != "file":
         if change.change_type == "added":
             content = change.new_content or ""
@@ -541,22 +590,17 @@ def artifact_change_content(change: ArtifactChange, *, max_chars: int | None = N
         else:
             content = change.content_diff or ""
     else:
-        before = render(change.before_path, "[File did not exist]")
-        after = render(change.after_path, "[File was deleted]")
+        before = _stored_or_read(change.old_content, change.before_path, "[File did not exist]")
+        after = _stored_or_read(change.new_content, change.after_path, "[File was deleted]")
         if change.change_type == "added":
             content = after
         elif change.change_type == "deleted":
             content = before
+        elif change.content_diff is not None and change.after_path.suffix.lower() != ".docx":
+            # The diff snapshot_changes computed; only a DOCX diff differs here, by its review sections.
+            content = change.content_diff
         else:
-            content = "\n".join(
-                difflib.unified_diff(
-                    before.splitlines(),
-                    after.splitlines(),
-                    fromfile=f"before/{change.path}",
-                    tofile=f"after/{change.path}",
-                    lineterm="",
-                )
-            )
+            content = _file_diff(change.path, before, after)
     if max_chars is not None and len(content) > max_chars:
         return content[:max_chars] + "\n[...artifact selection content truncated]"
     return content
@@ -612,25 +656,20 @@ def artifact_text(
     return "\n\n".join(parts), names
 
 
-def visual_content_blocks(
+def visual_file_blocks(
     root: Path,
-    files: list[Path],
+    path: Path,
+    position: int,
     *,
     document_converter_image: str | None = None,
-    page_indices_by_path: dict[Path, set[int]] | None = None,
+    allow_host_document_tools: bool = False,
+    changed_indices: set[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Render recursively located APEX artifacts after flattening their paths."""
-    staging = root / ".visual_staging" / uuid.uuid4().hex
-    staging.mkdir(parents=True, exist_ok=True)
-    staged_page_indices: dict[str, set[int]] = {}
-    for index, path in enumerate(files):
-        rel = path.relative_to(root).as_posix().replace("/", "__")
-        staged_path = staging / f"{index:04d}__{rel}"
-        shutil.copy2(path, staged_path)
-        if page_indices_by_path and path in page_indices_by_path:
-            staged_page_indices[staged_path.name] = page_indices_by_path[path]
-    return render_visual_content_blocks(
-        staging,
+    """Render one artifact, labelled by its position among the rendered files and its flattened path."""
+    return visual_blocks_for_file(
+        path,
+        display_name=f"{position:04d}__{path.relative_to(root).as_posix().replace('/', '__')}",
         document_converter_image=document_converter_image,
-        pdf_page_indices=staged_page_indices,
+        allow_host_document_tools=allow_host_document_tools,
+        changed_indices=changed_indices,
     )

@@ -3,10 +3,15 @@
 
 """Local extraction and rendering for APEX grading artifacts.
 
-The document extraction behavior in this module is adapted from the Apache-2.0
-Mercor Archipelago grader at commit 0cb5c476c219a9df637e0bd37fb86b2361f4ab89.
-Only its offline artifact-processing layer is carried here; model invocation,
-artifact-selection LLMs, cloud extractors, and scoring remain owned by NeMo Gym.
+The document extraction behavior in this module is adapted from the Mercor Archipelago grader. Only its offline
+artifact-processing layer is carried here; model invocation, artifact-selection LLMs, cloud extractors, and scoring
+remain owned by NeMo Gym.
+
+Adapted source (https://github.com/Mercor-Intelligence/archipelago, revision 0cb5c476c219a9df637e0bd37fb86b2361f4ab89, Apache-2.0):
+  grading/runner/utils/file_extraction/methods/local_extractor.py
+  grading/runner/utils/file_extraction/utils/chart_extraction.py
+  grading/runner/utils/file_extraction/utils/docx_tracked_changes.py
+The upstream files carry no per-file copyright notice. NVIDIA modifications are licensed under Apache-2.0.
 """
 
 from __future__ import annotations
@@ -16,12 +21,14 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import math
 import re
 import shutil
 import subprocess
 import tempfile
 import zipfile
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,7 +48,10 @@ _TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
-_OFFICE_EXTENSIONS = {".docx", ".pptx", ".xls", ".xlsm", ".xlsx"}
+_OFFICE_EXTENSIONS = {".doc", ".docx", ".odp", ".ods", ".odt", ".ppt", ".pptx", ".xls", ".xlsm", ".xlsx"}
+# Formats with no extractor of their own: LibreOffice converts them to the format whose extractor reads them.
+_LEGACY_OFFICE_TARGETS = {".doc": "docx", ".odt": "docx", ".ods": "xlsx", ".ppt": "pptx", ".odp": "pptx"}
+_SPREADSHEET_EXTENSIONS = {".xls", ".xlsm", ".xlsx"}
 _IMAGE_MIME_TYPES = {
     ".heic": "image/heic",
     ".heif": "image/heif",
@@ -55,6 +65,91 @@ _DOCUMENT_XML_PATH = "word/document.xml"
 _COMMENTS_XML_PATH = "word/comments.xml"
 _SECTION_HEADING_RE = re.compile(r"^(SECTION|ARTICLE)\s+[0-9IVXLC]+\b|^[0-9]+\.[0-9]+")
 _MAX_VISUAL_PAGES = 10
+# Bounds on what one file may cost the verifier. A file over a bound is described to the judge, not loaded.
+_MAX_EXTRACTED_TEXT_CHARS = 4_000_000
+_MAX_DOCUMENT_BYTES = 256 * 1024 * 1024
+_MAX_OFFICE_PART_BYTES = 256 * 1024 * 1024
+_MAX_OFFICE_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+_MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024
+_TEXT_TRUNCATION_NOTE = "\n[...file content truncated: extraction limit reached]"
+_DOCUMENT_TOOL_TIMEOUT_SECONDS = 120
+# Where a containerized converter sees its scratch directory, and the private /tmp and home inside that directory.
+_CONTAINER_SCRATCH = "/apex-convert"
+_CONTAINER_WORKDIR = ".apptainer-workdir"
+# A sheet exported as one page is shown only while that page stays readable as one image: about a page and a half
+# of rows or columns at most. A longer sheet is rasterized far taller than a judge model reads at full size.
+_MAX_SINGLE_PAGE_SHEET_POINTS = 1200
+_LOCAL_IMAGE_SUFFIXES = (".sif", ".sqsh", ".sqfs", ".img")
+LOG = logging.getLogger(__name__)
+# Conversions that timed out during the current verify, for the grading record; None outside a verify.
+_CONVERSION_TIMEOUTS: ContextVar[list[dict[str, Any]] | None] = ContextVar("apex_conversion_timeouts", default=None)
+_SINGLE_PAGE_SHEETS_PDF = 'pdf:calc_pdf_Export:{"SinglePageSheets":{"type":"boolean","value":"true"}}'
+
+
+class ExtractionLimitError(ValueError):
+    """A file is too large to load for extraction."""
+
+
+class DocumentConverterError(RuntimeError):
+    """The configured document converter could not run: a fault of the verifier's setup, not of the file."""
+
+
+def start_conversion_record() -> list[dict[str, Any]]:
+    """Start a fresh record of the conversions that time out from here on, in the caller's context.
+
+    Worker threads that run with a copy of that context append to the same list.
+    """
+    timeouts: list[dict[str, Any]] = []
+    _CONVERSION_TIMEOUTS.set(timeouts)
+    return timeouts
+
+
+def conversion_timeouts() -> list[dict[str, Any]]:
+    """The current record of timed-out conversions, started if the caller's context has none."""
+    timeouts = _CONVERSION_TIMEOUTS.get()
+    return start_conversion_record() if timeouts is None else timeouts
+
+
+def resolve_converter_image(image: str | None, base_dir: Path) -> str | None:
+    """The converter image as apptainer takes it: an absolute path for a local image, else a registry URI.
+
+    A reference is local when it is written as a path (``/``, ``.``, ``~``), names an image file by its suffix,
+    or exists as a file under ``base_dir``. A URI (``docker://``, ``oras://``, ``library://``) passes through
+    unchanged, and a bare OCI reference such as ``registry/name:tag`` is addressed as ``docker://``.
+    """
+    image = (image or "").strip()
+    if not image:
+        return None
+    if "://" in image:
+        return image
+    path = Path(image).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    if image.startswith(("/", ".", "~")) or image.lower().endswith(_LOCAL_IMAGE_SUFFIXES) or path.is_file():
+        return str(path.resolve())
+    return f"docker://{image}"
+
+
+def converter_setup_problem(
+    document_converter_image: str | None, *, allow_host_document_tools: bool = False
+) -> str | None:
+    """Why the configured converter cannot run on this host, or None when it can or none is configured.
+
+    ``document_converter_image`` is a resolved reference (see ``resolve_converter_image``).
+    """
+    if not document_converter_image:
+        return None
+    if allow_host_document_tools and all(
+        any(shutil.which(executable) for executable in executables)
+        for executables in (("libreoffice", "soffice"), ("pdftoppm",))
+    ):
+        # Every tool is installed on the host and preferred, so the image is never entered.
+        return None
+    if shutil.which("apptainer") is None:
+        return f"document converter image {document_converter_image} is configured but apptainer is not on PATH"
+    if "://" not in document_converter_image and not Path(document_converter_image).is_file():
+        return f"document converter image not found: {document_converter_image}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -77,42 +172,173 @@ class ExtractedContent:
     sub_artifacts: list[SubArtifact] = field(default_factory=list)
 
 
-def extract_file_text(path: Path, *, document_converter_image: str | None = None) -> str:
+def extract_file_text(
+    path: Path,
+    *,
+    document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
+) -> str:
     """Extract judge-readable text using Archipelago's offline format semantics."""
-    return extract_file_content(path, document_converter_image=document_converter_image).text
+    return extract_file_content(
+        path,
+        document_converter_image=document_converter_image,
+        allow_host_document_tools=allow_host_document_tools,
+    ).text
 
 
-def extract_file_content(path: Path, *, document_converter_image: str | None = None) -> ExtractedContent:
-    """Extract text and Archipelago-compatible sub-artifact records."""
+def extract_file_content(
+    path: Path,
+    *,
+    document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
+) -> ExtractedContent:
+    """Extract text and Archipelago-compatible sub-artifact records, bounded per file."""
+    try:
+        content = _extract_file_content(
+            path,
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
+        )
+    except ExtractionLimitError as exc:
+        return ExtractedContent(text=f"[File not extracted: {exc}]")
+    return ExtractedContent(
+        text=_bounded_text(content.text),
+        images=content.images,
+        sub_artifacts=[
+            SubArtifact(
+                index=artifact.index,
+                type=artifact.type,
+                title=artifact.title,
+                content=_bounded_text(artifact.content),
+                images=artifact.images,
+            )
+            for artifact in content.sub_artifacts
+        ],
+    )
+
+
+def _extract_file_content(
+    path: Path,
+    *,
+    document_converter_image: str | None,
+    allow_host_document_tools: bool,
+) -> ExtractedContent:
     extension = path.suffix.lower()
     if extension in _TEXT_EXTENSIONS:
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
-        return ExtractedContent(text=text)
+        return ExtractedContent(text=read_text_bounded(path))
     if extension == ".csv":
         return ExtractedContent(text=_extract_csv(path))
     if extension == ".ipynb":
+        _check_document_size(path)
         return ExtractedContent(text=_extract_ipynb(path))
     if extension == ".docx":
+        _check_office_parts(path)
         return ExtractedContent(text=_extract_docx(path))
     if extension == ".pdf":
+        _check_document_size(path)
         return _extract_pdf(path)
     if extension in {".xlsx", ".xlsm"}:
-        return _extract_xlsx(path, document_converter_image=document_converter_image)
+        _check_office_parts(path)
+        return _extract_xlsx(
+            path,
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
+        )
     if extension == ".xls":
+        _check_document_size(path)
         return _extract_xls(path)
     if extension == ".pptx":
+        _check_office_parts(path)
         return _extract_pptx(path)
+    if target := _LEGACY_OFFICE_TARGETS.get(extension):
+        _check_document_size(path)
+        converted = _convert_with_libreoffice(
+            path,
+            target,
+            scratch_prefix="apex-legacy-office-",
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
+        )
+        if converted is None:
+            return ExtractedContent(
+                text=f"[Binary file: {path.name}, {path.stat().st_size} bytes; not converted to a readable format]"
+            )
+        try:
+            return _extract_file_content(
+                converted,
+                document_converter_image=document_converter_image,
+                allow_host_document_tools=allow_host_document_tools,
+            )
+        finally:
+            shutil.rmtree(converted.parent, ignore_errors=True)
     return ExtractedContent(text=f"[Binary file: {path.name}, {path.stat().st_size} bytes]")
 
 
+def _bounded_text(text: str) -> str:
+    if len(text) <= _MAX_EXTRACTED_TEXT_CHARS:
+        return text
+    return text[:_MAX_EXTRACTED_TEXT_CHARS] + _TEXT_TRUNCATION_NOTE
+
+
+def _read_bounded(path: Path) -> tuple[bytes, bool]:
+    """The start of a file, at most one byte per allowed character, and whether more was left unread."""
+    with path.open("rb") as stream:
+        data = stream.read(_MAX_EXTRACTED_TEXT_CHARS + 1)
+    return data[:_MAX_EXTRACTED_TEXT_CHARS], len(data) > _MAX_EXTRACTED_TEXT_CHARS
+
+
+def read_text_bounded(path: Path) -> str:
+    """Read a text file without loading more of it than the judge can be shown."""
+    data, truncated = _read_bounded(path)
+    text = data.decode("utf-8", errors="replace").strip()
+    return text + _TEXT_TRUNCATION_NOTE if truncated else text
+
+
+def _check_document_size(path: Path) -> None:
+    size = path.stat().st_size
+    if size > _MAX_DOCUMENT_BYTES:
+        raise ExtractionLimitError(f"{path.name} is {size} bytes; the extraction limit is {_MAX_DOCUMENT_BYTES}")
+
+
+def _check_office_parts(path: Path) -> None:
+    """Refuse an Office package whose parts would not fit in memory, before any library opens them."""
+    _check_document_size(path)
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            parts = archive.infolist()
+    except zipfile.BadZipFile:
+        # Not a package: the format's own reader reports that.
+        return
+    total = 0
+    for part in parts:
+        if part.file_size > _MAX_OFFICE_PART_BYTES:
+            raise ExtractionLimitError(
+                f"{path.name} part {part.filename!r} expands to {part.file_size} bytes; "
+                f"the limit is {_MAX_OFFICE_PART_BYTES}"
+            )
+        total += part.file_size
+    if total > _MAX_OFFICE_UNCOMPRESSED_BYTES:
+        raise ExtractionLimitError(
+            f"{path.name} expands to {total} bytes; the limit is {_MAX_OFFICE_UNCOMPRESSED_BYTES}"
+        )
+
+
 def _extract_csv(path: Path) -> str:
+    data, truncated = _read_bounded(path)
+    text: str | None = None
     for encoding in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
         try:
-            with path.open(encoding=encoding, newline="") as stream:
-                return "\n".join("\t".join(row) for row in csv.reader(stream))
-        except UnicodeDecodeError:
-            continue
-    return path.read_text(encoding="utf-8", errors="replace")
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError as exc:
+            if truncated and encoding == "utf-8" and exc.start >= len(data) - 3:
+                # The read stopped inside a multi-byte character; the bytes before it are still UTF-8.
+                text = data[: exc.start].decode(encoding)
+                break
+    if text is None:
+        return data.decode("utf-8", errors="replace")
+    rendered = "\n".join("\t".join(row) for row in csv.reader(io.StringIO(text, newline="")))
+    return rendered + _TEXT_TRUNCATION_NOTE if truncated else rendered
 
 
 def _join_ipynb_source(source: Any) -> str:
@@ -508,13 +734,156 @@ def _hidden_xlsx_sheets(path: Path) -> set[str]:
     return hidden
 
 
-def _resolve_document_command(executable: str, document_converter_image: str | None) -> tuple[str, ...] | None:
-    if local_executable := shutil.which(executable):
-        return (local_executable,)
-    apptainer = shutil.which("apptainer")
-    if apptainer and document_converter_image and Path(document_converter_image).is_file():
-        return (apptainer, "exec", "--cleanenv", document_converter_image, executable)
-    return None
+@dataclass(frozen=True)
+class _DocumentTool:
+    """One LibreOffice or Poppler executable: inside the converter image, or on this host when that is allowed."""
+
+    executable: str
+    apptainer: str | None = None
+    image: str | None = None
+
+    @property
+    def containerized(self) -> bool:
+        return self.apptainer is not None
+
+    def command(self, scratch: Path) -> tuple[list[str], str]:
+        """The command prefix, and the path under which the tool sees ``scratch``.
+
+        A containerized tool sees nothing of the host but ``scratch``: no host /tmp, home or working directory.
+        """
+        if self.apptainer is None or self.image is None:
+            return [self.executable], str(scratch)
+        workdir = scratch / _CONTAINER_WORKDIR
+        workdir.mkdir(mode=0o700, exist_ok=True)
+        return [
+            self.apptainer,
+            "exec",
+            "--cleanenv",
+            "--containall",
+            # Keep the container's /tmp and home on disk inside the scratch directory, not in a small session tmpfs.
+            "--workdir",
+            str(workdir),
+            "--bind",
+            f"{scratch}:{_CONTAINER_SCRATCH}",
+            self.image,
+            self.executable,
+        ], _CONTAINER_SCRATCH
+
+
+def _resolve_document_command(
+    executables: tuple[str, ...],
+    document_converter_image: str | None,
+    *,
+    allow_host_document_tools: bool = False,
+) -> _DocumentTool | None:
+    """Where to run a document tool, or None when no converter is configured.
+
+    The tools open files the model wrote, so by default they run only inside the converter image. Tools installed
+    on this host are used, and preferred, only when ``allow_host_document_tools`` is set. A converter image that
+    is configured but cannot be used is a ``DocumentConverterError``, never a silent skip.
+    """
+    if allow_host_document_tools:
+        for executable in executables:
+            if local_executable := shutil.which(executable):
+                return _DocumentTool(local_executable)
+    if not document_converter_image:
+        return None
+    if problem := converter_setup_problem(document_converter_image):
+        raise DocumentConverterError(problem)
+    return _DocumentTool(executables[0], apptainer=shutil.which("apptainer"), image=document_converter_image)
+
+
+def _run_document_tool(
+    tool: _DocumentTool, scratch: Path, arguments: list[str], *, source: str = ""
+) -> subprocess.CompletedProcess[bytes] | None:
+    """Run a tool on files under ``scratch``; None when it timed out or, on the host, could not start.
+
+    ``arguments`` name files by the root ``tool.command(scratch)`` returns. A non-zero exit is the caller's to
+    read: the tool rejected the file. A container that could not start is a ``DocumentConverterError``. A timeout
+    is not: a file the model wrote can cause one, so the caller falls back to the file's text, and the timeout is
+    logged and recorded for the grading record under ``source``, the name of the file being converted.
+    """
+    command, _ = tool.command(scratch)
+    try:
+        process = subprocess.run(
+            [*command, *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=_DOCUMENT_TOOL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        executable = Path(tool.executable).name
+        LOG.warning("%s timed out after %ss converting %s", executable, _DOCUMENT_TOOL_TIMEOUT_SECONDS, source)
+        timeouts = _CONVERSION_TIMEOUTS.get()
+        if timeouts is not None:
+            timeouts.append({"tool": executable, "file": source, "timeout_seconds": _DOCUMENT_TOOL_TIMEOUT_SECONDS})
+        return None
+    except OSError as exc:
+        if tool.containerized:
+            raise DocumentConverterError(f"document converter could not start: {exc}") from exc
+        return None
+    if tool.containerized and process.returncode == 255 and b"FATAL" in process.stderr:
+        # Apptainer's own failure (an image it cannot mount, a missing executable), not the tool's verdict on a file.
+        detail = process.stderr.decode("utf-8", errors="replace").strip()[-500:]
+        raise DocumentConverterError(f"document converter container failed: {detail}")
+    return process
+
+
+def _convert_with_libreoffice(
+    path: Path,
+    convert_to: str,
+    *,
+    scratch_prefix: str,
+    extra_arguments: tuple[str, ...] = (),
+    document_converter_image: str | None,
+    allow_host_document_tools: bool,
+) -> Path | None:
+    """Convert a copy of ``path`` with LibreOffice, using an isolated profile.
+
+    Returns the converted file, alone with its inputs in a scratch directory (its parent) that the caller removes;
+    None when no converter is configured or LibreOffice did not convert the file.
+    """
+    tool = _resolve_document_command(
+        ("libreoffice", "soffice"),
+        document_converter_image,
+        allow_host_document_tools=allow_host_document_tools,
+    )
+    if tool is None:
+        return None
+    scratch = Path(tempfile.mkdtemp(prefix=scratch_prefix))
+    output: Path | None = None
+    try:
+        (scratch / "in").mkdir()
+        shutil.copyfile(path, scratch / "in" / f"document{path.suffix.lower()}")
+        _, root = tool.command(scratch)
+        process = _run_document_tool(
+            tool,
+            scratch,
+            [
+                "--headless",
+                *extra_arguments,
+                f"-env:UserInstallation=file://{root}/profile",
+                "--convert-to",
+                convert_to,
+                "--outdir",
+                root,
+                f"{root}/in/document{path.suffix.lower()}",
+            ],
+            source=path.name,
+        )
+        candidate = scratch / f"document.{convert_to.split(':', 1)[0]}"
+        if process is not None and process.returncode == 0 and candidate.is_file():
+            output = candidate
+    finally:
+        if output is None:
+            shutil.rmtree(scratch, ignore_errors=True)
+    return output
+
+
+def _sheet_rows(sheet: Any) -> Any:
+    """A worksheet's rows; none for a chartsheet, which holds a chart and no cells."""
+    return sheet.iter_rows() if hasattr(sheet, "iter_rows") else ()
 
 
 def _xlsx_has_uncached_formulas(path: Path) -> bool:
@@ -527,7 +896,7 @@ def _xlsx_has_uncached_formulas(path: Path) -> bool:
             formula_coordinates = {
                 (sheet_name, cell.coordinate)
                 for sheet_name in formulas.sheetnames
-                for row in formulas[sheet_name].iter_rows()
+                for row in _sheet_rows(formulas[sheet_name])
                 for cell in row
                 if cell.data_type == "f" or (cell.value is not None and str(cell.value).startswith("="))
             }
@@ -541,7 +910,7 @@ def _xlsx_has_uncached_formulas(path: Path) -> bool:
             return any(
                 cell.value is None and (sheet_name, getattr(cell, "coordinate", None)) in formula_coordinates
                 for sheet_name in values.sheetnames
-                for row in values[sheet_name].iter_rows()
+                for row in _sheet_rows(values[sheet_name])
                 for cell in row
             )
         finally:
@@ -554,51 +923,26 @@ def _evaluate_excel_formulas_with_libreoffice(
     path: Path,
     *,
     document_converter_image: str | None,
+    allow_host_document_tools: bool = False,
 ) -> bytes | None:
     """Re-save a workbook through LibreOffice so formula cells gain cached values."""
-    command = _resolve_document_command("libreoffice", document_converter_image) or _resolve_document_command(
-        "soffice", document_converter_image
-    )
-    if command is None:
-        return None
-
-    input_path: Path | None = None
-    output_dir: Path | None = None
-    profile_dir: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=path.suffix, prefix="formula_eval_") as stream:
-            stream.write(path.read_bytes())
-            input_path = Path(stream.name)
-        output_dir = Path(tempfile.mkdtemp(prefix="formula_eval_out_"))
-        profile_dir = Path(tempfile.mkdtemp(prefix="libreoffice_profile_"))
-        process = subprocess.run(
-            [
-                *command,
-                "--headless",
-                "--calc",
-                f"-env:UserInstallation=file://{profile_dir}",
-                "--convert-to",
-                "xlsx",
-                "--outdir",
-                str(output_dir),
-                str(input_path),
-            ],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=120,
+        recalculated = _convert_with_libreoffice(
+            path,
+            "xlsx",
+            scratch_prefix="apex-formula-eval-",
+            extra_arguments=("--calc",),
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
         )
-        output_path = output_dir / f"{input_path.stem}.xlsx"
-        return output_path.read_bytes() if process.returncode == 0 and output_path.is_file() else None
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return None
+    if recalculated is None:
+        return None
+    try:
+        return recalculated.read_bytes()
     finally:
-        if input_path is not None:
-            input_path.unlink(missing_ok=True)
-        if output_dir is not None:
-            shutil.rmtree(output_dir, ignore_errors=True)
-        if profile_dir is not None:
-            shutil.rmtree(profile_dir, ignore_errors=True)
+        shutil.rmtree(recalculated.parent, ignore_errors=True)
 
 
 def _has_charts_in_xlsx(path: Path) -> bool:
@@ -615,15 +959,31 @@ def _has_charts_in_xlsx(path: Path) -> bool:
             workbook.close()
 
 
+def _png_data_url(data: bytes) -> str:
+    return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+
+
 def _pdf_page_data_urls(
     pdf_path: Path,
     *,
     document_converter_image: str | None,
+    allow_host_document_tools: bool = False,
     page_indices: set[int] | None = None,
+    source: str | None = None,
 ) -> list[tuple[int, str]]:
+    """Rasterize the requested pages (the first pages when none are requested), capped at the visual page limit.
+
+    ``source`` names the file the PDF stands for, for the record of a rasterization that timed out.
+    """
+    source = source or pdf_path.name
     page_numbers = sorted(index + 1 for index in page_indices)[:_MAX_VISUAL_PAGES] if page_indices else None
-    command = _resolve_document_command("pdftoppm", document_converter_image)
-    if command is None:
+    tool = _resolve_document_command(
+        ("pdftoppm",), document_converter_image, allow_host_document_tools=allow_host_document_tools
+    )
+    if tool is None:
+        if not allow_host_document_tools:
+            # No converter configured: the PDF is graded on its extracted text.
+            return []
         from pdf2image import convert_from_path
 
         ranges = (
@@ -635,19 +995,22 @@ def _pdf_page_data_urls(
             for offset, page in enumerate(pages):
                 buffer = io.BytesIO()
                 page.save(buffer, format="PNG")
-                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-                results.append((first_page + offset, f"data:image/png;base64,{encoded}"))
+                results.append((first_page + offset, _png_data_url(buffer.getvalue())))
         return results
 
-    output_dir = Path(tempfile.mkdtemp(prefix="apex-chart-pages-"))
+    scratch = Path(tempfile.mkdtemp(prefix="apex-pdf-pages-"))
     try:
+        (scratch / "in").mkdir()
+        shutil.copyfile(pdf_path, scratch / "in" / "document.pdf")
+        _, root = tool.command(scratch)
+        document = f"{root}/in/document.pdf"
         if page_numbers:
             selected: list[tuple[int, str]] = []
             for page_number in page_numbers:
-                prefix = output_dir / f"selected-{page_number}"
-                process = subprocess.run(
+                process = _run_document_tool(
+                    tool,
+                    scratch,
                     [
-                        *command,
                         "-png",
                         "-r",
                         "150",
@@ -656,42 +1019,40 @@ def _pdf_page_data_urls(
                         "-l",
                         str(page_number),
                         "-singlefile",
-                        str(pdf_path),
-                        str(prefix),
+                        document,
+                        f"{root}/selected-{page_number}",
                     ],
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=120,
+                    source=source,
                 )
-                image_path = prefix.with_suffix(".png")
-                if process.returncode == 0 and image_path.is_file():
-                    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-                    selected.append((page_number, f"data:image/png;base64,{encoded}"))
+                image_path = scratch / f"selected-{page_number}.png"
+                if process is not None and process.returncode == 0 and image_path.is_file():
+                    selected.append((page_number, _png_data_url(image_path.read_bytes())))
             return selected
 
-        prefix = output_dir / "page"
-        process = subprocess.run(
-            [*command, "-png", "-r", "150", "-f", "1", "-l", str(_MAX_VISUAL_PAGES), str(pdf_path), str(prefix)],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=120,
+        process = _run_document_tool(
+            tool,
+            scratch,
+            ["-png", "-r", "150", "-f", "1", "-l", str(_MAX_VISUAL_PAGES), document, f"{root}/page"],
+            source=source,
         )
-        if process.returncode != 0:
+        if process is None or process.returncode != 0:
             return []
-        results: list[tuple[int, str]] = []
-        for page_number, image_path in enumerate(sorted(output_dir.glob("page-*.png")), 1):
-            encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-            results.append((page_number, f"data:image/png;base64,{encoded}"))
-        return results
-    except (OSError, subprocess.TimeoutExpired):
+        return [
+            (page_number, _png_data_url(image_path.read_bytes()))
+            for page_number, image_path in enumerate(sorted(scratch.glob("page-*.png")), 1)
+        ]
+    except OSError:
         return []
     finally:
-        shutil.rmtree(output_dir, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _pdf_to_chart_images(pdf_path: Path, *, document_converter_image: str | None) -> list[dict[str, Any]]:
+def _pdf_to_chart_images(
+    pdf_path: Path,
+    *,
+    document_converter_image: str | None,
+    allow_host_document_tools: bool = False,
+) -> list[dict[str, Any]]:
     try:
         return [
             {
@@ -701,15 +1062,26 @@ def _pdf_to_chart_images(pdf_path: Path, *, document_converter_image: str | None
                 "caption": f"Chart from Excel (Page {page_number})",
             }
             for index, (page_number, url) in enumerate(
-                _pdf_page_data_urls(pdf_path, document_converter_image=document_converter_image),
+                _pdf_page_data_urls(
+                    pdf_path,
+                    document_converter_image=document_converter_image,
+                    allow_host_document_tools=allow_host_document_tools,
+                ),
                 1,
             )
         ]
+    except DocumentConverterError:
+        raise
     except Exception:
         return []
 
 
-def _extract_xlsx(path: Path, *, document_converter_image: str | None = None) -> ExtractedContent:
+def _extract_xlsx(
+    path: Path,
+    *,
+    document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
+) -> ExtractedContent:
     from openpyxl import load_workbook
 
     hidden_sheets = _hidden_xlsx_sheets(path)
@@ -719,7 +1091,7 @@ def _extract_xlsx(path: Path, *, document_converter_image: str | None = None) ->
         for sheet_name in formula_workbook.sheetnames:
             if sheet_name in hidden_sheets:
                 continue
-            for row in formula_workbook[sheet_name].iter_rows():
+            for row in _sheet_rows(formula_workbook[sheet_name]):
                 for cell in row:
                     if cell.data_type == "f" and isinstance(cell.value, str) and cell.value.startswith("="):
                         formulas[(sheet_name, cell.coordinate)] = cell.value
@@ -728,7 +1100,11 @@ def _extract_xlsx(path: Path, *, document_converter_image: str | None = None) ->
 
     unresolved = _xlsx_has_uncached_formulas(path)
     recalculated = (
-        _evaluate_excel_formulas_with_libreoffice(path, document_converter_image=document_converter_image)
+        _evaluate_excel_formulas_with_libreoffice(
+            path,
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
+        )
         if unresolved
         else None
     )
@@ -745,7 +1121,11 @@ def _extract_xlsx(path: Path, *, document_converter_image: str | None = None) ->
             rows: list[str] = []
             formula_lines: list[str] = []
             format_lines: list[str] = []
-            for row in workbook[sheet_name].iter_rows():
+            sheet = workbook[sheet_name]
+            if not hasattr(sheet, "iter_rows"):
+                # A chartsheet stays a sheet of the workbook, so a change to its chart is still a sheet change.
+                rows.append("[chart sheet: no cells]")
+            for row in _sheet_rows(sheet):
                 values: list[str] = []
                 for cell in row:
                     coordinate = getattr(cell, "coordinate", "")
@@ -785,12 +1165,17 @@ def _extract_xlsx(path: Path, *, document_converter_image: str | None = None) ->
     ]
     chart_images: list[dict[str, Any]] = []
     if _has_charts_in_xlsx(path):
-        pdf_path = _convert_office_to_pdf(path, document_converter_image=document_converter_image)
+        pdf_path = _convert_office_to_pdf(
+            path,
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
+        )
         try:
             if pdf_path is not None:
                 chart_images = _pdf_to_chart_images(
                     pdf_path,
                     document_converter_image=document_converter_image,
+                    allow_host_document_tools=allow_host_document_tools,
                 )
         finally:
             if pdf_path is not None:
@@ -849,43 +1234,27 @@ def _extract_xls(path: Path) -> ExtractedContent:
     return ExtractedContent(text="\n\n".join(parts), sub_artifacts=sub_artifacts)
 
 
-def _convert_office_to_pdf(path: Path, *, document_converter_image: str | None = None) -> Path | None:
-    """Convert Office input to a temporary PDF using an isolated LibreOffice profile."""
-    command = _resolve_document_command("libreoffice", document_converter_image) or _resolve_document_command(
-        "soffice", document_converter_image
-    )
-    if command is None:
-        return None
-    output_dir = Path(tempfile.mkdtemp(prefix="apex-office-pdf-"))
-    profile_dir = Path(tempfile.mkdtemp(prefix="apex-lo-profile-"))
-    output_pdf: Path | None = None
+def _convert_office_to_pdf(
+    path: Path,
+    *,
+    document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
+    single_page_sheets: bool = False,
+) -> Path | None:
+    """Convert Office input to a temporary PDF; the caller removes the PDF's directory.
+
+    With ``single_page_sheets`` a workbook is exported one sheet per page, so a page number names a sheet.
+    """
     try:
-        process = subprocess.run(
-            [
-                *command,
-                "--headless",
-                f"-env:UserInstallation=file://{profile_dir.as_posix()}",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(output_dir),
-                str(path),
-            ],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=120,
+        return _convert_with_libreoffice(
+            path,
+            _SINGLE_PAGE_SHEETS_PDF if single_page_sheets else "pdf",
+            scratch_prefix="apex-office-pdf-",
+            document_converter_image=document_converter_image,
+            allow_host_document_tools=allow_host_document_tools,
         )
-        candidate = output_dir / f"{path.stem}.pdf"
-        if process.returncode == 0 and candidate.exists():
-            output_pdf = candidate
-    except subprocess.TimeoutExpired:
-        pass
-    finally:
-        shutil.rmtree(profile_dir, ignore_errors=True)
-        if output_pdf is None:
-            shutil.rmtree(output_dir, ignore_errors=True)
-    return output_pdf
+    except OSError:
+        return None
 
 
 def _pdf_visual_blocks(
@@ -894,81 +1263,200 @@ def _pdf_visual_blocks(
     *,
     converted: bool = False,
     document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
     page_indices: set[int] | None = None,
+    page_labels: dict[int, str] | None = None,
 ) -> list[dict[str, Any]]:
     pages = _pdf_page_data_urls(
         path,
         document_converter_image=document_converter_image,
+        allow_host_document_tools=allow_host_document_tools,
         page_indices=page_indices,
+        source=display_name,
     )
     label = f"\n{display_name} (rendered from Office):" if converted else f"\n{display_name}:"
     blocks: list[dict[str, Any]] = [{"type": "text", "text": label}]
     for page_number, url in pages:
-        blocks.append({"type": "text", "text": f"Page {page_number}"})
+        blocks.append({"type": "text", "text": (page_labels or {}).get(page_number - 1, f"Page {page_number}")})
         blocks.append({"type": "image_url", "image_url": {"url": url}})
     return blocks
+
+
+def _pptx_shown_slides(path: Path) -> list[int]:
+    """Indices of the slides LibreOffice exports: a hidden slide gets no PDF page."""
+    from pptx import Presentation
+
+    return [index for index, slide in enumerate(Presentation(str(path)).slides) if slide._element.get("show") != "0"]
+
+
+def _workbook_sheet_count(path: Path) -> int:
+    if path.suffix.lower() == ".xls":
+        import xlrd
+
+        return xlrd.open_workbook(str(path), on_demand=True).nsheets
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(path, read_only=True)
+    try:
+        return len(workbook.sheetnames)
+    finally:
+        workbook.close()
+
+
+def _changed_office_pages(
+    path: Path, pdf_path: Path, indices: set[int], *, single_page_sheets: bool
+) -> dict[int, str] | None:
+    """PDF page index -> label for the changed slides or sheets of a converted Office file.
+
+    None when the pages cannot be tied to slides or sheets (the export did not produce one page per shown slide
+    or per sheet), or when a changed sheet's single page is too large to read as one image; the caller then shows
+    the leading pages of the ordinary paginated export, as for a file with no known changed part.
+    """
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(str(pdf_path))
+        page_count = len(reader.pages)
+        if path.suffix.lower() == ".pptx":
+            shown = _pptx_shown_slides(path)
+            if len(shown) != page_count:
+                return None
+            pages = {shown.index(index): f"Slide {index + 1}" for index in sorted(indices) if index in shown}
+        elif single_page_sheets:
+            if _workbook_sheet_count(path) != page_count:
+                return None
+            pages = {index: f"Sheet {index + 1}" for index in sorted(indices) if index < page_count}
+            for index in pages:
+                box = reader.pages[index].mediabox
+                if max(float(box.width), float(box.height)) > _MAX_SINGLE_PAGE_SHEET_POINTS:
+                    # A long or wide sheet on one page is an image too large to read.
+                    return None
+        else:
+            return None
+    except Exception:
+        return None
+    return pages or None
+
+
+def _office_visual_blocks(
+    display_name: str,
+    path: Path,
+    *,
+    document_converter_image: str | None,
+    allow_host_document_tools: bool,
+    indices: set[int] | None,
+) -> list[dict[str, Any]]:
+    converter = {
+        "document_converter_image": document_converter_image,
+        "allow_host_document_tools": allow_host_document_tools,
+    }
+    pdf_path: Path | None = None
+    page_labels: dict[int, str] | None = None
+    if indices and path.suffix.lower() in _SPREADSHEET_EXTENSIONS:
+        # One sheet per page ties a page to a changed sheet. It is kept only when that works and the changed
+        # sheets stay readable; otherwise the workbook is shown by the leading pages of the paginated export.
+        pdf_path = _convert_office_to_pdf(path, single_page_sheets=True, **converter)
+        if pdf_path is not None:
+            page_labels = _changed_office_pages(path, pdf_path, indices, single_page_sheets=True)
+            if page_labels is None:
+                shutil.rmtree(pdf_path.parent, ignore_errors=True)
+                pdf_path = None
+    if pdf_path is None:
+        pdf_path = _convert_office_to_pdf(path, **converter)
+        if pdf_path is not None and indices:
+            page_labels = _changed_office_pages(path, pdf_path, indices, single_page_sheets=False)
+    if pdf_path is None:
+        text = extract_file_text(path, **converter)
+        return [{"type": "text", "text": f"\n{display_name} (text fallback):\n{text}"}] if text else []
+    try:
+        return _pdf_visual_blocks(
+            display_name,
+            pdf_path,
+            converted=True,
+            page_indices=set(page_labels) if page_labels else None,
+            page_labels=page_labels,
+            **converter,
+        )
+    finally:
+        shutil.rmtree(pdf_path.parent, ignore_errors=True)
+
+
+def renders_as_images(path: Path) -> bool:
+    """Whether a file can yield image evidence: a document that is rasterized, or an image itself."""
+    extension = path.suffix.lower()
+    return extension == ".pdf" or extension in _OFFICE_EXTENSIONS or extension in _IMAGE_MIME_TYPES
+
+
+def visual_blocks_for_file(
+    path: Path,
+    *,
+    display_name: str | None = None,
+    document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
+    changed_indices: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Render one artifact as text and real image blocks; documents are rasterized page by page.
+
+    ``changed_indices`` are the zero-based pages (PDF), slides (PPTX) or sheets (workbooks) that changed: those are
+    the pages rendered, so a change late in a file is shown rather than the file's first pages.
+    """
+    name = display_name or path.name
+    extension = path.suffix.lower()
+    try:
+        if extension in _TEXT_EXTENSIONS or extension in {".csv", ".ipynb"}:
+            text = extract_file_text(path)
+            return [{"type": "text", "text": f"\n{name}:\n{text}"}] if text else []
+        if extension in _OFFICE_EXTENSIONS:
+            return _office_visual_blocks(
+                name,
+                path,
+                document_converter_image=document_converter_image,
+                allow_host_document_tools=allow_host_document_tools,
+                indices=changed_indices,
+            )
+        if extension == ".pdf":
+            return _pdf_visual_blocks(
+                name,
+                path,
+                document_converter_image=document_converter_image,
+                allow_host_document_tools=allow_host_document_tools,
+                page_indices=changed_indices,
+            )
+        if mime_type := _IMAGE_MIME_TYPES.get(extension):
+            size = path.stat().st_size
+            if size > _MAX_INLINE_IMAGE_BYTES:
+                return [{"type": "text", "text": f"\n{name}: [image of {size} bytes is too large to attach]"}]
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            return [
+                {"type": "text", "text": f"\n{name}:"},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}},
+            ]
+    except DocumentConverterError:
+        raise
+    except Exception as exc:
+        return [{"type": "text", "text": f"\n{name}: [Error: {exc}]"}]
+    return []
 
 
 def visual_content_blocks(
     output_dir: Path,
     *,
     document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
     pdf_page_indices: dict[str, set[int]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Render artifacts as text and real image blocks; PDFs are rasterized page by page."""
+    """Render a directory's artifacts; ``pdf_page_indices`` maps a file name to its changed pages, slides or sheets."""
     if not output_dir.is_dir():
         return []
     blocks: list[dict[str, Any]] = []
-    converted_pdfs: list[Path] = []
-    try:
-        for path in sorted(output_dir.iterdir()):
-            if not path.is_file():
-                continue
-            extension = path.suffix.lower()
-            try:
-                if extension in _TEXT_EXTENSIONS or extension in {".csv", ".ipynb"}:
-                    text = extract_file_text(path)
-                    if text:
-                        blocks.append({"type": "text", "text": f"\n{path.name}:\n{text}"})
-                elif extension in _OFFICE_EXTENSIONS:
-                    pdf_path = _convert_office_to_pdf(
-                        path,
-                        document_converter_image=document_converter_image,
-                    )
-                    if pdf_path is None:
-                        text = extract_file_text(path)
-                        if text:
-                            blocks.append({"type": "text", "text": f"\n{path.name} (text fallback):\n{text}"})
-                        continue
-                    converted_pdfs.append(pdf_path)
-                    blocks.extend(
-                        _pdf_visual_blocks(
-                            path.name,
-                            pdf_path,
-                            converted=True,
-                            document_converter_image=document_converter_image,
-                        )
-                    )
-                elif extension == ".pdf":
-                    blocks.extend(
-                        _pdf_visual_blocks(
-                            path.name,
-                            path,
-                            document_converter_image=document_converter_image,
-                            page_indices=(pdf_page_indices or {}).get(path.name),
-                        )
-                    )
-                elif mime_type := _IMAGE_MIME_TYPES.get(extension):
-                    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-                    blocks.extend(
-                        [
-                            {"type": "text", "text": f"\n{path.name}:"},
-                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}},
-                        ]
-                    )
-            except Exception as exc:
-                blocks.append({"type": "text", "text": f"\n{path.name}: [Error: {exc}]"})
-    finally:
-        for path in converted_pdfs:
-            shutil.rmtree(path.parent, ignore_errors=True)
+    for path in sorted(output_dir.iterdir()):
+        if path.is_file():
+            blocks.extend(
+                visual_blocks_for_file(
+                    path,
+                    document_converter_image=document_converter_image,
+                    allow_host_document_tools=allow_host_document_tools,
+                    changed_indices=(pdf_page_indices or {}).get(path.name),
+                )
+            )
     return blocks

@@ -8,14 +8,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextvars
+import functools
 import json
 import re
 import shutil
 import tempfile
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,9 +39,15 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import VerifierFixture, is_judge_failure, is_judge_provider_stop
 from resources_servers.apex_agents.artifacts import (
+    ArtifactChange,
     SnapshotLimitError,
     safe_extract_snapshot,
     snapshot_changes,
+)
+from resources_servers.apex_agents.file_extraction import (
+    converter_setup_problem,
+    resolve_converter_image,
+    start_conversion_record,
 )
 from resources_servers.apex_agents.judge import grade_apex_output
 from resources_servers.apex_agents.verifier_fixture import create_fixture_server, invoke_fixture, reseed_fixture
@@ -68,7 +78,12 @@ class ApexResourcesServerConfig(BaseResourcesServerConfig):
     world_cache_dir: str = "benchmarks/apex_agents/data/world_cache"
     task_files_cache_dir: str = "benchmarks/apex_agents/data/task_files_cache"
     artifact_output_dir: Optional[str] = "results/apex_agents_artifacts"
+    # LibreOffice and Poppler open files the model wrote, so they run only inside this Apptainer image, with
+    # nothing of the host visible but one scratch directory. Unset, documents are graded on extracted text alone.
     document_converter_image: Optional[str] = None
+    # Opt in to the copies of those tools installed on this host (preferred over the image when present). Off by
+    # default: a host tool runs model-written documents outside any sandbox.
+    allow_host_document_tools: bool = False
 
 
 class ApexSeedSessionRequest(BaseSeedSessionRequest):
@@ -133,19 +148,101 @@ class _PolicyOutputRejected(Exception):
     """The final snapshot, which the policy's work produced, breaks a configured limit: a scored 0."""
 
 
+@dataclass(frozen=True)
+class _PreparedSubmission:
+    """What the blocking half of a verify produced: the extracted final snapshot and its changes."""
+
+    final_root: Path
+    changes: list[ArtifactChange]
+    artifact_paths: list[str]
+    persisted_output_dir: Optional[Path]
+
+
+class _VerifyWorkspace:
+    """One verify's scratch directory and the worker-thread work that reads it.
+
+    Blocking work runs on the server's bounded pool through ``run``. The directory is removed by ``release``,
+    which first waits for every piece of that work to return: a verify that fails or is cancelled while a
+    conversion is still running does not pull the files out from under it.
+    """
+
+    _releases: set[asyncio.Future] = set()
+
+    def __init__(self, executor: ThreadPoolExecutor) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="apex-verify-"))
+        self._executor = executor
+        self._pending: set[asyncio.Future] = set()
+
+    async def run(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        call = functools.partial(function, *args, **kwargs)
+        # The worker runs with a copy of this task's context, so what it records reaches this verify.
+        work = asyncio.get_running_loop().run_in_executor(self._executor, contextvars.copy_context().run, call)
+        self._pending.add(work)
+        work.add_done_callback(self._settled)
+        # Shielded: cancelling the verify cannot stop a thread, so its work stays tracked until it returns.
+        return await asyncio.shield(work)
+
+    def _settled(self, work: asyncio.Future) -> None:
+        self._pending.discard(work)
+        if not work.cancelled():
+            work.exception()
+
+    def release(self) -> asyncio.Future:
+        """Remove the scratch directory once no worker is using it; the returned future settles when it is gone."""
+
+        async def remove() -> None:
+            while self._pending:
+                await asyncio.wait(set(self._pending))
+            await asyncio.get_running_loop().run_in_executor(
+                self._executor, functools.partial(shutil.rmtree, self.root, ignore_errors=True)
+            )
+
+        release = asyncio.ensure_future(remove())
+        # Held until done, so a cancelled verify does not leave the removal unreferenced.
+        self._releases.add(release)
+        release.add_done_callback(self._releases.discard)
+        return release
+
+
+def _task_instruction(params_input: Any) -> str:
+    """The task instruction the agent was given: the user's text, from string content and from text blocks."""
+    if isinstance(params_input, str):
+        return params_input
+    parts: list[str] = []
+    for item in params_input:
+        payload = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+        if payload.get("role") != "user":
+            continue
+        content = payload.get("content", "")
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        for block in content or []:
+            block = block.model_dump() if hasattr(block, "model_dump") else block
+            if isinstance(block, dict) and block.get("type") in {"input_text", "output_text", "text"}:
+                parts.append(str(block.get("text") or ""))
+    return "\n\n".join(part for part in parts if part).strip()
+
+
 class ApexResourcesServer(SimpleResourcesServer):
     config: ApexResourcesServerConfig
     _semaphore: Any = None
+    _executor: Any = None
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._semaphore = asyncio.Semaphore(self.config.num_processes)
+        # Extraction, document conversion and persistence block; they run here, never on the event loop.
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, self.config.num_processes), thread_name_prefix="apex-verify"
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.get("/world")(self.world)
         app.get("/task_files")(self.task_files)
         app.router.on_startup.append(self._preflight_world_cache)
+        app.router.on_startup.append(self._preflight_document_converter)
         return app
 
     def _world_cache_dir(self) -> Path:
@@ -161,12 +258,20 @@ class ApexResourcesServer(SimpleResourcesServer):
         return path.resolve()
 
     def _document_converter_image(self) -> str | None:
-        if not self.config.document_converter_image:
-            return None
-        path = Path(self.config.document_converter_image).expanduser()
-        if not path.is_absolute():
-            path = PARENT_DIR / path
-        return str(path.resolve())
+        return resolve_converter_image(self.config.document_converter_image, PARENT_DIR)
+
+    async def _preflight_document_converter(self) -> None:
+        """Refuse to start with a converter that cannot run, rather than mask every document task at verify time."""
+        problem = converter_setup_problem(
+            self._document_converter_image(), allow_host_document_tools=self.config.allow_host_document_tools
+        )
+        if problem:
+            raise RuntimeError(
+                f"Apex document converter is not usable: {problem}. Either point `document_converter_image` at an "
+                "image this host can run with apptainer, or set `allow_host_document_tools: true` to use "
+                "LibreOffice and Poppler installed on this host, or set `document_converter_image: null` to grade "
+                "Office and PDF files from their extracted text only"
+            )
 
     async def _preflight_world_cache(self) -> None:
         """Require preprocessing before this server accepts rollouts."""
@@ -388,6 +493,51 @@ class ApexResourcesServer(SimpleResourcesServer):
             encoding="utf-8",
         )
 
+    def _prepare_submission(
+        self, body: ApexVerifyRequest, snapshots: dict[str, bytes], root: Path
+    ) -> _PreparedSubmission:
+        """The blocking half of a verify: unpack both snapshots, diff them and persist the submission."""
+        initial_archive_path = root / "initial.zip"
+        final_archive_path = root / "final.zip"
+        initial_root = root / "initial"
+        final_root = root / "final"
+        initial_root.mkdir()
+        final_root.mkdir()
+        initial_archive_path.write_bytes(snapshots["initial"])
+        final_archive_path.write_bytes(snapshots["final"])
+        initial_files = safe_extract_snapshot(
+            initial_archive_path,
+            initial_root,
+            max_files=self.config.max_artifact_files,
+            max_uncompressed_bytes=self.config.max_uncompressed_bytes,
+        )
+        try:
+            final_files = safe_extract_snapshot(
+                final_archive_path,
+                final_root,
+                max_files=self.config.max_artifact_files,
+                max_uncompressed_bytes=self.config.max_uncompressed_bytes,
+            )
+        except SnapshotLimitError as exc:
+            raise _PolicyOutputRejected(f"final artifact snapshot: {exc}") from exc
+        changes = snapshot_changes(
+            initial_root,
+            initial_files,
+            final_root,
+            final_files,
+            document_converter_image=self._document_converter_image(),
+            allow_host_document_tools=self.config.allow_host_document_tools,
+        )
+        artifact_paths = [change.path for change in changes]
+        persisted_output_dir = self._persist_submission(
+            body,
+            initial_archive_path,
+            final_archive_path,
+            final_root,
+            artifact_paths,
+        )
+        return _PreparedSubmission(final_root, changes, artifact_paths, persisted_output_dir)
+
     async def verify(self, body: ApexVerifyRequest) -> ApexVerifyResponse:
         try:
             metadata = ApexVerifierMetadata.model_validate(body.verifier_metadata)
@@ -411,7 +561,9 @@ class ApexResourcesServer(SimpleResourcesServer):
                     body, f"{name} artifact snapshot exceeds configured size limit", policy_caused=name == "final"
                 )
             try:
-                snapshot = base64.b64decode(encoded, validate=True)
+                snapshot = await asyncio.get_running_loop().run_in_executor(
+                    self._executor, functools.partial(base64.b64decode, encoded, validate=True)
+                )
             except (binascii.Error, ValueError) as exc:
                 return self._failure(body, f"invalid {name} artifact snapshot encoding: {exc}")
             if self.config.max_snapshot_bytes is not None and len(snapshot) > self.config.max_snapshot_bytes:
@@ -420,97 +572,60 @@ class ApexResourcesServer(SimpleResourcesServer):
                 )
             snapshots[name] = snapshot
 
-        task_prompt = ""
+        task_prompt = _task_instruction(body.responses_create_params.input)
         persisted_output_dir: Optional[Path] = None
         artifact_paths: list[str] = []
-        params_input = body.responses_create_params.input
-        if isinstance(params_input, str):
-            task_prompt = params_input
-        else:
-            for item in params_input:
-                payload = item.model_dump() if hasattr(item, "model_dump") else dict(item)
-                if payload.get("role") == "user" and isinstance(payload.get("content"), str):
-                    task_prompt += ("\n\n" if task_prompt else "") + payload["content"]
 
         async with self._semaphore:
+            workspace = _VerifyWorkspace(self._executor)
+            start_conversion_record()
             try:
-                with tempfile.TemporaryDirectory(prefix="apex-verify-") as scratch:
-                    root = Path(scratch)
-                    initial_archive_path = root / "initial.zip"
-                    final_archive_path = root / "final.zip"
-                    initial_root = root / "initial"
-                    final_root = root / "final"
-                    initial_root.mkdir()
-                    final_root.mkdir()
-                    initial_archive_path.write_bytes(snapshots["initial"])
-                    final_archive_path.write_bytes(snapshots["final"])
-                    initial_files = safe_extract_snapshot(
-                        initial_archive_path,
-                        initial_root,
-                        max_files=self.config.max_artifact_files,
-                        max_uncompressed_bytes=self.config.max_uncompressed_bytes,
-                    )
-                    try:
-                        final_files = safe_extract_snapshot(
-                            final_archive_path,
-                            final_root,
-                            max_files=self.config.max_artifact_files,
-                            max_uncompressed_bytes=self.config.max_uncompressed_bytes,
-                        )
-                    except SnapshotLimitError as exc:
-                        raise _PolicyOutputRejected(f"final artifact snapshot: {exc}") from exc
-                    document_converter_image = self._document_converter_image()
-                    changes = snapshot_changes(
-                        initial_root,
-                        initial_files,
-                        final_root,
-                        final_files,
-                        document_converter_image=document_converter_image,
-                    )
-                    artifact_paths = [change.path for change in changes]
-                    persisted_output_dir = self._persist_submission(
-                        body,
-                        initial_archive_path,
-                        final_archive_path,
-                        final_root,
-                        artifact_paths,
-                    )
-                    reward, rubric_scores, judge = await grade_apex_output(
-                        server_client=self.server_client,
-                        model_server_name=self.config.judge_model_server.name,
-                        task_id=body.task_id,
-                        world_id=body.world_id,
-                        instruction=task_prompt,
-                        response=body.response.output_text,
-                        rubric=metadata.rubric,
-                        expected_output=metadata.expected_output,
-                        artifact_changes=changes,
-                        final_root=final_root,
-                        judge_model=self.config.judge_model,
-                        judge_create_params_overrides=self.config.judge_create_params_overrides,
-                        judge_context_window_size=self.config.judge_context_window_size,
-                        document_converter_image=document_converter_image,
-                        scoring_method=metadata.scoring,
-                        metadata={
-                            "task_id": body.task_id,
-                            "execution": {
-                                "rollout_slot_id": str((body.__pydantic_extra__ or {}).get("_ng_rollout_index", ""))
-                            },
+                prepared: _PreparedSubmission = await workspace.run(
+                    self._prepare_submission, body, snapshots, workspace.root
+                )
+                del snapshots
+                artifact_paths = prepared.artifact_paths
+                persisted_output_dir = prepared.persisted_output_dir
+                reward, rubric_scores, judge = await grade_apex_output(
+                    server_client=self.server_client,
+                    model_server_name=self.config.judge_model_server.name,
+                    task_id=body.task_id,
+                    world_id=body.world_id,
+                    instruction=task_prompt,
+                    response=body.response.output_text,
+                    rubric=metadata.rubric,
+                    expected_output=metadata.expected_output,
+                    artifact_changes=prepared.changes,
+                    final_root=prepared.final_root,
+                    judge_model=self.config.judge_model,
+                    judge_create_params_overrides=self.config.judge_create_params_overrides,
+                    judge_context_window_size=self.config.judge_context_window_size,
+                    document_converter_image=self._document_converter_image(),
+                    allow_host_document_tools=self.config.allow_host_document_tools,
+                    scoring_method=metadata.scoring,
+                    run_blocking=workspace.run,
+                    metadata={
+                        "task_id": body.task_id,
+                        "execution": {
+                            "rollout_slot_id": str((body.__pydantic_extra__ or {}).get("_ng_rollout_index", ""))
                         },
-                    )
-                    self._persist_grading_result(
-                        persisted_output_dir,
-                        reward=reward,
-                        rubric_scores=rubric_scores,
-                        judge_response=judge,
-                    )
+                    },
+                )
+                await workspace.run(
+                    self._persist_grading_result,
+                    persisted_output_dir,
+                    reward=reward,
+                    rubric_scores=rubric_scores,
+                    judge_response=judge,
+                )
             except Exception as exc:
-                self._persist_grading_result(persisted_output_dir, error=str(exc))
+                await workspace.run(self._persist_grading_result, persisted_output_dir, error=str(exc))
                 if is_judge_failure(exc) or is_judge_provider_stop(exc):
                     # A judge that could not be reached or gave no usable verdict did not grade the answer: the
                     # verify endpoint's judge failsafe records the rollout as judge_failed, not as a scored zero.
                     raise
-                # Anything else, an initial snapshot over its limits included, is not the policy's doing.
+                # Anything else, an initial snapshot over its limits or a document converter that could not run
+                # included, is not the policy's doing.
                 return self._failure(
                     body,
                     str(exc),
@@ -518,6 +633,9 @@ class ApexResourcesServer(SimpleResourcesServer):
                     persisted_output_dir=persisted_output_dir,
                     policy_caused=isinstance(exc, _PolicyOutputRejected),
                 )
+            finally:
+                # The slot is held until the scratch directory is gone, so disk use stays bounded by the slots.
+                await asyncio.shield(workspace.release())
 
         payload = body.model_dump(exclude={"initial_artifact_snapshot_b64", "artifact_snapshot_b64"})
         return ApexVerifyResponse(

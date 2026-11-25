@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from aiohttp import ClientTimeout
 from pydantic import BaseModel, ValidationError
@@ -21,8 +22,9 @@ from resources_servers.apex_agents.artifacts import (
     ArtifactChange,
     artifact_change_content,
     artifact_change_text,
-    visual_content_blocks,
+    visual_file_blocks,
 )
+from resources_servers.apex_agents.file_extraction import conversion_timeouts, renders_as_images
 from resources_servers.apex_agents.prompts import (
     ARTIFACT_SELECTION_SYSTEM_PROMPT,
     ARTIFACT_SELECTION_USER_PROMPT,
@@ -40,6 +42,36 @@ _FINAL_ANSWER_ONLY = "Final Answer Only (No Files)"
 _MAX_JSON_RETRIES = 10
 _GEMINI_CONSERVATIVE_TOKEN_MULTIPLIER = 1.9
 _TOTAL_CONTENT_BUDGET_RATIO = 0.90
+# The grading prompt is budgeted at two characters per token: dense workbooks and code tokenize far below the
+# four characters per token of prose, and a prompt the judge rejects cannot be graded at all.
+_CONSERVATIVE_CHARS_PER_TOKEN = 2
+# Images are budgeted too: a page image is charged a fixed, generous token cost, images may take at most a quarter
+# of the judge's window, and their encoded size is capped below common request-payload limits.
+_IMAGE_TOKEN_ESTIMATE = 3_000
+_IMAGE_BUDGET_RATIO = 0.25
+_MAX_JUDGE_IMAGES = 60
+_MAX_JUDGE_IMAGE_CHARS = 16 * 1024 * 1024
+# A refusal is the policy's doing only when the request the verifier built was itself large: its estimated tokens
+# pass this share of the judge's window or, for an HTTP 413, its encoded body passes this many bytes. A small
+# request refused the same way points at the judge's setup (a wrong window, an output cap, a proxy limit).
+_LARGE_REQUEST_WINDOW_RATIO = 0.5
+_LARGE_REQUEST_BODY_BYTES = 1024 * 1024
+# How a judge provider says a request is larger than it accepts, in the body of an HTTP 400.
+_OVERSIZED_REQUEST_MARKERS = (
+    "context_length_exceeded",
+    "context length",
+    "context window",
+    "maximum context",
+    "too many tokens",
+    "token count",
+    "maximum number of tokens",
+    "prompt is too long",
+    "input is too long",
+    "request too large",
+    "payload size",
+    "entity too large",
+    "string too long",
+)
 LOG = logging.getLogger(__name__)
 
 EXPECTED_FILE_TYPES = {
@@ -156,6 +188,76 @@ def _selection_artifact_xml(index: int, change: ArtifactChange, content: str, *,
     return "\n".join(parts)
 
 
+class JudgeRequestTooLarge(Exception):
+    """The judge refused, as larger than it accepts, a request that was large.
+
+    The request's size comes from what the policy produced, and the same request is refused again on every retry,
+    so this is the policy's result (a failed criterion), not a judge outage.
+    """
+
+
+def _estimated_request_tokens(body: dict[str, Any]) -> int:
+    """The request's prompt tokens as the verifier budgets them: its text conservatively, plus a cost per image."""
+    characters = images = 0
+    for message in body.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            characters += len(content)
+            continue
+        for block in content or []:
+            if isinstance(block, dict) and block.get("type") == "image_url":
+                images += 1
+            elif isinstance(block, dict):
+                characters += len(str(block.get("text") or ""))
+    return characters // _CONSERVATIVE_CHARS_PER_TOKEN + images * _IMAGE_TOKEN_ESTIMATE
+
+
+def _oversized_request_rejection(error: BaseException) -> tuple[int, str] | None:
+    """The status and reason of a refusal for size, read from the HTTP error behind a failed judge call.
+
+    Only an HTTP 413, or an HTTP 400 whose body names a context-length or payload limit, counts. Connection
+    errors, timeouts and every other status (5xx included) are judge outages and return None.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = getattr(current, "status", None)
+        if isinstance(status, int) and not isinstance(status, bool) and status in {400, 413}:
+            content = getattr(current, "response_content", None)
+            body = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content or "")
+            detail = f"{body} {getattr(current, 'message', '')}".strip()
+            if status == 413 or any(marker in detail.lower() for marker in _OVERSIZED_REQUEST_MARKERS):
+                return status, f"HTTP {status}: {detail[:300]}"
+        current = current.__cause__
+    return None
+
+
+def _request_is_large(body: dict[str, Any], *, status: int, context_window_size: int) -> bool:
+    if _estimated_request_tokens(body) > context_window_size * _LARGE_REQUEST_WINDOW_RATIO:
+        return True
+    return status == 413 and len(json.dumps(body, default=str).encode("utf-8")) > _LARGE_REQUEST_BODY_BYTES
+
+
+async def _judge_completion(
+    server_client: Any, model_server_name: str, body: dict[str, Any], *, context_window_size: int
+) -> Any:
+    """One judge call: a failed call is a judge failure, except a large request refused for its size.
+
+    A small request refused with the same words (an output cap larger than the judge's window, a proxy's payload
+    limit) says nothing about the policy's output, so it stays a judge failure.
+    """
+    try:
+        return await reraise_judge_errors(_post_chat_completion(server_client, model_server_name, body))
+    except Exception as exc:
+        rejection = _oversized_request_rejection(exc)
+        if rejection is None or not _request_is_large(
+            body, status=rejection[0], context_window_size=context_window_size
+        ):
+            raise
+        raise JudgeRequestTooLarge(rejection[1]) from exc
+
+
 async def _post_chat_completion(server_client: Any, model_server_name: str, body: dict[str, Any]) -> Any:
     """One judge request. Callers await it through ``reraise_judge_errors``, so a failed call is a judge failure."""
     response = await server_client.post(
@@ -178,8 +280,15 @@ async def _select_artifacts_if_needed(
     criteria: str,
     changes: list[ArtifactChange],
     context_window_size: int,
+    contents_by_change: dict[int, str] | None = None,
 ) -> tuple[list[ArtifactChange], dict[str, Any]]:
-    contents = [artifact_change_content(change) for change in changes]
+    # ``contents_by_change`` holds each change's selection text by ``id(change)``, rendered once for all criteria.
+    contents = [
+        contents_by_change[id(change)]
+        if contents_by_change is not None and id(change) in contents_by_change
+        else artifact_change_content(change)
+        for change in changes
+    ]
     total_tokens = sum(_estimate_tokens(content, model=judge_model) for content in contents)
     threshold = int(context_window_size * 0.5)
     if total_tokens <= threshold:
@@ -234,7 +343,9 @@ async def _select_artifacts_if_needed(
                 "response_format": {"type": "json_object"},
             }
         )
-        payload = await reraise_judge_errors(_post_chat_completion(server_client, model_server_name, body))
+        payload = await _judge_completion(
+            server_client, model_server_name, body, context_window_size=context_window_size
+        )
         choices = payload.get("choices") if isinstance(payload, dict) else None
         message = choices[0].get("message") if isinstance(choices, list) and choices else None
         raw_content = message.get("content") if isinstance(message, dict) else None
@@ -317,7 +428,9 @@ def _build_prompt(
     file_type: str,
     changes: list[ArtifactChange],
     context_window_size: int,
+    reserved_tokens: int = 0,
 ) -> str:
+    """The grading prompt. ``reserved_tokens`` is what the images sent with it are charged against the window."""
     if file_type == _FINAL_ANSWER_ONLY:
         scope = EVAL_SCOPE_TEXT_ONLY
         artifact_structure = ""
@@ -326,10 +439,8 @@ def _build_prompt(
         scope = EVAL_SCOPE_BOTH if file_type == _ALL_OUTPUT else EVAL_SCOPE_FILES_ONLY
         artifact_structure = ARTIFACT_STRUCTURE
         fixed_prompt_chars = len(GRADING_SYSTEM_PROMPT) + len(instruction) + len(response) + len(criteria) + 2_000
-        artifact_budget = max(
-            4_000,
-            int(context_window_size * 4 * _TOTAL_CONTENT_BUDGET_RATIO) - fixed_prompt_chars,
-        )
+        prompt_tokens = int(context_window_size * _TOTAL_CONTENT_BUDGET_RATIO) - reserved_tokens
+        artifact_budget = max(4_000, prompt_tokens * _CONSERVATIVE_CHARS_PER_TOKEN - fixed_prompt_chars)
         artifacts = _artifact_xml(changes, character_budget=artifact_budget)
         final_answer = f"<TEXT_RESPONSE>\n{response}\n</TEXT_RESPONSE>\n" if scope == EVAL_SCOPE_BOTH else ""
         agent_output = f"{final_answer}{artifacts}".strip()
@@ -345,33 +456,113 @@ def _build_prompt(
 
 def _visual_blocks(
     final_root: Path,
-    changes: list[ArtifactChange],
+    path: Path,
+    position: int,
+    changed_indices: set[int] | None,
     *,
     document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
 ) -> list[dict[str, Any]]:
-    files = list(dict.fromkeys(change.after_path for change in changes if change.after_path is not None))
-    if not files:
+    """One changed file's images with their labels; nothing for a file that yields no image."""
+    if not renders_as_images(path):
         return []
-    page_indices_by_path: dict[Path, set[int]] = {}
-    for change in changes:
-        if change.artifact_type == "page" and change.index is not None and change.after_path is not None:
-            page_indices_by_path.setdefault(change.after_path, set()).add(change.index)
-    blocks = visual_content_blocks(
+    blocks = visual_file_blocks(
         final_root,
-        files,
+        path,
+        position,
         document_converter_image=document_converter_image,
-        page_indices_by_path=page_indices_by_path,
+        allow_host_document_tools=allow_host_document_tools,
+        changed_indices=changed_indices,
     )
-    selected: list[dict[str, Any]] = []
-    pending_labels: list[dict[str, Any]] = []
+    if not any(block.get("type") == "image_url" for block in blocks):
+        return []
+    return [block for block in blocks if block.get("type") in {"text", "image_url"}]
+
+
+class _VisualEvidence:
+    """Renders each changed file once per verify, however many criteria are graded on it."""
+
+    def __init__(
+        self,
+        final_root: Path,
+        *,
+        document_converter_image: str | None,
+        allow_host_document_tools: bool,
+        run_blocking: Callable[..., Awaitable[Any]],
+    ) -> None:
+        self._final_root = final_root
+        self._document_converter_image = document_converter_image
+        self._allow_host_document_tools = allow_host_document_tools
+        self._run_blocking = run_blocking
+        self._renders: dict[tuple[int, Path, frozenset[int]], asyncio.Future[list[dict[str, Any]]]] = {}
+
+    def _render(self, position: int, path: Path, indices: frozenset[int]) -> asyncio.Future[list[dict[str, Any]]]:
+        key = (position, path, indices)
+        render = self._renders.get(key)
+        if render is None:
+            render = asyncio.ensure_future(
+                self._run_blocking(
+                    functools.partial(
+                        _visual_blocks,
+                        self._final_root,
+                        path,
+                        position,
+                        set(indices) or None,
+                        document_converter_image=self._document_converter_image,
+                        allow_host_document_tools=self._allow_host_document_tools,
+                    )
+                )
+            )
+            # A render no criterion is left waiting for must not log an unretrieved exception.
+            render.add_done_callback(lambda done: done.cancelled() or done.exception())
+            self._renders[key] = render
+        return render
+
+    async def blocks(self, changes: list[ArtifactChange]) -> list[dict[str, Any]]:
+        files = list(dict.fromkeys(change.after_path for change in changes if change.after_path is not None))
+        indices_by_path: dict[Path, set[int]] = {}
+        for change in changes:
+            if (
+                change.artifact_type in {"page", "slide", "sheet"}
+                and change.index is not None
+                and change.after_path is not None
+            ):
+                indices_by_path.setdefault(change.after_path, set()).add(change.index)
+        renders = [
+            self._render(position, path, frozenset(indices_by_path.get(path, ())))
+            for position, path in enumerate(files)
+        ]
+        blocks: list[dict[str, Any]] = []
+        for render in renders:
+            # Shielded: a criterion that is cancelled must not cancel a render other criteria share.
+            blocks.extend(await asyncio.shield(render))
+        return blocks
+
+
+def _budget_images(blocks: list[dict[str, Any]], *, context_window_size: int) -> tuple[list[dict[str, Any]], int]:
+    """Keep the leading images that fit the judge request; returns the kept blocks and their image count."""
+    max_images = min(_MAX_JUDGE_IMAGES, int(context_window_size * _IMAGE_BUDGET_RATIO) // _IMAGE_TOKEN_ESTIMATE)
+    kept: list[dict[str, Any]] = []
+    image_count = image_chars = omitted = 0
     for block in blocks:
-        if block.get("type") == "text":
-            pending_labels.append(block)
-        elif block.get("type") == "image_url":
-            selected.extend(pending_labels)
-            pending_labels.clear()
-            selected.append(block)
-    return selected
+        if block.get("type") != "image_url":
+            kept.append(block)
+            continue
+        size = len(str((block.get("image_url") or {}).get("url", "")))
+        if image_count < max_images and image_chars + size <= _MAX_JUDGE_IMAGE_CHARS:
+            kept.append(block)
+            image_count += 1
+            image_chars += size
+            continue
+        omitted += 1
+        # Drop the page label that introduced the omitted image; a file's own label starts on a new line.
+        if kept and kept[-1].get("type") == "text" and not str(kept[-1].get("text", "")).startswith("\n"):
+            kept.pop()
+    if omitted:
+        kept.append({"type": "text", "text": f"\n[{omitted} further image(s) omitted: judge request size limit]"})
+    if not image_count:
+        return [], 0
+    return kept, image_count
 
 
 async def _judge_criterion(
@@ -383,6 +574,7 @@ async def _judge_criterion(
     system_prompt: str,
     user_prompt: str,
     visual_blocks: list[dict[str, Any]],
+    context_window_size: int,
 ) -> GradingResponse:
     user_content: str | list[dict[str, Any]] = user_prompt
     if visual_blocks:
@@ -402,7 +594,9 @@ async def _judge_criterion(
                 "response_format": {"type": "json_object"},
             }
         )
-        payload = await reraise_judge_errors(_post_chat_completion(server_client, model_server_name, body))
+        payload = await _judge_completion(
+            server_client, model_server_name, body, context_window_size=context_window_size
+        )
         choices = payload.get("choices") if isinstance(payload, dict) else None
         if not isinstance(choices, list) or not choices:
             continue
@@ -460,18 +654,53 @@ async def grade_apex_output(
     judge_create_params_overrides: dict[str, Any] | None,
     judge_context_window_size: int,
     document_converter_image: str | None = None,
+    allow_host_document_tools: bool = False,
     metadata: dict[str, Any] | None = None,
     scoring_method: str = "all_pass",
+    run_blocking: Callable[..., Awaitable[Any]] | None = None,
 ) -> tuple[float, dict[str, Any], dict[str, Any]]:
     """Grade every APEX rubric criterion.
 
     With ``all_pass`` (the default) a rollout scores 1 only when every criterion passes. With ``weighted_average``
     it scores the weighted mean of its criterion scores (see ``weighted_rubric_score``).
+
+    ``run_blocking`` awaits a synchronous callable off the event loop (``asyncio.to_thread`` by default): prompt
+    assembly and document rendering go through it, and only the judge requests run on the loop.
     """
     del world_id, metadata
     if scoring_method not in SCORING_METHODS:
         raise ValueError(f"unknown APEX scoring method: {scoring_method!r}")
     overrides = dict(judge_create_params_overrides or {})
+    run_blocking = run_blocking or asyncio.to_thread
+    timed_out_conversions = conversion_timeouts()
+    visual_evidence = _VisualEvidence(
+        final_root,
+        document_converter_image=document_converter_image,
+        allow_host_document_tools=allow_host_document_tools,
+        run_blocking=run_blocking,
+    )
+    # Each change's selection text is rendered once, not once per criterion.
+    selection_contents: dict[int, str] = {}
+    if any(
+        _matching_changes(artifact_changes, expected_file_type(expected_output, criterion)) for criterion in rubric
+    ):
+        selection_contents = await run_blocking(
+            lambda: {id(change): artifact_change_content(change) for change in artifact_changes}
+        )
+
+    def failed(verifier_id: str, rationale: str, selection: dict[str, Any], **values: Any) -> tuple[str, dict]:
+        return verifier_id, {
+            "score": 0.0,
+            "status": "completed",
+            "message": rationale,
+            "values": {
+                "judge_grade": "fail",
+                "grade_rationale": rationale,
+                "evaluated_artifacts": "",
+                "artifact_selection": selection,
+                **values,
+            },
+        }
 
     async def grade_one(index: int, criterion: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         verifier_id = str(criterion.get("verifier_id") or "").strip()
@@ -481,55 +710,60 @@ async def grade_apex_output(
         file_type = expected_file_type(expected_output, criterion)
         filtered = _matching_changes(artifact_changes, file_type)
         if _should_auto_fail_missing_file_type(file_type, filtered):
-            rationale = f"No files matching the expected type ({file_type}) were found."
-            return verifier_id, {
-                "score": 0.0,
-                "status": "completed",
-                "message": rationale,
-                "values": {
-                    "judge_grade": "fail",
-                    "grade_rationale": rationale,
-                    "evaluated_artifacts": "",
-                    "artifact_selection": {
-                        "status": "skipped",
-                        "reason": "no_matching_artifacts",
-                        "selected_count": 0,
-                        "total_count": 0,
-                    },
-                },
-            }
-        selected, selection_metadata = await _select_artifacts_if_needed(
-            server_client=server_client,
-            model_server_name=model_server_name,
-            judge_model=judge_model,
-            judge_create_params_overrides=overrides,
-            instruction=instruction,
-            criteria=criteria,
-            changes=filtered,
-            context_window_size=judge_context_window_size,
-        )
-        user_prompt = _build_prompt(
-            instruction=instruction,
-            response=response,
-            criteria=criteria,
-            file_type=file_type,
-            changes=selected,
-            context_window_size=judge_context_window_size,
-        )
-        visuals = _visual_blocks(
-            final_root,
-            selected,
-            document_converter_image=document_converter_image,
-        )
-        parsed = await _judge_criterion(
-            server_client=server_client,
-            model_server_name=model_server_name,
-            judge_model=judge_model,
-            judge_create_params_overrides=overrides,
-            system_prompt=GRADING_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            visual_blocks=visuals,
-        )
+            return failed(
+                verifier_id,
+                f"No files matching the expected type ({file_type}) were found.",
+                {"status": "skipped", "reason": "no_matching_artifacts", "selected_count": 0, "total_count": 0},
+            )
+        selection_metadata: dict[str, Any] = {"status": "not_run"}
+        try:
+            selected, selection_metadata = await _select_artifacts_if_needed(
+                server_client=server_client,
+                model_server_name=model_server_name,
+                judge_model=judge_model,
+                judge_create_params_overrides=overrides,
+                instruction=instruction,
+                criteria=criteria,
+                changes=filtered,
+                context_window_size=judge_context_window_size,
+                contents_by_change=selection_contents,
+            )
+            visuals, image_count = _budget_images(
+                await visual_evidence.blocks(selected), context_window_size=judge_context_window_size
+            )
+            user_prompt = await run_blocking(
+                functools.partial(
+                    _build_prompt,
+                    instruction=instruction,
+                    response=response,
+                    criteria=criteria,
+                    file_type=file_type,
+                    changes=selected,
+                    context_window_size=judge_context_window_size,
+                    reserved_tokens=image_count * _IMAGE_TOKEN_ESTIMATE,
+                )
+            )
+            parsed = await _judge_criterion(
+                server_client=server_client,
+                model_server_name=model_server_name,
+                judge_model=judge_model,
+                judge_create_params_overrides=overrides,
+                system_prompt=GRADING_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                visual_blocks=visuals,
+                context_window_size=judge_context_window_size,
+            )
+        except JudgeRequestTooLarge as exc:
+            # The judge will refuse this request every time, so the criterion is settled: the output it would
+            # have to read is too large to grade. Other criteria are still graded.
+            LOG.warning("judge refused criterion %s of task %s as too large: %s", verifier_id, task_id, exc)
+            return failed(
+                verifier_id,
+                f"The judge rejected the grading request as larger than it accepts ({exc}); "
+                "the submitted output is too large to grade.",
+                selection_metadata,
+                judge_request_rejected="request_too_large",
+            )
         score = 1.0 if parsed.is_criteria_true else 0.0
         values: dict[str, Any] = {
             "judge_grade": "pass" if parsed.is_criteria_true else "fail",
@@ -555,9 +789,16 @@ async def grade_apex_output(
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-    rubric_scores = dict(results)
-    passed_count = sum(score["score"] >= 0.99 for score in rubric_scores.values())
-    total_count = len(rubric_scores)
+    # Counted over the criteria, not over the ID-keyed mapping: two criteria sharing an ID are both graded and
+    # both count, and the second keeps its own entry under a numbered key.
+    rubric_scores: dict[str, Any] = {}
+    for verifier_id, score in results:
+        key, repeat = verifier_id, 2
+        while key in rubric_scores:
+            key, repeat = f"{verifier_id}#{repeat}", repeat + 1
+        rubric_scores[key] = score
+    passed_count = sum(score["score"] >= 0.99 for _, score in results)
+    total_count = len(results)
     failed_count = total_count - passed_count
     criteria_pass_rate = passed_count / total_count if total_count else 0.0
     all_pass = 1.0 if total_count and passed_count == total_count else 0.0
@@ -585,4 +826,7 @@ async def grade_apex_output(
         "verifier_count": total_count,
         "document_extraction": "local",
     }
+    if timed_out_conversions:
+        # The files named here were graded on their extracted text: their conversion did not finish.
+        judge_usage["document_conversion_timeouts"] = list(timed_out_conversions)
     return reward, rubric_scores, judge_usage

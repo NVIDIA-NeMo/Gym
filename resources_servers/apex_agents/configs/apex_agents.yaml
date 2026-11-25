@@ -26,10 +26,15 @@ apex_agents:
       # Trusted-host export of both snapshots, safely extracted changed files,
       # rubric-free submission metadata, and the upstream grading result.
       artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
-      # The Archipelago sandbox image contains LibreOffice and Poppler. The
-      # verifier re-enters it only for formula recalculation and document rendering
-      # when those executables are absent from the outer Gym container.
-      document_converter_image: ${oc.select:apex_agents_image,null}
+      # The Archipelago sandbox image contains LibreOffice and Poppler. Formula
+      # recalculation and document rendering open files the model wrote, so the
+      # verifier runs them only inside this image (apptainer exec --containall,
+      # with one scratch directory bound). It defaults to the agent's image.
+      document_converter_image: ${oc.select:apex_agents_image,responses_api_agents/apex_agent/images/archipelago.sif}
+      # Opt in to LibreOffice/Poppler installed in the outer Gym container
+      # instead (preferred over the image when present). Off by default: host
+      # tools process model-written documents outside any sandbox.
+      allow_host_document_tools: ${oc.select:apex_allow_host_document_tools,false}
 
 apex_judge_model:
   responses_api_models:
@@ -39,3 +44,7 @@ apex_judge_model:
       openai_api_key: ${judge_api_key}
       openai_model: ${oc.select:judge_model_name,gemini-3-flash}
       openai_default_headers: {}
+      # Forward the provider's 400 and 413 with their bodies, besides the defaults:
+      # the verifier scores a context-length or payload-size rejection as a failed
+      # criterion, and can only tell it from an outage by its status and body.
+      propagate_upstream_http_status_codes: [400, 401, 403, 413, 429]
