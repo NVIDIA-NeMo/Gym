@@ -3,7 +3,9 @@
 """Simple Agent's Python tools: a real worker process, run the way the sandboxed loop runs it."""
 
 import json
+import os
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -52,7 +54,17 @@ async def _tools(tmp_path: Path, **config: Any) -> AsyncIterator[PythonTools]:
 
 
 async def _run(tools: PythonTools, code: str) -> dict[str, Any]:
-    return json.loads(await tools.call("execute_python", {"code": code}))
+    output, error_type = await tools.call("execute_python", {"code": code})
+    assert error_type is None
+    return json.loads(output)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 async def test_names_a_call_defines_stay_defined_for_the_next_call(tmp_path: Path) -> None:
@@ -65,7 +77,7 @@ async def test_names_a_call_defines_stay_defined_for_the_next_call(tmp_path: Pat
             "result": None,
         }
         # The output is the compact JSON the Resources Server's tool returned, field for field.
-        output = await tools.call(
+        output, _ = await tools.call(
             "execute_python", {"code": "import sys\nprint(x)\nprint('warn', file=sys.stderr)\nx"}
         )
 
@@ -111,18 +123,32 @@ async def test_code_past_its_timeout_fails_and_the_worker_keeps_its_names(tmp_pa
         assert (await _run(tools, "kept"))["result"] == "1"
 
 
-async def test_code_that_blocks_the_alarm_is_killed_and_the_tool_stops(tmp_path: Path, monkeypatch) -> None:
+async def test_a_long_call_into_c_times_out_late_and_keeps_the_names(tmp_path: Path) -> None:
+    """SIGALRM fires between bytecodes, so a long C call answers once it returns, and the worker lives on."""
+    async with _tools(tmp_path, timeout_seconds=1) as tools:
+        await _run(tools, "kept = 1")
+        started = time.monotonic()
+        assert (await _run(tools, "sum(range(4 * 10**8))"))["error_message"] == "code timed-out"
+        assert time.monotonic() - started < 1 + python_tool.KILL_GRACE_SECONDS
+        assert (await _run(tools, "kept"))["result"] == "1"
+
+
+async def test_code_that_blocks_the_alarm_is_killed_and_the_next_call_starts_afresh(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(python_tool, "KILL_GRACE_SECONDS", 0.5)
     async with _tools(tmp_path, timeout_seconds=1) as tools:
         await _run(tools, "kept = 1")
         worker = tools._workers["execute_python"]
         blocked = "import signal\nsignal.signal(signal.SIGALRM, signal.SIG_IGN)\nwhile True:\n    pass"
 
-        assert (await _run(tools, blocked))["error_message"] == "code timed-out"
+        timed_out = await _run(tools, blocked)
 
+        assert timed_out["error_message"] == f"code timed-out; {python_tool.RESTARTS}"
         assert worker.returncode is not None
-        # Like the Resources Server's worker, a stopped worker is not started again with lost names.
-        assert (await _run(tools, "kept"))["error_message"] == python_tool.STOPPED
+        # The model was told: a new worker answers, without the old names.
+        assert (await _run(tools, "kept"))["error_message"] == "name 'kept' is not defined"
+        assert (await _run(tools, "1 + 1"))["result"] == "2"
 
 
 async def test_writes_to_the_real_descriptors_cannot_corrupt_a_reply(tmp_path: Path) -> None:
@@ -138,12 +164,45 @@ async def test_writes_to_the_real_descriptors_cannot_corrupt_a_reply(tmp_path: P
         assert (await _run(tools, "1 + 1"))["result"] == "2"
 
 
-async def test_code_that_ends_the_worker_reports_it_and_the_tool_stops(tmp_path: Path) -> None:
+async def test_a_reply_the_code_forges_stops_the_worker_instead_of_answering(tmp_path: Path) -> None:
+    """Code that writes a frame into the reply channel (fd 4 in the worker) cannot answer a call or break the loop."""
+    async with _tools(tmp_path) as tools:
+        await _run(tools, "kept = 1")
+        forged = await _run(tools, "import os\nos.write(4, b'\\x00\\x00\\x00\\x02{}')")
+        assert forged["error_message"] == f"Python worker stopped; {python_tool.RESTARTS}"
+        assert (await _run(tools, "kept"))["error_message"] == "name 'kept' is not defined"
+
+
+async def test_code_that_ends_the_worker_reports_it_and_the_next_call_starts_afresh(tmp_path: Path) -> None:
     async with _tools(tmp_path) as tools:
         ended = await _run(tools, "import sys\nsys.exit(3)")
         assert ended["success"] is False
-        assert ended["error_message"] == "Python worker stopped while running the code"
-        assert (await _run(tools, "1"))["error_message"] == python_tool.STOPPED
+        assert ended["error_message"] == f"Python worker stopped; {python_tool.RESTARTS}"
+        assert (await _run(tools, "1"))["result"] == "1"
+
+
+async def test_code_larger_than_a_pipe_buffer_runs(tmp_path: Path) -> None:
+    async with _tools(tmp_path) as tools:
+        code = f"text = '{'a' * 300_000}'\nlen(text)"
+        assert (await _run(tools, code))["result"] == "300000"
+        assert (await _run(tools, "print('b' * 1_000_000)"))["stdout"] == "b" * 1_000_000 + "\n"
+
+
+async def test_close_stops_what_the_code_forked(tmp_path: Path) -> None:
+    async with _tools(tmp_path) as tools:
+        forked = await _run(
+            tools, "import os, time\npid = os.fork()\nif pid == 0:\n    time.sleep(120)\n    os._exit(0)\nprint(pid)"
+        )
+        child = int(forked["stdout"])
+        assert _alive(child)
+        started = time.monotonic()
+        await tools.close()
+        assert time.monotonic() - started < python_tool.REAP_TIMEOUT_SECONDS + 1
+        for _ in range(50):
+            if not _alive(child):
+                break
+            time.sleep(0.1)
+        assert not _alive(child)
 
 
 async def test_the_code_runs_in_the_task_working_directory(tmp_path: Path) -> None:
@@ -155,8 +214,10 @@ async def test_the_code_runs_in_the_task_working_directory(tmp_path: Path) -> No
 @pytest.mark.parametrize("arguments", [{"cod": "1"}, {"code": 1}, ["1"]])
 async def test_arguments_without_code_are_an_error_the_model_sees(tmp_path: Path, arguments: Any) -> None:
     async with _tools(tmp_path) as tools:
-        output = json.loads(await tools.call("execute_python", arguments))
-        assert output["success"] is False and "code" in output["error_message"]
+        output, error_type = await tools.call("execute_python", arguments)
+        assert json.loads(output)["success"] is False and "code" in json.loads(output)["error_message"]
+        # Recorded as a failed call, as the Resources Server's 422 was.
+        assert error_type == "invalid_arguments"
         assert "execute_python" not in tools._workers
 
 
@@ -180,14 +241,20 @@ async def test_close_stops_the_workers(tmp_path: Path) -> None:
 
 async def test_a_lone_surrogate_the_code_prints_reaches_the_model_as_utf8(tmp_path: Path) -> None:
     async with _tools(tmp_path) as tools:
-        output = await tools.call("execute_python", {"code": "print('\\ud800')"})
+        output, _ = await tools.call("execute_python", {"code": "print('\\ud800')"})
     output.encode("utf-8")
     assert json.loads(output)["stdout"] == "?\n"
 
 
 @pytest.mark.parametrize(
     "config",
-    [{"preload": {"np": "numpy; import os"}}, {"preload": {"1np": "numpy"}}, {"builtins": ["print", "no_such"]}],
+    [
+        {"preload": {"np": "numpy; import os"}},
+        {"preload": {"1np": "numpy"}},
+        {"builtins": ["print", "no_such"]},
+        {"requirements": ["numpy"]},
+        {"requirements": ["numpy>=2"]},
+    ],
 )
 def test_a_config_that_cannot_build_the_namespace_is_refused(config: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):

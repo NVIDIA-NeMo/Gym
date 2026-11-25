@@ -93,8 +93,9 @@ def last_expression_value(code: str, globals_d: dict[str, Any], locals_d: dict[s
 
 
 def main() -> int:
-    requests = os.fdopen(os.dup(0), "rb", buffering=0)
-    replies = os.fdopen(os.dup(1), "wb", buffering=0)
+    # Buffered, so a read returns the whole message however many pipe writes it took, and a write sends it all.
+    requests = os.fdopen(os.dup(0), "rb")
+    replies = os.fdopen(os.dup(1), "wb")
     null = os.open(os.devnull, os.O_RDWR)
     for descriptor in (0, 1, 2):
         os.dup2(null, descriptor)

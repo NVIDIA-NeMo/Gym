@@ -5,7 +5,8 @@
 A Python tool is a harness tool. The agent server's config defines it (``python_tools``) and a task opts into it by
 name in its ``agent_context`` (``python_tools``), as a Harbor task declares the tools it needs. Only a sandboxed loop
 runs one: each tool gets one worker process (``python_tool_worker.py``) in the sandbox the environment lends, started
-on the tool's first call and kept for the loop's activation, so names a call defines stay defined for the next call.
+on the tool's first call and kept for the loop's activation, so names a call defines stay defined for later calls of
+that activation.
 
 The tool takes ``{"code": "<source>"}`` and returns the JSON a Resources Server's Python tool returned before it moved
 here: ``{"success", "stdout", "stderr", "error_message", "result"}``.
@@ -14,6 +15,9 @@ here: ``{"success", "stdout", "stderr", "error_message", "result"}``.
 import asyncio
 import builtins
 import json
+import os
+import re
+import signal
 import struct
 from typing import Any
 
@@ -22,11 +26,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _LENGTH = struct.Struct(">I")
 # How long past a call's timeout the loop waits for a worker that has not answered before it kills the worker. The
-# worker's own SIGALRM stops ordinary code at the timeout; only code that blocks the signal reaches this.
-KILL_GRACE_SECONDS = 5.0
+# worker's SIGALRM stops ordinary code at the timeout, but only between bytecodes: a long call into C, such as
+# sum(range(10**10)), answers "code timed-out" once it returns. Only code that runs past this grace is killed.
+KILL_GRACE_SECONDS = 20.0
 # How long a worker may take to import its preloaded modules before its first call fails.
 START_TIMEOUT_SECONDS = 120.0
-STOPPED = "Python worker has already stopped"
+# How long a killed worker's process group may take to exit before the loop stops waiting for it.
+REAP_TIMEOUT_SECONDS = 5.0
+RESTARTS = "the next call starts a new Python worker, without the names earlier calls defined"
+# A requirement pinned to one version, such as numpy==2.5.5 or pandas[performance]==3.1.1.
+_PINNED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==[A-Za-z0-9.+!_-]+")
 
 
 class PythonToolConfig(BaseModel):
@@ -43,7 +52,8 @@ class PythonToolConfig(BaseModel):
         default_factory=list,
         description=(
             "Packages for the tool's own Python runtime, which this server builds and uploads into the sandbox at "
-            "seed. Pin each one, for example numpy==2.5.5. Empty, the tool runs on the agent loop's runtime."
+            "seed, each pinned with ==, for example numpy==2.5.5. Their own dependencies resolve when a host first "
+            "builds the runtime. Empty, the tool runs on the agent loop's runtime."
         ),
     )
     preload: dict[str, str] = Field(
@@ -54,6 +64,13 @@ class PythonToolConfig(BaseModel):
         default=None,
         description="The builtins the code may use. Unset, all of them.",
     )
+
+    @field_validator("requirements")
+    @classmethod
+    def require_pins(cls, requirements: list[str]) -> list[str]:
+        if unpinned := [requirement for requirement in requirements if not _PINNED.fullmatch(requirement)]:
+            raise ValueError(f"pin each requirement to one version with ==, such as numpy==2.5.5; got {unpinned}")
+        return requirements
 
     @field_validator("preload")
     @classmethod
@@ -104,20 +121,40 @@ async def _send(process: asyncio.subprocess.Process, message: Any) -> None:
     await process.stdin.drain()
 
 
-async def _receive(process: asyncio.subprocess.Process) -> Any:
-    """The worker's next message, or None when it exited before sending one."""
+async def _receive(process: asyncio.subprocess.Process) -> dict[str, Any] | None:
+    """The worker's next message, or None when it exited first or sent something that is not a message."""
     assert process.stdout is not None
     try:
         (length,) = _LENGTH.unpack(await process.stdout.readexactly(_LENGTH.size))
-        return json.loads(await process.stdout.readexactly(length))
-    except asyncio.IncompleteReadError:
+        message = json.loads(await process.stdout.readexactly(length))
+    except (asyncio.IncompleteReadError, ValueError):
         return None
+    return message if isinstance(message, dict) else None
+
+
+def _reply_output(reply: dict[str, Any]) -> str | None:
+    """The tool output a worker's reply to a call gives, or None for a reply no worker sends."""
+    if reply.get("ok") is True and all(isinstance(reply.get(key), str) for key in ("out", "err")):
+        result = reply.get("res")
+        if result is None or isinstance(result, str):
+            return tool_output(success=True, stdout=reply["out"], stderr=reply["err"], result=result)
+    elif reply.get("ok") is False and isinstance(reply.get("error"), str):
+        return tool_output(success=False, error_message=reply["error"])
+    return None
 
 
 async def _kill(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
-        process.kill()
-    await process.wait()
+    """Kill the worker and everything the code started in its process group, and reap it."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        # A process the code started outside the group may hold the pipes open, and wait() waits for them too. The
+        # activation's supervisor stops what is left.
+        await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT_SECONDS)
+    except TimeoutError:
+        pass
 
 
 class PythonTools:
@@ -126,48 +163,48 @@ class PythonTools:
     def __init__(self, specs: dict[str, PythonToolSpec]) -> None:
         self._specs = specs
         self._workers: dict[str, asyncio.subprocess.Process] = {}
-        # Tools whose worker died or was killed: like the Resources Server's worker before, it is not started again.
-        self._stopped: set[str] = set()
         self._locks = {name: asyncio.Lock() for name in specs}
 
     def __contains__(self, name: object) -> bool:
         return name in self._specs
 
-    async def call(self, name: str, arguments: Any) -> str:
-        """Run one call's code and return the tool's output. Errors in the code or the worker come back in it."""
+    async def call(self, name: str, arguments: Any) -> tuple[str, str | None]:
+        """Run one call's code. Return the tool's output and, for a call without code, the error type to record.
+
+        Errors in the code, and a worker that stops, come back in the output, for the model to read.
+        """
         if not isinstance(arguments, dict) or not isinstance(arguments.get("code"), str):
-            return tool_output(success=False, error_message=f'{name} takes {{"code": "<Python source>"}}')
+            output = tool_output(success=False, error_message=f'{name} takes {{"code": "<Python source>"}}')
+            return output, "invalid_arguments"
         spec = self._specs[name]
         # One call at a time per worker, so each gets its own reply.
         async with self._locks[name]:
-            if name in self._stopped:
-                return tool_output(success=False, error_message=STOPPED)
             try:
                 process = self._workers.get(name) or await self._start(name)
             except Exception as error:
                 # A worker that failed to start is started again on the next call.
-                return tool_output(success=False, error_message=str(error))
+                return tool_output(success=False, error_message=str(error)), None
             try:
                 await _send(process, {"code": arguments["code"]})
                 reply = await asyncio.wait_for(
                     _receive(process), timeout=spec.config.timeout_seconds + KILL_GRACE_SECONDS
                 )
             except TimeoutError:
-                # The code blocked the worker's alarm: stop it, as a timed-out call.
                 await self._stop(name)
-                return tool_output(success=False, error_message="code timed-out")
+                return tool_output(success=False, error_message=f"code timed-out; {RESTARTS}"), None
             except (BrokenPipeError, ConnectionResetError):
                 reply = None
-            if reply is None:
+            output = _reply_output(reply) if reply is not None else None
+            if output is None:
+                # The worker exited, or the code wrote into the reply channel: nothing it sends can be trusted now.
                 await self._stop(name)
-                return tool_output(success=False, error_message="Python worker stopped while running the code")
-            if reply["ok"]:
-                return tool_output(success=True, stdout=reply["out"], stderr=reply["err"], result=reply["res"])
-            return tool_output(success=False, error_message=reply["error"])
+                return tool_output(success=False, error_message=f"Python worker stopped; {RESTARTS}"), None
+            return output, None
 
     async def _start(self, name: str) -> asyncio.subprocess.Process:
         spec = self._specs[name]
         # -I: the task's Python settings, user site-packages and the working directory never shape the interpreter.
+        # Its own session, so a kill reaches every process the code starts in its group.
         process = await asyncio.create_subprocess_exec(
             spec.python,
             "-I",
@@ -176,6 +213,7 @@ class PythonTools:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=spec.workdir,
+            start_new_session=True,
         )
         try:
             settings = {
@@ -185,10 +223,13 @@ class PythonTools:
             }
             await _send(process, settings)
             ready = await asyncio.wait_for(_receive(process), timeout=START_TIMEOUT_SECONDS)
+        except TimeoutError:
+            await _kill(process)
+            raise RuntimeError(f"Python worker did not start within {START_TIMEOUT_SECONDS:.0f} s") from None
         except BaseException:
             await _kill(process)
             raise
-        if ready is None or not ready.get("ready"):
+        if ready is None or ready.get("ready") is not True:
             await _kill(process)
             detail = ready.get("error") if ready else f"it exited with status {process.returncode}"
             raise RuntimeError(f"Python worker failed to start: {detail}")
@@ -196,12 +237,10 @@ class PythonTools:
         return process
 
     async def _stop(self, name: str) -> None:
-        self._stopped.add(name)
         if (process := self._workers.pop(name, None)) is not None:
             await _kill(process)
 
     async def close(self) -> None:
-        """Stop every worker. The activation's supervisor would stop them too; this does not wait for it."""
+        """Stop every worker and what its code started. The activation's supervisor would stop them too."""
         for name in list(self._workers):
-            process = self._workers.pop(name)
-            await _kill(process)
+            await self._stop(name)

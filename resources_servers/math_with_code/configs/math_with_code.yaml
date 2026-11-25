@@ -55,7 +55,7 @@ math_with_code_environment_server:
       sandbox_config:
         image: python:3.13-slim
         workdir: /workspace
-        ttl_s: 25200  # above the agent's sandbox_runner_timeout_seconds plus cleanup
+        ttl_s: 25200  # above the episode timeout plus the cleanup timeout
         network: model_only
         model_server: policy_model
       # The grader compares boxed answers and runs nothing, so it grades in this Resources Server and the sandbox

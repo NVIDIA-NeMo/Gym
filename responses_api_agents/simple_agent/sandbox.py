@@ -29,7 +29,7 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
 import nemo_gym
-from nemo_gym.agents import SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.agents import AgentSeedRejectedError, SandboxCommand, SandboxPythonRuntime, SandboxSession
 from nemo_gym.core import FailureHeader, RequestFailureLog, rebuild_failure
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import BorrowedSandbox
@@ -245,6 +245,12 @@ class SandboxLoop:
             checked = await sandbox.exec(
                 f"{quote(python)} -I -c {quote(_import_check(config))}", cwd="/", timeout_s=min(timeout, 300)
             )
+            if checked.error_type is None and checked.return_code != 0:
+                # The runtime runs but lacks a module: the agent's config is wrong, and no retry changes that.
+                detail = (checked.stderr or checked.stdout or "").strip()[-2000:]
+                raise AgentSeedRejectedError(
+                    f"Python tool {name!r} cannot import its preloaded modules in the sandbox: {detail}"
+                )
             _check(checked, f"import the preloaded modules of Python tool {name!r}")
             specs[name] = PythonToolSpec(
                 config=config, python=python, worker=python_tool_worker_path(), workdir=self.session.workdir

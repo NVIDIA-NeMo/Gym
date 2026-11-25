@@ -19,7 +19,7 @@ from aiohttp import web
 from omegaconf import OmegaConf
 from packaging.requirements import Requirement
 
-from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
+from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
 from nemo_gym.core import (
@@ -681,6 +681,16 @@ PYTHON_TOOL = PythonToolConfig(
     builtins=["print", "__import__"],
 )
 OPTS_INTO_PYTHON = AgentContext(values={"python_tools": ["execute_python"]})
+EXECUTE_PYTHON = {
+    "type": "function",
+    "name": "execute_python",
+    "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+    "strict": False,
+}
+
+
+def _offering_python(text: str) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(input=text, tools=[EXECUTE_PYTHON])
 
 
 def _function_call(code: str) -> dict[str, Any]:
@@ -776,19 +786,60 @@ async def test_a_sandboxed_seed_installs_the_tools_the_task_opted_into_and_stage
         }
 
     loop.run = record
-    await agent._create_session_episode(
-        state, NeMoGymResponseCreateParamsNonStreaming(input="hi"), **_loop_arguments()
-    )
+    await agent._create_session_episode(state, _offering_python("hi"), **_loop_arguments())
     (payload,) = loop.payloads
     assert payload["python_tools"] == {"execute_python": spec.model_dump(mode="json")}
 
 
-async def test_a_sandboxed_seed_fails_when_the_tool_cannot_import_its_modules(installed_runtime) -> None:
+async def test_a_tool_whose_runtime_lacks_a_preloaded_module_refuses_the_seed_for_good(installed_runtime) -> None:
     sandbox = _FakeSandbox(fail="import numpy")
     loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
 
-    with pytest.raises(RuntimeError, match="could not import the preloaded modules of Python tool 'execute_python'"):
+    with pytest.raises(AgentSeedRejectedError, match="'execute_python' cannot import its preloaded modules.*no such"):
         await loop.install_python_tools({"execute_python": PYTHON_TOOL}, timeout=60)
+
+
+async def test_a_sandbox_that_cannot_run_the_import_check_fails_the_seed_for_a_retry(
+    installed_runtime, monkeypatch
+) -> None:
+    sandbox = _FakeSandbox()
+    loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
+
+    async def timed_out(command: str, **kwargs: Any) -> SandboxExecResult:
+        return SandboxExecResult(stdout="", stderr="", return_code=None, error_type="timeout")
+
+    monkeypatch.setattr(sandbox, "exec", timed_out)
+    with pytest.raises(RuntimeError, match="could not import the preloaded modules") as raised:
+        await loop.install_python_tools({"execute_python": PYTHON_TOOL}, timeout=60)
+    assert not isinstance(raised.value, AgentSeedRejectedError)
+
+
+async def test_a_seed_whose_python_tool_install_fails_releases_the_borrowed_sandbox(monkeypatch) -> None:
+    closed: list[float] = []
+
+    async def install(self: Any, *, timeout: float) -> None:
+        return None
+
+    async def install_python_tools(self: Any, tools: Any, *, timeout: float) -> None:
+        raise RuntimeError("upload failed")
+
+    async def close(self: Any, *, timeout: float) -> None:
+        closed.append(timeout)
+
+    monkeypatch.setattr(sandbox_module.SandboxLoop, "install", install)
+    monkeypatch.setattr(sandbox_module.SandboxLoop, "install_python_tools", install_python_tools)
+    monkeypatch.setattr(sandbox_module.SandboxLoop, "close", close)
+    monkeypatch.setattr(
+        "responses_api_agents.simple_agent.app.sandbox_server_url",
+        lambda name, require_reachable: "http://10.0.0.5:8000",
+    )
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.borrow", lambda access: _resolved(_FakeSandbox()))
+    agent = SimpleAgent(config=_config(python_tools={"execute_python": PYTHON_TOOL}), server_client=_client(1))
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        await agent._seed_agent_session_state(_seed(sandbox_access=ACCESS, agent_context=OPTS_INTO_PYTHON))
+
+    assert closed == [agent.config.session_close_timeout_seconds]
 
 
 async def test_a_tool_without_requirements_runs_on_the_loops_runtime(installed_runtime) -> None:
@@ -824,10 +875,11 @@ async def test_the_sandboxed_loop_runs_the_python_tool_beside_itself(tmp_path: P
             resources_cookies=None,
             sandbox_loop=loop,
             model_server_endpoint=("127.0.0.1", port),
+            python_tools={"execute_python": spec.config},
             python_tool_specs={"execute_python": spec},
         )
         response, trajectory, _, _ = await agent._create_session_episode(
-            state, NeMoGymResponseCreateParamsNonStreaming(input="What is 5! + 1?"), **_loop_arguments()
+            state, _offering_python("What is 5! + 1?"), **_loop_arguments()
         )
 
     outputs = [json.loads(item.output) for item in response.output if item.type == "function_call_output"]
@@ -842,22 +894,62 @@ async def test_the_sandboxed_loop_runs_the_python_tool_beside_itself(tmp_path: P
     assert [call.status for call in trajectory.tool_calls] == ["completed", "completed"]
 
 
-async def test_a_sandboxed_loop_with_python_tools_still_refuses_other_tools_without_a_grant(tmp_path: Path) -> None:
+async def test_a_python_tool_session_answers_a_call_to_an_unknown_tool_as_resources_did(tmp_path: Path) -> None:
+    """The model calls a tool name it was never offered: it sees a 404's reply, as before, and the turn goes on."""
     worker = Path(sandbox_module.__file__).with_name("python_tool_worker.py")
     spec = PythonToolSpec(config=PythonToolConfig(), python=sys.executable, worker=str(worker), workdir=str(tmp_path))
-    other = _function_call("1")
-    other["output"][0]["name"] = "get_weather"
-    async with _model_server([(200, other)]) as (port, _):
+    other = _function_call("print(1)")
+    other["output"][0]["name"] = "stateful_python_code_exec"
+    async with _model_server([(200, other), (200, _reply("\\boxed{1}"))]) as (port, seen):
         agent = SimpleAgent(config=_config(), server_client=_client(port))
         state = SimpleAgentSessionState(
-            request=_seed(sandbox_access=ACCESS),
+            request=_seed(sandbox_access=ACCESS, agent_context=OPTS_INTO_PYTHON),
             tool_access=None,
             resources_cookies=None,
             sandbox_loop=_LoopInProcess(),
             model_server_endpoint=("127.0.0.1", port),
+            python_tools={"execute_python": spec.config},
             python_tool_specs={"execute_python": spec},
         )
-        with pytest.raises(RuntimeError, match="'get_weather'.*no direct HTTP tool access"):
-            await agent._create_session_episode(
-                state, NeMoGymResponseCreateParamsNonStreaming(input="Weather?"), **_loop_arguments()
-            )
+        response, trajectory, _, _ = await agent._create_session_episode(
+            state, _offering_python("1?"), **_loop_arguments()
+        )
+
+    assert response.output[1].output == '{"detail":"Not Found"}'
+    assert response.output[-1].content[0].text == "\\boxed{1}"
+    assert len(seen) == 2
+    (call,) = trajectory.tool_calls
+    assert (call.tool_name, call.status, call.error_type) == ("stateful_python_code_exec", "failed", "unknown_tool")
+
+
+@pytest.mark.parametrize(
+    ("opted_in", "offered", "grant", "refusal"),
+    [
+        # A train row from before the opt-in: the request offers execute_python, the task does not opt in.
+        pytest.param([], [EXECUTE_PYTHON], False, "does not opt into them", id="offered-not-opted-in"),
+        pytest.param(["execute_python"], [], False, "does not offer them to the model", id="opted-in-not-offered"),
+        # A tool grant may serve the name, as a Resources Server did before.
+        pytest.param([], [EXECUTE_PYTHON], True, None, id="offered-and-granted"),
+        pytest.param(["execute_python"], [EXECUTE_PYTHON], False, None, id="offered-and-opted-in"),
+    ],
+)
+async def test_a_request_whose_tools_disagree_with_the_tasks_python_tools_is_refused_before_the_loop(
+    opted_in: list[str], offered: list[dict[str, Any]], grant: bool, refusal: str | None
+) -> None:
+    from fastapi import HTTPException
+
+    agent = SimpleAgent(config=_config(python_tools={"execute_python": PYTHON_TOOL}), server_client=_client(1))
+    state = SimpleAgentSessionState(
+        request=_seed(),
+        tool_access=object() if grant else None,
+        resources_cookies=None,
+        python_tools={name: PYTHON_TOOL for name in opted_in},
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input="1?", tools=offered)
+
+    if refusal is None:
+        agent._check_python_tools_offered(state, body)
+        return
+    with pytest.raises(HTTPException) as raised:
+        await agent._create_session_episode(state, body, **_loop_arguments())
+    assert raised.value.status_code == 422 and refusal in raised.value.detail

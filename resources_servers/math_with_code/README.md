@@ -74,7 +74,9 @@ print(f"5! = {result}")
             "parallel_tool_calls": False
         },
         "expected_result": original_data["expected_answer"],
-        "expected_code_contains": ""
+        "expected_code_contains": "",
+        # The task opts into Simple Agent's execute_python Python tool.
+        "agent_context": {"agent": {"values": {"python_tools": ["execute_python"]}}}
     }
     
     return converted
@@ -125,8 +127,9 @@ gym eval run --no-serve \
 ```
 
 Each row opts into the tool with `"agent_context": {"agent": {"values": {"python_tools": ["execute_python"]}}}`, as
-`data/example.jsonl` does. A row without it gets no Python tool, and its episode fails when the model calls one. The
-conversion script above writes rows without it: add the key to each row it writes.
+`data/example.jsonl` and the conversion script above do. The agent refuses a row that offers `execute_python` without
+the opt-in, before the model runs, so rows written before the tool moved (such as the `train` artifact's revision
+0.0.1) need the key added.
 
 
 
