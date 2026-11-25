@@ -105,6 +105,7 @@ models. Raising both the worker count and the per-worker limit increases resourc
 | Environment | Description | Verification | Benchmark |
 |---|---|---|---|
 | [workplace_assistant](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | Workplace tasks: 27 tools, 5 databases, 690 tasks | Rule-based (task completion) | ✓ |
+| [mcp_atlas](/main/tutorials/evaluation-tutorials/mcp-atlas) | MCP-Atlas public 500-task integration; pending authenticated Slack catalog and sandbox-isolation validation | LLM judge (claim coverage) | Experimental |
 | [WebArena](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webarena/README.md) | 812 browser tasks on self-hosted sites; deployment, reset, judge, and single-display requirements in the benchmark README | WebArena reference evaluator: rules and LLM judge | ✓ |
 | [VisualWebArena](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/visualwebarena/README.md) | 908 visually grounded browser tasks; shared reference-image root, self-hosted sites, reset, judge, and single-display requirements in the benchmark README | VisualWebArena reference evaluator: rules, LLM judge, VQA and fuzzy-image matching | ✓ |
 | [aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) | Multi-hop QA with Wikipedia search + GSM8k with calculator | LLM judge + execution | ✓ |
