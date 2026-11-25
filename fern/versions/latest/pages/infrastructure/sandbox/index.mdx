@@ -146,7 +146,7 @@ python first_sandbox.py
 
 An argument list is not a trust boundary on its own. No shell runs, but the program, its dynamic loader and libraries, and files such as `/etc/ld.so.preload` still come from the sandbox's file system. To run a program you trust in a sandbox that an agent has modified, upload a statically linked binary or mount the program read-only.
 
-On Docker, Apptainer and Local, a program in an argument list that cannot be started is a command failure, as with shell text: `error_type` is `None` and `return_code` is `127` when the program is not found or `126` when it is not executable.
+On Docker, Apptainer, Local and OpenSandbox, a program in an argument list that cannot be started is a command failure, as with shell text: `error_type` is `None` and `return_code` is `127` when the program is not found or `126` when it is not executable.
 
 ## Provider Config Blocks
 
