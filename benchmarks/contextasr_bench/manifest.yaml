@@ -1,0 +1,29 @@
+name: contextasr_bench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: asr
+description: Contextual speech recognition of entity-rich monologues and movie dialogues in English and Mandarin, with no, coarse or fine-grained context, scored for word error rate and named-entity errors.
+modality: audio
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 0.0
+  higher_is_better: true
+determinism: unknown
+resources_server: audio_eval
+agent_server: simple_agent
+datasets:
+- name: contextasr_bench
+  type: benchmark
+  jsonl_fpath: benchmarks/contextasr_bench/data/contextasr_bench_benchmark.jsonl
+  prepare_script: benchmarks/contextasr_bench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active
