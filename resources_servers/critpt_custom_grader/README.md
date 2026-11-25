@@ -299,6 +299,32 @@ The recipe records its own choices explicitly: a 300-second command deadline, fo
 with hidden grading behavior. This server uses the supplied task schema and its documented comparison policy;
 it does not call an external grading API.
 
+#### Grading the same answers through Artificial Analysis
+
+On the CritPt problems, the answers of a run can also be graded by the Artificial Analysis CritPt API, which accepts
+batches of exactly 70 submissions, one per problem. `export_aa_batches` writes one such batch per repeat, in the format
+`resources_servers/critpt`'s replay tool sends:
+
+```bash
+python -m resources_servers.critpt_custom_grader.export_aa_batches \
+    --rollouts results/critpt_rollouts.jsonl --out-dir results/aa_batches --model <model name>
+# Needs the approved key in ARTIFICIAL_ANALYSIS_API_KEY; one repeat directory per call.
+python -m resources_servers.critpt.replay --cache-dir results/aa_batches/repeat-0
+```
+
+Replay writes AA's responses to `aa_responses.jsonl` and its accuracy to `partial_metrics.json` in the repeat directory
+([CritPt replay](../critpt/README.md)). Each answer is extracted from the saved trajectory with the `finish` answer
+rule of [Submission and accounting](#submission-and-accounting), independently of the local verdict, so an answer whose
+local reference preflight failed is still exported. A scored no-answer, including a wall-clock stop without an accepted
+answer, is sent as the empty code block the CritPt server submits for one. Each rollout is its latest attempt by
+attempt index across the rollouts file and its `_failures.jsonl` sidecar, as Gym's sidecar readers select it. A repeat
+whose latest attempt of some task is unscorable (`response_incomplete` or `submission_invalid`), failed or missing is
+not written; run a `response_incomplete` or failed rollout again (see [Recovery](#recovery)) and export again. A
+`submission_invalid` row is final, so its repeat cannot be exported. Only repeats with rows are considered, and
+rollouts whose exportable attempts hold no non-empty accepted `finish` (not the agentic recipe) are refused.
+`repeat-<r>/sources.jsonl` maps each submission to its rollout, and `manifest.json` records the counts and digests; the
+tool exits with code 3 when a repeat was not written and 2 for an unusable input.
+
 ### Semantic answer validators
 
 Some tasks admit several valid outputs: a protocol can be split into more stages without changing its result, and
