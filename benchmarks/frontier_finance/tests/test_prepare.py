@@ -91,7 +91,7 @@ class TestConvert:
     def test_prompt_uses_query_date(self, tmp_path) -> None:
         _, rows = _convert(tmp_path, [_row(query_date="2024-10-31")])
         system, user = rows[0]["responses_create_params"]["input"]
-        assert "as if the current date is October 31, 2024." in system["content"]
+        assert "Today's date is October 31, 2024." in system["content"]
         assert "March 1, 2026" not in system["content"]
         assert "What did ACME report for FY2024 revenue?" in user["content"]
 
