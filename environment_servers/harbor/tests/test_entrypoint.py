@@ -9,6 +9,7 @@ entrypoint log collection and the user the entrypoint runs as.
 import asyncio
 import json
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 from environment_servers.harbor.entrypoint import (
     ENTRYPOINT_DIR,
     ENTRYPOINT_FAILED_KIND,
+    entrypoint_script,
     entrypoint_to_run,
     image_healthcheck_settings,
     is_keepalive_entrypoint,
@@ -1370,3 +1372,40 @@ class TestEntrypoint:
         assert result.response is not None and agent.launch() is not None
         assert not any("test.sh" in c["command"] for c in verifier.execs)
         assert verifier.stopped and agent.stopped and not server._sandboxes
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash", "dash"])
+@pytest.mark.parametrize("absolute", [False, True])
+def test_bare_shell_entrypoint_executes_keepalive(shell, absolute, tmp_path, monkeypatch):
+    executable = shutil.which(shell)
+    if executable is None:
+        pytest.skip(f"{shell} is not installed")
+    # Exercise the real nested shells while making the keepalive terminate promptly.
+    sleep = tmp_path / "sleep"
+    sleep.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\nexit 7\n')
+    sleep.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    script = entrypoint_script([executable if absolute else shell], runtime=str(tmp_path))
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=5)
+    assert result.stdout == "infinity\n"
+    assert result.stderr == ""
+    assert (tmp_path / "started").exists()
+    assert (tmp_path / "exit").read_text() == "7"
+
+
+@pytest.mark.parametrize("kind", ["executable", "shell-script", "compound"])
+def test_script_and_compound_entrypoint_preserve_arguments(kind, tmp_path):
+    executable = tmp_path / "entry point.sh"
+    executable.write_text('#!/bin/sh\nprintf "<%s>\\n" "$@"\nexit 9\n')
+    executable.chmod(0o755)
+    if kind == "executable":
+        argv = [str(executable), "argument with spaces"]
+    elif kind == "shell-script":
+        argv = ["sh", str(executable), "argument with spaces"]
+    else:
+        argv = ["sh", "-c", 'printf "<%s>\\n" "$0" "$@"; exit 9', "argument with spaces"]
+    script = entrypoint_script(argv, runtime=str(tmp_path))
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=5)
+    assert result.stdout == "<argument with spaces>\n<sh>\n<-c>\n<sleep infinity>\n"
+    assert result.stderr == ""
+    assert (tmp_path / "exit").read_text() == "9"

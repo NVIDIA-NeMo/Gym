@@ -1083,8 +1083,7 @@ def deadline_events(case):
             compaction,
         ]
     elif case == "overflow-at-output-limit":
-        # An empty `length` reply at a full context is an overflow to Pi, which compacts to retry it (Pi 0.80.2 then
-        # exits with code 1).
+        # Pi counts this `length` reply as a context overflow and compacts to retry it, so the run was still working.
         last = reply("length")
         recorded = [
             last,
@@ -2144,11 +2143,10 @@ def _pinned_pi_package() -> tuple[str, Path]:
     node, pi = shutil.which("node"), shutil.which("pi")
     if not node or not pi:
         pytest.skip("Installed Pi and Node are required for the real Pi contract")
-    package = Path(pi).resolve().parents[1]
-    manifest = package / "package.json"
-    if not manifest.exists() or json.loads(manifest.read_text()).get("version") != pinned:
+    manifest = next((p / "package.json" for p in Path(pi).resolve().parents if (p / "package.json").is_file()), None)
+    if manifest is None or json.loads(manifest.read_text()).get("version") != pinned:
         pytest.skip(f"This integration targets the pinned Pi {pinned}")
-    return node, package
+    return node, manifest.parent
 
 
 @contextmanager
@@ -2270,14 +2268,16 @@ async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies
     """
     agent, sandbox = setup
     node, package = _pinned_pi_package()
+    # The session runs the pinned Pi, so it seeds that pin and reports it in the response metadata.
+    agent.config.pi_version = json.loads((package / "package.json").read_text())["version"]
     # Pi sends fetch, including gym_mcp.mjs's, through proxies set in the environment.
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         monkeypatch.delenv(name, raising=False)
     runtime = tmp_path / "runtime"
     (runtime / "node/bin").mkdir(parents=True)
     (runtime / "node/bin/node").symlink_to(node)
-    (runtime / "pi/node_modules/@earendil-works").mkdir(parents=True)
-    (runtime / "pi/node_modules/@earendil-works/pi-coding-agent").symlink_to(package)
+    (runtime / "pi/node_modules/.bin").mkdir(parents=True)
+    (runtime / "pi/node_modules/.bin/pi").symlink_to(shutil.which("pi"))
     agent.config.finish_tool_names = ["finish"]
     workdir = tmp_path / "work"
     workdir.mkdir()
@@ -2317,16 +2317,23 @@ def _url_grant(name, url, *, required=True):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
-@pytest.mark.parametrize("case", ["finish", "finish-cut-at-output-limit", "finish-cut-as-vllm-reports-it"])
+@pytest.mark.parametrize(
+    "case",
+    ["finish", "finish-cut-at-output-limit", "finish-cut-as-vllm-reports-it", "finish-cut-with-complete-arguments"],
+)
 async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, case):
     paths = ["/app/report.docx", "/app/data.xlsx"]
     replies = [(json.dumps({"paths": paths}), "tool_calls", False)]
     if case.startswith("finish-cut"):
-        # Pi parses the cut-off arguments as `{"paths": ["/app/report.docx"]}`; the call must not run. A server may
-        # report `length` (here under a lower limit than the request's), while vLLM reports `tool_calls` for a reply
-        # it parsed a call from, even when the reply used its whole output budget.
-        vllm = case == "finish-cut-as-vllm-reports-it"
-        replies.insert(0, ('{"paths": ["/app/report.docx", ', "tool_calls" if vllm else "length", vllm))
+        # A finish call in a reply cut at the output limit must not run. A server may report `length` (here under a
+        # lower limit than the request's), and Pi then runs none of the reply's calls. vLLM reports `tool_calls` for a
+        # reply it parsed a call from, even when the reply used its whole output budget: Pi refuses arguments that
+        # are not a complete JSON object, and Gym's finish tool refuses a call whose arguments parse.
+        vllm = case != "finish-cut-at-output-limit"
+        arguments = '{"paths": ["/app/report.docx", '
+        if case == "finish-cut-with-complete-arguments":
+            arguments = json.dumps({"paths": paths[:1]})
+        replies.insert(0, (arguments, "tool_calls" if vllm else "length", vllm))
 
     def grants(up, down):
         return [_url_grant("resources", up)]
@@ -2353,6 +2360,11 @@ async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, ca
     # Pi's agent_end carries the terminal tool result, so the invocation record agrees with the response.
     records = run.close.agent_observations.records
     assert [record.status for record in records if record.kind == "agent_invocation"] == ["completed"]
+    assert response.metadata["pi_version"] == setup[0].config.pi_version
+    if case == "finish-cut-with-complete-arguments":
+        # Gym's finish tool refused the cut-off call, and the next request tells the model why.
+        replayed = [message for message in run.requests[1]["messages"] if message.get("role") == "tool"]
+        assert "Not run: the reply with this call hit the output limit" in json.dumps(replayed)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
@@ -2372,7 +2384,8 @@ async def test_pinned_pi_stops_before_inference_when_a_required_grant_is_down(se
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 @pytest.mark.parametrize(
-    ("summary_status", "requests_with_tools"), [(200, [True, True, False, True]), (503, [True, True, False])]
+    ("summary_status", "requests_with_tools"),
+    [(200, [True, True, False, True]), (503, [True, True, False, False, False, False])],
 )
 async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
     setup, tmp_path, monkeypatch, summary_status, requests_with_tools
@@ -2381,9 +2394,14 @@ async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
     # split one of them or be lost. Gym grades the final 400 as a model limit only when that event reaches it.
     # With compaction on, Pi first compacts and retries; a failed compaction call is reported as the run's failure.
     model = functools.partial(_long_turn_then_overflow, summary_status=summary_status)
-    async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
-        response = await run.activation
-    # Pi's compaction request is the one without tools; Pi retries the overflowed call only after it worked.
+    agent = setup[0]
+    # Pi retries a failed compaction call under its retry policy: here three times, without the default backoff.
+    settings = agent._build_settings_config()
+    settings["retry"] = {**settings["retry"], "maxRetries": 3, "baseDelayMs": 1}
+    with patch.object(agent, "_build_settings_config", return_value=settings):
+        async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
+            response = await run.activation
+    # Pi's compaction requests are the ones without tools; Pi retries the overflowed call only after one worked.
     assert ["tools" in request for request in run.requests] == requests_with_tools
     # The long turn ran and reached Gym whole; without it the pipe never fills.
     assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output"]
@@ -2394,6 +2412,96 @@ async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
         assert re.match(r"Context overflow recovery failed: .*\b503\b", response.error.message)
         # Not the overflow's 400, which the default policy would grade.
         assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+
+
+def _tool_turns_then_cut_off(requests, summary_status=200):
+    """A streaming chat model that reasons at length and calls `bash` three times, then replies with text cut at
+    `length` well below the output cap, and finally answers. Pi's compaction requests, which carry no tools, get a
+    summary, or `summary_status` with no body.
+    """
+
+    def handle(body):
+        requests.append(body)
+        turn = sum("tools" in request for request in requests)
+        if "tools" not in body:
+            if summary_status != 200:
+                return summary_status, "application/json", b""
+            delta, finish = {"role": "assistant", "content": "Summary."}, "stop"
+        elif turn <= 3:
+            call = {"index": 0, "id": f"call-{turn}", "type": "function"}
+            call["function"] = {"name": "bash", "arguments": json.dumps({"command": "true"})}
+            delta, finish = (
+                {"role": "assistant", "reasoning_content": "r" * 100_000, "tool_calls": [call]},
+                "tool_calls",
+            )
+        elif turn == 4:
+            delta, finish = {"role": "assistant", "content": "The answer is"}, "length"
+        else:
+            delta, finish = {"role": "assistant", "content": "Done."}, "stop"
+        data = {
+            "id": f"chat-{len(requests)}",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": body.get("model"),
+        }
+        chunks = [{**data, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}]
+        chunks.append(
+            {**data, "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+        )
+        stream = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+        return 200, "text/event-stream", f"{stream}data: [DONE]\n\n".encode()
+
+    return handle
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.parametrize(
+    ("summary_status", "requests_with_tools"),
+    [(200, [True] * 4 + [False, True]), (503, [True] * 4 + [False] * 4)],
+)
+async def test_pinned_pi_reports_a_failed_recovery_of_a_cut_off_reply(
+    setup, tmp_path, monkeypatch, summary_status, requests_with_tools
+):
+    # Pi compacts and retries a `length` reply cut below the output cap. When its compaction call fails, the cut-off
+    # reply is not the run's result: the run fails as the compaction call did, like a failed overflow recovery.
+    model = functools.partial(_tool_turns_then_cut_off, summary_status=summary_status)
+    agent = setup[0]
+    settings = agent._build_settings_config()
+    settings["retry"] = {**settings["retry"], "maxRetries": 3, "baseDelayMs": 1}
+    with patch.object(agent, "_build_settings_config", return_value=settings):
+        async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
+            response = await run.activation
+    assert ["tools" in request for request in run.requests] == requests_with_tools
+    # The invocation record agrees with the response, not with the cut-off reply Pi tried to recover.
+    records = run.close.agent_observations.records
+    assert [record.status for record in records if record.kind == "agent_invocation"] == [response.status]
+    texts = [item.content[0].text for item in response.output if item.type == "message"]
+    if summary_status == 200:
+        assert (response.status, response.error) == ("completed", None)
+        # The cut-off reply that Pi retried stays in the output before the reply that replaced it.
+        assert texts == ["The answer is", "Done."]
+    else:
+        assert response.status == "failed"
+        assert re.match(r"Context overflow recovery failed: .*\b503\b", response.error.message)
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+        assert texts == ["The answer is"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+async def test_pinned_pi_types_a_refused_model_connection_as_a_transport_error(setup, tmp_path, monkeypatch):
+    agent = setup[0]
+    settings = agent._build_settings_config()
+    # Pi would retry the connection; the terminal error is the same.
+    settings["retry"] = {**settings["retry"], "maxRetries": 0}
+    with patch.object(agent, "_build_settings_config", return_value=settings):
+        async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: []) as run:
+            # Pi reads the model server's address when the activation starts.
+            agent.server_client._build_server_base_url.return_value = run.down
+            response = await run.activation
+    assert response.status == "failed"
+    # Pi appends the cause, as in `Connection error.: connect ECONNREFUSED 127.0.0.1:<port>`.
+    assert response.error.message.startswith("Connection error")
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
 
 
 @pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
@@ -2411,7 +2519,7 @@ _COMPACTION_CALL_FAILED = "Context overflow recovery failed: Summarization faile
     [
         (False, [], "model error"),
         (True, [], None),
-        # Pi 0.80.2's events after the overflow: it compacted, its retry overflowed again, and it gave up.
+        # The pinned Pi's events after the overflow: it compacted, its retry overflowed again, and it gave up.
         (
             True,
             [
@@ -2484,6 +2592,34 @@ async def test_provider_failure_is_reported_but_context_limit_preserves_patch(
     assert close.agent_observations.records[0].status == ("failed" if error else "incomplete")
     sandbox.launch.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("compaction", "status", "error"),
+    [
+        # Pi stopped at the output limit without trying to recover the reply.
+        ([], "incomplete", None),
+        # Pi compacted to recover the cut-off reply, and its compaction call failed.
+        (
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "errorMessage": _COMPACTION_CALL_FAILED},
+            ],
+            "failed",
+            _COMPACTION_CALL_FAILED,
+        ),
+    ],
+)
+async def test_failed_recovery_of_a_cut_off_reply_also_fails_the_invocation(setup, compaction, status, error):
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events(stop_reason="length").splitlines()]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate([*recorded, *compaction]))
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert (response.status, response.error and response.error.message) == (status, error)
+    close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    # Pi's events end on the `length` reply either way; the invocation record follows the response.
+    assert close.agent_observations.records[0].status == status
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
@@ -2793,7 +2929,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     execute = sandbox.exec.side_effect
 
     async def report_version(command, **kwargs):
-        if command.endswith("/dist/cli.js --version"):
+        if command.endswith("/.bin/pi --version"):
             return SimpleNamespace(return_code=return_code, error_type=None, stdout=f"{reported}\n", stderr="")
         return await execute(command, **kwargs)
 
@@ -2810,7 +2946,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     assert state.runtime == "/opt"
     assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
-    assert "/opt/node/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version" in commands
+    assert "NODE_DISABLE_COMPILE_CACHE=1 /opt/node/bin/node /opt/pi/node_modules/.bin/pi --version" in commands
 
 
 def test_required_tool_grant_under_model_only_is_a_terminal_seed_refusal(setup):
@@ -2861,7 +2997,7 @@ async def test_preinstalled_runtime_check_that_cannot_run_stays_retryable(setup)
     execute = sandbox.exec.side_effect
 
     async def time_out(command, **kwargs):
-        if command.endswith("/dist/cli.js --version"):
+        if command.endswith("/.bin/pi --version"):
             return SimpleNamespace(return_code=None, error_type="timeout", stdout="", stderr="")
         return await execute(command, **kwargs)
 

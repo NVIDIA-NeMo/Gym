@@ -173,6 +173,24 @@ dataset, harness and mode combination that has been run, and the
 [resources server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/nl2repobench/README.md)
 describes the verification flow.
 
+## PerceptionBench
+
+[PerceptionBench](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/perceptionbench/README.md) (`benchmarks/perceptionbench`) evaluates ten atomic visual-perception capabilities across 3,000 short-answer VQA items from [`moonshotai/PerceptionBench`](https://huggingface.co/datasets/moonshotai/PerceptionBench), graded 0/1 by an LLM judge (`mean/reward` is overall micro-average accuracy; per-capability and per-source breakdowns are logged as `by_category/<category>/accuracy` and `by_source/<source_bmk>/accuracy`). The dataset is licensed **CC-BY-NC-4.0** (non-commercial research and evaluation only; do not include in training corpora).
+
+Prepare downloads the pinned Hugging Face revision and verifies its SHA-256 (or pass `++prepare_script_args.source_path=/path/to/PerceptionBench.jsonl` / `PERCEPTIONBENCH_DATA_ROOT` for a local copy). Configure a vision-capable policy endpoint that supports **multi-image prompts of up to 8 interleaved images** (~11.6% of items carry 2–8 images; e.g. `--limit-mm-per-prompt '{"image":8}'` on vLLM) and an OpenAI-compatible judge endpoint (upstream protocol uses `openai/gpt-oss-120b` at temperature 0.3 via `++judge_base_url`, `++judge_api_key`, and `++judge_model_name`, or `env.yaml`):
+
+```bash
+gym eval prepare --benchmark perceptionbench
+
+gym eval run --benchmark perceptionbench \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --split benchmark --num-repeats 1 --max-output-tokens 65536 \
+  --output results/perceptionbench/rollouts.jsonl \
+  ++judge_base_url="$JUDGE_URL" ++judge_api_key="$JUDGE_KEY" ++judge_model_name=openai/gpt-oss-120b
+```
+
+See the [PerceptionBench README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/perceptionbench/README.md) for upstream parity notes, optional prompt flags (`--include-hints` and `--normalize-coords-1000`, mutually exclusive and off by default), and `DA-2K` pixel-coordinate resizing caveats.
+
 ## Benchmarks Whose Data You Stage
 
 A few benchmarks declare a protocol over a dataset that cannot ship with Gym. Their `prepare_script` copies a file you stage yourself and fails when you have not given it one, so a run never scores a partial or stale set.

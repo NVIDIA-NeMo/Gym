@@ -44,19 +44,19 @@ review.
 Typical command shapes:
 
 ```bash
-uv run python scripts/blade_toolkit.py validate \
+uv run python .agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py validate \
   --benchmark-dir benchmarks/<benchmark_name> --phase all
 
-uv run python scripts/blade_toolkit.py extract-anchor-facts \
+uv run python .agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py extract-anchor-facts \
   --golden benchmarks/<benchmark_name>/golden_reports/<model>_golden_report.md \
   --benchmark <benchmark_name> --model-name <model> \
   --output benchmarks/<benchmark_name>/golden_reports/<model>_anchor_facts.json
 
-uv run python scripts/blade_toolkit.py make-shallow \
+uv run python .agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py make-shallow \
   --input benchmarks/<benchmark_name>/golden_reports/<model>_golden_report.md \
   --output benchmarks/<benchmark_name>/golden_reports/<model>_shallow.md
 
-uv run python scripts/blade_toolkit.py calibrate \
+uv run python .agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py calibrate \
   --golden-report benchmarks/<benchmark_name>/golden_reports/<model>_golden_report.md \
   --anchor-facts benchmarks/<benchmark_name>/golden_reports/<model>_anchor_facts.json \
   --shallow-report benchmarks/<benchmark_name>/golden_reports/<model>_shallow.md
