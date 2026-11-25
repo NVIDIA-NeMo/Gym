@@ -16,8 +16,8 @@ from typing import TypedDict
 from pydantic import JsonValue
 
 from ..contracts import SessionEvidence
-from ..git_diff import patch_section_paths
-from .shell import bash_write_targets, inline_write_targets, invocations, runs_tests
+from ..git_diff import patch_section_paths, workspace_patches_equal
+from .shell import bash_write_targets, command_parts, inline_write_targets, invocations, runs_tests, unquoted
 
 
 class Call(TypedDict, total=False):
@@ -59,7 +59,7 @@ class Step(TypedDict, total=False):
 Facts = dict[str, JsonValue]
 # A checker's verdict on one unit and what it found.
 Outcome = tuple[bool, str]
-# A call spec, {tool, arg, changes_repo}, or just a kind: `tool` is a kind or a list of kinds, `arg` one
+# A call spec, {tool, arg, changes_repo, writes_file}, or just a kind: `tool` is a kind or a list of kinds, `arg` one
 # {field, regex, ...} or a list of them.
 CallSpec = Mapping[str, JsonValue] | str
 
@@ -116,6 +116,8 @@ def evidence_steps(evidence: SessionEvidence) -> list[Step]:
     Results can arrive out of order and session-local call IDs can collide. Diff
     chronology follows observations, never the grouped assistant call ordering.
     Change marks a call already carries survive when actual workspace observations are absent.
+    The calls after a restored continuation prefix are compared against the workspace seed observed once it was
+    restored (facts['workspace_restored_diff']), when seed took that diff.
     """
     steps = [step.model_dump(mode="json", exclude_none=True) for step in evidence.steps]
     calls = {
@@ -123,8 +125,8 @@ def evidence_steps(evidence: SessionEvidence) -> list[Step]:
         for step in steps
         for call in step.get("calls", [])
     }
-    ordered, diffs, identities = [], [], set()
-    for step in steps:
+    ordered, diffs, indices, identities = [], [], [], set()
+    for index, step in enumerate(steps):
         if step["role"] != "tool":
             continue
         key = (step["session_id"], step.get("invocation_id"), step.get("call_id"))
@@ -134,9 +136,17 @@ def evidence_steps(evidence: SessionEvidence) -> list[Step]:
         identities.add(key)
         ordered.append(call)
         diffs.append(step.get("workspace_diff"))
+        indices.append(index)
     if any(diff is not None for diff in diffs):
+        restored = None
+        if evidence.continuation_start is not None and "workspace_restored_diff" in evidence.facts:
+            prefix = sum(index < evidence.continuation_start for index in indices)
+            restored = (prefix, evidence.facts["workspace_restored_diff"])
         derived = mark_repo_changes(
-            [dict(call) for call in ordered], diffs, initial_diff=evidence.facts.get("workspace_initial_diff", "")
+            [dict(call) for call in ordered],
+            diffs,
+            initial_diff=evidence.facts.get("workspace_initial_diff", ""),
+            restored=restored,
         )
         for call, marked, diff in zip(ordered, derived, diffs):
             for key in CHANGE_KEYS:
@@ -175,18 +185,34 @@ def arg_value(args: Mapping[str, JsonValue], field: str) -> JsonValue:
 def call_matches(call: Call, spec: CallSpec, facts: Facts | None = None) -> bool:
     """The call fits a spec: {tool: kind or list, arg: {field, regex} or a list of such (any of them)}, or a kind.
 
-    `changes_repo: true` (or false): the call changed the repository, or did not (`changes_repo`). Options of an arg
-    spec for shell text (checkers/shell.py): `parts: true` tests the regex on each simple command the text runs, read as
-    the shell runs it (`invocations`: quoted text is data, git's global options are skipped, a `bash -c` script is read
-    as commands), and the call matches when one command does. `planted: true` (with a path regex): when the
-    task's facts list planted files, the path must also be the very planted file the regex names, read from the
-    working folder, so docs/AGENTS.md is not the planted AGENTS.md.
+    `changes_repo: true` (or false): the call changed the repository, or did not (`changes_repo`). `writes_file: true`
+    (or false): the call writes, creates or deletes a file anywhere, /tmp included, or does not (`writes_file`).
+    Options of an arg spec for shell text (checkers/shell.py): `parts: true` tests the regex on each simple command the
+    text runs, read as the shell runs it (`invocations`: quoted text is data, git's global options are skipped, a
+    `bash -c` script is read as commands), and the call matches when one command does. `planted: true` (with a path
+    regex): when the task's facts list planted files, the path must also be the very planted file the regex names, read
+    from the working folder, so docs/AGENTS.md is not the planted AGENTS.md.
+
+    `unquoted: true` without `parts` tests the regex on the shell text outside quotes, here-document bodies and
+    comments (`unquoted`: a quoted string reads as ""); with `parts`, `invocations` already reads the text that way.
+
+    `as_written: true` with `parts` tests the regex on each simple command as written (`command_parts`) instead: quoted
+    text, prefixes such as sudo or env, variable settings, redirections and git's global options stay, and a `bash -c`
+    script stays one quoted word, so `python -c "import pytest; pytest.main()"` shows its code. Without `parts` the
+    regex already reads the whole text as written, so the key changes nothing. A spec takes `as_written` or
+    `unquoted`, not both.
+
+    An arg spec {field: command, writes: regex, by} matches when a file the shell command writes content into does: a
+    redirect, tee or sed -i target (`by: shell`) or a file an inline script writes (`by: inline`); both without `by`
+    (calls.shell_content_writes). A relative target is read from the call's working folder, else the session's.
     """
     if isinstance(spec, str):
         spec = {"tool": spec}
     if not tool_matches(call["tool"], spec.get("tool")):
         return False
     if spec.get("changes_repo") is not None and changes_repo(call) != bool(spec["changes_repo"]):
+        return False
+    if spec.get("writes_file") is not None and writes_file(call) != bool(spec["writes_file"]):
         return False
     arg = spec.get("arg")
     if arg:
@@ -195,12 +221,21 @@ def call_matches(call: Call, spec: CallSpec, facts: Facts | None = None) -> bool
 
 
 def _arg_matches(call: Call, option: Mapping[str, JsonValue], facts: Facts | None) -> bool:
+    if option.get("writes") is not None:
+        # calls.py imports this module, so its reader of a call's shell writes is imported here
+        from .calls import shell_content_writes
+
+        return any(re.search(option["writes"], p, re.S) for p in shell_content_writes(call, facts, option.get("by")))
+    if option.get("as_written") and option.get("unquoted"):
+        raise ValueError("an arg spec reads the text as written (as_written) or outside quotes (unquoted), not both")
     v = arg_value(call["args"], option["field"])
     if v is None:
         return False
     texts = [v if isinstance(v, str) else str(v)]
     if option.get("parts"):
-        texts = invocations(texts[0])
+        texts = command_parts(texts[0]) if option.get("as_written") else invocations(texts[0])
+    elif option.get("unquoted"):
+        texts = [unquoted(texts[0])]
     if not any(re.search(option["regex"], t, re.S) for t in texts):
         return False
     if option.get("planted") and (facts or {}).get("planted_files"):
@@ -309,17 +344,24 @@ def same_path(a: object, b: object) -> bool:
 
 def match_count(call: Call, spec: CallSpec, facts: Facts | None = None) -> int:
     """How many commands of a call match a spec: for an arg spec with `parts: true`, the simple commands the shell
-    text runs that match (git status && git log is two); otherwise 1 when the call matches, else 0 (`together`)."""
+    text runs that match (git status && git log is two), read as the spec reads them (`as_written` or not, the same
+    for every arg spec of the call spec); otherwise 1 when the call matches, else 0 (`together`)."""
     if not call_matches(call, spec, facts):
         return 0
     specs = spec.get("arg") if isinstance(spec, Mapping) else None
     specs = specs if isinstance(specs, list) else [specs] if specs else []
-    if not specs or not all(s.get("parts") and s.get("field") == specs[0].get("field") for s in specs):
+    if not specs or not all(
+        s.get("parts")
+        and s.get("field") == specs[0].get("field")
+        and bool(s.get("as_written")) == bool(specs[0].get("as_written"))
+        for s in specs
+    ):
         return 1
     v = arg_value(call["args"], specs[0]["field"])
+    split = command_parts if specs[0].get("as_written") else invocations
     n = sum(
         1
-        for part in invocations(v if isinstance(v, str) else str(v))
+        for part in split(v if isinstance(v, str) else str(v))
         if any(re.search(s["regex"], part, re.S) for s in specs)
     )
     return max(n, 1)
@@ -351,6 +393,22 @@ def changes_repo(call: Call) -> bool:
     return any(
         isinstance(p, str) and p and not TMP_RE.match(posixpath.normpath(p) if p.startswith("/") else p) for p in paths
     )
+
+
+def writes_file(call: Call) -> bool:
+    """The call writes, creates or deletes a file, wherever it is (/tmp included): an edit or write call, a file a
+    shell command plainly writes, creates or deletes (shell.bash_write_targets) or an inline script writes, or a
+    change the workspace diff shows (test outputs left out). A call the harness refused did nothing."""
+    if call.get("rejected"):
+        return False
+    if call_changed_paths(call):
+        return True
+    args = call.get("args") or {}
+    if tool_matches(call["tool"], "bash"):
+        cmd, wd = arg_value(args, "command"), arg_value(args, "workdir")
+        if isinstance(cmd, str) and (bash_write_targets(cmd, wd) or inline_write_targets(cmd, wd)):
+            return True
+    return bool(repo_changes(call))
 
 
 def same_file(a: object, b: object, workdir: str | None = None) -> bool:
@@ -412,9 +470,19 @@ def _is_new(section: str) -> bool:
     return "new file mode" in "\n".join(section.split("\n")[1:6])
 
 
-def mark_repo_changes(calls: list[Call], diffs: list[str | None], *, initial_diff: str | None = "") -> list[Call]:
+def mark_repo_changes(
+    calls: list[Call],
+    diffs: list[str | None],
+    *,
+    initial_diff: str | None = "",
+    restored: tuple[int, str | None] | None = None,
+) -> list[Call]:
     """Set the change marks (CHANGE_KEYS) of each call from `diffs`, the workspace diff stored after each call (None
     where none was stored), in the order of the run, compared against the observed initial workspace state.
+
+    `restored` is (n, diff) when the first n calls are a continuation's restored prefix and seed observed `diff` once
+    it was restored: the calls after the prefix are compared against that, not against the prefix's last stored diff,
+    which its harness may have taken against another base (the Git index, so a change it staged is not in it).
 
     An explicitly unknown initial state (None) cannot establish the first change; the calls' own arguments decide
     until a stored diff gives a baseline. A call that stored no diff in a run that stores diffs changed nothing (a
@@ -422,13 +490,18 @@ def mark_repo_changes(calls: list[Call], diffs: list[str | None], *, initial_dif
     at all gets changed_repo None (no git repository): the checks then fall back to the calls' own arguments
     (changes_repo). A test run (shell.runs_tests) that creates a file it does not name leaves a test output; later
     changes to that file are test outputs too.
+
+    Diffs are compared by what they say about the files (git_diff.workspace_patches_equal): a restored prefix recorded
+    by another harness abbreviates the object IDs that this harness's diffs and the initial diff spell out.
     """
     if all(d is None for d in diffs):
         for c in calls:
             c.update(changed_repo=None, changed_paths=[], created_paths=[], test_output_paths=[])
         return calls
     last, last_text, outputs = diff_files(initial_diff), initial_diff, set()
-    for c, d in zip(calls, diffs):
+    for position, (c, d) in enumerate(zip(calls, diffs)):
+        if restored is not None and position == restored[0]:
+            last, last_text = diff_files(restored[1]), restored[1]
         if last_text is None:
             c.update(changed_repo=None, changed_paths=[], created_paths=[], test_output_paths=[])
             if d is not None:
@@ -441,7 +514,7 @@ def mark_repo_changes(calls: list[Call], diffs: list[str | None], *, initial_dif
         changed = []
         for k in sorted(set(last) | set(now)):
             before, after = last.get(k), now.get(k)
-            if (before or ("",))[0] != (after or ("",))[0]:
+            if not workspace_patches_equal((before or ("",))[0], (after or ("",))[0]):
                 for p in (after or ("", ()))[1] + (before or ("", ()))[1]:
                     if p not in changed:
                         changed.append(p)
@@ -451,7 +524,7 @@ def mark_repo_changes(calls: list[Call], diffs: list[str | None], *, initial_dif
             named = [path for path, _kind in bash_write_targets(cmd, arg_value(c["args"], "workdir"))]
             outputs |= {k for k in created if not any(same_path(t, k) for t in named)}
         c.update(
-            changed_repo=d != last_text,
+            changed_repo=not workspace_patches_equal(d, last_text),
             changed_paths=changed,
             created_paths=created,
             test_output_paths=[p for p in changed if p in outputs],

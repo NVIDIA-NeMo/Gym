@@ -41,6 +41,9 @@ agentic_if_resources:
       # Each episode's evidence, receipts and task verdict, which re-verification reads. Rollout data: keep it private.
       # Absolute: the run's results_dir (which Gym makes absolute) unless agentic_if_artifacts_dir names another place.
       artifacts_dir: ${oc.select:agentic_if_artifacts_dir,${oc.select:results_dir,results}/agentic_if}
+      # The reward (README.md, "Training reward"). Unset, it is the task verdict, the benchmark's. A training run sets
+      # reward_mode: task_and_if (the task verdict times the run's IF score), and optionally if_score: if_frac and
+      # cut_run_reward: zero (a run a timeout or a full context cut short earns 0).
       datasets:
         - name: example
           type: example

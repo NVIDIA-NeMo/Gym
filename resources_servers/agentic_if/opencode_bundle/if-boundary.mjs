@@ -7,8 +7,15 @@
 //     agent writes (config.instructions); with no instructions file OpenCode's own system prompt is left as is;
 //   - checks the exposed tool inventory against the row's selection (the `config` hook denies unselected tools) and
 //     applies the compiled tool descriptions and JSON-pointer parameter descriptions;
+//   - shows each tool the row renames under its alias (`tool_aliases`): in the tool definitions, history and
+//     tool_choice, and in compaction calls' history. A call the model makes under an alias reaches OpenCode as the
+//     built-in tool (a spelling that only matches an alias after lowercasing reaches it as the built-in tool's ID in
+//     capitals, which OpenCode's own lowercase repair maps to the tool); the records keep the model's own reply;
 //   - restores the model's own tool calls (raw arguments) in history and shows each rejected call's result as the tools
-//     its request offered, including rejected calls recorded in a continuation prefix;
+//     its request offered, including rejected calls recorded in a continuation prefix (a prefix's rejected calls
+//     recorded without a receipt, which the row lists, keep OpenCode's own form);
+//   - records how each model-written tool name reached OpenCode in the process registry (`dispatched`), where the
+//     profile plugin refuses a call to a renamed tool that the model did not make under its alias;
 //   - re-serializes streamed (SSE) and whole JSON replies with Python's json semantics (numbers and text unchanged;
 //     tests/opencode_bundle/fixtures pin the bytes);
 //   - passes model-server errors to OpenCode unchanged and records them on the call: an HTTP error reply, or an error
@@ -39,6 +46,8 @@ const INTERNAL_AGENT = "x-nemo-gym-if-agent";
 const INTERNAL_ASSISTANT = "x-nemo-gym-if-assistant-message";
 const INTERNAL_HEADERS = new Set([INTERNAL_SESSION, INTERNAL_AGENT, INTERNAL_ASSISTANT]);
 const MAX_SSE_EVENT = 4 * 1024 * 1024;
+// A tool alias, as row validation accepts it (task_variants/runtime.py).
+const TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 let callSequence = 0; // per process, shared by every instance of this module
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -536,8 +545,9 @@ function checkUserPrompt(content) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Streaming: hold each tool call's name until its arguments start, so OpenCode receives the whole name in one delta;
-// observe the model-visible reply, and re-serialize every data event as json.dumps(..., ensure_ascii=False).
+// Streaming: hold each tool call's name until its arguments start, so OpenCode receives the whole name in one delta
+// (the built-in tool of an alias: observeReplyCalls renames the held call, never the assembled reply); observe the
+// model-visible reply, and re-serialize every data event as json.dumps(..., ensure_ascii=False).
 
 class ChatStream {
   constructor(prepared, observeReplyCalls) {
@@ -842,6 +852,29 @@ function validateConfig(config) {
     const namesValid = Array.isArray(names) && (names.length === 0 || isStringList(names, { unique: true }));
     if (!isDict(receipt) || !isDict(receipt.function) || !namesValid) fail("historical_rejected_calls receipt");
   }
+  if (has(config, "unreceipted_rejected_calls") && !isStringList(config.unreceipted_rejected_calls, { unique: true })) {
+    fail("unreceipted_rejected_calls");
+  }
+  if (has(config, "tool_aliases")) {
+    // The selected built-in tools the row renames, each to a distinct name no other selected tool keeps.
+    const aliases = config.tool_aliases;
+    const renamed = isDict(aliases) ? Object.keys(aliases) : [];
+    if (
+      config.tool_names === null ||
+      !renamed.length ||
+      renamed.some(
+        (tool) =>
+          !config.tool_names.includes(tool) ||
+          typeof aliases[tool] !== "string" ||
+          !TOOL_NAME.test(aliases[tool]) ||
+          aliases[tool] === tool,
+      )
+    ) {
+      fail("tool_aliases");
+    }
+    const visible = config.tool_names.map((tool) => (has(aliases, tool) ? aliases[tool] : tool));
+    if (new Set(visible).size !== visible.length) fail("tool_aliases");
+  }
   return config;
 }
 
@@ -934,6 +967,11 @@ function installGuard(registry) {
 export const IfBoundary = async () => {
   const registry = (globalThis[REGISTRY] ??= {});
   installGuard(registry);
+  // (session, call ID) -> how the call was dispatched, or null when ambiguous. Per process, so the profile plugin's
+  // gate reads it through `registry.dispatched` whichever instance of this plugin forwarded the call.
+  const dispatch = (registry.dispatch ??= new Map());
+  const dispatchKey = (session, callId) => pyKey(session) + "\u0000" + callId;
+  registry.dispatched ??= (session, callId) => dispatch.get(dispatchKey(session, callId));
   const state = {
     config: null,
     loadError: null,
@@ -942,7 +980,6 @@ export const IfBoundary = async () => {
     system: null,
     root: null,
     observations: [], // {session_id, response?}: what the history restore reads
-    dispatch: new Map(), // (session, call id) -> dispatch record, or null when ambiguous
     active: new Map(), // session -> saved, unfinished assistant messages (OA's assistant_message_header logic)
   };
   let pluginSha256 = null;
@@ -989,16 +1026,39 @@ export const IfBoundary = async () => {
   };
 
   const cfg = () => state.config;
+  // The row's renamed tools (built-in -> alias); empty for a row that renames none.
+  const aliases = () => (has(cfg(), "tool_aliases") ? cfg().tool_aliases : {});
 
-  // The tools each call's request offered, by (session, call ID); null once the ID repeats.
-  const recordDispatch = (session, allowedNames, callId) => {
+  // Each call's dispatch, by (session, call ID); null once the ID repeats: the names its request offered
+  // (`available`), the name the model wrote, the name OpenCode received, and whether the model's name was offered
+  // (exactly, or as OpenCode's lowercase repair reads it).
+  const recordDispatch = (session, allowedNames, callId, modelName, forwarded, allowed) => {
     if (typeof callId !== "string" || !callId) throw valueError("missing tool call identity");
-    const key = pyKey(session) + "\u0000" + callId;
-    if (state.dispatch.has(key)) {
-      state.dispatch.set(key, null);
+    const key = dispatchKey(session, callId);
+    if (dispatch.has(key)) {
+      dispatch.set(key, null);
       throw valueError("duplicate tool call identity");
     }
-    state.dispatch.set(key, sortedStrings(allowedNames));
+    dispatch.set(key, {
+      available: sortedStrings(allowedNames),
+      model_name: modelName,
+      opencode_name: forwarded,
+      allowed,
+    });
+  };
+
+  // Name each call in history as the model saw its tool: a renamed tool under its alias.
+  const aliasHistory = (messages) => {
+    const renamed = aliases();
+    for (const entry of iterate(messages)) {
+      if (!isDict(entry)) throw valueError("OpenCode's actor messages must be structured objects");
+      for (const call of iterate(has(entry, "tool_calls") ? entry.tool_calls : [])) {
+        const definition = item(call, "function");
+        const name = item(definition, "name");
+        pyKey(name);
+        if (typeof name === "string" && has(renamed, name)) assign(definition, "name", renamed[name]);
+      }
+    }
   };
 
   const prompts = (payload, child) => {
@@ -1036,18 +1096,23 @@ export const IfBoundary = async () => {
     }
     result.tools = tools;
     effectiveToolNames(available, config.targets, child);
+    const renamed = aliases();
+    // The name the model sees for each offered tool: its alias, or its own ID.
+    const visible = (name) => (has(renamed, name) ? renamed[name] : name);
     for (const tool of entries) {
       const definition = item(tool, "function");
       const name = item(definition, "name");
+      // Descriptions are compiled per built-in tool; the model sees them under the tool's alias.
       if (has(config.descriptions, name)) assign(definition, "description", config.descriptions[name]);
       if (has(config.parameter_descriptions, name)) {
         const schema = has(definition, "parameters") ? definition.parameters : {};
         assign(definition, "parameters", describeParameters(schema, config.parameter_descriptions[name]));
       }
+      if (has(renamed, name)) assign(definition, "name", renamed[name]);
     }
-    for (const entry of iterate(has(result, "messages") ? result.messages : [])) {
-      if (!isDict(entry)) throw valueError("OpenCode's actor messages must be structured objects");
-      for (const call of iterate(has(entry, "tool_calls") ? entry.tool_calls : [])) pyKey(item(item(call, "function"), "name"));
+    const messages = has(result, "messages") ? result.messages : [];
+    aliasHistory(messages);
+    for (const entry of iterate(messages)) {
       // Gym correlates results by tool_call_id; redundant tool-message names are not a separate execution route.
       if (get(entry, "role") === "tool") delete entry.name;
     }
@@ -1057,22 +1122,30 @@ export const IfBoundary = async () => {
       if (truthy(get(named, "name"))) {
         pyKey(named.name);
         if (!selected.has(named.name)) throw valueError("tool_choice names an unselected tool");
+        if (has(renamed, named.name)) assign(named, "name", renamed[named.name]);
       }
     }
     prompts(result, child);
     const executionTools = {};
-    for (const name of available) assign(executionTools, name, name);
+    for (const name of available) assign(executionTools, visible(name), name);
     return {
       payload: result,
-      allowedNames: available,
+      allowedNames: available.map(visible),
       executionTools,
       restricted: config.tool_names !== null,
+      aliased: Object.keys(renamed).length > 0,
       observeDispatch: null,
     };
   };
 
-  // Observe a reply's tool calls (OpenCode receives the reply unchanged): record each call's dispatch, and the tool
-  // that runs a name OpenCode's lowercase repair accepts.
+  // Observe a reply's tool calls: record each call's dispatch and the tool that runs a name OpenCode's lowercase
+  // repair accepts, and give each call, in place, the name OpenCode receives (the caller passes the held stream call,
+  // or a copy of a whole reply, so the records keep the model's own reply):
+  //   - an alias reaches OpenCode as its built-in tool;
+  //   - a name whose lowercase is an alias reaches it as that tool's ID in capitals when the alias renames the tool
+  //     (OpenCode's own lowercase repair then maps it to the tool, so the boundary repairs nothing), else unchanged;
+  //   - any other name is left to OpenCode, which runs its `invalid` tool, or the hidden ID of a renamed tool that the
+  //     profile plugin refuses.
   const observeReplyCalls = (prepared, payload) => {
     const calls = [];
     for (const choice of iterate(get(payload, "choices", []))) {
@@ -1082,13 +1155,21 @@ export const IfBoundary = async () => {
     for (const [callId, fn] of calls) {
       const name = get(fn, "name");
       if (!truthy(name)) continue;
-      if (!(typeof name === "string" && prepared.allowedNames.includes(name))) {
+      let allowed = typeof name === "string" && prepared.allowedNames.includes(name);
+      let forwarded = allowed ? prepared.executionTools[name] : name;
+      if (!allowed) {
         pyKey(name);
         if (typeof name !== "string") throw new PyError("AttributeError", `'${typeName(name)}' object has no attribute 'lower'`);
         const lower = name.toLowerCase();
-        if (prepared.allowedNames.includes(lower)) assign(prepared.executionTools, name, prepared.executionTools[lower]);
+        if (prepared.allowedNames.includes(lower)) {
+          const tool = prepared.executionTools[lower];
+          assign(prepared.executionTools, name, tool);
+          allowed = true;
+          if (tool !== lower) forwarded = tool.toUpperCase();
+        }
       }
-      if (prepared.observeDispatch !== null) prepared.observeDispatch(callId);
+      if (prepared.observeDispatch !== null) prepared.observeDispatch(callId, name, forwarded, allowed);
+      if (forwarded !== name) assign(fn, "name", forwarded);
     }
   };
 
@@ -1105,6 +1186,10 @@ export const IfBoundary = async () => {
     }
     const rejections = new Map();
     const historical = session === state.root ? config.historical_rejected_calls : {};
+    // The prefix's rejected calls recorded without a receipt that the row keeps as OpenCode recorded them.
+    const unreceipted = new Set(
+      session === state.root && has(config, "unreceipted_rejected_calls") ? config.unreceipted_rejected_calls : [],
+    );
     for (const entry of iterate(get(outgoing, "messages", []))) {
       for (const call of iterate(or(get(entry, "tool_calls"), []))) {
         const invalid = invalidCalls.has(pyKey(get(call, "id")));
@@ -1123,7 +1208,7 @@ export const IfBoundary = async () => {
           const identity = get(call, "id");
           const receipt = typeof identity === "string" && has(historical, identity) ? historical[identity] : null;
           if (receipt === null) {
-            if (!invalid) continue;
+            if (!invalid || unreceipted.has(identity)) continue;
             throw valueError("unobserved rejected model call in OpenCode's history; prefix requires captured call evidence");
           }
           matches = [item(receipt, "function")];
@@ -1132,9 +1217,9 @@ export const IfBoundary = async () => {
           // Dispatch records exist for string call IDs only (recordDispatch refuses any other).
           const identity = item(call, "id");
           pyKey(identity);
-          const offered = typeof identity === "string" ? state.dispatch.get(pyKey(session) + "\u0000" + identity) : undefined;
+          const offered = typeof identity === "string" ? dispatch.get(dispatchKey(session, identity)) : undefined;
           if (offered === undefined || offered === null) throw valueError("missing rejected-call dispatch evidence");
-          availableNames = offered;
+          availableNames = offered.available;
         }
         if (matches.length !== 1 || !isDict(matches[0])) throw valueError("ambiguous rejected model call in OpenCode's history");
         assign(call, "function", clone(matches[0]));
@@ -1203,6 +1288,8 @@ export const IfBoundary = async () => {
       }
       const outgoing = clone(prepared !== null ? prepared.payload : payload);
       if (actor) restoreRejectedCalls(outgoing, session, payload);
+      // A compaction call's history also names each renamed tool under its alias: the summary keeps identifiers.
+      if (compaction && Object.keys(aliases()).length) aliasHistory(get(outgoing, "messages", []));
       if (actor || compaction) {
         writeRecord({
           kind: "request",
@@ -1268,10 +1355,12 @@ export const IfBoundary = async () => {
       while (start < end && [0x20, 0x09, 0x0a, 0x0d, 0x0b, 0x0c].includes(bytes[start])) start += 1;
       while (end > start && [0x20, 0x09, 0x0a, 0x0d, 0x0b, 0x0c].includes(bytes[end - 1])) end -= 1;
       const raw = end > start ? parseJson(decodeUtf8(bytes.subarray(start, end))) : null;
-      if (prepared !== null) observeReplyCalls(prepared, raw);
+      // A row that renames tools gets a copy whose calls name the tools OpenCode runs; the record keeps the reply.
+      const forwarded = prepared !== null && prepared.aliased ? clone(raw) : raw;
+      if (prepared !== null) observeReplyCalls(prepared, forwarded);
       observe(raw);
       // Compact JSON, no NaN or Infinity.
-      const rendered = dumps(raw, { compact: true, allowNan: false });
+      const rendered = dumps(forwarded, { compact: true, allowNan: false });
       return new Response(rendered, { status: 200, headers: { "content-type": "application/json" } });
     } catch (error) {
       recordIssue(call, error);
@@ -1364,6 +1453,11 @@ export const IfBoundary = async () => {
         );
         if (files.length > 1) throw new Error(`ambiguous instructions files: ${files.join(", ")}`);
         state.system = files.length ? decodeUtf8(fs.readFileSync(files[0])) : null;
+        if (state.system === null && has(settings, "tool_aliases")) {
+          throw new Error(
+            "a row that renames tools needs its system text: OpenCode's own system prompt names the tools",
+          );
+        }
         state.configured = true;
         writeRecord({
           kind: "configured",

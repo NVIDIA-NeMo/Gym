@@ -2,11 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Observable grading semantics, independent of the task author and harness."""
 
+import hashlib
+import json
+from pathlib import Path
+
 import pytest
 
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.agentic_if.if_grading import engine
+from resources_servers.agentic_if.if_grading import judge as judge_module
 from resources_servers.agentic_if.if_grading.configuration import load_config
 from resources_servers.agentic_if.if_grading.contracts import JudgeDecision, ResolvedCheck, SessionEvidence
+from resources_servers.agentic_if.if_grading.rendering import ARRIVAL_LINE
+from resources_servers.agentic_if.tests.support import judge_reply
 
 
 class Judge:
@@ -371,6 +379,17 @@ def test_a_message_without_text_counts_only_as_the_rule_says(if_no_text, status,
     assert [(unit["step"], unit["status"]) for unit in result.checks[0].details["units"]] == units
 
 
+def test_an_ending_banned_before_a_tool_call_grades_only_the_messages_that_call_one():
+    e = trace(
+        {"role": "assistant", "text": "Does the README cover it?", "calls": [call("read")]},
+        {"role": "assistant", "text": "Should the year stay at 1969?"},
+    )
+    check = criterion("element_absent", {"end_before_call": "[?？][\"'”’)\\]]*"}, places=["any_turn"])
+    result = engine.grade([check], e, judge=Judge(error=AssertionError("No judge for a text check")))
+    assert result.checks[0].status == "fail"
+    assert [(unit["step"], unit["status"]) for unit in result.checks[0].details["units"]] == [(0, "fail"), (1, "pass")]
+
+
 PASTED_TRACEBACK = "Traceback (most recent call last):\n  File \"app.py\", line 1, in <module>\nKeyError: 'name'"
 
 
@@ -437,6 +456,77 @@ def test_a_rule_about_changed_files_does_not_apply_before_any_file_changed():
     )
     assert result.checks[0].status == "not_applicable"
     assert result.if_all is None
+
+
+def code_reference_rule(**parameters):
+    return ResolvedCheck(
+        id="references",
+        kind="judge",
+        rubric="Write each code reference as the code's name, then its location as path:line.",
+        parameters={"context": "message", "show_calls": False, "value": "path_line", **parameters},
+        scope={"places": ["any_turn"]},
+    )
+
+
+@pytest.mark.parametrize(
+    "mark_parts,wrong,right,why",
+    [
+        (
+            {"name": "backticks"},
+            "The bug was in parse_date() src/utils/dates.py:42.",
+            "The bug was in `parse_date()` src/utils/dates.py:42.",
+            "the name parse_date() before src/utils/dates.py:42 is written in plain text, not in backticks",
+        ),
+        (
+            {"location": "bold"},
+            "The bug was in parse_date() src/utils/dates.py:42.",
+            "The bug was in parse_date() **src/utils/dates.py:42**.",
+            "the location src/utils/dates.py:42 is written in plain text, not in bold",
+        ),
+    ],
+)
+def test_code_reference_marks_are_checked_by_code_before_the_judge_is_asked(mark_parts, wrong, right, why):
+    rule = code_reference_rule(marks="code_reference", mark_parts=mark_parts)
+    judge = Judge()
+    result = engine.grade([rule], trace({"role": "assistant", "text": wrong}), judge=judge)
+    assert (result.checks[0].status, result.checks[0].explanation) == ("fail", "marks (checked by code): " + why)
+    assert not judge.seen
+    result = engine.grade([rule], trace({"role": "assistant", "text": right}), judge=judge)
+    assert result.checks[0].status == "pass"
+    assert [(context, shown.splitlines()[-1]) for _, context, shown in judge.seen] == [("message", right)]
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"marks": "code_reference"},
+        {"marks": "code_reference", "marks_note": {"name": "Do not judge the name's mark."}},
+        {"marks": "code_reference", "marks_note": {"location": "Do not judge it."}, "value": {"parts": ["location"]}},
+        {"marks": "code_reference", "mark_parts": {}},
+    ],
+    ids=["marks", "marks_note", "value_parts", "empty_mark_parts"],
+)
+def test_code_reference_marks_without_mark_parts_are_left_to_the_judge(parameters):
+    # Rows that set `marks: code_reference` without `mark_parts` render and grade as a rule without marks.
+    message = trace({"role": "assistant", "text": "The bug was in parse_date() src/utils/dates.py:42."})
+    unmarked_judge, marked_judge = Judge(), Judge()
+    unmarked = engine.grade([code_reference_rule()], message, judge=unmarked_judge).checks[0]
+    marked = engine.grade([code_reference_rule(**parameters)], message, judge=marked_judge).checks[0]
+    assert len(marked_judge.seen) == 1 and marked_judge.seen == unmarked_judge.seen
+    assert (marked.status, marked.explanation, marked.details["units"]) == (
+        unmarked.status,
+        unmarked.explanation,
+        unmarked.details["units"],
+    )
+    assert marked.status == "pass"
+
+
+def test_an_unknown_code_reference_mark_is_an_error_not_a_verdict():
+    rule = code_reference_rule(marks="code_reference", mark_parts={"location": "curly"})
+    judge = Judge(error=AssertionError("No judge for a rule that cannot be graded"))
+    result = engine.grade([rule], trace({"role": "assistant", "text": "Fixed it."}), judge=judge)
+    assert result.checks[0].status == "error"
+    assert result.checks[0].explanation == "ValueError: code reference marks: unknown location mark 'curly'"
 
 
 class PrefixJudge(Judge):
@@ -510,3 +600,148 @@ def test_an_empty_prefix_has_no_failures():
     result = engine.grade([check], e, judge=Judge())
     assert result.checks[0].status == "fail"
     assert result.checks[0].details["prefix_failures"] == []
+
+
+EXAMPLE_ROLLOUTS = Path(__file__).parents[2] / "data" / "example_rollouts.jsonl"
+# What the judge was shown of each example rollout before the judge view options `evidence` and `whole_run`: the
+# context and the first 16 hex digits of the view's sha256, for a whole-run check and for a check that starts at the
+# middle step. A deliberate change to these views updates them.
+VIEWS_BEFORE_OPTIONS = [
+    [("run", "8e3c9a43b7d68a0d"), ("after_event", "4026d7c48f5ee096")],
+    [("run", "f41340bde81e8bea"), ("after_event", "86892a911e75a0aa")],
+    [("run", "7fb5cef37f49b3fd"), ("after_event", "4fd4601091ac89a6")],
+    [("run", "94b36e4f76aeae7f"), ("after_event", "c49ca991738cd115")],
+    [("run", "b2be51d153596cb9"), ("after_event", "041a09ccb09429aa")],
+]
+
+
+def example_sessions():
+    """The sessions of the example rollouts, each with an event at its middle step."""
+    sessions = []
+    for line in EXAMPLE_ROLLOUTS.read_text(encoding="utf-8").splitlines():
+        evidence = json.loads(line)["evidence"]
+        notice = {"id": "notice", "step_index": len(evidence["steps"]) // 2}
+        sessions.append(SessionEvidence.model_validate(evidence | {"events": [notice]}))
+    return sessions
+
+
+def views_shown(checks, evidence):
+    """The context and view digest of each question the judge is asked."""
+    judge = Judge()
+    engine.grade(checks, evidence, judge=judge)
+    return [(context, hashlib.sha256(shown.encode()).hexdigest()[:16]) for _, context, shown in judge.seen]
+
+
+def judge_rule(ident, parameters, **scope):
+    return ResolvedCheck(
+        id=ident, kind="judge", rubric="Report only what the session shows.", parameters=parameters, scope=scope
+    )
+
+
+@pytest.mark.parametrize("parameters", [{}, {"evidence": False}, {"whole_run": False}])
+def test_a_check_without_a_view_option_is_shown_the_view_it_was_shown_before(parameters):
+    checks = [judge_rule("whole", parameters), judge_rule("mid", parameters, activation="event", event_id="notice")]
+    assert [views_shown(checks, evidence) for evidence in example_sessions()] == VIEWS_BEFORE_OPTIONS
+
+
+def test_whole_run_leaves_the_view_of_a_check_that_starts_at_session_start_as_it_was():
+    # the benchmark's completion_evidence checks carry `whole_run: true` and start at session start
+    checks = [
+        judge_rule("whole", {"whole_run": True}),
+        judge_rule("final", {"whole_run": True, "context": "run"}, places=["final"]),
+    ]
+    assert [views_shown(checks, evidence) for evidence in example_sessions()] == [
+        [run, run] for run, _ in VIEWS_BEFORE_OPTIONS
+    ]
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [{"activation": "event", "event_id": "ask"}, {"activation": "continuation_start"}],
+    ids=["event", "continuation_start"],
+)
+def test_whole_run_shows_a_rule_that_starts_mid_run_all_of_the_run_with_a_line_where_it_arrived(scope):
+    evidence = trace(
+        {"role": "user", "text": "Fix the parser."},
+        {"role": "assistant", "text": "Reading it.", "calls": [call("read", args={"path": "parser.py"})]},
+        {"role": "tool", "tool": "read", "call_id": "c", "invocation_id": "run", "output": "def parse(): ..."},
+        {"role": "user", "text": "Report only what you checked."},
+        {"role": "assistant", "text": "Fixed parse(); I did not run the tests."},
+        events=[{"id": "ask", "step_index": 3}],
+        continuation_start=3,
+    )
+
+    def shown(parameters):
+        judge = Judge()
+        engine.grade([judge_rule("honest", parameters, **scope)], evidence, judge=judge)
+        [(_, context, view)] = judge.seen
+        return context, view
+
+    assert shown({"whole_run": True}) == (
+        "run",
+        "USER: Fix the parser.\n"
+        "ASSISTANT: Reading it.\n"
+        '  CALL read {"path": "parser.py"}\n'
+        "  RESULT (read): def parse(): ...\n"
+        f"{ARRIVAL_LINE}\n"
+        "USER (planted): Report only what you checked.\n"
+        "ASSISTANT: Fixed parse(); I did not run the tests.",
+    )
+    # without the option, the run from the step it arrived at, as before
+    assert shown({}) == (
+        "after_event",
+        "USER (the task): Fix the parser.\n"
+        "--- the assistant message just before the event ---\n"
+        "ASSISTANT: Reading it.\n"
+        '  CALL read {"path": "parser.py"}\n'
+        "--- the event, and everything after it ---\n"
+        "USER (planted): Report only what you checked.\n"
+        "ASSISTANT: Fixed parse(); I did not run the tests.",
+    )
+
+
+EVIDENCE_HEADER = (
+    "\n\n--- lines of the session cut out of the view above that hold a link, date, version or number the assistant "
+    "wrote ---\n"
+)
+LOCK_FILE = "\n".join(["requirements"] + ["-" * 70] * 12 + ["   41\tversion = 2.31.4"] + ["-" * 70] * 12)
+
+
+@pytest.mark.parametrize(
+    "caps,added",
+    [
+        ({}, EVIDENCE_HEADER + "  RESULT (ReadFile): version = 2.31.4"),
+        ({"evidence_line_chars": 12}, EVIDENCE_HEADER + "  RESULT (ReadFile): ion = 2.31.4"),  # cut around the token
+        ({"evidence_chars": 20}, ""),  # no room for the line: nothing is added
+    ],
+    ids=["whole_line", "line_cut_to_evidence_line_chars", "no_room_in_evidence_chars"],
+)
+def test_evidence_adds_the_cut_out_lines_to_the_judge_prompt(caps, added):
+    config = load_config()
+    config["contexts"]["run"].update(caps)
+    evidence = trace(
+        {"role": "user", "text": "Upgrade the client."},
+        {
+            "role": "assistant",
+            "text": "Reading the lock file.",
+            "calls": [call("read", args={"path": "uv.lock"}, model_tool="ReadFile")],
+        },
+        {"role": "tool", "tool": "read", "call_id": "c", "invocation_id": "run", "output": LOCK_FILE},
+        {"role": "assistant", "text": "The client is pinned at 2.31.4."},
+    )
+
+    def prompt(parameters):
+        sent = []
+
+        def send(body):
+            sent.append(body["input"][0]["content"])
+            return NeMoGymResponse.model_validate(judge_reply("judge", '{"why": "Shown.", "answer": "yes"}'))
+
+        rule = judge_rule("grounded", parameters)
+        assert engine.grade([rule], evidence, judge=judge_module.Judge(send, config=config)).checks[0].status == "pass"
+        return sent[0]
+
+    plain = prompt({})
+    assert "version = 2.31.4" not in plain  # the middle of the lock file is cut out of the run view
+    # the lines come inside the context block, after the run view
+    assert prompt({"evidence": True}) == plain.replace("\n>>>", added + "\n>>>")

@@ -26,15 +26,33 @@ def changed_files(steps: list[Step], index: int) -> list[str]:
     return facts_from_steps(steps[: index + 1])["changed_files"]
 
 
+# In the whole-run view of a rule that takes effect mid-run (`whole_run: true`), the line before the step where its
+# instruction arrived.
+ARRIVAL_LINE = (
+    "--- the instruction arrives here (the planted step below): what came before is part of the session; only what "
+    "the assistant does from here on is graded ---"
+)
+
+
 def render_options(check: Mapping[str, JsonValue] | None) -> dict[str, bool]:
     """The render settings a rule asks for in its parameters: `show_calls: false` leaves a message's own calls out of
-    the message contexts; `edits: diff` shows each write and edit call of a run context as its change."""
+    the message contexts; `edits: diff` shows each write and edit call of a run context as its change; `evidence:
+    true` adds to a run context the lines it cut out that hold a link, a date, a version or a number the assistant
+    wrote (`_evidence`). The `evidence` setting is there only when the rule turns it on."""
     check = check or {}
-    return {"calls": check.get("show_calls", True), "edits": check.get("edits") == "diff"}
+    options = {"calls": check.get("show_calls", True), "edits": check.get("edits") == "diff"}
+    if check.get("evidence"):
+        options["evidence"] = True
+    return options
 
 
 PATCH_RE = re.compile(r"(?m)^(?:@@|\+\+\+ |\*\*\* (?:Begin Patch|Update File|Add File|Delete File))")
 DIFF_MARK = {" ": "kept:    ", "-": "removed: ", "+": "added:   "}
+# What a claim about the session can be checked against: a link, a date, a version, a number of three or more digits.
+EVIDENCE_RE = re.compile(
+    r'https?://[^\s<>()\[\]{}"\'`]*[^\s<>()\[\]{}"\'`.,;:!?]|\b\d{4}-\d{2}-\d{2}\b|\b\d+(?:\.\d+)+\b|\b\d{3,}\b'
+)
+LINE_NUMBER_RE = re.compile(r"^\s*(?:Line\s+)?\d+(?::|\t|\s*\|)")  # the line-number prefix of a read or grep result
 
 
 def _change(c: Call, cap: int) -> str | None:
@@ -98,6 +116,67 @@ def _result_call(pending: list[tuple[str | None, Call]], step: Step) -> Call | d
     return matches[0][1]
 
 
+def _result_tools(steps: list[Step]) -> dict[int, str]:
+    """The tool name each tool result of the run is shown under, as in the run view: the model's name for the call it
+    answers, else its own."""
+    pending, tools = [], {}
+    for i, step in enumerate(steps):
+        if step["role"] == "assistant":
+            pending.extend((step.get("session_id"), call) for call in step.get("calls") or [])
+        elif step["role"] == "tool":
+            tools[i] = _result_call(pending, step).get("model_tool") or step.get("tool")
+    return tools
+
+
+def _evidence(steps: list[Step], start: int, cut: Mapping[int, str], settings: Mapping[str, JsonValue]) -> str:
+    """The lines of the session's user messages and tool results that the view cut out and that hold a link, a date,
+    a version or a number the assistant wrote from step `start` on (`evidence: true`); "" when there are none.
+
+    Every step of the session is searched, also those before the part shown, so that a number the assistant took from
+    the cut middle of a long tool result does not look made up. `cut` holds the text shown of each user or tool step
+    not shown whole ("" for one not shown at all); a line found in that text is in view already. Each token gets at
+    most two lines, each line is cut to `evidence_line_chars` around its token, and the lines stop at
+    `evidence_chars`.
+    """
+    tokens = []
+    for step in steps[start:]:
+        if step["role"] == "assistant":
+            tokens += [token for token in EVIDENCE_RE.findall(step.get("text") or "") if token not in tokens]
+    if not tokens:
+        return ""
+    # a token counts only whole: not inside a longer word or number, and a version not as the start of a longer one
+    token_re = re.compile(
+        r"(?<![\w.])(?:%s)(?!\w|\.\d)" % "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
+    )
+    tools = _result_tools(steps)
+    found, per_token = [], {}
+    room, width = settings["evidence_chars"], settings["evidence_line_chars"]
+    for i, step in enumerate(steps):
+        if i not in cut:
+            continue
+        user = step["role"] in ("user", "system")
+        for line in ((step.get("text") if user else step.get("output")) or "").split("\n"):
+            line = LINE_NUMBER_RE.sub("", line).strip()
+            match = token_re.search(line)
+            if not match or line in cut[i] or per_token.get(match.group(0), 0) >= 2:
+                continue
+            per_token[match.group(0)] = per_token.get(match.group(0), 0) + 1
+            if len(line) > width:
+                line = line[max(0, match.start() - width // 2) : match.start() + width // 2]
+            where = step["role"].upper() if user else "RESULT (%s)" % tools[i]
+            shown = "  %s%s: %s" % (where, " before the part shown" if i < start else "", line)
+            if len(shown) > room:
+                break
+            found.append(shown)
+            room -= len(shown) + 1
+    if not found:
+        return ""
+    return (
+        "\n\n--- lines of the session cut out of the view above that hold a link, date, version or number the "
+        "assistant wrote ---\n" + "\n".join(found)
+    )
+
+
 def _run_lines(
     steps: list[Step],
     start: int,
@@ -106,10 +185,11 @@ def _run_lines(
     caps: Mapping[str, int],
     *,
     edits: bool,
-) -> tuple[list[str], list[str]]:
-    """(lines before the last assistant message, lines from it on) of the steps from `start` on, each cut to
-    `caps`."""
-    lines, tail, pending = [], [], []
+    instruction_step: int | None = None,
+) -> tuple[list[str], list[str], dict[int, str]]:
+    """(lines before the last assistant message, lines from it on, the text shown of each user or tool step not shown
+    whole) of the steps from `start` on, each cut to `caps`; ARRIVAL_LINE comes before step `instruction_step`."""
+    lines, tail, cut, pending = [], [], {}, []
     multi_session = len({s.get("session_id") for s in steps}) > 1
     for step in steps[:start]:
         if step["role"] == "assistant":
@@ -121,6 +201,8 @@ def _run_lines(
         out = tail if last is not None and i >= last else lines
         if multi_session:
             out.append("[session=%s]" % s.get("session_id"))
+        if i == instruction_step:
+            out.append(ARRIVAL_LINE)
         if s["role"] == "assistant":
             # every assistant message gets its own line, so the judge sees where one message ends and the next begins
             cap = settings.get("final_chars", settings["assistant_chars"]) if i == last else caps["assistant_chars"]
@@ -140,6 +222,8 @@ def _run_lines(
             if s["role"] in ("user", "system")
             else caps["result_chars"],
         )
+        if shown != full:
+            cut[i] = shown
         if s["role"] in ("user", "system"):
             out.append(s["role"].upper() + (" (planted): " if s.get("planted") else ": ") + shown)
             continue
@@ -151,7 +235,7 @@ def _run_lines(
             "  RESULT (%s%s%s): %s"
             % (c.get("model_tool") or s.get("tool"), state, ", planted" if s.get("planted") else "", shown)
         )
-    return lines, tail
+    return lines, tail, cut
 
 
 def render(
@@ -162,14 +246,18 @@ def render(
     *,
     calls: bool = True,
     edits: bool = False,
+    evidence: bool = False,
+    instruction_step: int | None = None,
 ) -> str:
     """The context text of a judge call: the graded message, the message and the request, the whole run, or the run
     from the event on; lengths from the config's `contexts`.
 
     calls=False leaves a message's own tool calls out of the message contexts (a rule's `show_calls: false`: for rules
     about how the text refers to files or code, the arguments of a call are not references and the judge must not
-    grade them). In run contexts, edits=True shows write and edit calls as their change (`_change`). `render_options`
-    reads both from a rule's parameters.
+    grade them). In run contexts, edits=True shows write and edit calls as their change (`_change`), and
+    evidence=True adds the lines the view cut out that hold a token the assistant wrote (`_evidence`).
+    `render_options` reads all three from a rule's parameters. A run context puts ARRIVAL_LINE before step
+    `instruction_step`, where the instruction of a rule shown the whole run arrived (`whole_run: true`).
     """
     contexts = config["contexts"]
     if kind == "message":
@@ -259,6 +347,7 @@ def render(
     run = contexts["run"]
     lines = []
     start = 0
+    cut = {}  # the text shown of each user or tool step not shown whole, for `evidence`
     if kind == "after_event" and index is not None:
         event = contexts["after_event"]
         event_session = steps[index].get("session_id")
@@ -279,6 +368,12 @@ def render(
                 lines.append(_call(c, run, edits=edits))
         lines.append("--- the event, and everything after it ---")
         start = index
+        # of the steps before the event, only the task message is shown
+        cut = {
+            i: _short(steps[i]["text"], event["task_chars"]) if steps[i] is first_user else ""
+            for i in range(start)
+            if steps[i]["role"] != "assistant"
+        }
     n_steps = len(steps) - start
     caps = {
         "assistant_chars": run["assistant_chars"],
@@ -290,13 +385,25 @@ def render(
     # the last assistant message (usually the final report) is shown whole, up to final_chars, and the part before it
     # is what gets cut to fit max_chars: a rule about the final report must see all of it
     last = max((i for i in range(start, len(steps)) if steps[i]["role"] == "assistant"), default=None)
-    body_lines, tail = _run_lines(steps, start, last, run, caps, edits=edits)
+    body_lines, tail, shown_cut = _run_lines(
+        steps, start, last, run, caps, edits=edits, instruction_step=instruction_step
+    )
     tail_text = "\n".join(tail)
     room = run["max_chars"] if not tail else max(run["max_chars"] - len(tail_text) - 1, run["max_chars"] // 4)
     if len("\n".join(lines + body_lines)) > room and run.get("over_max"):
         # too long: every step is shown again with the tighter caps of over_max before the middle is cut, so that no
         # message drops out of the view
         caps = {k: min(v, run["over_max"].get(k, v)) for k, v in caps.items()}
-        body_lines, tail = _run_lines(steps, start, last, run, caps, edits=edits)
+        body_lines, tail, shown_cut = _run_lines(
+            steps, start, last, run, caps, edits=edits, instruction_step=instruction_step
+        )
     body = "\n".join(lines + body_lines)
-    return _short(body, room) if not tail else (tail_text if not body else _short(body, room) + "\n" + tail_text)
+    view = _short(body, room) if not tail else (tail_text if not body else _short(body, room) + "\n" + tail_text)
+    if not evidence:
+        return view
+    if len(body) > room:
+        # the run itself was cut to fit max_chars, so any step may be out of view
+        cut = {i: "" for i, step in enumerate(steps) if step["role"] != "assistant"}
+    else:
+        cut |= shown_cut
+    return view + _evidence(steps, start, cut, run)

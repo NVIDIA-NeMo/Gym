@@ -66,6 +66,21 @@ const guardedPlant = await IfProfile({directory});
 await assert.rejects(before(guardedPlant, "edit", {...edit}), /first/);
 await after(guardedPlant, await before(guardedPlant, "read", {filePath: target}));
 await assert.rejects(before(guardedPlant, "edit", {...edit}), {message: "PLANTED"});
+// A read whose output a "replace" plant swapped ran, but the model never saw the file: it does not count as read. A
+// read with an "append" plant's notice after its output does.
+fs.writeFileSync(PLANTS, JSON.stringify([
+  {id: "read-replaced", match: {tool: "read"}, action: "replace", text: "PLANTED: permission denied"},
+  {id: "read-appended", match: {tool: "read"}, nth: 2, action: "append", text: "PLANTED notice"},
+]));
+const plantedReads = await IfProfile({directory});
+const replacedRead = await after(plantedReads, await before(plantedReads, "read", {filePath: target}));
+assert.equal(replacedRead.output, "PLANTED: permission denied");
+assert.equal(replacedRead.metadata.nemo_gym_profile.read_first, undefined);
+await assert.rejects(before(plantedReads, "edit", {...edit}), /first/);
+const appendedRead = await after(plantedReads, await before(plantedReads, "read", {filePath: target}));
+assert.equal(appendedRead.output, "actual result\nPLANTED notice");
+assert.equal(appendedRead.metadata.nemo_gym_profile.read_first.file, file);
+await before(plantedReads, "edit", {...edit});
 // A restored prefix retains completed read receipts, not failed reads.
 fs.writeFileSync(PLANTS, "[]");
 const resumed = await IfProfile({directory});

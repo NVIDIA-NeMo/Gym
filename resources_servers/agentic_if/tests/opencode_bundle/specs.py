@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""RuntimeSpecs shared by the bundle tests: an unrestricted row, a private-shaped row, and a continuation."""
+"""RuntimeSpecs shared by the bundle tests: an unrestricted row, a private-shaped row, a continuation, and a row that
+renames tools."""
 
 from collections.abc import Callable
 
@@ -100,6 +101,25 @@ def continuation_spec() -> RuntimeSpec:
     )
 
 
+ALIASES = {"bash": "shell", "read": "view_file", "write": "create_file"}
+"""The names ``aliased_spec`` shows the model for the tools it renames; edit keeps its own."""
+
+
+def aliased_spec() -> RuntimeSpec:
+    """A row that renames tools: bash, read and write are offered as ALIASES says, and each selected tool has the
+    description a row that renames tools must give (the bundle refuses OpenCode's own, which name the built-ins)."""
+    selected = ["bash", "edit", "read", "write"]
+    return RuntimeSpec(
+        harness="opencode",
+        task_backend="swe",
+        tools={
+            "tool_names": {tool: ALIASES.get(tool, tool) for tool in selected},
+            "tool_descriptions": {tool: f"Row description of {ALIASES.get(tool, tool)}." for tool in selected},
+        },
+    )
+
+
+# The rows the profile goldens pin (fixtures/profile-goldens.json).
 SPECS: dict[str, Callable[[], RuntimeSpec]] = {
     "unrestricted": unrestricted_spec,
     "private_like": private_like_spec,

@@ -5,7 +5,10 @@
 from copy import deepcopy
 
 from resources_servers.agentic_if.episode.session_evidence import build_session_evidence, row_prompt_texts
+from resources_servers.agentic_if.if_grading.checkers.run import evidence_steps
+from resources_servers.agentic_if.if_grading.configuration import load_config
 from resources_servers.agentic_if.if_grading.contracts import SessionInfo
+from resources_servers.agentic_if.if_grading.rendering import render
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
 from resources_servers.agentic_if.tests.support import (
     REPLAY_RECEIPT,
@@ -126,6 +129,44 @@ def test_a_planted_event_binds_to_the_call_it_failed():
     ).evidence
     assert evidence.status == "complete", evidence.issues
     assert evidence.events[0].id == "notice" and evidence.steps[evidence.events[0].step_index].planted
+
+
+def test_a_replaced_result_binds_to_the_call_it_completed_and_the_judge_sees_the_planted_text():
+    planted = "Error: the build server is unreachable."
+    spec = RuntimeSpec(
+        harness="opencode",
+        task_backend="swe",
+        events=[{"id": "build-down", "match": {"tool": "bash"}, "action": "replace", "text": planted}],
+    )
+    # The profile plugin swapped the completed call's output before OpenCode stored it; the bash tool's own metadata
+    # keeps the real result.
+    source = answered_export()
+    source["messages"][1]["parts"][1]["state"] |= {"output": planted, "metadata": {"output": "/app\n", "exit": 0}}
+    fired = [
+        {"kind": "loaded", "plants": 1},
+        {
+            "kind": "fired",
+            "index": 0,
+            "event_id": "build-down",
+            "tool": "bash",
+            "action": "replace",
+            "call_number": 1,
+            "call_id": "c1",
+            "session_id": "root",
+        },
+    ]
+    calls = [observation(), tool_observation(value=planted)]
+    evidence = build(spec, exports=[source], events=fired, calls=calls).evidence
+    assert evidence.status == "complete", evidence.issues
+    receipt = evidence.events[0]
+    step = evidence.steps[receipt.step_index]
+    assert (receipt.id, receipt.details["action"]) == ("build-down", "replace")
+    assert (step.planted, step.error, step.output) == (True, False, planted)
+    shown = render(evidence_steps(evidence), "after_event", receipt.step_index, load_config())
+    assert f"  RESULT (RunCommand, planted): {planted}\n" in shown
+    # A firing of another action than the event's binds to nothing.
+    wrong = build(spec, exports=[source], events=[fired[0], fired[1] | {"action": "fail"}], calls=calls).evidence
+    assert wrong.status == "incomplete" and "uncorrelated_event:build-down" in wrong.issues
 
 
 def test_tool_steps_show_what_the_model_saw_and_capture_gaps_are_explicit():

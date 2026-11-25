@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
+from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator, model_validator
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
@@ -63,6 +63,7 @@ from resources_servers.agentic_if.episode.judging import (
 from resources_servers.agentic_if.episode.opencode_replay import restore_prefix_workspace
 from resources_servers.agentic_if.episode.outcome import ExecutionStatus, Verdict, classify, execution_status
 from resources_servers.agentic_if.episode.resources import SandboxTaskSession
+from resources_servers.agentic_if.episode.reward import CutRunReward, IFScore, RewardMode, reward_verdict
 from resources_servers.agentic_if.episode.session_evidence import (
     collection_failed,
     evidence_from_bundle,
@@ -108,6 +109,23 @@ class AgenticIFResourcesServerConfig(BaseResourcesServerConfig):
     # relative paths are under the Gym root. The benchmark stages OpenCode's ripgrep and plugin dependencies this way
     # for sandboxes without internet access, and opencode_agent checks each copy against its pinned digest.
     opencode_runtime_files: list[Path] = Field(default_factory=list)
+    # The reward of each verify result (README.md, "Training reward"). `task`, the default and the benchmark's, is the
+    # task backend's verdict. `task_and_if`, for training, is the task verdict times the run's IF score, or the IF
+    # score alone for a row sealed with `outcome_tracked: false`; a run without an IF score is masked.
+    reward_mode: RewardMode = "task"
+    # The IF score of task_and_if: `if_all` (1 when every applicable check passed, else 0) or `if_frac` (the share
+    # of applicable checks passed).
+    if_score: IFScore = "if_all"
+    # The reward of a scored run that OpenCode's timeout or a full context window cut short, under either reward_mode:
+    # `as_is` (default) scores it as it stands, like any other run; `zero` gives it 0.0, unmasked.
+    cut_run_reward: CutRunReward = "as_is"
+
+    @model_validator(mode="after")
+    def require_task_and_if_for_if_score(self) -> "AgenticIFResourcesServerConfig":
+        """The task reward has no IF score: refuse a setting it would silently ignore."""
+        if self.reward_mode == "task" and self.if_score != "if_all":
+            raise ValueError("if_score applies only to reward_mode task_and_if")
+        return self
 
     @field_validator("opencode_runtime_files")
     @classmethod
@@ -160,6 +178,9 @@ class AgenticIFVerifyResponse(BaseVerifyResponse):
     # so its calls are not in the rollout's model-call capture; the episode record keeps them with their questions.
     judge_calls: list[JudgeCallSummary] = Field(default_factory=list)
     judge_usage: JudgeUsage = Field(default_factory=JudgeUsage)
+    # The task backend's verdict, beside a reward that may not be that verdict (a reward_mode other than `task`, or
+    # cut_run_reward `zero`). Absent under the default reward settings, so a default result keeps its fields.
+    task_reward: float | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 @dataclass(eq=False)
@@ -354,6 +375,9 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         _closing(episode)
         if spec.continuation is not None:
             episode.seed["replay"] = await restore_prefix_workspace(sandbox, spec, base=base)
+            # The workspace the continued session starts from, in the form of its own diffs: what its first call
+            # changed is told against this, not against the prefix's last recorded diff.
+            episode.seed["workspace_restored_diff"] = await snapshot_workspace(sandbox, base)
             _closing(episode)
         agent_user = None if is_root_agent_user(sandbox.user) else sandbox.user
         staged = await bundle.stage(sandbox.transport, spec=spec, agent_user=agent_user)
@@ -614,7 +638,9 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
     ) -> AgenticIFVerifyResponse:
         """Grade the persisted evidence, and assemble the result around the persisted task verdict.
 
-        ``ledger`` records the grade's judge calls, for the caller to keep even when grading raises.
+        The result's reward is that verdict under the configured ``reward_mode`` and ``cut_run_reward``; the record
+        keeps the task verdict, so re-verification applies the settings afresh. ``ledger`` records the grade's judge
+        calls, for the caller to keep even when grading raises.
         """
         if_result, judge_hash = await self._grade(spec.checks, record.evidence, ledger)
         outage = ledger.outage(if_result, judge_hash)
@@ -637,7 +663,17 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             "judge_calls": [call.summary().model_dump(mode="json") for call in calls],
             "judge_usage": judge_usage(calls).model_dump(mode="json"),
         }
-        payload |= Verdict(**record.verdict.model_dump()).fields()
+        verdict = Verdict(**record.verdict.model_dump())
+        payload |= reward_verdict(
+            verdict,
+            if_result,
+            mode=self.config.reward_mode,
+            if_score=self.config.if_score,
+            cut_run_reward=self.config.cut_run_reward,
+            outcome_tracked=spec.outcome_tracked,
+        ).fields()
+        if (self.config.reward_mode, self.config.cut_run_reward) != ("task", "as_is"):
+            payload["task_reward"] = verdict.reward
         return AgenticIFVerifyResponse.model_validate(payload)
 
     # ------------------------------------------------------------------------------------------------------ grading
@@ -694,7 +730,8 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         """Instruction-following rates over scored rollouts, beside the task reward Gym already reports.
 
         A rollout whose applicable checks all passed counts as an IF pass. Rollouts with no applicable check, or
-        with a check that could not be graded, are counted separately and excluded from the rates.
+        with a check that could not be graded, are counted separately and excluded from the rates. The task part of
+        ``mean/task_and_if`` is the task verdict under every reward mode (``task_reward`` when the reward is not it).
         """
         rollouts = [rollout for task in tasks for rollout in task]
         graded, not_applicable, errored = [], 0, 0
@@ -716,7 +753,9 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             metrics["mean/if_all"] = sum(rollout["if_result"]["if_all"] for rollout in graded) / len(graded)
             metrics["mean/if_frac"] = sum(rollout["if_result"]["if_frac"] for rollout in graded) / len(graded)
             metrics["mean/task_and_if"] = sum(
-                1.0 for rollout in graded if rollout["if_result"]["if_all"] == 1 and rollout.get("reward", 0) >= 1
+                1.0
+                for rollout in graded
+                if rollout["if_result"]["if_all"] == 1 and rollout.get("task_reward", rollout.get("reward", 0)) >= 1
             ) / len(graded)
         return metrics
 

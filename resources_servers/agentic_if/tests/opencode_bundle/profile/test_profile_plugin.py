@@ -15,9 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from resources_servers.agentic_if.opencode_bundle.layout import PROFILE_PLUGIN, SOURCE_DIR
+from resources_servers.agentic_if.opencode_bundle.boundary import compile_boundary
+from resources_servers.agentic_if.opencode_bundle.layout import BOUNDARY_PLUGIN, PROFILE_PLUGIN, SOURCE_DIR
 from resources_servers.agentic_if.opencode_bundle.profile import compile_plants, compile_profile
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
+
+from ..specs import aliased_spec
 
 
 HERE = Path(__file__).parent
@@ -124,3 +127,18 @@ def test_load_receipt_and_fail_closed_loading(tmp_path: Path) -> None:
     spec = RuntimeSpec(harness="opencode", task_backend="swe", tools={"tool_names": {"bash": "bash"}})
     bundle = stage(tmp_path, profile=compile_profile(spec), plants=[])
     assert_passed(run_node("load_receipt", tmp_path, bundle), "load receipts passed")
+
+
+def test_renamed_tools_across_both_plugins(tmp_path: Path) -> None:
+    spec = RuntimeSpec.model_validate(
+        aliased_spec().model_dump(mode="json")
+        | {
+            "events": [
+                {"id": "busy", "match": {"tool": "bash"}, "action": "fail", "text": "PLANTED: the shell is busy."}
+            ]
+        }
+    )
+    bundle = stage(tmp_path, profile=compile_profile(spec), plants=compile_plants(spec))
+    shutil.copyfile(SOURCE_DIR / BOUNDARY_PLUGIN, bundle / BOUNDARY_PLUGIN)
+    (bundle / "boundary.json").write_text(json.dumps(compile_boundary(spec)))
+    assert_passed(run_node("aliases", tmp_path, bundle), "renamed tools passed")

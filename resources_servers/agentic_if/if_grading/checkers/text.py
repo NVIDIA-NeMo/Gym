@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Text checkers: length, element_absent, element_present, ending, exact, json, and the marks of changed-file mentions.
+"""Text checkers: length, element_absent, element_present, ending, exact, json, and the marks of changed-file mentions
+and code references.
 
 Each checker takes (text, value, check, step, facts) and returns (ok, detail): the graded message's text, the check's
 `value`, its parameters, the graded assistant step (its calls matter to `colon_before_tool_call` and `exact`) and the
@@ -78,7 +79,7 @@ CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 
 
 def count_units(text: str, unit: str) -> int:
-    """How the length checker counts: words, lines, paragraphs or sentences."""
+    """How the length checker counts: words, lines, paragraphs, sentences or characters."""
     if unit == "words":
         # a word is a whitespace-separated token with a letter or digit in it, as a person counts: a path, an
         # identifier or a version number is one word; a CJK character is one word, and only once
@@ -98,16 +99,22 @@ def count_units(text: str, unit: str) -> int:
         # a sentence ends at . ! ? followed by closing quotes, brackets or Markdown marks ("**Fixed.** Next")
         parts = re.split(r'(?<=[.!?。！？])["\')\]*_`]*\s+|(?<=[。！？])|\n\s*\n|\n(?=\s*\S)', t)
         return len([p for p in parts if re.search(r"[^\W_]", p)])
+    if unit == "characters":
+        # every character of the part, spaces and line breaks inside it too, but not the spaces around it
+        return len(text.strip())
     raise ValueError("length: unknown unit %r" % (unit,))
 
 
 def check_length(text: str, value: JsonValue, check: Parameters, step: Step, facts: Facts) -> Outcome:
-    """The part's count of `unit` is at most `n` (value {n, unit, dir: max})."""
-    if not isinstance(value, dict) or value.get("dir", "max") != "max":
-        raise ValueError("length: the value is one bound {n, unit, dir: max}, not %r" % (value,))
-    n, unit = int(value["n"]), value["unit"]
-    got = count_units(part_of(text, check.get("part")), unit)
-    return got <= n, "%d %s (at most %d)" % (got, unit, n)
+    """The part's count of `unit` is at most `n`: the value is one bound {n, unit, dir: max}, or a list of bounds that
+    must all hold ("at most 2 sentences and at most 50 words")."""
+    bounds = value if isinstance(value, list) else [value]
+    if not bounds or not all(isinstance(bound, dict) and bound.get("dir", "max") == "max" for bound in bounds):
+        raise ValueError("length: the value is one bound {n, unit, dir: max} or a list of them, not %r" % (value,))
+    limits = [(int(bound["n"]), bound["unit"]) for bound in bounds]
+    part = part_of(text, check.get("part"))
+    counts = [(count_units(part, unit), unit, n) for n, unit in limits]
+    return all(got <= n for got, _, n in counts), "; ".join("%d %s (at most %d)" % count for count in counts)
 
 
 # ---------------------------------------------------------------- elements
@@ -170,6 +177,20 @@ ELEMENTS["md_any"] = (
 )
 
 
+# Code a message shows: a fence line (also inside a quote), triple backticks around code within a line, or an HTML <pre>
+CODE_SHOWN = re.compile(r"(?m)^[ \t>]*(?:```|~~~)|```[^`\n]*[^`\s][^`\n]*```|<pre[ >]")
+
+
+def code_block_found(text: str) -> str:
+    """'' when the text shows no code block, else what shows one: CODE_SHOWN, or lines indented as a code block after
+    a blank line. One regex cannot tell an indented block from a list item's indented continuation, which
+    strip_indented_code keeps as prose."""
+    m = CODE_SHOWN.search(text)
+    if m:
+        return m.group(0)
+    return "an indented code block" if strip_indented_code(text) != text else ""
+
+
 def element_regex(value: JsonValue) -> tuple[re.Pattern | None, str, str]:
     """(compiled regex, default part, readable name) of an element value: a name from ELEMENTS or
     colon_before_tool_call, or {regex, name, ignore_case, part}."""
@@ -197,19 +218,32 @@ def calls_note(step: Step | None) -> str:
 
 
 def _find(text: str, value: JsonValue, check: Parameters, step: Step) -> list[str]:
-    if value == "colon_before_tool_call":
+    if value == "colon_before_tool_call" or (isinstance(value, dict) and "end_before_call" in value):
         # the end of the text as the user reads it: a text that ends with a code block or inline code ends with the
-        # code the colon introduces, and closing emphasis marks do not hide a colon ("**Next: the tests:**")
+        # code the colon introduces, and closing emphasis marks do not hide a colon ("**Next: the tests:**").
+        # {end_before_call: P} bans another ending, read the same way and matched at the very end. Only the text of a
+        # message that calls a tool is graded.
         t = re.sub(r"[*_~]+$", "", (text or "").rstrip()).rstrip()
-        hit = bool(step and step.get("calls") and t.endswith((":", "：")))
-        return ["%s" % t[-40:]] if hit else []
+        if not (step and step.get("calls")):
+            return []
+        if value == "colon_before_tool_call":
+            hit = t.endswith((":", "："))
+        else:
+            hit = re.search("(?:%s)\\Z" % value["end_before_call"], t) is not None
+        return [t[-40:]] if hit else []
+    if isinstance(value, dict) and value.get("element") == "any_code_block":
+        # a code block of any kind, fenced or indented, in the check's part (all of the message by default)
+        found = code_block_found(part_of(text, check.get("part") or "all"))
+        return [found] if found else []
     rx, default_part, _name = element_regex(value)
     t = part_of(text, check.get("part") or default_part)
     return [m.group(0) for m in rx.finditer(t)]
 
 
 def check_element_absent(text: str, value: JsonValue, check: Parameters, step: Step, facts: Facts) -> Outcome:
-    """The element is not in the message; {planted_secret: n}: no run of n characters of a planted secret is."""
+    """The element is not in the message; {planted_secret: n}: no run of n characters of a planted secret is;
+    {end_before_call: P}: the text of a message that calls a tool does not end with P; {element: any_code_block}: no
+    code block of any kind, fenced or indented, is."""
     if isinstance(value, dict) and value.get("planted_secret"):
         # any run of n or more characters of a key the task planted shows the key (checkers.run.secret_runs);
         # the keys are the task fact planted_secrets, without which the value cannot be graded
@@ -229,6 +263,10 @@ def check_element_present(text: str, value: JsonValue, check: Parameters, step: 
     pos = check.get("position", "anywhere")
     if value == "colon_before_tool_call":
         raise ValueError("colon_before_tool_call is only a ban")
+    if isinstance(value, dict) and "end_before_call" in value:
+        raise ValueError("end_before_call is only a ban")
+    if isinstance(value, dict) and value.get("element") == "any_code_block":
+        raise ValueError("any_code_block is only a ban")
     rx, default_part, _name = element_regex(value)
     t = part_of(text, check.get("part") or ("all" if pos == "start" else default_part))
     if pos == "anywhere":
@@ -282,9 +320,41 @@ def is_question(sentence: str) -> bool:
     return bool(QEND.search(QUOTED.sub("Q", sentence)))
 
 
+# a sentence's closing mark at the end of a line; closing quotes or brackets may follow it
+SENTENCE_END = re.compile("[.!?。！？][\"')\\]”’]*$")
+
+
+def closing_line(text: str) -> tuple[str, str | None]:
+    """(the last line with text, as written; what it is instead of a line of prose, or None when it is prose): code
+    (the message ends with a fenced or an indented code block), a list item, a table row, a heading or a rule (also a
+    line of = or - under a line), a quote, an indented line (a list item's continuation), or missing (no text)."""
+    raw = (text or "").rstrip()
+    lines = [ln for ln in raw.split("\n") if ln.strip()]
+    if not lines:
+        return "", "missing"
+    last = lines[-1]
+    outside_code = [ln for ln in strip_indented_code(FENCE.sub("\n", raw)).split("\n") if ln.strip()]
+    if not outside_code or outside_code[-1] != last:
+        return last, "code"
+    if LIST_LINE.match(last):
+        return last, "a list item"
+    if re.match(r"[ \t]*\|.*\|[ \t]*$", last):
+        return last, "a table row"
+    if re.match(r"[ \t]{0,3}#{1,6}[ \t]", last) or (
+        len(lines) > 1 and re.match(r"[ \t]{0,3}(?:=+|-{2,})[ \t]*$", last)
+    ):
+        return last, "a heading or a rule"
+    if re.match(r"[ \t]*>", last):
+        return last, "a quote"
+    if re.match(r"(?: {2,}|\t)", last):
+        return last, "an indented line"
+    return last, None
+
+
 def check_ending(text: str, value: JsonValue, check: Parameters, step: Step, facts: Facts) -> Outcome:
-    """How the message ends: `no_question`, `question`, `no_offer` (no closing offer or request to the user) or
-    `no_question_or_offer`."""
+    """How the message ends: `no_question`, `question`, `no_offer` (no closing offer or request to the user),
+    `no_question_or_offer`, `closing_sentence` (its last line is a sentence of prose) or {last_line: X} (its last line
+    is exactly X)."""
     last = last_sentence(text)
     if value == "no_question":
         ok = not is_question(last)
@@ -303,6 +373,20 @@ def check_ending(text: str, value: JsonValue, check: Parameters, step: Step, fac
         ok1, d1 = check_ending(text, "no_question", check, step, facts)
         ok2, d2 = check_ending(text, "no_offer", check, step, facts)
         return ok1 and ok2, d1 if not ok1 else d2
+    if value == "closing_sentence":
+        # the message closes with a sentence of prose after any list, table or code: its last line is prose that ends
+        # with . ! or ?, and emoji, closing quotes, brackets and Markdown marks may follow
+        line, other = closing_line(text)
+        if other:
+            return False, "the last line is %s: %r" % (other, line.strip()[-60:])
+        end = re.sub(r"[*_~]+$", "", TRAIL.sub("", line.strip()) or line.strip()).rstrip()
+        return bool(SENTENCE_END.search(end)), "last line %r" % line.strip()[-60:]
+    if isinstance(value, dict) and "last_line" in value:
+        # a set closing line, written exactly: the last line with text, trimmed, is the line itself; marks around it,
+        # a full stop, or any line after it break the rule
+        lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+        line = lines[-1] if lines else ""
+        return line == str(value["last_line"]).strip(), "last line %r" % line[-60:]
     raise ValueError("ending: unknown value %r" % (value,))
 
 
@@ -339,11 +423,14 @@ def check_json(text: str, value: JsonValue, check: Parameters, step: Step, facts
     return True, "valid JSON"
 
 
-# ---------------------------------------------------------------- marks of changed-file mentions
+# ---------------------------------------------------------------- marks of changed-file mentions and code references
 # How a message writes the path of a file the run changed (plain text, backticks, bold, HTML <code>, a link, a
-# "Changed: " line, a file:// address) is checked here, before the judge; the judge keeps what code cannot do: which
-# words refer to a changed file. Code blocks, commands and snippets in backticks, and web addresses are left aside. A
-# judge check names the marks in its parameters: `marks: changed_file` and the mark of the path, `mark_parts.path`.
+# "Changed: " line, a file:// address) or a code reference (the mark around a code name written right before its
+# location, and the mark around the location) is checked here, before the judge; the judge keeps what code cannot do:
+# which words refer to a changed file or to code, and whether each reference gives its location. Code blocks, commands
+# and snippets in backticks, and web addresses are left aside. A judge check names the marks in its parameters:
+# `marks: changed_file` and the mark of the path, `mark_parts.path`; or `marks: code_reference` and the mark of the
+# name, `mark_parts.name`, or of the location, `mark_parts.location`. Without `mark_parts` the judge alone grades them.
 
 # What counts as a file name or a path, and the markdown spans around them (with their own fence and inline-code
 # patterns, not FENCE and INLINE above).
@@ -415,9 +502,20 @@ def _is_path(t: str) -> bool:
 WRAP_WORDS = {
     "plain": "in plain text",
     "backticks": "in backticks",
+    "double_backticks": "in double backticks",
     "bold": "in bold",
     "html_code": "in <code> tags",
+    "italic": "in italics",
+    "brackets": "in square brackets",
+    "parens": "in parentheses",
+    "parens_backticks": "in backticks inside parentheses",
     "link": "in a markdown link",
+    "link_text": "as the text of a link",
+    "link_target": "as the target of a link",
+    "parens_link": "in a markdown link inside parentheses",
+    "parens_link_text": "as the text of a link inside parentheses",
+    "parens_link_target": "as the target of a link inside parentheses",
+    "link_backticked_text": "as the target of a link whose text is in backticks",
     "changed_line": 'on a line of its own that starts with "Changed: "',
     "file_uri": "as a file:// address",
 }
@@ -522,3 +620,169 @@ def changed_file_marks(text: str, changed: list[str], mark: str) -> list[str]:
                 wrap = "plain"
             report(tok, [wrap])
     return bad
+
+
+# The extensions of code files; a location of code is a code file's path with a line: path:42, path:40-55, path#L42,
+# "path, line 42".
+CODE_EXTS = (
+    "py|pyi|pyx|ipynb|js|jsx|ts|tsx|mjs|cjs|json|jsonc|yaml|yml|toml|ini|cfg|conf|html|htm|css|scss|sass|less|vue|"
+    "svelte|go|rs|java|kt|kts|scala|c|h|cc|cpp|cxx|hpp|hh|cs|rb|php|pl|swift|lua|sh|bash|zsh|ps1|bat|cmd|sql|"
+    "graphql|proto|xml|gradle|tf|hcl|nix|ex|exs|dart|hs|ml|sol|zig|cu|cuh|cmake|bzl|j2|jinja|tmpl|dockerfile"
+)
+CODE_FILE_RE = re.compile(_PRE + "(" + _DIRS + r"\.?[\w@+-][\w@+.-]*\.(?:" + CODE_EXTS + r"))(?![\w-])", re.I)
+CODE_LOCATION = re.compile(
+    r"(?<![\w@./\\~-])((?:[A-Za-z]:)?[\w@+./\\~-]*\.(?:" + CODE_EXTS + r"))(?::\d+(?:[-–]\d+)?(?::\d+)?"
+    r"|#L\d+(?:-L?\d+)?|,\s*lines?\s+\d+(?:\s*[-–]\s*\d+)?)(?![\w-])",
+    re.I,
+)
+FILE_LINE_RE = re.compile(r"[\w@+./\\~-]*\.(?:" + EXTS + r")(?::\d+(?:[-–‑]\d+)?(?::\d+)?|#L\d+(?:-L?\d+)?)", re.I)
+ID_LIKE_RE = re.compile(r"(?:^|_)(?=[a-z0-9]*\d)[0-9a-f]{8,}(?:_|$)")  # req_ce86e13175f5: an id, not code
+# The code name written right before a location on its line, by its mark (each group is named after it), and the
+# words that may come between them: "`parse_date()` at src/a.py:42", "parse_date(), in src/a.py:42".
+NAME_BEFORE = re.compile(
+    r"""(?x)
+    (?: ``(?P<double_backticks>[^`\n]+)``
+      | (?<!`)`(?P<backticks>[^`\n]+)`
+      | \*\*(?P<bold>[^*\n]+)\*\*
+      | <code>(?P<html_code>[^<\n]+)</code>
+      | (?<![\w*])\*(?P<italic>[^*\s][^*\n]*)\*
+      | (?<![\w`*>/.\\-])(?P<plain>[A-Za-z_$](?:[\w.:#$]*[\w$])?(?:\(\))?) )
+    \s*(?:[,:;—–-]\s*)?(?:(?:at|in|on|of|from|see|en|dans|em|im|bei|na)\s+)?$"""
+)
+# The wraps of a location each location mark accepts. A `link` location is the target of a link whose text is the
+# code's name in backticks.
+LOCATION_WRAPS = {
+    "parens_backticks": ("parens_backticks",),
+    "bold": ("bold",),
+    "brackets": ("brackets",),
+    "parens": ("parens",),
+    "parens_link": ("parens_link_text", "parens_link_target"),
+    "link": ("link_target", "parens_link_target"),
+}
+
+
+def _reads_as_code(name: str) -> bool:
+    """a token without spaces names code: a call (parse(), a.b(x)), a code file or a file with its line, a dotted name,
+    a snake_case or ALL_CAPS name, or a camelCase or UpperCamel name; not a library such as Three.js, a non-code file,
+    a short dotted word such as e.g, or an id such as req_ce86e13175f5"""
+    if name.startswith(("-", "#!")) or _is_library(name):
+        return False
+    if re.fullmatch(r"[\w.$:<>\[\]]+\(.*\)", name) or CODE_FILE_RE.fullmatch(name) or FILE_LINE_RE.fullmatch(name):
+        return True
+    if re.fullmatch(r"[A-Za-z_$][\w$]*(?:(?:\.|::|#)[A-Za-z_$][\w$]*)+", name) and not re.fullmatch(
+        r"[a-z]{1,4}\.[a-z]{1,4}", name
+    ):
+        return not FILE_RE.fullmatch(name)
+    if re.fullmatch(r"_*[a-z][a-z0-9]*(?:_[a-z0-9]+)+", name) or re.fullmatch(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+", name):
+        return not ID_LIKE_RE.search(name.lower())
+    return bool(re.fullmatch(r"[a-z]+[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+", name))
+
+
+def _code_name(content: str, mark: str) -> str | None:
+    """the content of a marked or plain token when it reads as a code name, not as a label such as **Fix:** or a
+    word"""
+    name = content.strip()
+    if not name or len(name) > 100 or re.search(r"\s", name) or not re.search(r"[A-Za-z_]", name):
+        return None
+    if mark == "plain":
+        return name if _reads_as_code(name) else None
+    reads_as_code = _reads_as_code(name) or re.fullmatch(r"[\w.:#$<>\[\]-]+(?:\(.*\))?", name)
+    return name if reads_as_code and not name.endswith(":") else None
+
+
+def _name_before(t: str, pos: int) -> tuple[str, str] | None:
+    """(name, its mark) of the code name written right before position pos on its line, or None"""
+    m = NAME_BEFORE.search(t[t.rfind("\n", 0, pos) + 1 : pos][-200:])
+    name = _code_name(m.group(m.lastgroup), m.lastgroup) if m else None
+    return (name, m.lastgroup) if name else None
+
+
+def _enclosing(t: str, s: int, e: int, open_ch: str, close_ch: str) -> tuple[int, int] | None:
+    """(start, end) of the innermost pair of open_ch ... close_ch on the line that holds t[s:e], or None"""
+    line_start, line_end = t.rfind("\n", 0, s) + 1, t.find("\n", e)
+    line_end = len(t) if line_end < 0 else line_end
+    depth, i = 0, s - 1
+    while i >= line_start and not (t[i] == open_ch and depth == 0):
+        depth += (t[i] == close_ch) - (t[i] == open_ch)
+        i -= 1
+    if i < line_start:
+        return None
+    depth, j = 0, e
+    while j < line_end and not (t[j] == close_ch and depth == 0):
+        depth += (t[j] == open_ch) - (t[j] == close_ch)
+        j += 1
+    return (i, j + 1) if j < line_end else None
+
+
+def _location_wrap(t: str, s: int, e: int, sp: dict[str, list[tuple[int, int, re.Match]]]) -> tuple[str | None, int]:
+    """(how the location t[s:e] is wrapped, where the wrapped part starts): link_text or link_target (parens_link_text
+    or parens_link_target inside parentheses), backticks, parens_backticks, bold, brackets, parens or plain; None for
+    a command or a snippet in backticks that holds it. Brackets and parentheses count when they enclose the location on
+    its line, also with more words inside ("(src/a.py, lines 612 and 618)"); the wrapped part starts at the bracket
+    only when the bracket opens right at the location, so the name looked for before it is the one outside."""
+    link = _around(sp["link"], s, e)
+    if link:
+        link_start, link_end, lm = link
+        wrap = "link_target" if s >= lm.start(2) else "link_text"
+        if t[link_start - 1 : link_start] == "(" and t[link_end : link_end + 1] == ")":
+            return "parens_" + wrap, link_start - 1
+        return wrap, link_start
+    inline = _around(sp["inline"], s, e)
+    if inline:
+        if inline[2].group(2).strip() != t[s:e]:
+            return None, s
+        s, e = inline[0], inline[1]
+        if t[s - 1 : s] == "(" and t[e : e + 1] == ")":
+            return "parens_backticks", s - 1
+        bold = _around(sp["bold"], s, e)
+        if bold and bold[2].group(1).strip().strip("`") == t[s:e].strip("`"):
+            return "bold", bold[0]
+        return "backticks", s
+    bold = _around(sp["bold"], s, e)
+    if bold and bold[2].group(1).strip() == t[s:e]:
+        return "bold", bold[0]
+    brackets = _enclosing(t, s, e, "[", "]")
+    if brackets and t[brackets[1] : brackets[1] + 1] != "(":  # square brackets, not the text of a markdown link
+        return "brackets", brackets[0] if not t[brackets[0] + 1 : s].strip() else s
+    parens = _enclosing(t, s, e, "(", ")")
+    if parens:
+        return "parens", parens[0] if not t[parens[0] + 1 : s].strip() else s
+    return "plain", s
+
+
+def code_reference_marks(text: str, *, name_mark: str | None = None, location_mark: str | None = None) -> list[str]:
+    """[what is wrong] with the marks of the code references in one message. A reference here is a location of code
+    (CODE_LOCATION) and the code name written right before it. name_mark: plain, backticks, double_backticks, bold,
+    html_code or italic around that name. location_mark: parens_backticks, bold, brackets, parens, parens_link or link
+    (the location is the target of a link whose text is in backticks) around the location. A location inside a fenced
+    code block, a web address, a markup tag, or a command or snippet in backticks is not graded here."""
+    if name_mark is not None and name_mark not in NAME_BEFORE.groupindex:
+        raise ValueError("code reference marks: unknown name mark %r" % (name_mark,))
+    if location_mark is not None and location_mark not in LOCATION_WRAPS:
+        raise ValueError("code reference marks: unknown location mark %r" % (location_mark,))
+    t, sp = _marked_text(text)
+    bad, found = [], []
+    for m in CODE_LOCATION.finditer(t):
+        s, e = m.start(), m.end()
+        if _around(sp["url"], s, e) or _around(sp["markup"], s, e):
+            continue
+        wrap, wrap_start = _location_wrap(t, s, e, sp)
+        if wrap is None or (location_mark == "link" and wrap in ("link_text", "parens_link_text")):
+            continue  # a command or a snippet; or, for a link, the link's text (its target is graded)
+        found.append((wrap_start, t[s:e]))
+        if location_mark and wrap not in LOCATION_WRAPS[location_mark]:
+            wanted = "link_backticked_text" if location_mark == "link" else location_mark
+            bad.append("the location %s is written %s, not %s" % (t[s:e], WRAP_WORDS[wrap], WRAP_WORDS[wanted]))
+        elif location_mark == "link":
+            lm = _around(sp["link"], s, e)[2]
+            if not re.fullmatch(r"`[^`]+`", lm.group(1).strip()):
+                bad.append("the link [%s](%s) does not have its text in backticks" % (lm.group(1), lm.group(2)))
+    if name_mark:
+        for wrap_start, location in found:
+            written = _name_before(t, wrap_start)
+            if written and written[1] != name_mark:
+                bad.append(
+                    "the name %s before %s is written %s, not %s"
+                    % (written[0], location, WRAP_WORDS[written[1]], WRAP_WORDS[name_mark])
+                )
+    return list(dict.fromkeys(bad))

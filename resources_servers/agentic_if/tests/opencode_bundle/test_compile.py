@@ -84,6 +84,31 @@ def test_plants_are_the_events_as_the_profile_plugin_reads_them() -> None:
     assert compile_plants(unrestricted_spec()) == []
 
 
+def test_replaced_and_appended_results_are_plants_and_leave_the_profile_as_the_failures_alone_compile_it() -> None:
+    fail = {
+        "id": "push",
+        "match": {"tool": "bash", "arg": {"field": "command", "regex": "^git push"}},
+        "nth": 2,
+        "action": "fail",
+        "text": "Blocked: pushing is not allowed here.",
+    }
+    replace = {"id": "build-down", "match": {"tool": "bash"}, "nth": 3, "action": "replace", "text": "Error: offline."}
+    append = {
+        "id": "disk",
+        "match": {"tool": "read", "arg": {"field": "filePath", "regex": "\\.py$"}},
+        "action": "append",
+        "text": "NOTICE: the disk is 95% full.",
+    }
+    tools = {"tool_names": {"read": "read", "bash": "bash"}}
+    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools=tools, events=[fail, replace, append])
+    # The plugin reads each event's action from plants.json.
+    assert compile_plants(spec) == [fail, replace, append | {"nth": 1}]
+    # Only a failure's text is shown as an error; the profile gets no new key and no new hash input.
+    profile = compile_profile(spec)
+    assert profile["literal_errors"] == ["Blocked: pushing is not allowed here."]
+    assert profile == compile_profile(RuntimeSpec(harness="opencode", task_backend="swe", tools=tools, events=[fail]))
+
+
 def test_boundary_of_a_private_shaped_row() -> None:
     spec = private_like_spec()
     boundary = compile_boundary(spec)
@@ -184,17 +209,10 @@ def test_prefix_rejected_calls_need_captured_evidence() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "tools, message",
-    [
-        ({"tool_names": {"read": "ReadSource"}}, "tool aliases"),
-        ({"tool_names": {"apply_patch": "apply_patch"}}, "apply_patch"),
-    ],
-)
-def test_dropped_features_are_refused_when_compiling(tools: dict, message: str) -> None:
-    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools=tools)
+def test_dropped_features_are_refused_when_compiling() -> None:
+    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools={"tool_names": {"apply_patch": "apply_patch"}})
     for compile_ in (compile_profile, compile_boundary, bundle_files):
-        with pytest.raises(UnsupportedFeatureError, match=message):
+        with pytest.raises(UnsupportedFeatureError, match="apply_patch"):
             compile_(spec)
 
 

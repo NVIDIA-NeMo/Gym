@@ -7,7 +7,15 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Literal
 
-from pydantic import Field, JsonValue, SerializerFunctionWrapHandler, StrictInt, model_serializer, model_validator
+from pydantic import (
+    Field,
+    JsonValue,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StrictInt,
+    model_serializer,
+    model_validator,
+)
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.agentic_if.if_grading.contracts import Contract, EventReceipt, ResolvedCheck
@@ -16,7 +24,7 @@ from resources_servers.agentic_if.task_variants.catalog import BUILTIN_ARGUMENTS
 from resources_servers.agentic_if.task_variants.guards import ReadFirstGuard
 from resources_servers.agentic_if.task_variants.interfaces import installed_interfaces
 from resources_servers.agentic_if.task_variants.tasks import backend_task_digest
-from resources_servers.agentic_if.task_variants.toolsets import configurable_tools
+from resources_servers.agentic_if.task_variants.toolsets import configurable_tools, renamed_tools
 
 
 class ToolConfiguration(Contract):
@@ -63,15 +71,17 @@ class ToolMatch(Contract):
 
 
 class ToolEvent(Contract):
-    """One scheduled tool failure: the matching call does not run and the model sees `text` as its error.
+    """One scheduled tool result on the `nth` call that matches.
 
-    Firing is recorded separately in evidence.
+    `fail`: the call does not run and the model sees `text` as its error. `replace`: the call runs and the model sees
+    `text` instead of its output. `append`: the call runs and the model sees its output with `text` on a line after it.
+    `replace` and `append` act only on a call the tool completes. Firing is recorded separately in evidence.
     """
 
     id: str = Field(min_length=1)
     match: ToolMatch
     nth: StrictInt = Field(default=1, ge=1)
-    action: Literal["fail"]
+    action: Literal["fail", "replace", "append"]
     text: str = Field(min_length=1)
 
 
@@ -80,6 +90,10 @@ class ContinuationSpec(Contract):
 
     The author chooses the cut before export. Restore imports recorded history and
     workspace state; it never infers a cut or fabricates a new user message at runtime.
+
+    The optional fields describe a prefix recorded under another restore contract, that of the
+    ``opencode_sandboxed_agent`` harness with OpenCode profiles. Each is left out of the dump when unset, so the receipts
+    and task IDs of rows sealed without it stay valid.
     """
 
     mode: Literal["restore"]
@@ -89,6 +103,28 @@ class ContinuationSpec(Contract):
     workspace_diff: str
     source_task_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_tools_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # "mismatch": a replayed shell command that times out is recorded as an output mismatch (and in the replay
+    # receipt's command_timeout_indices), and the replay goes on, as opencode_sandboxed_agent's did. Unset, a timeout
+    # fails the seed.
+    replay_timeouts: Literal["mismatch"] | None = None
+    # Call IDs of the prefix's rejected calls (OpenCode's `invalid` tool parts) recorded without a nemo_gym_model_call
+    # receipt, as opencode_sandboxed_agent recorded them: the model sees each in OpenCode's own form, as it did then,
+    # instead of its own call. Unset, such a call fails the seed.
+    unreceipted_rejected_calls: list[str] | None = None
+    # "index": workspace_diff and the prefix's per-call diffs were taken against the Git index, as
+    # opencode_sandboxed_agent took them, so a change the prefix staged (git mv, git rm, git add) is not in them. The
+    # restore then resets the files to the index the replayed commands leave, applies the diff and compares against
+    # that index. Unset, they were taken against the episode's base tree.
+    workspace_diff_base: Literal["index"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict:
+        """The dump, without the recording options left unset."""
+        result = handler(self)
+        for name in ("replay_timeouts", "unreceipted_rejected_calls", "workspace_diff_base"):
+            if result.get(name) is None:
+                result.pop(name, None)
+        return result
 
     @model_validator(mode="after")
     def validate_prefix(self) -> "ContinuationSpec":
@@ -98,6 +134,7 @@ class ContinuationSpec(Contract):
         messages = self.prefix_export.get("messages")
         if not isinstance(info, dict) or not info.get("id") or not isinstance(messages, list) or not messages:
             raise ValueError("continuation prefix requires an OpenCode session ID and messages")
+        unreceipted = []
         for message in messages:
             if not isinstance(message, dict) or not isinstance(message.get("info"), dict):
                 raise ValueError("continuation prefix has an invalid message")
@@ -113,8 +150,21 @@ class ContinuationSpec(Contract):
                         raise ValueError("continuation prefix contains an unfinished tool call")
                     if part.get("tool") == "task":
                         raise ValueError("continuation prefix cannot yet restore delegated child state")
+                    metadata = state.get("metadata")
+                    if part.get("tool") == "invalid" and not (
+                        isinstance(metadata, dict) and metadata.get("nemo_gym_model_call") is not None
+                    ):
+                        unreceipted.append(part.get("callID"))
         if messages[-1]["info"].get("role") != "assistant":
             raise ValueError("continuation prefix must end at an assistant-message boundary")
+        listed = self.unreceipted_rejected_calls
+        if listed is not None and (
+            not listed or len(set(listed)) != len(listed) or any(unreceipted.count(call) != 1 for call in listed)
+        ):
+            raise ValueError(
+                "unreceipted_rejected_calls must list distinct call IDs, each of one rejected (invalid) prefix call "
+                "recorded without a receipt"
+            )
         return self
 
 
@@ -138,6 +188,11 @@ class RuntimeSpec(Contract):
     continuation: ContinuationSpec | None = None
     events: list[ToolEvent] = Field(default_factory=list)
     checks: list[ResolvedCheck] = Field(default_factory=list)
+    # Whether the task backend's verdict measures this row's run. A row whose instruction stops the work (a
+    # continuation that asks only for a status reply, say) leaves the task's tests nothing to measure: it is sealed
+    # with false, and the server's `task_and_if` reward is then the IF score alone. Only that reward reads it. Left
+    # out of the dump when true, so rows sealed without it keep their receipts.
+    outcome_tracked: StrictBool = Field(default=True, exclude_if=lambda tracked: tracked)
     provenance: dict[str, JsonValue] = Field(default_factory=dict)
     receipt: InputReceipt | None = None
 
@@ -213,6 +268,10 @@ def _validate_row(row: Mapping[str, object], spec: RuntimeSpec) -> list[dict]:
     if any(content_text(message.get("content")) == "" for message in systems):
         # opencode_agent stages no instructions for an empty one, so OpenCode would keep its own system prompt.
         raise ValueError("a system message needs text; omit it to keep OpenCode's own system prompt")
+    if renamed_tools(spec.tools.tool_names) and not systems:
+        raise ValueError(
+            "a row that renames tools needs a system message: OpenCode's own system prompt names the built-in tools"
+        )
     _validate_sources(row, spec)
     return messages
 

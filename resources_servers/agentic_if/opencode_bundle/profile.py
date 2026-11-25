@@ -5,7 +5,7 @@
 The compiled profile is evidence format: its canonical hash ``profile_sha256`` is in the seed record, in the profile
 plugin's load receipt and in every tool receipt, and the seed record keeps the digest of its staged bytes.
 ``tests/opencode_bundle/fixtures/profile-goldens.json`` pins them: keep every key and its order, including the keys
-the plugin does not read (``profile_version``, ``id``, ``check_aliases``, ``prefix_receipts``, ``prefix_mode``).
+the plugin does not read (``profile_version``, ``id``, ``prefix_receipts``, ``prefix_mode``).
 """
 
 import hashlib
@@ -18,6 +18,7 @@ from pydantic import JsonValue
 from resources_servers.agentic_if.opencode_bundle.features import check_supported
 from resources_servers.agentic_if.task_variants.interfaces import installed_interfaces
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
+from resources_servers.agentic_if.task_variants.toolsets import renamed_tools
 
 
 def profile_sha256(profile: Mapping[str, Any]) -> str:
@@ -30,7 +31,9 @@ def compile_profile(spec: RuntimeSpec) -> dict[str, JsonValue]:
     """The profile plugin's configuration: installed interfaces, read-first guards and literal error texts.
 
     Execution sees the built-in tool IDs; presentation (descriptions, parameter descriptions) belongs to the boundary,
-    so interface descriptions are removed here. ``visible_tools`` keeps the selection for error presentation.
+    so interface descriptions are removed here. ``visible_tools`` keeps the selection and the name the model sees for
+    each tool, for error presentation; ``check_aliases`` is true when a tool is renamed, and the plugin then refuses a
+    call to a renamed tool that the model did not make under its alias.
     """
     check_supported(spec)
     definitions = installed_interfaces(spec.tools.tool_interfaces)
@@ -41,9 +44,10 @@ def compile_profile(spec: RuntimeSpec) -> dict[str, JsonValue]:
         config["read_first"] = spec.tools.read_first.model_dump(mode="json")
     if spec.tools.tool_names is not None:
         config["visible_tools"] = dict(spec.tools.tool_names)
-        # Unread hash input: check_supported refuses aliases.
-        config["check_aliases"] = False
-    config["literal_errors"] = [event.text for event in spec.events]
+        config["check_aliases"] = bool(renamed_tools(spec.tools.tool_names))
+    # A planted failure's text is shown as the call's error, exactly; a replace or append text is a completed call's
+    # output, never an error.
+    config["literal_errors"] = [event.text for event in spec.events if event.action == "fail"]
     if spec.continuation is not None:
         # Unread hash inputs; prefix_receipts is always empty (check_supported refuses frozen error receipts).
         config["prefix_receipts"] = []
@@ -53,5 +57,5 @@ def compile_profile(spec: RuntimeSpec) -> dict[str, JsonValue]:
 
 
 def compile_plants(spec: RuntimeSpec) -> list[dict[str, JsonValue]]:
-    """The planted tool failures, in the form the profile plugin reads."""
+    """The planted tool results, in the form the profile plugin reads."""
     return [event.model_dump(mode="json", exclude_none=True) for event in spec.events]

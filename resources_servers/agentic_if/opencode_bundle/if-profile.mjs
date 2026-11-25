@@ -3,14 +3,23 @@
 //
 // Apply a tool profile inside OpenCode through its own plugin hooks:
 //   - tool.definition: each profiled tool gets the profile's JSON Schema;
-//   - tool.execute.before: the model's (configured) arguments are mapped to the built-in tool's, in place;
+//   - tool.execute.before: a call to a tool the row renames is refused unless the model made it under the tool's
+//     alias (see below); the model's (configured) arguments are mapped to the built-in tool's, in place;
 //   - tool.execute.after: the configured arguments and the profile hash are recorded in the tool part's metadata;
 //   - experimental.chat.messages.transform: every past call of a reshaped tool is shown in the configured form.
 // The plugin keeps no state between runs: everything it needs is in the bundle's files and in the stored tool parts.
 //
+// Renamed tools (profile.check_aliases; visible_tools maps each built-in tool to the name the model sees): the
+// boundary plugin gives OpenCode the built-in tool of a call the model made under an alias, and passes any other name
+// on, so a model that writes a renamed tool's hidden ID (bash for a tool shown as shell) would run it. The boundary
+// records how each model-written name reached OpenCode in the process registry (`dispatched`); a call to a renamed
+// tool runs only when the model's own name was offered (exactly, or as OpenCode's lowercase repair reads it).
+// Otherwise the model sees the boundary's refusal of an unavailable tool, and the refusal is recorded as a tool receipt
+// with dispatch_rejected. Errors and the few exact OpenCode texts that name a tool show the tool's alias.
+//
 // Bundle layout (the Resources Server stages this file in its bundle directory; every path is beside this module):
 //   - profile.json: the compiled profile, read when OpenCode creates the plugin;
-//   - plants.json: the planted tool failures, read at the same time;
+//   - plants.json: the planted tool results, read at the same time;
 //   - workspace.json: the base tree of the workspace diffs, written by the Resources Server at seed and read at the
 //     same time;
 //   - receipts/hook-applied.jsonl: the load receipt, tool definitions, tool receipts and presentation receipts;
@@ -23,13 +32,16 @@
 // Resources Server refuses evidence without that receipt), registers the failure in the process-wide bundle registry
 // (the boundary plugin then refuses every model call), and installs no hook.
 //
-// Planted tool failures: each plant matches the calls of one built-in tool, optionally with one of its arguments tested
-// against a regular expression, and acts on its nth matching call only. Its action is "fail": the call does not run and
-// the model sees the plant's text as the call's error (thrown before any mapping, like the plugin's own rejections).
-// Only calls that pass the profile's argument check count. One plant acts on a call: the first, in list order, whose
-// nth match it is. Each firing is appended to receipts/hook-events-fired.jsonl, after one "loaded" line; plants that
-// cannot be loaded (any other action included) leave an "error" line instead and none is applied (evidence is then
-// incomplete).
+// Planted tool results: each plant matches the calls of one built-in tool, optionally with one of its arguments tested
+// against a regular expression, and acts on its nth matching call only. "fail": the call does not run and the model
+// sees the plant's text as the call's error (thrown before any mapping, like the plugin's own rejections). "replace":
+// the call runs and the model sees the text instead of its output. "append": the call runs and the model sees its
+// output with the text after it, on a line of its own. Those two act once the tool has completed the call
+// (tool.execute.after): a call that fails inside the tool keeps its error, and the plant whose nth match it was never
+// acts. The tool's own metadata keeps what really happened. Only calls that pass the profile's argument check count.
+// One plant acts on a call: the first, in list order, whose nth match it is. Each time a plant acts, a firing is
+// appended to receipts/hook-events-fired.jsonl, after one "loaded" line; plants that cannot be loaded (any other action
+// included) leave an "error" line instead and none is applied (evidence is then incomplete).
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -193,13 +205,44 @@ const EDIT_DIAGNOSTICS = new Set([
   "Found multiple matches for oldString. Provide more surrounding context to make the match unique.",
 ]);
 
-function toProfileNames(tool, toolID, text) {
+// The name the model sees for a built-in tool: its alias when the row renames it, otherwise its ID.
+function visibleName(visibleTools, toolID) {
+  return visibleTools && Object.hasOwn(visibleTools, toolID) ? visibleTools[toolID] : toolID;
+}
+
+function toProfileNames(tool, toolID, text, visibleTools) {
   const names = tool?.args_map || {};
   if (toolID === "read" && names.offset && /^Offset \d+ is out of range for this file \(\d+ lines\)$/.test(text)) {
     return names.offset + text.slice("Offset".length);
   }
   if (toolID !== "edit" || !EDIT_DIAGNOSTICS.has(text)) return text;
-  return text.replace(/\b(?:filePath|oldString|newString)\b/g, word => names[word] || word);
+  return text
+    .replace(/\b(?:filePath|oldString|newString)\b/g, word => names[word] || word)
+    // One edit diagnostic names the write tool ("or use write for an intentional full-file replacement").
+    .replace(/\buse write for\b/, () => `use ${visibleName(visibleTools, "write")} for`);
+}
+
+// OpenCode's hints after a truncated tool output (tool/truncate.ts) name the Task, Grep and Read tools. A hint is
+// matched only where OpenCode puts it, after its note at the end of the output (truncated head) or at its start
+// (truncated tail), so output bytes are never rewritten; a row that renames those tools sees their aliases there.
+const TRUNCATION_HINTS = [
+  "Use the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.",
+  "Use Grep to search the full content or Read with offset/limit to view specific sections.",
+];
+const TRUNCATION_NOTE = String.raw`\.\.\.\d+ (?:lines|bytes) truncated\.\.\.\n\n` +
+  String.raw`The tool call succeeded but the output was truncated\. Full output saved to: [^\n]*\n`;
+const TRUNCATION_HINT = TRUNCATION_HINTS.map((hint) => hint.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|");
+const TRUNCATED_HEAD = new RegExp(String.raw`(\n\n${TRUNCATION_NOTE})(${TRUNCATION_HINT})$`);
+const TRUNCATED_TAIL = new RegExp(String.raw`^(${TRUNCATION_NOTE})(${TRUNCATION_HINT})(?=\n\n)`);
+
+function renameTruncationHint(visibleTools, text) {
+  const alias = (word) => {
+    const name = visibleName(visibleTools, word.toLowerCase());
+    return name === word.toLowerCase() ? word : name;
+  };
+  const rename = (_match, note, hint) => note + hint.replace(/\b(?:Task|Grep|Read)\b/g, alias);
+  // OpenCode writes one of the two forms.
+  return TRUNCATED_TAIL.test(text) ? text.replace(TRUNCATED_TAIL, rename) : text.replace(TRUNCATED_HEAD, rename);
 }
 
 // Hints OpenCode appends to a successful result that name a built-in argument. Only these exact phrases are renamed:
@@ -233,14 +276,16 @@ function presentedError(profile, toolID, text, mapped, args) {
       message => message.replaceAll("{{path}}", () => builtin.filePath) === text)) return text;
   }
   if (profile.visible_tools === undefined) return mapped ? toProfileNames(profile.tools[toolID], toolID, text) : text;
-  if (text.startsWith(`${toolID} failed: `)) return text;
+  // The tool as the model knows it: its alias when the row renames it.
+  const name = visibleName(profile.visible_tools, toolID);
+  if (text.startsWith(`${name} failed: `)) return text;
   const denied = "The user has specified a rule which prevents you from using this specific tool call.";
-  if (text.startsWith(denied)) return `${toolID} failed: ${denied}`;
+  if (text.startsWith(denied)) return `${name} failed: ${denied}`;
   // Only OpenCode-generated argument errors are renamed. Nonzero command output
   // is a completed tool result and never enters this path.
   let detail = text.replace(/^The \S+ tool was called with invalid arguments: /, "Invalid arguments: ");
-  detail = toProfileNames(mapped ? profile.tools[toolID] : undefined, toolID, detail);
-  return `${toolID} failed: ${detail}`;
+  detail = toProfileNames(mapped ? profile.tools[toolID] : undefined, toolID, detail, profile.visible_tools);
+  return `${name} failed: ${detail}`;
 }
 
 function record(entry) {
@@ -272,10 +317,12 @@ function recordPlant(entry) {
   }
 }
 
+const PLANT_ACTIONS = new Set(["fail", "replace", "append"]);
+
 function loadPlants() {
   try {
     const plants = JSON.parse(fs.readFileSync(PLANTS_PATH, "utf8")).map((plant, index) => {
-      if (plant.action !== "fail") throw new Error(`unsupported plant action: ${plant.action}`);
+      if (!PLANT_ACTIONS.has(plant.action)) throw new Error(`unsupported plant action: ${plant.action}`);
       const arg = plant.match.arg;
       return {
         index,
@@ -312,6 +359,14 @@ function duePlant(plants, toolID, builtin) {
     if (plant.matched === plant.nth && due === null) due = plant;
   }
   return due;
+}
+
+// What the model sees of a completed call that a "replace" or "append" plant acts on: the plant's text instead of the
+// tool's output, or the output with the text after it on a line of its own (the text alone after an empty output).
+function plantedOutput(plant, output) {
+  if (plant.action === "replace") return plant.text;
+  const real = typeof output === "string" ? output : "";
+  return real + (real && !real.endsWith("\n") ? "\n" : "") + plant.text;
 }
 
 function recordFiring(plant, input, callNumber) {
@@ -378,9 +433,25 @@ export const IfProfile = async (input) => {
     }
     return file;
   };
+  // The refusal of a call to a renamed tool that the model did not make under its alias, or null: the executed tool
+  // must be the one the boundary gave OpenCode for the model's offered name, or that name lowercased by OpenCode's
+  // repair.
+  const aliasRefusal = (input) => {
+    if (profile.check_aliases !== true || visibleName(profile.visible_tools, input.tool) === input.tool) return null;
+    const registry = globalThis[REGISTRY] || {};
+    const dispatched = typeof registry.dispatched === "function" ? registry.dispatched : () => null;
+    const dispatch = dispatched(input.sessionID, input.callID);
+    if (!dispatch) return "Tool call provenance unavailable; execution was not started.";
+    const sent = dispatch.opencode_name;
+    if (dispatch.allowed && (input.tool === sent || input.tool === sent.toLowerCase())) return null;
+    // The boundary's text for any unavailable tool, so a hidden ID reads like any other unknown name.
+    const available = dispatch.available.join(", ") || "none";
+    return `${dispatch.model_name} is unavailable or its arguments are invalid. Available tools: ${available}.`;
+  };
   const recorded = new Set();
   const errorPresentations = new Map();
   const plants = loadPlants();
+  const planted = new Map(); // session + call ID -> {plant, callNumber}: a "replace" or "append" plant due on the call
   let calls = 0; // every tool call this run, in the order OpenCode starts them (call_number in a firing record)
 
   const hooks = {
@@ -402,6 +473,14 @@ export const IfProfile = async (input) => {
 
     "tool.execute.before": async (input, output) => {
       calls += 1;
+      const refusal = aliasRefusal(input);
+      if (refusal !== null) {
+        // Before the argument check, the read-first guard and the plants: a refused call matches no plant.
+        guardErrors.set(key(input), refusal);
+        record({kind: "tool_receipt", session_id: input.sessionID, call_id: input.callID, opencode_tool: input.tool,
+          metadata: {model_error: refusal, dispatch_rejected: true}});
+        throw new Error(refusal);
+      }
       const tool = tools[input.tool];
       if (reshaped(input.tool)) {
         const errors = schemaErrors(tool.parameters, output.args);
@@ -418,11 +497,13 @@ export const IfProfile = async (input) => {
       const builtin = reshaped(input.tool) ? toBuiltin(tool, output.args) : output.args;
       const readFile = readFirstCheck(input, builtin);
       const plant = duePlant(plants, input.tool, builtin);
-      if (plant) {
+      if (plant?.action === "fail") {
         // Before any mapping: the stored input stays what the model sent, and the text is shown exactly.
         recordFiring(plant, input, calls);
         throw new Error(plant.text);
       }
+      // The call runs; the plant acts on its result if the tool completes it (tool.execute.after).
+      if (plant) planted.set(key(input), {plant, callNumber: calls});
       if (readFile) readFiles.set(key(input), readFile);
       if (!reshaped(input.tool)) return;
       const configured = JSON.parse(JSON.stringify(output.args));
@@ -435,6 +516,8 @@ export const IfProfile = async (input) => {
     "tool.execute.after": async (input, output) => {
       const configured = pending.get(key(input));
       pending.delete(key(input));
+      const due = planted.get(key(input));
+      planted.delete(key(input));
       let diff = null;
       if (FILE_TOOLS.has(input.tool) && base !== null) {
         try {
@@ -446,11 +529,21 @@ export const IfProfile = async (input) => {
       if (configured && output && typeof output.output === "string") {
         output.output = renameHints(tools[input.tool], input.tool, output.output, output.metadata);
       }
+      if (profile.check_aliases === true && output && typeof output.output === "string") {
+        output.output = renameTruncationHint(profile.visible_tools, output.output);
+      }
+      if (due) {
+        // After renameHints: the plant's text is shown exactly, and the read footer that renameHints rewrites is still
+        // at the end of the output.
+        output.output = plantedOutput(due.plant, output.output);
+        recordFiring(due.plant, input, due.callNumber);
+      }
       const readFile = readFiles.get(key(input));
       readFiles.delete(key(input));
       let readRecord = null;
-      // A call that fails inside the tool never calls this hook.
-      if (readFile && isRegularFile(readFile)) {
+      // A call that fails inside the tool never calls this hook. A read whose output a plant replaced ran, but the
+      // model never saw the file, so it does not count as read.
+      if (readFile && isRegularFile(readFile) && !(input.tool === "read" && due?.plant.action === "replace")) {
         readRecord = {file: readFile, sha256: contentSha256(readFile)};
         knownIn(input.sessionID).set(readFile, readRecord.sha256);
       }

@@ -119,4 +119,31 @@ assert.match(await receiptDiff(await IfProfile({directory: fresh}), "fresh"), /n
 // Without a base (no git worktree at seed) no diff is recorded.
 fs.writeFileSync(WORKSPACE, JSON.stringify({base_tree: null}));
 assert.equal(await receiptDiff(await IfProfile({directory: fresh}), "no-base"), undefined);
+// "replace" and "append" act on what the tool completed: a shell command whose output a plant replaced still changed
+// the files (its receipt records the workspace diff), and a notice appended to a read follows the paging footer that
+// the profile renamed.
+fs.writeFileSync(WORKSPACE, JSON.stringify({base_tree: git("rev-parse", "HEAD^{tree}").trim()}));
+fs.writeFileSync(PLANTS, JSON.stringify([
+  {id: "shell-replaced", match: {tool: "bash"}, action: "replace", text: "PLANTED: bash: make: command not found"},
+  {id: "read-notice", match: {tool: "read"}, action: "append", text: "PLANTED: this file is generated."},
+]));
+const results = await IfProfile({directory: repo});
+const shell = {tool: "bash", callID: "replaced", sessionID: "root"};
+await results["tool.execute.before"](shell, {args: {command: "make"}});
+fs.writeFileSync(path.join(repo, "built.txt"), "built\n");
+const replaced = {output: "built\n", metadata: {output: "built\n", exit: 0}};
+await results["tool.execute.after"](shell, replaced);
+assert.equal(replaced.output, "PLANTED: bash: make: command not found");
+assert.match(replaced.metadata.nemo_gym_profile.workspace_diff, /new file mode[\s\S]*\+built/);
+const paging = {tool: "read", callID: "noticed", sessionID: "root"};
+await results["tool.execute.before"](paging, {args: {path: "/app/file", start_line: 1, line_count: 2}});
+const page = {output: "<content>\n1: a\n2: b\n\n(Showing lines 1-2 of 9. Use offset=3 to continue.)\n</content>",
+  metadata: {display: {type: "file", lineEnd: 2, totalLines: 9, truncated: true}}};
+await results["tool.execute.after"](paging, page);
+assert.equal(page.output, "<content>\n1: a\n2: b\n\n(Showing lines 1-2 of 9. Use start_line=3 to continue.)\n</content>" +
+  "\nPLANTED: this file is generated.");
+const firings = fs.readFileSync(FIRED, "utf8").trim().split("\n").map(JSON.parse).filter(row => row.kind === "fired");
+assert.deepEqual(firings.slice(-2).map(row => [row.event_id, row.action, row.call_id]),
+  [["shell-replaced", "replace", "replaced"], ["read-notice", "append", "noticed"]]);
+fs.unlinkSync(path.join(repo, "built.txt"));
 console.log("combined hooks passed");

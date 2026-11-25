@@ -123,7 +123,7 @@ async def test_stage_resets_receipts_and_exports_but_keeps_the_prefix_export(san
 
 @pytest.mark.asyncio
 async def test_stage_refuses_unsupported_rows_before_touching_the_sandbox(sandbox: LocalSandbox) -> None:
-    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools={"tool_names": {"read": "ReadSource"}})
+    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools={"tool_names": {"apply_patch": "apply_patch"}})
     with pytest.raises(UnsupportedFeatureError):
         await stage_bundle(sandbox, spec=spec, agent_user=None)
     assert sandbox.commands == []
