@@ -5362,7 +5362,8 @@ executions → not run again (left to recovery)
             if rejection is not None:
                 print(
                     "The run is incomplete and allow_incomplete_aggregate is set: the aggregate covers the settled "
-                    "rollouts only. Its denominator is not the expected rollouts, and the run stays incomplete."
+                    "rollouts only and is not exported. Its denominator is not the expected rollouts, and the run "
+                    "stays incomplete."
                 )
             print("Computing aggregate metrics")
             if config.count_failure_classes_as_zero:
@@ -5387,6 +5388,8 @@ executions → not run again (left to recovery)
                 [metadata_rows[i] for i in order],
                 output_fpath,
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
+                # An incomplete run's aggregate is not exported, so no tracker shows it as the run's score.
+                export=rejection is None,
             )
 
         if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
@@ -5612,8 +5615,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         output_fpath: Path,
         *,
         raise_on_error: bool = True,
+        export: bool = True,
     ) -> Optional[Path]:
         """Aggregate ``results`` per environment server and write the run's _aggregate_metrics.json.
+
+        ``export=False`` writes the file without exporting the metrics, for an aggregate that is not the score of a
+        complete run.
 
         See ``_aggregate_entries`` for how rows are grouped. Writes a single _aggregate_metrics.json with
         one entry per environment server (same shape as the old _agent_metrics.json, plus the server
@@ -5629,9 +5636,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics, first_error = await self._aggregate_entries(results, rows)
 
-        metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
-
-        export_metrics(metrics_to_log)
+        if export:
+            export_metrics(flatten_aggregate_metrics(all_agent_metrics))
 
         # Write single file with all agents
         metrics_fpath = aggregate_metrics_path_for(output_fpath)
