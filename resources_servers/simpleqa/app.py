@@ -54,6 +54,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    VerifierMode,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge
@@ -168,6 +169,11 @@ class SimpleQAVerifyResponse(BaseVerifyResponse):
 
 class SimpleQAServer(SimpleResourcesServer):
     config: SimpleQAConfig
+
+    # verify() formats the judge prompt, calls the judge model and parses one letter: it executes nothing and calls no
+    # tools, so it runs only in the Resources Server. "none" is the mode a pairing gets when it leaves verifier.mode
+    # unset, and the only one supported: a pairing that configures "shared" or "separate" is refused.
+    verifier_mode: ClassVar[VerifierMode] = "none"
 
     def model_post_init(self, context):
         prompt_data = yaml.safe_load(Path(self.config.judge_prompt_path).read_text())

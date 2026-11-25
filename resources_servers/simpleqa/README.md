@@ -55,6 +55,16 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
+## Where it runs
+
+| Agent | Verifier | Why |
+|-------|----------|-----|
+| Agent Server process | `none` | No tools; the verifier only reads the answer (a judge call). |
+
+`simpleqa_environment_server` sets `verifier: {mode: none}`, grants no tools (`resources_tool_transports: []`) and
+sets no `sandbox_provider` or `sandbox_config`, so no sandbox group starts. See
+[Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs) in the single-agent-turn README.
+
 ## Data Format
 
 Each JSONL row must have:
