@@ -185,7 +185,7 @@ async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
     assert config["plugins"][0]["options"]["sampling"] == {"temperature": 0.25, "top_p": 0.5}
     assert config["providers"]["nemo_gym"]["models"]["dummy_model"]["capabilities"]["temperature"] is True
     assert config["agent"] == {"build": {"steps": 5, "prompt": "Be {careful}."}}
-    assert config["compaction"] == {"auto": False}
+    assert config["compaction"] == {"auto": False, "background": False}
     # A configured rule cannot re-enable Code Mode.
     assert config["permission"] == {"*": "allow", "execute": "deny"}
     # The prompt's braces never reach OpenCode's {env:} and {file:} substitution.
@@ -200,7 +200,18 @@ async def test_compaction_buffer_reaches_opencode_2(opencode2):
     response, _ = await episode(agent, sandbox)
     assert response.status == "completed"
     _, config = launch_config(sandbox)
-    assert config["compaction"] == {"auto": True, "buffer": 8000}
+    assert config["compaction"] == {"auto": True, "buffer": 8000, "background": False}
+
+
+@pytest.mark.parametrize("version", ["2.2.7", OPENCODE_V2_VERSION])
+async def test_background_compaction_summaries_are_off_on_each_pinned_opencode_2(opencode2, version):
+    """2.3.1 writes compaction summaries in the background by default, held by a run's process; 2.2.7 ignores the key."""
+    agent, sandbox = opencode2
+    agent.config.opencode_version = version
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert config["compaction"] == {"background": False}
 
 
 def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
@@ -411,7 +422,7 @@ async def test_a_local_call_runs_opencode_2_standalone_and_reads_its_store(openc
     agent.config.command = str(binary)
     agent.config.workspace_root = str(tmp_path / "workspaces")
     with patch("responses_api_agents.opencode_agent.app.ensure_opencode2") as install:
-        output, usage, _, _ = await agent._run_opencode("task", None)
+        output, usage, _, _, _ = await agent._run_opencode("task", None)
     install.assert_not_called()
     call = json.loads(log.read_text())
     # A fixed title: OpenCode 2 would otherwise ask a model for one outside the rollout.

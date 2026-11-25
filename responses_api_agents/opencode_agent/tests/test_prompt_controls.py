@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config import ModelServerRef
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 from responses_api_agents.opencode_agent.tests.test_app import _make_agent
 from responses_api_agents.pi_agent.tests.test_sandbox import _finishing_model, _http_server
 
@@ -19,11 +20,11 @@ async def test_pinned_opencode_merges_replacement_without_persisting_it(tmp_path
     configured_binary = os.environ.get("GYM_TEST_OPENCODE_BINARY")
     binary = configured_binary or shutil.which("opencode")
     if binary is None:
-        pytest.skip("Set GYM_TEST_OPENCODE_BINARY to the pinned OpenCode 1.17.11 executable")
+        pytest.skip(f"Set GYM_TEST_OPENCODE_BINARY to the pinned OpenCode {OPENCODE_VERSION} executable")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
-    if configured_binary is None and version.stdout.strip() != "1.17.11":
-        pytest.skip("PATH OpenCode is not 1.17.11")
-    assert version.returncode == 0 and version.stdout.strip() == "1.17.11"
+    if configured_binary is None and version.stdout.strip() != OPENCODE_VERSION:
+        pytest.skip(f"PATH OpenCode is not {OPENCODE_VERSION}")
+    assert version.returncode == 0 and version.stdout.strip() == OPENCODE_VERSION
     repo = tmp_path / "repo"
     configured = {
         "default_agent": "plan",
@@ -76,10 +77,10 @@ async def test_pinned_opencode_merges_replacement_without_persisting_it(tmp_path
 async def test_pinned_opencode_replacement_selects_build_over_a_plan_default(tmp_path, monkeypatch):
     binary = os.environ.get("GYM_TEST_OPENCODE_BINARY") or shutil.which("opencode")
     if binary is None:
-        pytest.skip("The pinned OpenCode 1.17.11 executable is required")
+        pytest.skip(f"The pinned OpenCode {OPENCODE_VERSION} executable is required")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
-    if version.returncode != 0 or version.stdout.strip() != "1.17.11":
-        pytest.skip("This integration targets OpenCode 1.17.11")
+    if version.returncode != 0 or version.stdout.strip() != OPENCODE_VERSION:
+        pytest.skip(f"This integration targets OpenCode {OPENCODE_VERSION}")
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         monkeypatch.delenv(key, raising=False)
     requests = []
