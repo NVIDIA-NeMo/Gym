@@ -71,8 +71,10 @@ from nemo_gym.sandbox.attribution import (  # noqa: F401
     sanitize_label_value,
 )
 from nemo_gym.sandbox.providers.base import (
+    NETWORK_RULES,
     ORPHAN_REAP_TIMEOUT_S,
     PLACEMENT_GROUP_KEY,
+    NetworkRule,
     SandboxCapabilities,
     SandboxEndpoint,
     SandboxExecArgvUnsupportedError,
@@ -99,6 +101,7 @@ from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.exception_inspection import error_to_http_status, explicit_causes
+from nemo_gym.utils.network_policy import allowlist_policy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1178,10 +1181,12 @@ class OpenSandboxProviderOptions:
 
 @dataclass
 class OpenSandboxNetworkingConfig:
-    """Operator assertions about the deployment's network: that direct sandbox IPs are mutually reachable
-    (``enabled``), and that its egress layer applies the ``ports`` of a network policy rule
-    (``rule_ports_enforced``). Without the second, an allow rule for a sidecar would open every port of it, its exec
-    daemon included, so a sandbox with a network policy cannot be given a sidecar it may reach.
+    """Operator declarations about direct sandbox connectivity and control-plane egress enforcement.
+
+    ``enabled`` says that direct sandbox IPs are mutually reachable, and ``rule_ports_enforced`` that the egress
+    layer applies the ``ports`` of a network policy rule. Without the second, an allow rule for a sidecar would open
+    every port of it, its exec daemon included, so a sandbox with a network policy cannot be given a sidecar it may
+    reach.
     """
 
     enabled: bool = False
@@ -1189,6 +1194,7 @@ class OpenSandboxNetworkingConfig:
     loopback_forwarding: bool = False
     python_executable: str = "python3"
     setup_command: str | None = None
+    enforces_network_policy: bool = False
 
 
 @dataclass
@@ -1248,7 +1254,28 @@ class OpenSandboxProvider:
 
     name = "opensandbox"
     # A snapshot is a filesystem image: a sandbox created from it starts its processes anew.
-    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(snapshot_keeps=frozenset({"files"}))
+    capabilities: SandboxCapabilities = SandboxCapabilities(snapshot_keeps=frozenset({"files"}))
+
+    @classmethod
+    def capabilities_for_config(cls, config: Mapping[str, Any]) -> SandboxCapabilities:
+        """Advertise restricted rules only for deployments that enforce their allowlists at the packet level."""
+        networking = _coerce_config(config.get("networking"), OpenSandboxNetworkingConfig)
+        if networking.enforces_network_policy is not True:
+            return cls.capabilities
+        return replace(cls.capabilities, network_rules=NETWORK_RULES)
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with a ``network_policy`` for ``rule``: deny by default and allow only ``hosts``.
+
+        Restricted rules require a deployment with declared packet-level enforcement.
+        """
+        if rule == "inherit":
+            return dict(provider_options)
+        if rule not in self.capabilities.network_rules:
+            raise ValueError(f"OpenSandbox network {rule!r} requires networking.enforces_network_policy: true")
+        return {**provider_options, "network_policy": allowlist_policy(hosts)}
 
     def __init__(
         self,
@@ -1272,6 +1299,7 @@ class OpenSandboxProvider:
         self._diagnostics = _coerce_config(diagnostics, OpenSandboxDiagnosticsConfig)
         self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
         self._networking = _coerce_config(networking, OpenSandboxNetworkingConfig)
+        self.capabilities = self.capabilities_for_config({"networking": self._networking})
         self._shared_storage = _coerce_config(shared_storage, OpenSandboxSharedStorageConfig)
         self._runtime_requirements = _coerce_config(runtime_requirements, OpenSandboxRuntimeRequirementsConfig)
         self._images = _coerce_config(images, OpenSandboxImagesConfig)

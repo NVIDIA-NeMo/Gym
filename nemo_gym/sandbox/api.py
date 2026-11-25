@@ -501,6 +501,18 @@ def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -
     return [name for name in keywords if name not in parameters]
 
 
+async def _stop_after_failed_start(sandbox: "AsyncSandbox", error: BaseException) -> None:
+    """Stop the sandbox a failed start leaves; if that stop fails too, the start's ``error`` is still raised.
+
+    The stop's error becomes the context of ``error``, so the caller acts on why the start failed and still sees that
+    the sandbox may be running. A function rather than a method, so ``sandbox.stop`` is what runs, as it was.
+    """
+    try:
+        await sandbox.stop()
+    except Exception:
+        raise error
+
+
 def _exec_argv(command: Sequence[str]) -> list[str]:
     """``command`` as an argv list: a program name first, then any arguments, all strings without NUL.
 
@@ -647,8 +659,13 @@ class AsyncSandbox:
         *,
         snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
+        take_ownership: Callable[["AsyncSandbox"], None] | None = None,
     ) -> "AsyncSandbox":
-        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
+        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image.
+
+        If supplied, ``take_ownership`` receives the sandbox when its handle can be stopped, before file upload.
+        The caller then owns rollback if startup fails or is cancelled. By default, start rolls back failed uploads.
+        """
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
@@ -694,6 +711,8 @@ class AsyncSandbox:
         self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
         self._stopped = False
+        if take_ownership is not None:
+            take_ownership(self)
         interval = sampling_interval()
         if interval and isinstance(self._provider, ResourceProvider):
             self._resource_sampler = ResourceSampler(
@@ -714,8 +733,10 @@ class AsyncSandbox:
                         else:
                             source_path.write_text(contents, encoding="utf-8")
                         await self.upload(source_path, target_path)
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            # An owner that tracks the handle rolls it back under its own provider concurrency limit.
+            if take_ownership is None:
+                await _stop_after_failed_start(self, error)
             raise
 
         return self
@@ -733,8 +754,8 @@ class AsyncSandbox:
         await self.start(spec)
         try:
             await setup(self)
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            await _stop_after_failed_start(self, error)
             raise
         return self
 
