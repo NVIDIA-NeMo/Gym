@@ -45,7 +45,11 @@ from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from nemo_gym.orchestration.executors.slurm.resume_script import render_resume_epilogue
-from nemo_gym.orchestration.executors.slurm.script import _collector_command, build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import (
+    _collector_command,
+    build_sbatch_script,
+    collector_scrape_hosts,
+)
 from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME
 
 
@@ -304,6 +308,57 @@ def test_engine_series_carry_the_declared_service_name_and_role(services, pools,
         s["job_name"]: s["static_configs"][0]["labels"] for s in scrapes if s["job_name"] not in ("dcgm", "node")
     }
     assert engine == expected
+
+
+def _host(node):
+    return f"${{env:GYM_OTEL_NODE_{node}_HOST}}"
+
+
+@pytest.mark.parametrize(
+    "services, pools, expected",
+    [
+        pytest.param(
+            {"policy": {"type": "vllm", "container": "vllm:latest", "model": "m"}},
+            {},
+            {"policy": ["localhost"]},
+            id="one_node",
+        ),
+        pytest.param(
+            {"policy": _PD},
+            {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}},
+            {"policy-prefill": ["localhost"], "policy-decode": [_host(1)], "policy": ["localhost"]},
+            id="decode_on_its_own_node",
+        ),
+        pytest.param(
+            {"policy": {**_PD, "server_per_node": True}},
+            {"prefill": {"partition": "batch", "nodes": 2}, "decode": {"partition": "batch", "nodes": 2}},
+            {
+                "policy-prefill": ["localhost", _host(1)],
+                "policy-decode": [_host(2), _host(3)],
+                "policy": ["localhost"],
+            },
+            id="every_node_of_a_per_node_server",
+        ),
+    ],
+)
+def test_the_collector_scrapes_each_model_service_on_the_nodes_that_serve_it(services, pools, expected):
+    config = _config(
+        services=services, compute={"cluster-a": {"type": "slurm", "account": "acct", "node_pools": pools}}
+    )
+    hosts = collector_scrape_hosts(config, config.compute["cluster-a"])
+    assert hosts == expected
+    doc = yaml.safe_load(render_collector_config(config, "scicode", BENCH_DIR, scrape_hosts=hosts))
+    targets = {
+        s["job_name"]: s["static_configs"][0]["targets"]
+        for s in doc["receivers"]["prometheus"]["config"]["scrape_configs"]
+    }
+    port = {name: port for name, port in scrape_targets(config).items()}
+    assert {
+        f"gym-vllm/{name}": [f"{h}:{port[name]}" for h in hs] for name, hs in expected.items()
+    }.items() <= targets.items()
+    # Without the hosts other nodes' services are left out, never scraped through localhost.
+    beside = collector_scrape_hosts(config, config.compute["cluster-a"], other_nodes=False)
+    assert beside == {name: [h for h in hs if h == "localhost"] for name, hs in expected.items()}
 
 
 def test_scraped_engine_display_name_is_component_slash_service():
@@ -1091,6 +1146,58 @@ def test_submit_stages_the_collector_config_and_exports_the_token_only_to_the_sh
     commands = conn.commands[0]
     assert commands[0] == "export OTEL_TOKEN=secret-token"
     assert commands[1].startswith("out=$(sbatch --parsable ")
+
+
+def _in_job(job_sh: str, nodes: list[str], expressions: list[str], assignments: str = "") -> list[str]:
+    """What each shell expression expands to after the job's host array and pool exports, on `nodes`."""
+    exports = [line for line in job_sh.splitlines() if line.startswith("export GYM_POOL_")]
+    script = "\n".join(
+        [
+            f"gym_nodes=({' '.join(nodes)})",
+            *exports,
+            assignments,
+            "printf '%s\\n' " + " ".join(f'"{e}"' for e in expressions),
+        ]
+    )
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash needed")
+@pytest.mark.parametrize(
+    "ports", [pytest.param({}, id="default_ports"), pytest.param({"port": 8001}, id="both_tiers_on_one_port")]
+)
+def test_each_prefill_decode_tier_is_scraped_on_the_node_it_runs_on(tmp_path, monkeypatch, ports):
+    """The documented two-pool layout: the collector beside the router on the prefill node, decode on its own node."""
+    monkeypatch.setenv("OTEL_TOKEN", "secret-token")
+    conn = _FakeConnection(["__GYM_JOB:scicode:0:111 "])
+    _install(monkeypatch, conn, tmp_path)
+    pd = {**_PD, "prefill": {"node_pool": "prefill", **ports}, "decode": {"node_pool": "decode", **ports}}
+    pool = {"partition": "batch", "nodes": 1, "gpus_per_node": 8}
+    compute = {"cluster-a": {"type": "slurm", "account": "acct", "node_pools": {"prefill": pool, "decode": pool}}}
+
+    record = SlurmExecutor().run(_executor_config(tmp_path, services={"policy": pd}, compute=compute))
+
+    bench_dir = Path(record.run_dir) / "scicode"
+    job_sh = (bench_dir / "job.sh").read_text()
+    scrapes = yaml.safe_load((bench_dir / "otel" / "collector.yaml").read_text())["receivers"]["prometheus"]
+    targets = {s["job_name"]: s["static_configs"][0]["targets"] for s in scrapes["config"]["scrape_configs"]}
+
+    def step(name):
+        return job_sh.split(f"# service: {name}\n")[1].split("_PID=$!")[0]
+
+    collector = step("otel_collector")
+    collector_node = re.search(r'--nodelist="([^"]+)"', collector).group(1)
+    exported = " ".join(re.findall(r"\b(GYM_OTEL_NODE_\d+_HOST=\S+)", collector))
+    for tier in ("policy-prefill", "policy-decode"):
+        [target] = targets[f"gym-vllm/{tier}"]
+        host, port = target.rsplit(":", 1)
+        scraped = collector_node if host == "localhost" else re.sub(r"^\$\{env:(\w+)\}$", r"${\1}", host)
+        runs_on = re.search(r'--nodelist="([^"]+)"', step(tier)).group(1)
+        assert (
+            _in_job(job_sh, ["pn0", "dn0"], [scraped, runs_on], exported)
+            == [{"policy-prefill": "pn0", "policy-decode": "dn0"}[tier]] * 2
+        ), tier
+        assert f"--port {port}" in step(tier)
 
 
 def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):

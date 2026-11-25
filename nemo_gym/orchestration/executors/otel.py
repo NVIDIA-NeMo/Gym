@@ -16,7 +16,7 @@
 """The OpenTelemetry collector that runs beside every benchmark job.
 
 One collector per benchmark job, in its own `srun --overlap` step like any other service. It
-scrapes each model service's Prometheus `/metrics` on localhost, accepts OTLP from the job's own
+scrapes each model service's Prometheus `/metrics` on the node that serves it, accepts OTLP from the job's own
 processes, stamps the resource attributes the shared dashboards filter on (`user`, `run_id`,
 `slurm_job_id`, plus `benchmark`, `cluster`, `model`), and exports to the configured OTLP/HTTP
 endpoint (when remote export is enabled) and to `<job dir>/otel/*.jsonl` (written node-local, copied when it stops).
@@ -38,6 +38,7 @@ attribute and silently drops payloads without it while still answering 200.
 import getpass
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
@@ -64,6 +65,12 @@ COLLECTOR_HEALTH_PORT = 4319
 OTLP_GRPC_PORT = 4317
 OTLP_HTTP_PORT = 4318
 GYM_TELEMETRY_EXTRA = "telemetry"
+SCRAPE_HOST_VAR_PREFIX = "GYM_OTEL_NODE_"
+
+
+def scrape_host_var(node: int) -> str:
+    """The env var the collector's step exports with the hostname of allocation node `node`."""
+    return f"{SCRAPE_HOST_VAR_PREFIX}{node}_HOST"
 
 
 def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True) -> dict[str, str]:
@@ -182,15 +189,23 @@ def _policy_model_name(config: SubmitConfig) -> str | None:
 
 
 def render_collector_config(
-    config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path, *, node_local: bool = True
+    config: SubmitConfig,
+    benchmark_name: str,
+    remote_bench_dir: Path,
+    *,
+    node_local: bool = True,
+    scrape_hosts: Mapping[str, list[str]] | None = None,
 ) -> str:
     """The collector's YAML for one benchmark job.
 
     `run_id` is the submission's gym job id, which is the job directory's parent by construction
     (`<output_path>/<gym_job_id>/<benchmark>`); `cluster` is the sole compute key, the same value
     `SubmissionRecord.cluster` records. Values only known inside the job (`SLURM_JOB_ID`, the
-    token, the node-local directory) are left as `${env:...}` for the collector to expand at startup.
+    token, the node-local directory, another node's hostname) are left as `${env:...}` for the collector
+    to expand at startup.
     `node_local=False` writes the jsonl straight into the job directory, for a job.sh that predates the copy.
+    `scrape_hosts` maps each model service to the hosts its `/metrics` is scraped on (a service with none is
+    not scraped); without it every service is scraped on localhost, as in a one-node job.
     """
     obs = config.otel
     file_dir = f"${{env:{COLLECTOR_LOCAL_DIR_ENV}}}" if node_local else str(remote_bench_dir / COLLECTOR_DIR)
@@ -203,9 +218,12 @@ def render_collector_config(
         {
             "job_name": f"{obs.component}/{name}",
             "scrape_interval": interval,
-            "static_configs": [{"targets": [f"localhost:{port}"], "labels": _engine_labels(name, config)}],
+            "static_configs": [
+                {"targets": [f"{host}:{port}" for host in hosts], "labels": _engine_labels(name, config)}
+            ],
         }
         for name, port in scrape_targets(config).items()
+        if (hosts := ["localhost"] if scrape_hosts is None else scrape_hosts[name])
     ]
     # Node exporters keep their conventional job names so the standard DCGM / node_exporter
     # dashboards' queries apply unchanged; DCGM already labels every sample with `hpc_job`.

@@ -52,6 +52,7 @@ from nemo_gym.orchestration.executors.otel import (
     driver_telemetry_env,
     gym_telemetry_active,
     otel_active,
+    scrape_host_var,
     vllm_traces_env,
     vllm_traces_flag,
 )
@@ -807,15 +808,16 @@ def _render_collector_service(
     is_multi_node: bool,
     driver_node: int | None = None,
     account: str | None = None,
+    other_scrape_nodes: list[int] | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
 
-    Runs on exactly one node, the batch host. That is the first node of the allocation, which is
-    also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
-    so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
-    container the job directory is mounted for the config and the copied `otel/*.jsonl`; on the
-    node it is simply there, so no mounts or workdir are passed.
+    Runs on exactly one node, beside the driver, so `localhost` reaches the OTLP endpoints and every
+    model service API on that node. `other_scrape_nodes` are the nodes whose model services it scrapes
+    by hostname (see `collector_scrape_hosts`); the step exports each one's hostname for the config to
+    expand. In a container the job directory is mounted for the config and the copied `otel/*.jsonl`;
+    on the node it is simply there, so no mounts or workdir are passed.
     """
     obs = config.otel
     command = _collector_command(config, remote_bench_dir)
@@ -831,6 +833,7 @@ def _render_collector_service(
         env={
             **({obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}"} if obs.remote_export else {}),
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
+            **{scrape_host_var(node): f"{RUNTIME_ENV_PREFIX}gym_nodes[{node}]" for node in other_scrape_nodes or []},
         },
         single_node=is_multi_node,
         # Beside the driver: it scrapes the policy API on localhost, as the driver calls it.
@@ -1018,6 +1021,51 @@ def _service_node_indices(
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return list(range(total_nodes))
     return [driver_node if driver_node is not None else 0]
+
+
+def _scrape_nodes(config: SubmitConfig, compute: SlurmComputeConfig) -> dict[str, list[int]]:
+    """Each model service's nodes that serve its `/metrics`: every node of a per-node server, else its API node."""
+    total_nodes, _ = _node_totals(compute)
+    driver_node = _driver_node(config, compute) if total_nodes > 1 else None
+    nodes = {}
+    for name, service in config.deployed_services.items():
+        if not isinstance(service, BaseModelServiceConfig):
+            continue
+        on = _service_node_indices(service, compute, driver_node, total_nodes)
+        per_node = isinstance(service, (VllmNodeServiceConfig, VllmPDTierConfig)) and service.server_per_node
+        nodes[name] = on if per_node else on[:1]
+    return nodes
+
+
+def _collector_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int:
+    """The node the collector runs on: beside the driver (see _render_collector_service)."""
+    return _driver_node(config, compute) if _node_totals(compute)[0] > 1 else 0
+
+
+def _other_scrape_nodes(config: SubmitConfig, compute: SlurmComputeConfig) -> list[int]:
+    collector = _collector_node(config, compute)
+    return sorted({node for nodes in _scrape_nodes(config, compute).values() for node in nodes} - {collector})
+
+
+def collector_scrape_hosts(
+    config: SubmitConfig, compute: SlurmComputeConfig, *, other_nodes: bool = True
+) -> dict[str, list[str]]:
+    """The hosts the collector scrapes each model service's `/metrics` on, for `render_collector_config`.
+
+    A node beside the collector is `localhost`; another node is the hostname its step exports. A service on
+    another node is never scraped through `localhost`, which would reach whatever answers on that port beside
+    the collector, such as the other tier of a prefill/decode pair. `other_nodes=False` is for a job.sh
+    whose collector step does not export other nodes' hostnames: services there are not scraped.
+    """
+    collector = _collector_node(config, compute)
+    return {
+        name: [
+            "localhost" if node == collector else f"${{env:{scrape_host_var(node)}}}"
+            for node in nodes
+            if other_nodes or node == collector
+        ]
+        for name, nodes in _scrape_nodes(config, compute).items()
+    }
 
 
 def _render_service_declaration(
@@ -1247,6 +1295,7 @@ def build_sbatch_script(
                     is_multi_node=is_multi_node,
                     driver_node=driver_node,
                     account=compute.account,
+                    other_scrape_nodes=_other_scrape_nodes(config, compute),
                 )
             ]
             if observed

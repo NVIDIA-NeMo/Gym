@@ -42,11 +42,35 @@ from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm
 OLD, NEW = "a" * 40, "d" * 40
 
 
-def _repinnable_run(tmp_path: Path, *, otel: bool = False) -> Path:
+_TWO_POOL_PD = {
+    "services": {
+        "llm": {
+            "type": "vllm_pd",
+            "container": "vllm:latest",
+            "model": "org/model",
+            "prefill": {"node_pool": "prefill", "tensor_parallel_size": 8},
+            "decode": {"node_pool": "decode", "tensor_parallel_size": 8},
+        }
+    },
+    "compute": {
+        "cluster": {
+            "type": "slurm",
+            "account": "a",
+            "hostname": None,
+            "node_pools": {
+                pool: {"partition": "batch", "nodes": 1, "gpus_per_node": 8} for pool in ("prefill", "decode")
+            },
+        }
+    },
+}
+
+
+def _repinnable_run(tmp_path: Path, *, otel: bool = False, two_pools: bool = False) -> Path:
     """One benchmark staged on Gym OLD with its MLflow pin tags, one saved row, one missing row and spent budgets.
 
     With `otel`, the staged job.sh and collector config predate the node-local collector: the collector runs from
-    `binary` and its exporters write straight into the job directory.
+    `binary` and its exporters write straight into the job directory. With `two_pools`, it serves a prefill/decode
+    pair on two nodes with the collector on.
     """
     config = SubmitConfig.model_validate(
         {
@@ -63,7 +87,8 @@ def _repinnable_run(tmp_path: Path, *, otel: bool = False) -> Path:
                 },
             },
             "job": {"output_path": str(tmp_path)},
-            "otel": {"remote_export": False} if otel else {"enabled": False},
+            "otel": {"remote_export": False} if otel or two_pools else {"enabled": False},
+            **(_TWO_POOL_PD if two_pools else {}),
         }
     )
     run_dir = tmp_path / "gym-job-x"
@@ -153,6 +178,34 @@ def test_a_repin_renders_the_run_again_on_the_new_commit_and_keeps_rows_and_budg
     # Saved rows and the retry counter are untouched; the walltime keeps its terminal accounting (7200 + 60).
     assert _digests(job_dir) == before
     assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+
+
+@pytest.mark.parametrize("exports_hosts", [True, False], ids=["current_job_sh", "job_sh_without_host_exports"])
+def test_a_resubmit_scrapes_a_service_on_another_node_only_if_its_job_sh_exports_the_host(
+    tmp_path, slurm_bin, launcher_at, exports_hosts
+):
+    # A collector config naming a host its step does not export would leave that scrape with an empty host.
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path, two_pools=True)
+    job_sh = (job_dir / "job.sh").read_text()
+    assert "GYM_OTEL_NODE_1_HOST=${gym_nodes[1]} " in job_sh
+    if not exports_hosts:
+        (job_dir / "job.sh").write_text(job_sh.replace("GYM_OTEL_NODE_1_HOST=${gym_nodes[1]} ", ""))
+    collector = collector_config_path(job_dir)
+    collector.parent.mkdir()
+    collector.write_text("")
+
+    out = recover(*_handle(job_dir))
+
+    assert out.dispatched == "resubmit", out.decision.reason
+    scrapes = yaml.safe_load(collector.read_text())["receivers"]["prometheus"]["config"]["scrape_configs"]
+    targets = {s["job_name"]: s["static_configs"][0]["targets"] for s in scrapes if s["job_name"].startswith("gym-")}
+    expected = {"gym-vllm/llm-prefill": ["localhost:8001"], "gym-vllm/llm": ["localhost:8000"]}
+    if exports_hosts:
+        expected["gym-vllm/llm-decode"] = ["${env:GYM_OTEL_NODE_1_HOST}:8002"]
+    assert targets == expected
 
 
 @pytest.mark.parametrize(

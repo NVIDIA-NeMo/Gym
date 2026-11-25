@@ -75,6 +75,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
 from nemo_gym.orchestration.executors.slurm.script import (
     _resolve_env,
     build_sbatch_script,
+    collector_scrape_hosts,
     planned_log_sources,
 )
 from nemo_gym.orchestration.executors.slurm_control import parse_terminate_output, render_terminate_script
@@ -393,7 +394,11 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
                 print(f"\n{'=' * 60}")
                 print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for benchmark: {name}")
                 print(f"{'=' * 60}")
-                print(render_collector_config(config, name, remote_run_dir / name))
+                print(
+                    render_collector_config(
+                        config, name, remote_run_dir / name, scrape_hosts=collector_scrape_hosts(config, compute)
+                    )
+                )
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path) -> Path:
         # rsync -a copies these modes to the cluster. The temp dir is created 0700, which would
@@ -411,6 +416,8 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
             if otel_active(config):
                 (bench_dir / COLLECTOR_DIR).mkdir()
                 (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
-                    render_collector_config(config, name, remote_run_dir / name)
+                    render_collector_config(
+                        config, name, remote_run_dir / name, scrape_hosts=collector_scrape_hosts(config, compute)
+                    )
                 )
         return staging
