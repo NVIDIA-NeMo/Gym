@@ -223,6 +223,9 @@ class _LocalSidecarProvider:
     ) -> None:
         shutil.copyfile(source_path, target_path)
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        return sidecar
+
     async def connect(self, descriptor: dict[str, Any]) -> SandboxHandle:
         return SandboxHandle(sandbox_id=descriptor["sandbox_id"], provider_name=self.name, raw=None)
 
@@ -766,6 +769,25 @@ async def test_verify_grades_only_a_session_whose_tool_state_was_read_back_from_
         assert host.post("/verify", json=_verify_body()).status_code == 409
 
 
+async def test_a_closed_session_is_forgotten_by_the_verify_guard(scripted_tool_host: SimpleNamespace) -> None:
+    access = {"sandbox_access": _access().model_dump(mode="json")}
+    app = _server(_config()).setup_webserver()
+    collected = app.state.nemo_gym_tool_state_collected
+    with TestClient(app) as host:
+        host.post("/seed_session", json=_seed())
+        scripted_tool_host.replies = [{"status": 200, "body": '{"state": {"ledger": ["opening:hi"]}}', "cookies": {}}]
+        assert host.post("/tool_sidecar/import_state", json=access).status_code == 200
+        assert collected == {SESSION}
+        # The attempt ends without a grade, as when its /verify raised and it was redone in a new session.
+        host.cookies.clear()
+        closed = host.post(
+            "/close_session",
+            json={"resources_session_id": SESSION, "episode_id": {"rollout_id": "rollout", "attempt": 1}},
+        )
+        assert closed.status_code == 200, closed.text
+    assert collected == set()
+
+
 class _LedgerWithALookup(LedgerResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -778,10 +800,15 @@ class _LedgerWithALookup(LedgerResourcesServer):
 
 def test_no_tool_route_answers_on_the_resources_host_whatever_its_method() -> None:
     server = _LedgerWithALookup(config=_config(), server_client=_server(_config()).server_client)
-    with TestClient(server.setup_webserver()) as host:
+    app = server.setup_webserver()
+    # As run_webserver does: the health routes are added after the server's own.
+    server.setup_liveness(app)
+    with TestClient(app) as host:
         assert host.get("/lookup").status_code == 409
-        # The base's own routes still answer.
+        # The base's own routes, and the health checks a probe calls, still answer.
         assert host.get("/reverify_mode").status_code == 200
+        for path in ("/", "/health", "/healthz", "/livez", "/readyz"):
+            assert host.get(path).status_code == 200, path
 
 
 class _StatefulWithoutStateHooks(ToolSidecarResources, SimpleResourcesServer):

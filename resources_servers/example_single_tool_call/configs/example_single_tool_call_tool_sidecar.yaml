@@ -15,6 +15,9 @@ sandbox:
       # The agent container reaches the sidecar by its name, and each member's egress is enforced.
       enabled: true
       enforces_network_policy: true
+      # The agent container's model_only rule opens only the sidecar's tool port, which needs an egress layer that
+      # applies a rule's ports; without it the provider refuses the create.
+      rule_ports_enforced: true
 
 example_single_tool_call:
   resources_servers:

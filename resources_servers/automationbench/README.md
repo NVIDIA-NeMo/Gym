@@ -26,7 +26,9 @@ Configuration (`configs/automationbench.yaml`):
   `/verify`, the world the agent's calls left is copied back here (`export_tool_state` there, `import_tool_state` here),
   and the rubric scores it as before; a world that cannot be copied fails the attempt as an infrastructure failure.
   The sidecar is seeded without the answer key: each assertion keeps only its type, which scopes the services the tools
-  allow.
+  allow, so no tool route can return it. The `automation-bench` package installed there still ships the public tasks
+  with their assertions, so code that reaches the sidecar's files through the provider's exec daemon (the limit the
+  pairing config names) could read them: pair it only with an agent that runs no model-written code.
 
 A row whose `responses_create_params` carries no tools was prepared before this server existed. `/seed_session` refuses
 it with HTTP 422 before any model call, reading the params the typed seed carries beside `task_data`, and the message

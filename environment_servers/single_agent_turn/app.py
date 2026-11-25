@@ -8,6 +8,7 @@ import functools
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import ClientConnectorError, ClientResponseError, ConnectionTimeoutError
@@ -89,6 +90,7 @@ from nemo_gym.server_runtime import (
     seed_rebinds_tool_accesses,
     seed_restarts,
     seed_verify_step_type,
+    tool_host_on_loopback,
     tool_sidecar_config_of,
     tool_sidecar_reachable,
     tool_sidecar_to_grant,
@@ -665,12 +667,26 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             raise self._failure(stage="seed", failure_reason=str(refusal), terminal=True) from refusal
         if sidecar is None:
             return
-        url = f"http://{sidecar.name}:{sidecar.tools_port}"
         try:
             sandbox = self.sandboxes.get(handles.attempt_sandbox.key)
             if sandbox is None:
                 raise RuntimeError("the attempt's sandbox group is gone before its tool sidecar was checked")
-            checked = await tool_sidecar_reachable(sandbox, sidecar.name, sidecar.tools_port)
+            # The address the agent container reaches the tool port at, as the provider gives it.
+            url = sandbox.sidecar(sidecar.name).url(sidecar.tools_port)
+        except Exception as error:
+            raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
+        if tool_host_on_loopback(url):
+            raise self._failure(
+                stage="seed",
+                failure_reason=(
+                    f"the agent container reaches the tool sidecar {sidecar.name!r} on its own loopback ({url}), so "
+                    "code in it could seed the tool host and read its state; the provider must give each sidecar "
+                    "its own address"
+                ),
+                terminal=True,
+            )
+        try:
+            checked = await tool_sidecar_reachable(sandbox, urlsplit(url).hostname or "", sidecar.tools_port)
         except Exception as error:
             raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
         if not checked:

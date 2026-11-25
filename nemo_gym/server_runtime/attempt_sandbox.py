@@ -149,13 +149,18 @@ class SandboxGroupSidecar(BaseModel):
         return "hosts_only" if self.egress_hosts else "no_network"
 
     def spec(self, *, provider_options: Mapping[str, Any] | None = None) -> SandboxSidecarSpec:
-        """The provider-neutral sidecar spec this declaration starts, with its own ``provider_options``."""
+        """The provider-neutral sidecar spec this declaration starts, with its own ``provider_options``.
+
+        A ``tools_port`` is the one port of the sidecar the main container may reach; the tool host is started on it
+        later, at ``/prepare_sandbox``, so the spec names no entrypoint and the create does not wait for it.
+        """
         return SandboxSidecarSpec(
             name=self.name,
             image=self.image,
             env=dict(self.env),
             resources=dict(self.resources),
             provider_options=dict(provider_options or {}),
+            ports=(self.tools_port,) if self.tools_port is not None else (),
         )
 
 

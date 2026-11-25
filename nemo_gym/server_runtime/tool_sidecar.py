@@ -4,15 +4,19 @@
 
 A Resources Server declares a ``tool_sidecar`` in its config, and the sidecar in its seed's ``sandbox_group``. The
 Environment Server's base class starts the group, and the Resources Server starts its tool host in the sidecar at
-``/prepare_sandbox``, through a borrowed handle. The Environment Server grants the agent ``http://<name>:<port>`` with
-the Resources session's cookies, which the tool host reads as its own, and checks that the agent container reaches it.
+``/prepare_sandbox``, through a borrowed handle. The Environment Server grants the agent the address the provider
+gives for the sidecar's tool port (``AsyncSandbox.sidecar(name).url(port)``, ``http://<name>:<port>`` on OpenSandbox)
+with the Resources session's cookies, which the tool host reads as its own, and checks that the agent container
+reaches it.
 After the agent closes and before ``/verify``, it asks the Resources Server to copy the session's tool state out of
 the sidecar (``/tool_sidecar/import_state``), then stops the group. No tool call of the agent reaches the Resources host.
 """
 
+import ipaddress
 import shlex
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PositiveFloat
@@ -34,7 +38,8 @@ class ToolSidecarConfig(BaseModel):
 
     The sidecar runs the Resources Server's own class, with this server's config, and serves its tool routes, so a
     tool answers as it does in process. It reaches only ``egress_hosts``, none by default. The agent
-    container reaches it as ``http://<name>:<port>``; on OpenSandbox that needs ``networking.enabled``. Code in the
+    container reaches it at the address the provider gives for ``port``, ``http://<name>:<port>`` on OpenSandbox, which
+    needs ``networking.enabled`` there. Code in the
     agent container can also reach the sidecar's other ports, such as the provider's exec daemon, so the sidecar must
     hold no secret: a config that would put one there is refused.
 
@@ -58,11 +63,6 @@ class ToolSidecarConfig(BaseModel):
     egress_hosts: list[str] = Field(default_factory=list)
     install_timeout_seconds: PositiveFloat = 900
     ready_timeout_seconds: PositiveFloat = 120
-
-    @property
-    def url(self) -> str:
-        """The tool host's address as the agent container reaches it."""
-        return f"http://{self.name}:{self.port}"
 
     def check_provider(self, provider: object) -> None:
         """Refuse at startup a provider that cannot run this sidecar or apply its own egress, as the attempt's group
@@ -168,6 +168,22 @@ def tool_sidecar_to_grant(
     if "direct_http" not in transports:
         raise ValueError(f"{name} serves its tools from a sidecar, which this server grants over direct_http only")
     return serving[0]
+
+
+def tool_host_on_loopback(url: str) -> bool:
+    """Whether the agent container reaches the tool host at ``url`` on its own loopback.
+
+    The tool host answers its seed and state routes to loopback callers only, as the Resources Server calls them from
+    inside the sidecar. Where a provider's sidecars share the agent container's loopback, code in the agent container
+    would pass that check, so such a tool host is never granted.
+    """
+    host = urlsplit(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 async def tool_sidecar_reachable(sandbox: AsyncSandbox, host: str, port: int) -> bool:

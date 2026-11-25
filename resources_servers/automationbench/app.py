@@ -215,8 +215,9 @@ class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer
         """The task as the tool sidecar gets it: the world and the services in scope, without the answer key.
 
         The tools read neither the assertions nor the answer; the services in scope come from each assertion's type
-        alone (``compute_allowed_services``), so only the types go to the sidecar, which code in the agent container
-        can reach.
+        alone (``compute_allowed_services``), so only the types go to the sidecar's seed, which code in the agent
+        container can reach through the tool routes. The ``automation-bench`` package installed in the sidecar still
+        holds the public tasks' assertions on its filesystem, which only the provider's exec daemon reaches.
         """
         info = dict(task_data.get("info") or {})
         info["assertions"] = [{"type": assertion.get("type")} for assertion in info.get("assertions") or []]

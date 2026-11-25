@@ -273,6 +273,9 @@ class _SidecarProvider(_Provider):
     ) -> None:
         pass
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        return sidecar
+
 
 class _TaskInput(BaseModel):
     value: str = "task"
@@ -506,12 +509,14 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
     assert (spec.image, spec.workdir, spec.ttl_s) == ("task:1", "/task", 3600)
     assert spec.env == {"FROM_CONFIG": "1", "SHARED": "group"}
     assert spec.files == {"task.txt": "2+2"}
-    # Each sidecar starts with its own rule, never the main container's: the weather API only, or nothing.
+    # Each sidecar starts with its own rule, never the main container's: the weather API only, or nothing. The
+    # tools port is the one port of a sidecar the main container may reach.
     assert spec.sidecars == (
         SandboxSidecarSpec(
             name="weather",
             image="weather:1",
             provider_options={"network_policy": {"rule": "hosts_only", "allow": ["api.weather.example"]}},
+            ports=(8080,),
         ),
         SandboxSidecarSpec(
             name="db", image="db:1", provider_options={"network_policy": {"rule": "no_network", "allow": []}}
@@ -524,7 +529,10 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
         "sandbox_id": "sb-1",
         "scope": "operate",
         "workdir": "/task",
-        "sidecars": [{"name": "weather", "image": "weather:1"}, {"name": "db", "image": "db:1"}],
+        "sidecars": [
+            {"name": "weather", "image": "weather:1", "ports": [8080]},
+            {"name": "db", "image": "db:1", "ports": []},
+        ],
     }
     assert access.connection.provider_config_ref == "attempt_sandboxes"
     assert access.connection.descriptor == descriptor

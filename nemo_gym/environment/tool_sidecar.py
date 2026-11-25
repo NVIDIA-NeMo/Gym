@@ -285,6 +285,15 @@ class ToolSidecarResources:
             app.router.dependencies.append(Depends(_tools_run_in_the_sidecar))
         return app
 
+    def setup_liveness(self, app: FastAPI) -> None:
+        # The health routes come after the server's tools: they answer as on any server, never with the tools' 409.
+        app.router.dependencies[:] = [
+            dependency
+            for dependency in app.router.dependencies
+            if dependency.dependency is not _tools_run_in_the_sidecar
+        ]
+        super().setup_liveness(app)  # type: ignore[misc]
+
     def register_protocol_routes(self, app: FastAPI) -> None:
         super().register_protocol_routes(app)  # type: ignore[misc]
         if self.config.tool_sidecar is not None:  # type: ignore[attr-defined]
@@ -293,6 +302,7 @@ class ToolSidecarResources:
             # import and verify reach the same worker, so each worker keeps its own.
             app.state.nemo_gym_tool_state_collected = set()
             _guard_route(app, "/verify", self._graded_after_collecting)
+            _guard_route(app, "/close_session", _forget_collected_on_close)
 
     def sandbox_declaration(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
         """The seed's declaration, with the tool sidecar that serves this server's tools added to whatever group the
@@ -491,12 +501,27 @@ class ToolSidecarResources:
 async def _tools_run_in_the_sidecar(request: Request) -> None:
     """Refuse a tool call on the Resources host, whatever its method: its tools run in the tool sidecar.
 
-    Only routes the server adds after the base's own get this dependency, so health checks and the protocol routes
-    still answer.
+    Only routes the server adds after the base's own get this dependency, and it is dropped before the health routes
+    are added, so health checks and the protocol routes still answer.
     """
     raise HTTPException(
         status_code=409, detail="this Resources Server's tools run in its tool sidecar, not in this process"
     )
+
+
+async def _forget_collected_on_close(request: Request) -> AsyncIterator[None]:
+    """Forget, once ``/close_session`` has answered, that the closed session's tool state was read back.
+
+    A ``/verify`` that raised keeps the session in the set for its retry; a close ends that, so a redone attempt's new
+    session leaves nothing behind.
+    """
+    yield
+    collected: set[str] = request.app.state.nemo_gym_tool_state_collected
+    collected.discard(request.session.get(SESSION_ID_KEY))
+    # A close may carry no session cookie; it names the session in its body.
+    body = await request.json()
+    if isinstance(body, dict):
+        collected.discard(body.get("resources_session_id"))
 
 
 def _guard_route(app: FastAPI, path: str, guard: Any) -> None:

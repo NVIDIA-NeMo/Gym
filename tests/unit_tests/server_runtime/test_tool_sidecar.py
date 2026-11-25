@@ -24,6 +24,7 @@ from nemo_gym.server_runtime.attempt_sandbox import SandboxGroupSidecar, Sandbox
 from nemo_gym.server_runtime.tool_sidecar import (
     TOOL_HOST_READY_PATH,
     ToolSidecarConfig,
+    tool_host_on_loopback,
     tool_sidecar_config_of,
     tool_sidecar_reachable,
     tool_sidecar_to_grant,
@@ -48,6 +49,9 @@ class _SidecarProvider:
     async def download_sidecar_file(self, *args: Any, **kwargs: Any) -> None:
         raise AssertionError("not called")
 
+    def sidecar_host(self, *args: Any, **kwargs: Any) -> str:
+        raise AssertionError("not called")
+
 
 class _NoSidecars:
     name = "plain"
@@ -61,7 +65,7 @@ class _OpenEgressOnly(_SidecarProvider):
     capabilities = SandboxCapabilities(network_rules=frozenset({"inherit"}))
 
 
-def test_the_seed_declares_the_tool_sidecar_and_the_agent_reaches_it_by_its_name() -> None:
+def test_the_seed_declares_the_tool_sidecar_with_its_tools_port_as_the_one_port_the_agent_reaches() -> None:
     closed = ToolSidecarConfig(image="python:3.13-slim")
     sidecar = closed.group_sidecar()
     assert (sidecar.name, sidecar.image, sidecar.resources, sidecar.egress_hosts, sidecar.tools_port) == (
@@ -71,11 +75,29 @@ def test_the_seed_declares_the_tool_sidecar_and_the_agent_reaches_it_by_its_name
         [],
         8000,
     )
-    assert (closed.url, sidecar.network) == ("http://tools:8000", "no_network")
+    assert sidecar.network == "no_network"
+    assert sidecar.spec().ports == (8000,)
 
     search = ToolSidecarConfig(image="search:1", name="search", port=9000, egress_hosts=["api.example.com"])
-    assert (search.url, search.group_sidecar().network) == ("http://search:9000", "hosts_only")
+    assert (search.group_sidecar().network, search.group_sidecar().spec().ports) == ("hosts_only", (9000,))
     assert search.group_sidecar().egress_hosts == ["api.example.com"]
+    # A sidecar that serves no tools names no port the main container may reach.
+    assert SandboxGroupSidecar(name="db", image="db:1").spec().ports == ()
+
+
+@pytest.mark.parametrize(
+    ("url", "on_loopback"),
+    [
+        ("http://tools:8000", False),
+        ("http://10.0.0.7:8000", False),
+        ("http://127.0.0.1:8000", True),
+        ("http://127.0.0.2:8000", True),
+        ("http://[::1]:8000", True),
+        ("http://localhost:8000", True),
+    ],
+)
+def test_a_tool_host_on_the_agent_containers_own_loopback_is_recognized(url: str, on_loopback: bool) -> None:
+    assert tool_host_on_loopback(url) is on_loopback
 
 
 def test_a_provider_that_runs_no_sidecar_or_cannot_close_its_egress_is_refused() -> None:

@@ -132,7 +132,7 @@ own process (`ToolSidecarResources` in `nemo_gym.environment`). Its seed declare
 
 | Step | What it does |
 |------|------|
-| Grant | Grants the agent `http://<name>:<port>` (`direct_http`) with the Resources session's cookies, which the tool host reads as its own, in place of the Resources host. |
+| Grant | Grants the agent the address the provider gives for the sidecar's tool port (`sidecar(name).url(port)`, `http://<name>:<port>` on OpenSandbox) as `direct_http`, with the Resources session's cookies, which the tool host reads as its own, in place of the Resources host. An address on the agent container's own loopback is refused: the tool host's seed and state routes trust loopback callers. |
 | Check | Probes that address from the agent container before the agent is seeded, with `python3` or else `bash`; an agent image with neither fails the attempt for good. |
 | Import state | After the agent closes and before `/verify`, asks the Resources Server to copy the session's tool state out of the sidecar (`/tool_sidecar/import_state`), so the grader reads what the tool calls left. It runs before the group stops, whatever the verifier mode, so a verifier that executes nothing keeps `none`. The Resources Server refuses `/verify` (HTTP 409) for a session whose state was never copied. |
 

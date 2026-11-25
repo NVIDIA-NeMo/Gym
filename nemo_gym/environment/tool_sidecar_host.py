@@ -99,7 +99,16 @@ def serve(spec_path: str) -> int:
     import uvicorn
 
     spec = json.loads(Path(spec_path).read_text())
-    uvicorn.run(build_app(spec), host="0.0.0.0", port=spec["port"], log_level="warning", access_log=False)
+    # No proxy headers: the seed and state routes trust the client's own address, which a forwarded header would
+    # replace where the image allows it (``FORWARDED_ALLOW_IPS``).
+    uvicorn.run(
+        build_app(spec),
+        host="0.0.0.0",
+        port=spec["port"],
+        log_level="warning",
+        access_log=False,
+        proxy_headers=False,
+    )
     return 0
 
 

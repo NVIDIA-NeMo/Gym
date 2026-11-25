@@ -3,9 +3,9 @@
 """An Environment Server that grants a Resources Server's tool sidecar: single_agent_turn checks the pairing at
 startup, probes the sidecar from the agent container, grants it, and imports the tool state before /verify.
 
-The agent container's reach probe runs for real, in a local shell, against a stand-in tool host on localhost: the
-seed declares the sidecar as ``localhost`` on the stand-in's port, so the address the agent is granted is the one the
-probe reached.
+The agent container's reach probe runs for real, in a local shell, against a stand-in tool host on 127.0.0.1. The
+provider gives the sidecar's name as its host, as OpenSandbox does, and the agent container resolves that name to the
+stand-in, so the address the agent is granted is the one the probe reached.
 """
 
 import asyncio
@@ -89,7 +89,8 @@ def _closed_port() -> int:
 
 class _SidecarProvider:
     """An attempt provider with sidecars: the group's members are records, and a command in the agent container that
-    probes the tool host runs in a local shell with ``path`` as its PATH. Any other command only succeeds."""
+    probes the tool host runs in a local shell with ``path`` as its PATH, where a sidecar's name resolves to
+    127.0.0.1. Any other command only succeeds."""
 
     name = "fake"
     capabilities = SandboxCapabilities(network_rules=frozenset({"inherit", "model_only", "no_network", "hosts_only"}))
@@ -110,6 +111,9 @@ class _SidecarProvider:
     async def exec(self, handle: SandboxHandle, command: str, **kwargs: Any) -> SandboxExecResult:
         if TOOL_HOST_READY_PATH not in command:
             return SandboxExecResult(stdout="", stderr=None, return_code=0)
+        # The agent container resolves a sidecar's name to the sidecar: here, the stand-in on 127.0.0.1.
+        for name in self.sidecar_names(handle):
+            command = command.replace(f"//{name}:", "//127.0.0.1:").replace(f" {name} ", " 127.0.0.1 ")
         process = await asyncio.create_subprocess_exec(
             "/bin/sh", "-c", command, cwd="/", env={"PATH": self.path}, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
@@ -147,13 +151,20 @@ class _SidecarProvider:
     async def download_sidecar_file(self, *args: Any, **kwargs: Any) -> None:
         raise AssertionError("the Environment Server never reads the tool sidecar")
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        # As OpenSandbox: the agent container reaches a sidecar by its name.
+        return sidecar
+
+    def sidecar_names(self, handle: SandboxHandle) -> list[str]:
+        return [sidecar.name for sidecar in self.boxes[handle.sandbox_id]["spec"].sidecars]
+
     def running(self) -> list[str]:
         return [sandbox_id for sandbox_id, box in self.boxes.items() if box["state"] == "running"]
 
 
 def _seed_body(port: int) -> dict[str, Any]:
-    """The Resources seed's reply: the tool sidecar in the attempt's group, on ``port`` of ``localhost``, prepared."""
-    sidecars = [{"name": "localhost", "image": "tools:1", "tools_port": port}]
+    """The Resources seed's reply: the tool sidecar ``tools`` in the attempt's group, serving on ``port``, prepared."""
+    sidecars = [{"name": "tools", "image": "tools:1", "tools_port": port}]
     return {"resources_session_id": "resources-session", "sandbox_group": {"sidecars": sidecars, "prepare": True}}
 
 
@@ -232,7 +243,8 @@ async def test_the_agent_is_granted_the_tool_sidecar_it_was_probed_to_reach_and_
     spec = provider.boxes["sb-1"]["spec"]
     assert spec.provider_options["network_policy"] == {"rule": "model_only", "allow": [MODEL_HOST]}
     [sidecar] = spec.sidecars
-    assert (sidecar.name, sidecar.image) == ("localhost", "tools:1")
+    # The tool port is the one port of the sidecar the agent container is let reach.
+    assert (sidecar.name, sidecar.image, sidecar.ports) == ("tools", "tools:1", (_port(tool_host),))
     assert sidecar.provider_options == {"network_policy": {"rule": "no_network", "allow": []}}
     assert _paths(client) == [
         "/seed_session",
@@ -254,7 +266,7 @@ async def test_the_agent_is_granted_the_tool_sidecar_it_was_probed_to_reach_and_
     seed = AgentSeedSessionRequest.model_validate(calls["/v1/agent_sessions"]["json"])
     [grant] = seed.tool_accesses
     assert isinstance(grant, DirectHTTPToolAccess)
-    assert str(grant.base_url).rstrip("/") == f"http://localhost:{_port(tool_host)}"
+    assert str(grant.base_url).rstrip("/") == f"http://tools:{_port(tool_host)}"
     assert dict(grant.cookies) == {"session": "cookie-value"}
     # The tool state is copied out of the group while it runs. The verifier (mode none) grades it in the Resources
     # Server, lent nothing, after the group has stopped.
@@ -327,10 +339,36 @@ async def test_a_tool_sidecar_the_agent_container_cannot_reach_fails_the_attempt
 
     assert result.result is None
     assert (result.failure.stage, result.failure.terminal) == ("seed", False)
-    assert f"cannot reach the tool sidecar at localhost:{closed}" in result.failure.failure_reason
+    assert f"cannot reach the tool sidecar at tools:{closed}" in result.failure.failure_reason
     assert provider.probes and provider.probes[0] != 0
     assert "/v1/agent_sessions" not in _paths(client)
     assert "/verify" not in _paths(client)
+    assert provider.running() == []
+
+
+class _SharedLoopbackProvider(_SidecarProvider):
+    """A provider whose sidecars share the agent container's loopback, so it gives a loopback address for them."""
+
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        return "127.0.0.1"
+
+
+async def test_a_tool_sidecar_on_the_agent_containers_own_loopback_is_never_granted(
+    tool_host: _ToolHostStandIn,
+) -> None:
+    # The tool host trusts loopback callers on its seed and state routes; code in an agent container that shares its
+    # loopback would pass that check, so the attempt fails for good before the probe or the agent's seed.
+    provider = _SharedLoopbackProvider()
+    server, client = _sidecar_server(provider, _port(tool_host))
+
+    result = await server.run_request(_request())
+
+    assert result.result is None
+    assert (result.failure.stage, result.failure.terminal) == ("seed", True)
+    assert f"on its own loopback (http://127.0.0.1:{_port(tool_host)})" in result.failure.failure_reason
+    assert provider.probes == []
+    assert tool_host.paths == []
+    assert "/v1/agent_sessions" not in _paths(client)
     assert provider.running() == []
 
 
