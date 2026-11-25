@@ -63,22 +63,37 @@ may therefore opt out of the attempt's sandbox group, which saves sandbox capaci
 | Config | Pairing | Agent loop | Judge call |
 |--------|---------|------------|------------|
 | `simpleqa.yaml` | `simpleqa_environment_server` | Agent Server process | Resources Server |
-| `simpleqa_sandboxed.yaml` | `simpleqa_sandboxed_environment_server` | The attempt's sandbox group (`sandboxed: true`) | Resources Server |
+| `simpleqa_sandboxed.yaml` | `simpleqa_sandboxed_environment_server` | The attempt's sandbox group | Resources Server |
 
 `simpleqa_environment_server` sets `sandbox_opt_out: {task: true, grader: true}` and needs no sandbox provider.
-`simpleqa_sandboxed_environment_server` starts one sandbox per attempt from its `sandbox_config` and runs Simple
-Agent's loop there; its grader still opts out. Its `model_only` network rule lets the sandbox reach only the policy
-model, so it needs a provider that applies that rule, in a provider block named `sandbox`, and a model server address
-the sandbox can reach. Add `simpleqa_sandboxed.yaml` and the provider config to the config paths, then run the
-sandboxed agent:
+
+`simpleqa_sandboxed_environment_server` starts one sandbox per attempt from its `sandbox_config` and lends it to the
+agent, so Simple Agent runs its loop there. Its grader still opts out. The `model_only` network rule allows only the
+policy model server's host, so the pairing needs:
+
+- a provider block named `sandbox` whose provider applies that rule: E2B, or OpenSandbox with
+  `networking.enforces_network_policy: true` on a deployment that enforces it. Docker and Enroot apply only
+  `inherit` and `no_network`;
+- model servers that listen on an address the sandbox reaches (`use_absolute_ip`).
 
 ```bash
+gym env start \
+    --model-type vllm_model \
+    --config resources_servers/simpleqa/configs/simpleqa_sandboxed.yaml \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+    ++sandbox.opensandbox.networking.enforces_network_policy=true \
+    ++use_absolute_ip=true \
+    +simpleqa.resources_servers.simpleqa.judge_model_server.name=policy_model
+
 gym eval run --no-serve \
     --agent simpleqa_sandboxed_simple_agent \
     --input resources_servers/simpleqa/data/example.jsonl \
     --output results/simpleqa_sandboxed_rollouts.jsonl \
     --num-repeats 1
 ```
+
+`simpleqa_sandboxed.yaml` also loads `simpleqa.yaml`, so rows reach the sandbox only through
+`--agent simpleqa_sandboxed_simple_agent`. The example rows name `simpleqa_simple_agent`, which runs in process.
 
 ## Data Format
 
