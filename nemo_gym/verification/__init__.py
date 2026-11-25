@@ -16,8 +16,9 @@
 
 judge calls an LLM judge and routes a failed judge call to the failures sidecar (``call_judge``,
 ``judge_failsafe``); verifier_fixture runs in-process contract tests of a server's verifier; and
-sandbox_verification grades a submission in a fresh, single-use sandbox. sandbox_verification uses only the
-provider-neutral API; core sandbox APIs and providers live in :mod:`nemo_gym.sandbox`.
+sandbox_verification grades a submission in a fresh, single-use sandbox or in one the caller holds.
+sandbox_verification uses only the provider-neutral API; core sandbox APIs and providers live in
+:mod:`nemo_gym.sandbox`.
 """
 
 # Public API
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
         RUNNER_FILE,
         SandboxVerificationConfig,
         SandboxVerificationError,
+        run_verification_in_sandbox,
         run_verification_sandbox,
     )
     from nemo_gym.verification.verifier_fixture import (
@@ -73,6 +75,7 @@ _PUBLIC_API = {
     "record_parsed_judge_verdict": "judge",
     "record_rejected_judge_reply": "judge",
     "reraise_judge_errors": "judge",
+    "run_verification_in_sandbox": "sandbox_verification",
     "run_verification_sandbox": "sandbox_verification",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)

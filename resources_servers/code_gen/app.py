@@ -14,12 +14,16 @@
 # limitations under the License.
 
 import base64
+import functools
 import json
 import logging
 import zlib
-from asyncio import Semaphore
+from asyncio import Lock, Semaphore
+from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from time import time
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
+from weakref import WeakValueDictionary
 
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
@@ -27,13 +31,14 @@ from sandbox_execution import check_assertions_in_sandbox, check_correctness_in_
 from task_data import AssertionTests, ResourceLimits
 
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import PROVIDER_UNAVAILABLE
 from nemo_gym.metrics import (
     add_avg_sample_std_dev,
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox import SandboxAccess, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -41,6 +46,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    VerifierMode,
+    borrow,
     observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -63,9 +70,10 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     unit_test_timeout_secs: int
     debug: bool
     reasoning_format_penalty: float = 0.0
-    # Run unit tests in a fresh provider sandbox per verification.
-    # Names a top-level sandbox block, such as `sandbox` from
-    # nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or is an inline provider mapping.
+    # The unit tests run in the sandbox the Environment Server lends /verify. For a caller that lends none, such as a
+    # re-verification, they run in a fresh sandbox per verification from this provider: a top-level sandbox block,
+    # such as `sandbox` from nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or an inline provider
+    # mapping.
     sandbox_provider: Union[str, Dict[str, Any]]
     sandbox_config: SandboxVerificationConfig = Field(default_factory=SandboxVerificationConfig)
 
@@ -95,6 +103,10 @@ class CompCodingRunRequest(BaseRunRequest):
 
 class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
+    # The verifier's sandbox (body key NG_SANDBOX_ACCESS_KEY), lent by the Environment Server that owns it and starts
+    # it right before /verify. The tests run in it instead of in a sandbox of this server's own. Excluded from
+    # dumps, so no response or result carries it.
+    ng_sandbox_access: SandboxAccess | None = Field(default=None, exclude=True)
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
@@ -118,11 +130,21 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
     ray_enabled = False
+    # The verifier runs the candidate's code, so /verify runs only in a separate group: a fresh one with no network
+    # that the Environment Server starts right before /verify and lends it. "separate" is also the mode when a pairing
+    # leaves verifier.mode unset. "shared" would grade in the agent's group, with the agent's image, network and
+    # leftovers, and "none" would leave the sandbox to this server. A caller that lends no sandbox, such as a
+    # re-verification, gets a fresh sandbox of this server's own.
+    verifier_mode: ClassVar[VerifierMode] = "separate"
+    supported_verifier_modes: ClassVar[frozenset[VerifierMode]] = frozenset({"separate"})
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
         self._sandbox_target: Optional[Tuple[Dict[str, Any], Dict[str, str]]] = None
+        # One grade at a time per lent sandbox: a /verify the caller resent after a dropped connection waits for the
+        # first instead of sharing the sandbox's CPU with it, which would turn per-test time limits into failures.
+        self._lent_sandbox_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
 
     def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
         """Provider config and sandbox metadata, resolved once from the global config."""
@@ -252,8 +274,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 )
             )
 
-        # 4) run in a fresh provider sandbox
-        async with self._semaphore:
+        # 4) run in the sandbox lent to /verify, or else in a fresh provider sandbox. num_processes caps only the
+        # sandboxes this server starts: a lent sandbox is its owner's, so its grade does not queue behind them.
+        async with nullcontext() if body.ng_sandbox_access is not None else self._semaphore:
             """
             Sample looks like this:
             ```json
@@ -277,41 +300,15 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             ```
             """
 
-            # We can directly measure here since we are inside the semaphore.
+            # Measured from here: a fresh sandbox's slot is held, and a grade in a lent sandbox includes borrowing the
+            # sandbox and waiting for an earlier grade in it.
             start_time = time()
 
-            provider, sandbox_metadata = self._resolve_sandbox_target()
+            grade = self._grader(
+                code, tests, timeout=timeout, memory_limit_mb=memory_limit_mb, task_limits=task_limits
+            )
             try:
-                if isinstance(tests, AssertionTests):
-                    result, metadata = await check_assertions_in_sandbox(
-                        code,
-                        tests.tests,
-                        time_limit_s=timeout,
-                        memory_limit_mb=memory_limit_mb,
-                        provider=provider,
-                        config=self.config.sandbox_config,
-                        metadata=sandbox_metadata,
-                    )
-                else:
-                    task_args = (
-                        {"input_output": tests.model_dump_json()},  # sample
-                        code,  # generation
-                        timeout,
-                        self.config.debug,  # debug
-                    )
-                    # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
-                    deadline_s = (
-                        task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
-                    )
-                    result, metadata = await check_correctness_in_sandbox(
-                        *task_args,
-                        num_tests=len(tests.inputs),
-                        provider=provider,
-                        config=self.config.sandbox_config,
-                        metadata=sandbox_metadata,
-                        memory_limit_mb=memory_limit_mb,
-                        deadline_s=deadline_s,
-                    )
+                result, metadata = await self._run_tests(body.ng_sandbox_access, grade)
             except SandboxVerificationError as e:
                 # The environment failed, not the policy: exclude the sample rather than score it.
                 LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
@@ -349,6 +346,85 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
         return observe_programmatic_grading(_grade)
+
+    def _grader(
+        self,
+        code: str,
+        tests: UnitTests | AssertionTests,
+        *,
+        timeout: float,
+        memory_limit_mb: int | None,
+        task_limits: ResourceLimits,
+    ) -> Callable[..., Awaitable[tuple[list[bool | int], dict[str, Any] | None]]]:
+        """How to grade ``code`` against ``tests`` under the task's limits; call it with the sandbox to grade in
+        (``sandbox=``) or the provider of a fresh one (``provider=``, ``metadata=``)."""
+        if isinstance(tests, AssertionTests):
+            return functools.partial(
+                check_assertions_in_sandbox,
+                code,
+                tests.tests,
+                time_limit_s=timeout,
+                memory_limit_mb=memory_limit_mb,
+                config=self.config.sandbox_config,
+            )
+        # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
+        deadline_s = task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
+        return functools.partial(
+            check_correctness_in_sandbox,
+            {"input_output": tests.model_dump_json()},  # sample
+            code,  # generation
+            timeout,
+            self.config.debug,
+            num_tests=len(tests.inputs),
+            config=self.config.sandbox_config,
+            memory_limit_mb=memory_limit_mb,
+            deadline_s=deadline_s,
+        )
+
+    async def _run_tests(
+        self,
+        access: SandboxAccess | None,
+        grade: Callable[..., Awaitable[tuple[list[bool | int], dict[str, Any] | None]]],
+    ) -> tuple[list[bool | int], dict[str, Any] | None]:
+        """Run the tests in the sandbox lent to /verify, or else in a fresh sandbox of this server's own.
+
+        A lent sandbox is borrowed: this server releases its client after the tests, and the Environment Server that
+        owns the sandbox stops it.
+
+        Raises:
+            SandboxVerificationError: When no sandbox can run them; the caller masks the sample.
+        """
+        if access is not None:
+            key = json.dumps(access.connection.model_dump(mode="json"), sort_keys=True)
+            lock = self._lent_sandbox_locks.setdefault(key, Lock())
+            async with lock:
+                return await self._run_tests_in_lent_sandbox(access, grade)
+        provider, sandbox_metadata = self._resolve_sandbox_target()
+        return await grade(provider=provider, metadata=sandbox_metadata)
+
+    async def _run_tests_in_lent_sandbox(
+        self,
+        access: SandboxAccess,
+        grade: Callable[..., Awaitable[tuple[list[bool | int], dict[str, Any] | None]]],
+    ) -> tuple[list[bool | int], dict[str, Any] | None]:
+        """Borrow the lent sandbox, run the tests in it, and release the client; its owner stops it."""
+        try:
+            sandbox = await borrow(access)
+        except (ImportError, ValueError):
+            # A missing provider SDK or a provider block this server cannot resolve would mask every sample, and some
+            # providers (Enroot, Apptainer, bwrap) raise ValueError for a sandbox that is gone. Neither is the
+            # policy's failure: fail the request, which the Environment Server retries as an infrastructure failure.
+            raise
+        except Exception as e:
+            raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}") from e
+        try:
+            return await grade(sandbox=sandbox)
+        finally:
+            # A failed release must not replace the grade or the error above it.
+            try:
+                await sandbox.disconnect()
+            except Exception:
+                LOG.warning("code_gen could not release its client of the lent sandbox", exc_info=True)
 
 
 if __name__ == "__main__":

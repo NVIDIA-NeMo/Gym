@@ -19,10 +19,12 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.verification.sandbox_verification import (
     SandboxVerificationConfig,
     SandboxVerificationError,
+    run_verification_in_sandbox,
     run_verification_sandbox,
 )
 from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
@@ -42,9 +44,13 @@ class _VerificationProvider(FakeSandboxProvider):
         create_error: Exception | None = None,
         runner_result: SandboxExecResult | None = None,
         result_json: str = '{"ok": 42}',
+        mkdir_result: SandboxExecResult | None = None,
+        upload_error: Exception | None = None,
     ) -> None:
         super().__init__()
         self._create_error = create_error
+        self._mkdir_result = mkdir_result or SandboxExecResult(stdout="", stderr="", return_code=0)
+        self._upload_error = upload_error
         self._runner_result = runner_result or SandboxExecResult(stdout="", stderr="", return_code=0)
         self._result_json = result_json
         self.uploaded: dict[str, str] = {}
@@ -55,6 +61,8 @@ class _VerificationProvider(FakeSandboxProvider):
         return await super().create(spec)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+        if self._upload_error is not None:
+            raise self._upload_error
         await super().upload_file(handle, source_path, target_path)
         self.uploaded[target_path] = Path(source_path).read_text()
 
@@ -62,6 +70,8 @@ class _VerificationProvider(FakeSandboxProvider):
         await super().exec(handle, command, **kwargs)
         if command.startswith("tail "):
             return SandboxExecResult(stdout="Traceback: boom\n", stderr="", return_code=0)
+        if command.startswith("mkdir "):
+            return self._mkdir_result
         return self._runner_result
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
@@ -194,3 +204,100 @@ async def test_runs_the_runner_through_the_local_provider(tmp_path: Path) -> Non
         work_dir=str(tmp_path / "work"),
     )
     assert result == 42
+
+
+async def _held(provider: _VerificationProvider) -> AsyncSandbox:
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="attempt:test"))
+    provider.exec_calls.clear()
+    return sandbox
+
+
+async def _run_in(sandbox: AsyncSandbox, *, files=None, env=None):
+    return await run_verification_in_sandbox(
+        sandbox,
+        files=files or {"sandbox_runner.py": _RUNNER, "lib/helper.py": "X = 1\n"},
+        request={"x": 21},
+        exec_timeout_s=120,
+        parse_result=_parse,
+        work_dir="/tmp/verify",
+        python="/opt/venv/bin/python",
+        env=env,
+    )
+
+
+class TestHeldSandbox:
+    """run_verification_in_sandbox: the same runner contract in a sandbox the caller holds, left running."""
+
+    async def test_uploads_into_a_fresh_call_dir_runs_the_runner_and_leaves_the_sandbox(self) -> None:
+        provider = _VerificationProvider()
+        sandbox = await _held(provider)
+
+        assert await _run_in(sandbox, env={"OMP_NUM_THREADS": "1"}) == 42
+
+        call_dir = _call_dir(provider)
+        assert provider.uploaded[f"{call_dir}/lib/helper.py"] == "X = 1\n"
+        assert json.loads(provider.uploaded[f"{call_dir}/request.json"]) == {"x": 21}
+        mkdir_call, runner_call = provider.exec_calls
+        assert mkdir_call["command"] == f"mkdir -p {call_dir}"
+        assert runner_call["command"] == (
+            f"cd {call_dir} && /opt/venv/bin/python sandbox_runner.py request.json result.json > runner.log 2>&1"
+        )
+        assert runner_call["env"] == {"OMP_NUM_THREADS": "1"} and runner_call["timeout_s"] == 120
+        assert provider.download_calls[0][1] == f"{call_dir}/result.json"
+        # Its owner stops it: one sandbox, never created or closed by the grade.
+        assert len(provider.created_specs) == 1 and provider.closed == []
+
+    async def test_each_call_gets_its_own_work_dir(self) -> None:
+        provider = _VerificationProvider()
+        sandbox = await _held(provider)
+        await _run_in(sandbox)
+        await _run_in(sandbox)
+        call_dirs = {path.rsplit("/", 1)[0] for path in provider.uploaded if path.endswith("/request.json")}
+        assert len(call_dirs) == 2
+
+    @pytest.mark.parametrize(
+        "provider",
+        [
+            _VerificationProvider(mkdir_result=SandboxExecResult(stdout="", stderr="read-only", return_code=1)),
+            _VerificationProvider(upload_error=OSError("connection reset")),
+        ],
+        ids=["mkdir", "upload"],
+    )
+    async def test_a_sandbox_that_takes_no_files_is_provider_unavailable(self, provider) -> None:
+        sandbox = await _held(provider)
+        with pytest.raises(SandboxVerificationError) as info:
+            await _run_in(sandbox)
+        assert info.value.failure_kind == PROVIDER_UNAVAILABLE
+        assert not any("sandbox_runner.py" in call["command"] for call in provider.exec_calls)
+        assert provider.closed == []
+
+    async def test_runner_failure_is_verifier_error_with_log_tail(self) -> None:
+        provider = _VerificationProvider(runner_result=SandboxExecResult(stdout="", stderr="", return_code=1))
+        sandbox = await _held(provider)
+        with pytest.raises(SandboxVerificationError) as info:
+            await _run_in(sandbox)
+        assert info.value.failure_kind == VERIFIER_ERROR
+        assert "Traceback: boom" in str(info.value)
+        assert provider.closed == []
+
+    async def test_files_without_runner_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sandbox_runner.py"):
+            await _run_in(await _held(_VerificationProvider()), files={"lib/helper.py": ""})
+
+    async def test_runs_the_runner_in_a_held_local_sandbox(self, tmp_path: Path) -> None:
+        sandbox = AsyncSandbox({"local": {}})
+        await sandbox.start(SandboxSpec())
+        try:
+            result = await run_verification_in_sandbox(
+                sandbox,
+                files={"sandbox_runner.py": _RUNNER},
+                request={"x": 21},
+                exec_timeout_s=120,
+                parse_result=_parse,
+                work_dir=str(tmp_path / "work"),
+                python=sys.executable,
+            )
+            assert result == 42
+        finally:
+            await sandbox.stop()
