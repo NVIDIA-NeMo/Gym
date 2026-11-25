@@ -6,9 +6,11 @@ import asyncio
 import dataclasses
 import io
 import os
+import shlex
 import shutil
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -86,7 +88,7 @@ def _server(root: Path, **extra) -> CVDPResourcesServer:
         name="cvdp_agentic_resources_server",
         num_processes=1,
         agent_sandbox_provider="sandbox",
-        agent_sandbox_config={"image": "unused-by-the-local-provider"},
+        agent_sandbox_config=extra.pop("agent_sandbox_config", {"image": "unused-by-the-local-provider"}),
         agent_workdir=str(root),
         **extra,
     )
@@ -371,6 +373,94 @@ def test_a_read_only_workspace_root_cannot_mask_a_failed_attempt(server, root, s
 
     assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
     assert graded[0]["rtl/top.sv"] == TOP
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes to a read-only directory anyway")
+def test_a_read_only_workspace_root_cannot_mask_a_failed_attempt_on_apptainer(root, graded, monkeypatch):
+    # Apptainer binds a host staging directory at the workspace and writes each exec's environment file (the
+    # session configs set TMPDIR) on the host before the command runs, so before the harvest makes the root writable.
+    from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
+
+    real_mkdtemp = tempfile.mkdtemp
+
+    def mkdtemp(suffix=None, prefix=None, dir=None):
+        if prefix == "nemo-gym-apptainer-":
+            # The staging directory is the mount point, so the stand-in CLI below runs commands on the host.
+            root.mkdir()
+            return str(root)
+        return real_mkdtemp(suffix, prefix, dir)
+
+    async def run(self, argv, *, timeout_s=None, stdin=None, daemonize=False):
+        """A stand-in for the apptainer CLI: starting and stopping succeed, and exec runs the command here."""
+        if argv[1] != "exec":
+            return 0, "", ""
+        env = dict(os.environ)
+        if "--env-file" in argv:
+            # Apptainer reads the file on the host: one it cannot read fails the exec.
+            assignments = shlex.split(Path(argv[argv.index("--env-file") + 1]).read_text())
+            env.update(assignment.split("=", 1) for assignment in assignments)
+        process = await asyncio.create_subprocess_exec(
+            *argv[-3:],
+            cwd=argv[argv.index("--pwd") + 1] if "--pwd" in argv else None,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await process.communicate()
+        return process.returncode, out.decode(), err.decode()
+
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", mkdtemp)
+    monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _bin_path=None: "/usr/bin/apptainer")
+    monkeypatch.setattr(apptainer_provider.ApptainerProvider, "_run", run)
+    provider = {"apptainer": {"create": {"mount_point": str(root)}, "probe": {"command": None}}}
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {"sandbox": provider})
+    server = _server(root, agent_sandbox_config={"image": "cvdp-sim.sif", "env": {"TMPDIR": "/tmp"}})
+    client = TestClient(server.setup_webserver())
+    assert _post_seed(client, _seed()).status_code == 200
+    _solve(root)
+    root.chmod(0o555)
+
+    verified = _verify(client)
+
+    assert (verified["reward"], verified["mask_sample"]) == (1.0, False), verified
+    assert graded[0]["rtl/top.sv"] == TOP
+
+
+@pytest.mark.parametrize("link", ["file", "directory"])
+def test_a_target_reached_through_a_symlink_is_graded_under_its_name(root, graded, link):
+    server = _server(root)
+    metadata = _metadata()
+    if link == "directory":
+        metadata["target_files"] = ["hdl/top.sv"]
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(task_data={"verifier_metadata": metadata}))
+    if link == "file":
+        (root / "rtl" / "codec.sv").write_text(TOP)
+        (root / "rtl" / "top.sv").symlink_to("codec.sv")
+    else:
+        (root / "rtl" / "top.sv").write_text(TOP)
+        (root / "hdl").symlink_to("rtl")
+
+    verified = _verify(client, _verify_body("Done.") | {"verifier_metadata": metadata})
+
+    assert verified["mask_sample"] is False
+    target = metadata["target_files"][0]
+    assert graded[0][target] == TOP, "the target's contents are graded, not the response text"
+    assert not any(name.startswith(".cvdp-harvest") for name in graded[0]), "the resolved copies are not graded"
+    assert not any(path.name.endswith(".targets") for path in root.iterdir()), "the command removes its copies"
+
+
+def test_a_target_linked_outside_the_workspace_is_not_followed(server, root, stopped, graded):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    outside = root.parent / "outside.sv"
+    outside.write_text("module leaked; endmodule\n")
+    (root / "rtl" / "top.sv").symlink_to(outside)
+
+    verified = _verify(client, _verify_body(f"```systemverilog\n{TOP}```"))
+
+    assert verified["mask_sample"] is False
+    assert all("leaked" not in content for run in graded for content in run.values())
 
 
 def test_a_target_that_is_not_utf8_is_graded_as_empty_not_replaced_by_the_response_text(server, root, stopped, graded):

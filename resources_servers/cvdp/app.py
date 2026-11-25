@@ -329,7 +329,9 @@ def _harvest_roots(globs: List[str], target_files: List[str]) -> List[str]:
     return sorted(roots) + sorted({t for t in target_files if _safe_rel(t) and t.split("/")[0] not in roots})
 
 
-def _harvest_command(workdir: str, roots: List[str], archive: str) -> str:
+def _harvest_command(
+    workdir: str, roots: List[str], archive: str, targets: Iterable[str] = (), resolved_dir: str = ""
+) -> str:
     """Archive whichever roots exist; exit ``_NOTHING_TO_HARVEST_EXIT`` when none do.
 
     A workspace that cannot be entered exits ``_WORKSPACE_MISSING_EXIT``.
@@ -339,27 +341,54 @@ def _harvest_command(workdir: str, roots: List[str], archive: str) -> str:
     makes the agent's files readable again (it runs as their owner, or as root), and GNU tar then leaves out
     whatever still is not with a warning. A target left out is graded as missing, a failure of the model; write
     failures, such as a full disk, still exit 2.
+
+    tar archives a symbolic link as the link, so a declared target reached through one (the file itself or a
+    directory above it) would be missing from the archive. The command resolves each declared target inside the
+    sandbox and, when it is a regular file inside the workspace, copies its contents into ``resolved_dir`` under the
+    declared name, which ``_collect_harvest`` grades as the target, as the legacy agentic path downloaded the target
+    by name. A link that leads outside the workspace is not followed.
     """
     candidates = " ".join(shlex.quote(root) for root in roots)
-    return (
+    resolve = ""
+    names = " ".join(shlex.quote(target) for target in targets if _safe_rel(target))
+    if resolved_dir and names:
+        stage = shlex.quote(resolved_dir)
+        resolve = (
+            f'ws=$(pwd -P); for t in {names}; do r=$(readlink -f "./$t" 2>/dev/null) || continue; '
+            f'if [ "$r" != "$ws/$t" ] && [ -f "$r" ]; then case "$r" in "$ws"/*) '
+            f'd={stage}/"$t"; mkdir -p "${{d%/*}}" && chmod u+r "$r" 2>/dev/null; cat "$r" > "$d" 2>/dev/null || rm -f "$d";; '
+            "esac; fi; done; "
+            f'if [ -d {stage} ]; then set -- "$@" {stage}; fi; '
+        )
+    command = (
         f"cd {shlex.quote(workdir)} || exit {_WORKSPACE_MISSING_EXIT}; chmod u+w . 2>/dev/null; set --; "
         f'for p in {candidates}; do if [ -e "$p" ]; then set -- "$@" "$p"; fi; done; '
+        f"{resolve}"
         f'if [ "$#" -eq 0 ]; then exit {_NOTHING_TO_HARVEST_EXIT}; fi; '
         'chmod -R u+rX -- "$@" 2>/dev/null; '
         # Only GNU tar has the flag; others exit 1 on an unreadable file, which grades too.
         'if tar --version 2>/dev/null | grep -q GNU; then set -- --ignore-failed-read -- "$@"; else set -- -- "$@"; fi; '
         f'tar -cf {shlex.quote(archive)} "$@"'
     )
+    if resolve:
+        command += f"; status=$?; rm -rf {shlex.quote(resolved_dir)}; exit $status"
+    return command
 
 
 def _collect_harvest(
-    archive: Path, dest: Path, globs: List[str], seeded: Dict[str, str], target_files: List[str]
+    archive: Path,
+    dest: Path,
+    globs: List[str],
+    seeded: Dict[str, str],
+    target_files: List[str],
+    resolved_dir: str = "",
 ) -> tuple[Dict[str, str], set[str]]:
     """Unpack the regular files of the workspace archive; return the ones to grade and every path it holds.
 
     Glob matches count only when they differ from what seed staged, so unchanged context files are not graded as
-    the agent's work; a declared target file counts whenever it exists. Files that are not UTF-8 text, hidden harness
-    paths and generated directories are skipped.
+    the agent's work; a declared target file counts whenever it exists, including through a symbolic link that the
+    harvest command resolved into ``resolved_dir``. Files that are not UTF-8 text, hidden harness paths and generated
+    directories are skipped.
     """
     # Uncompressed only: the command writes a plain tar, and nothing in the workspace may swap in a compressed one.
     with tarfile.open(archive, "r:") as tar:
@@ -393,6 +422,8 @@ def _collect_harvest(
             rel = path.relative_to(dest).as_posix()
             if not utf8_name(rel) or _is_harness_path(rel) or _generated(rel):
                 continue
+            if resolved_dir and (rel == resolved_dir or rel.startswith(f"{resolved_dir}/")):
+                continue
             content = read(path)
             if rel in produced or content is None or seeded.get(rel) == content:
                 continue
@@ -406,6 +437,10 @@ def _collect_harvest(
             # The agent wrote the target, but not as UTF-8 text: graded as an empty file, a miss, never replaced by
             # RTL parsed out of the response text.
             produced[rel] = ""
+        elif resolved_dir and (dest / resolved_dir / rel).is_file():
+            # A target reached through a symbolic link inside the workspace, under its declared name.
+            produced[rel] = read(dest / resolved_dir / rel) or ""
+            present.add(rel)
     return produced, present
 
 
@@ -459,13 +494,20 @@ class CVDPResourcesServer(SimpleResourcesServer):
         global_config = getattr(self.server_client, "global_config_dict", None)
         if isinstance(global_config, Mapping) and isinstance(global_config.get("split"), str):
             inputs: set[Path] = set()
-            for instance in global_config.values():
+            for instance_name, instance in global_config.items():
                 if not isinstance(instance, Mapping):
                     continue
-                for agent in (instance.get("responses_api_agents") or {}).values():
-                    if (agent.get("resources_server") or {}).get("name") != self.config.name:
-                        continue
-                    for dataset in agent.get("datasets") or []:
+                # The datasets of the agents bound to this server, and this server's own: the session configs
+                # (cvdp_agentic_*.yaml) declare theirs on the resources server.
+                owners = [
+                    agent
+                    for agent in (instance.get("responses_api_agents") or {}).values()
+                    if (agent.get("resources_server") or {}).get("name") == self.config.name
+                ]
+                if instance_name == self.config.name:
+                    owners += (instance.get("resources_servers") or {}).values()
+                for owner in owners:
+                    for dataset in owner.get("datasets") or []:
                         if dataset.get("type") == global_config["split"]:
                             path = Path(dataset["jsonl_fpath"])
                             inputs.add(path if path.is_absolute() else Path(__file__).resolve().parents[2] / path)
@@ -691,13 +733,14 @@ class CVDPResourcesServer(SimpleResourcesServer):
         if session.harvested is None:
             workdir = self.config.agent_workdir.rstrip("/")
             # In the workspace, which the provider reads directly, not in the sandbox's /tmp.
-            remote_archive = f"{workdir}/.cvdp-harvest-{uuid.uuid4().hex}.tar"
+            harvest_id = uuid.uuid4().hex
+            remote_archive = f"{workdir}/.cvdp-harvest-{harvest_id}.tar"
+            resolved_dir = f".cvdp-harvest-{harvest_id}.targets"
             globs = _harvest_globs(self.config.harvest_globs, session.meta.context_files)
             roots = _harvest_roots(globs, session.meta.target_files)
+            command = _harvest_command(workdir, roots, remote_archive, session.meta.target_files, resolved_dir)
             try:
-                result = await session.sandbox.exec(
-                    _harvest_command(workdir, roots, remote_archive), cwd="/", timeout_s=self.config.harvest_timeout_s
-                )
+                result = await session.sandbox.exec(command, cwd="/", timeout_s=self.config.harvest_timeout_s)
             except Exception as error:
                 raise _harvest_unavailable("archive the workspace", error) from error
             output = (result.stderr or result.stdout or "").strip()
@@ -724,6 +767,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
                             globs,
                             session.seeded,
                             session.meta.target_files,
+                            resolved_dir,
                         )
                     except tarfile.TarError as error:
                         raise _HarvestUnavailable(
