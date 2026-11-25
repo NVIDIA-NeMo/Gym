@@ -30,7 +30,7 @@ from environment_servers.robolab.opencode_relay import (
 from environment_servers.robolab.terminal import read_condition
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import BaseEpisodeRequest, rollout_context
+from nemo_gym.core import AGENT_LIMIT, ENVIRONMENT_SERVER_FAILED, BaseEpisodeRequest, rollout_context
 from nemo_gym.server_runtime import CleanupContext
 from nemo_gym.trajectory import grading_result_binding
 
@@ -352,3 +352,144 @@ def test_robolab_opencode_relay_streams_via_aiohttp() -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_suite_manifest_scores_policy_failure_as_unmasked_zero_and_masks_infra(tmp_path: Path) -> None:
+    base = _make_manifest(sdk_version="open_model", sdk_bundle="core", arm="open_model")
+    suite = {
+        "schema": "robolab.efb-suite.v1",
+        "official_manifest_sha256": OFFICIAL_SHA,
+        "arm": "open_model",
+        "cases": [
+            {
+                "id": "GrabABagelTask@run-010",
+                "task": "GrabABagelTask",
+                "run": 10,
+                "native_horizon": 450,
+                "official_bundle": "6924e138fa53",
+            },
+            {
+                "id": "GrabABagelTask@run-011",
+                "task": "GrabABagelTask",
+                "run": 11,
+                "native_horizon": 450,
+                "official_bundle": "6924e138fa53",
+            },
+            {
+                "id": "GrabABagelTask@run-012",
+                "task": "GrabABagelTask",
+                "run": 12,
+                "native_horizon": 450,
+                "official_bundle": "6924e138fa53",
+            },
+        ],
+        "bridge_config": base["bridge_config"],
+        "harness": "opencode",
+        "tools": ["observe"],
+        "score_source": "native_summary",
+    }
+    manifest_path, digest = _write_staged_manifest(tmp_path, suite)
+    prepared = prepare(manifest_path, tmp_path / "suite.jsonl")
+    rows = [json.loads(line) for line in prepared.read_text().splitlines()]
+    assert [r["case_id"] for r in rows] == [
+        "GrabABagelTask@run-010",
+        "GrabABagelTask@run-011",
+        "GrabABagelTask@run-012",
+    ]
+
+    backend = tmp_path / "mock-suite-backend"
+    backend.write_text(
+        f"#!{sys.executable}\n"
+        "import hashlib, json, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "case_cfg = json.loads(Path(args[args.index('--case-manifest') + 1]).read_text())\n"
+        "run_idx = case_cfg['case']['run']\n"
+        "cond = Path(args[args.index('--condition-output') + 1])\n"
+        "ep = cond / 'runs' / f'run-{run_idx:03d}'\n"
+        "ep.mkdir(parents=True, exist_ok=True)\n"
+        "(cond / 'official').mkdir(parents=True, exist_ok=True)\n"
+        "scored = (run_idx == 10)\n"
+        "outcome = 'scored' if run_idx == 10 else ('policy_failure.decision_budget' if run_idx == 11 else 'infrastructure.worker')\n"
+        "summary = {'run': run_idx, 'score': 1.0, 'success': True}\n"
+        "sha = hashlib.sha256(json.dumps(summary, sort_keys=True, separators=(',', ':')).encode()).hexdigest()\n"
+        "(cond / 'official' / 'episode_results.jsonl').write_text(json.dumps(summary) + '\\n')\n"
+        "derived = {\n"
+        "  'schema': 'robolab.full-suite-episode.v2',\n"
+        "  'identity': {'arm': 'open_model', 'task': 'GrabABagelTask', 'run_index': run_idx, 'seed': 0},\n"
+        "  'attempted': True, 'scored': scored, 'native_complete': scored,\n"
+        "  'native_task': 'GrabABagelTask' if scored else None,\n"
+        "  'native_score': 1.0 if scored else None, 'native_horizon': 450,\n"
+        "  'success': True if scored else None, 'outcome_class': outcome,\n"
+        f"  'bindings': {{'source_manifest_sha256': '{SOURCE_SHA}'}},\n"
+        "  'evidence': {'archive_audit_passed': True, 'official_summary_sha256': sha},\n"
+        "}\n"
+        "(ep / 'episode-result.json').write_text(json.dumps(derived) + '\\n')\n"
+        "(ep / 'terminal-record.json').write_text(json.dumps({'schema': 'robolab.sealed-terminal.v1', 'derived_episode_result': derived}) + '\\n')\n"
+        "(cond / 'condition-result.json').write_text(json.dumps({\n"
+        "  'task': 'GrabABagelTask', 'arm': 'open_model', 'requested_runs': [run_idx], 'attempted_runs': [run_idx],\n"
+        "  'process': {'returncode': 0, 'forced': False, 'live_owned_after_cleanup': []},\n"
+        "  'error': None, 'interrupted_signal': None,\n"
+        "}) + '\\n')\n"
+    )
+    backend.chmod(backend.stat().st_mode | stat.S_IXUSR)
+
+    config = RoboLabEnvironmentConfig(
+        name="robolab_environment",
+        host="127.0.0.1",
+        port=8016,
+        entrypoint="app.py",
+        agent_server={"type": "responses_api_agents", "name": "robolab"},
+        model_server={"type": "responses_api_models", "name": "policy_model"},
+        case_manifest=manifest_path,
+        backend=backend,
+        output_root=tmp_path / "suite-out",
+        native_source_sha256=SOURCE_SHA,
+    )
+    client = ServerClient(
+        head_server_config={"host": "127.0.0.1", "port": 8000},
+        global_config_dict=OmegaConf.create(
+            {"policy_model": {"responses_api_models": {"vllm_model": {"host": "127.0.0.1", "port": 8011}}}}
+        ),
+    )
+    server = RoboLabEnvironmentServer(config=config, server_client=client)
+    server.setup_webserver()
+
+    results = []
+    with rollout_context("robolab-suite-test"):
+        for idx, row in enumerate(rows):
+            req = BaseEpisodeRequest[RoboLabTaskInput].model_validate(
+                {
+                    "episode_id": {"rollout_id": f"robolab-suite-{idx}", "attempt": 0},
+                    "task": {
+                        "task_id": {"taskset": "robolab", "task_id": f"case-{idx}"},
+                        "task_input": {
+                            "case_id": row["case_id"],
+                            "verifier_metadata": {"seed": 0, "manifest_sha256": digest},
+                        },
+                    },
+                }
+            )
+            cleanup = CleanupContext(episode_id=req.episode_id, cleanup_timeout_seconds=10.0)
+            results.append(asyncio.run(server.run(req, cleanup)).result)
+
+    # run-010: scored 1.0; run-011: decision_budget unmasked 0.0; run-012: infra masked
+    assert results[0]["reward"] == 1.0 and results[0]["mask_sample"] is False
+    assert results[1]["reward"] == 0.0
+    assert results[1]["native_score"] == 0.0
+    assert results[1]["native_success"] is False
+    assert results[1]["mask_sample"] is False
+    assert results[1]["failure_kind"] == AGENT_LIMIT
+    assert len(results[1]["ng_verifier_invocations"]) == 1
+    assert results[1]["ng_verifier_invocations"][0]["grading_record"][
+        "result_binding_sha256"
+    ] == grading_result_binding(results[1])
+    assert results[2]["mask_sample"] is True
+    assert results[2]["failure_kind"] == ENVIRONMENT_SERVER_FAILED
+    assert results[2].get("ng_verifier_invocations", []) == []
+
+    agg = asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=results)))
+    assert agg.key_metrics["num/scored_cases"] == 2
+    assert agg.key_metrics["num/unscored_cases"] == 1
+    assert agg.key_metrics["mean/native_score"] == pytest.approx(0.5)
+    assert agg.key_metrics["mean/native_success"] == pytest.approx(0.5)

@@ -53,13 +53,20 @@ class Manifest(BaseModel):
     score_source: Literal["native_summary"]
 
 
-def load_case_manifest(path: Path) -> tuple[Manifest, str]:
-    """Read and validate a single RoboLab case manifest and its staged digest."""
-    raw = path.read_bytes()
-    digest = hashlib.sha256(raw).hexdigest()
-    if path.parent.parent.name == "staged-files" and path.parent.name != digest:
-        raise ValueError("RoboLab manifest does not match its staged SHA-256")
-    manifest = Manifest.model_validate_json(raw)
+class SuiteManifest(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    schema_id: Literal["robolab.efb-suite.v1"] = Field(alias="schema")
+    official_manifest_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    arm: Literal["sdk_v15", "open_model"]
+    cases: list[Case] = Field(min_length=1)
+    bridge_config: dict[str, object]
+    harness: Literal["opencode"]
+    tools: list[Literal["observe"]]
+    score_source: Literal["native_summary"]
+
+
+def _validate_manifest_contract(manifest: Manifest) -> None:
     case, plan = manifest.case, manifest.native_run_plan
     if not case.task or case.id != f"{case.task}@run-{case.run:03d}" or plan.task != case.task:
         raise ValueError("RoboLab case identity and run plan task must agree")
@@ -116,30 +123,85 @@ def load_case_manifest(path: Path) -> tuple[Manifest, str]:
         raise ValueError("RoboLab candidate requires a non-empty reasoning setting")
     if manifest.tools != ["observe"] or bridge.get("policies") != []:
         raise ValueError("RoboLab candidate requires the observe-only tool surface")
-    return manifest, digest
+
+
+def load_case_manifests(path: Path) -> tuple[list[Manifest], str]:
+    """Read and validate a single-case or multi-case RoboLab manifest and its staged digest."""
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if path.parent.parent.name == "staged-files" and path.parent.name != digest:
+        raise ValueError("RoboLab manifest does not match its staged SHA-256")
+    payload = json.loads(raw)
+    if isinstance(payload, dict) and payload.get("schema") == "robolab.efb-suite.v1":
+        suite = SuiteManifest.model_validate(payload)
+        seen: set[str] = set()
+        manifests: list[Manifest] = []
+        base_native = suite.bridge_config.get("native")
+        if not isinstance(base_native, dict):
+            raise ValueError("RoboLab manifest requires native, SDK and model bindings")
+        for case in suite.cases:
+            if case.id in seen:
+                raise ValueError(f"Duplicate RoboLab case id {case.id!r} in suite manifest")
+            seen.add(case.id)
+            case_bridge = {**suite.bridge_config, "native": {**base_native, "task": case.task}}
+            manifest = Manifest.model_validate(
+                {
+                    "schema": "robolab.efb-candidate.v1",
+                    "official_manifest_sha256": suite.official_manifest_sha256,
+                    "case": case.model_dump(),
+                    "native_run_plan": {
+                        "schema": "robolab.native-sequence.v2",
+                        "arm": suite.arm,
+                        "task": case.task,
+                        "run_indices": [case.run],
+                        "reset_only_prefix": case.run,
+                    },
+                    "bridge_config": case_bridge,
+                    "harness": suite.harness,
+                    "tools": suite.tools,
+                    "score_source": suite.score_source,
+                }
+            )
+            _validate_manifest_contract(manifest)
+            manifests.append(manifest)
+        return manifests, digest
+    manifest = Manifest.model_validate(payload)
+    _validate_manifest_contract(manifest)
+    return [manifest], digest
+
+
+def load_case_manifest(path: Path) -> tuple[Manifest, str]:
+    """Read and validate a single RoboLab case manifest and its staged digest."""
+    manifests, digest = load_case_manifests(path)
+    if len(manifests) != 1:
+        raise ValueError("Expected a single RoboLab case manifest")
+    return manifests[0], digest
 
 
 def prepare(
     manifest_path: str | Path | None = None,
     output_fpath: str | Path | None = None,
 ) -> Path:
-    """Write the single frozen episode request consumed by Gym."""
+    """Write one frozen episode request row per RoboLab case consumed by Gym."""
     source = manifest_path or os.environ.get("ROBOLAB_CASE_MANIFEST")
     if not source:
         raise ValueError("Set ROBOLAB_CASE_MANIFEST to the staged RoboLab case manifest")
-    manifest, digest = load_case_manifest(Path(source))
-    row = {
-        "case_id": manifest.case.id,
-        "responses_create_params": {"input": []},
-        "verifier_metadata": {
-            "manifest_sha256": digest,
-            "official_manifest_sha256": manifest.official_manifest_sha256,
-            "case": manifest.case.model_dump(),
-            "seed": 0,
-            "native_run_plan": manifest.native_run_plan.model_dump(by_alias=True),
-            "score_source": manifest.score_source,
-        },
-    }
+    manifests, digest = load_case_manifests(Path(source))
+    rows = [
+        {
+            "case_id": manifest.case.id,
+            "responses_create_params": {"input": []},
+            "verifier_metadata": {
+                "manifest_sha256": digest,
+                "official_manifest_sha256": manifest.official_manifest_sha256,
+                "case": manifest.case.model_dump(),
+                "seed": 0,
+                "native_run_plan": manifest.native_run_plan.model_dump(by_alias=True),
+                "score_source": manifest.score_source,
+            },
+        }
+        for manifest in manifests
+    ]
     if output_fpath is None:
         output_dir = os.environ.get("NEMO_GYM_BENCH_DIR", "benchmarks/robolab/data")
         output_fpath = Path(output_dir) / "case.jsonl"
@@ -149,7 +211,8 @@ def prepare(
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent, delete=False) as file:
             temporary = Path(file.name)
-            file.write(json.dumps(row) + "\n")
+            for row in rows:
+                file.write(json.dumps(row) + "\n")
         temporary.replace(output)
     finally:
         if temporary is not None:

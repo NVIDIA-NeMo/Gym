@@ -4,6 +4,7 @@
 """Run the assigned RoboLab condition and return its audited native score."""
 
 import asyncio
+import json
 import os
 import secrets
 import signal
@@ -17,7 +18,7 @@ from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr, model_validator
 
 from benchmarks.robolab.episode_binding import RoboLabEpisodeBinding
-from benchmarks.robolab.prepare import Manifest, load_case_manifest
+from benchmarks.robolab.prepare import Manifest, load_case_manifests
 from environment_servers.robolab.opencode_relay import mount_opencode_relay
 from environment_servers.robolab.terminal import SHA256, Score, read_condition
 from nemo_gym.agents import AgentSeedSessionRequest
@@ -139,21 +140,24 @@ class RoboLabEnvironmentServer(
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         if self.config.backend is None:
             raise HTTPException(422, "RoboLab metrics require the pinned Bridge runtime adapter")
-        manifest, digest = load_case_manifest(self.config.case_manifest)
+        manifests, digest = load_case_manifests(self.config.case_manifest)
+        manifests_by_id = {m.case.id: m for m in manifests}
+        allowed_outcomes = frozenset({"scored", *POLICY_FAILURE_KINDS})
         scores = []
         try:
             for row in body.verify_responses:
                 if row.get("mask_sample") or row.get("native_score") is None:
                     continue
+                manifest = manifests_by_id.get(str(row.get("case_id", "")))
                 if (
-                    row.get("case_id") != manifest.case.id
+                    manifest is None
                     or type(row.get("seed")) is not int
                     or row["seed"] != 0
                     or row.get("manifest_sha256") != digest
                     or row.get("official_manifest_sha256") != manifest.official_manifest_sha256
                     or row.get("native_source_sha256") != self.config.native_source_sha256
                     or row.get("cleanup_confirmed") is not True
-                    or row.get("native_outcome") != "scored"
+                    or row.get("native_outcome") not in allowed_outcomes
                 ):
                     raise ValueError("RoboLab metrics row differs from the assigned native condition")
                 scores.append(ScoredResult.model_validate(row))
@@ -172,7 +176,8 @@ class RoboLabEnvironmentServer(
         task = request.task
         if task.task_id.taskset != "robolab":
             raise ValueError("RoboLab requires the robolab taskset")
-        manifest, digest = load_case_manifest(self.config.case_manifest)
+        manifests, digest = load_case_manifests(self.config.case_manifest)
+        manifests_by_id = {m.case.id: m for m in manifests}
         metadata = task.task_input.verifier_metadata
         binding = RoboLabEpisodeBinding.model_validate(
             {
@@ -181,7 +186,8 @@ class RoboLabEnvironmentServer(
                 "manifest_sha256": metadata.get("manifest_sha256"),
             }
         )
-        if (binding.case_id, binding.seed, binding.manifest_sha256) != (manifest.case.id, 0, digest):
+        manifest = manifests_by_id.get(binding.case_id)
+        if manifest is None or (binding.seed, binding.manifest_sha256) != (0, digest):
             raise ValueError("RoboLab case, seed or manifest SHA differs from the staged manifest")
         return manifest, binding
 
@@ -228,9 +234,15 @@ class RoboLabEnvironmentServer(
             root.mkdir(parents=True, exist_ok=True)
             attempt = Path(tempfile.mkdtemp(prefix="robolab-", dir=root)).resolve()
             staged_manifest = attempt / "case.json"
-            staged_manifest.write_bytes(self.config.case_manifest.read_bytes())
-            if load_case_manifest(staged_manifest)[1] != binding.manifest_sha256:
+            source_manifests, source_digest = load_case_manifests(self.config.case_manifest)
+            if source_digest != binding.manifest_sha256:
                 raise ValueError("RoboLab manifest changed before launch")
+            if len(source_manifests) == 1:
+                staged_manifest.write_bytes(self.config.case_manifest.read_bytes())
+            else:
+                staged_manifest.write_text(
+                    json.dumps(manifest.model_dump(by_alias=True), indent=2) + "\n", encoding="utf-8"
+                )
         except (OSError, ValueError) as error:
             return self.failure_response(
                 request, EpisodeFailure(failure_reason=str(error), terminal=True, stage="admission")
@@ -344,13 +356,33 @@ class RoboLabEnvironmentServer(
         }
         if result["native_score"] is None:
             outcome = str(result["native_outcome"])
+            if outcome in POLICY_FAILURE_KINDS:
+                policy_failure_kind = POLICY_FAILURE_KINDS[outcome]
+
+                async def policy_failure_grade() -> RoboLabVerifyResponse:
+                    return RoboLabVerifyResponse(
+                        **common,
+                        reward=0.0,
+                        native_score=0.0,
+                        native_success=False,
+                        mask_sample=False,
+                        failure_kind=policy_failure_kind,
+                        failure_reason=outcome,
+                    )
+
+                graded = await observe_verifier(policy_failure_grade, enabled=True, verifier_name=self.config.name)()
+                return self.response_model(
+                    episode_id=request.episode_id,
+                    task_id=request.task.task_id,
+                    result=graded.model_dump(mode="json"),
+                )
             verify_response = RoboLabVerifyResponse(
                 **common,
                 reward=0.0,
                 native_score=None,
                 native_success=None,
                 mask_sample=True,
-                failure_kind=POLICY_FAILURE_KINDS.get(outcome, ENVIRONMENT_SERVER_FAILED),
+                failure_kind=ENVIRONMENT_SERVER_FAILED,
                 failure_reason=outcome,
             )
             return self.response_model(
