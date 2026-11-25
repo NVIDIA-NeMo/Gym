@@ -591,7 +591,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             key=self._attempt_sandbox_key(handles),
             lent=seed.sandbox_access,
             group=seed.sandbox_group,
-            verifier_executes_nothing=seed.verifier_executes_nothing,
             task_tools=self._task_tools(request, tool_accesses),
             resources_server=repr(self.config.resources_server.name),
             prepare=lambda access: self._prepare_resources_sandbox(request, handles, access),

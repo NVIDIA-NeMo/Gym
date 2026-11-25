@@ -81,17 +81,6 @@ class _CodeVerifier(_Verifier):
         return SandboxGroupSpec(image="python:3.13-slim", files={"tests/test_task.py": body.task_data["question"]})
 
 
-class _AnswerReader(_Verifier):
-    verifier_executes_nothing = True
-
-
-class _OverriddenSeed(_AnswerReader):
-    """A server that builds its own seed reply and forgets the sandbox declaration."""
-
-    async def seed_session(self, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
-        return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
-
-
 class _Preparer(_Verifier):
     prepared: ClassVar[list[ResourcesPrepareSandboxRequest]] = []
 
@@ -118,28 +107,11 @@ def test_a_resources_server_that_declares_nothing_keeps_the_seed_reply_and_serve
     assert client.post(PREPARE_SANDBOX_PATH, json=PREPARE).status_code == 404
 
 
-def test_a_server_declares_the_group_its_hook_describes_and_no_verifier_opt_out() -> None:
+def test_a_server_declares_the_group_its_hook_describes() -> None:
     reply = _resources(_CodeVerifier).post("/seed_session", json=SEED).json()
 
     group = SandboxGroupSpec.model_validate(reply["sandbox_group"])
     assert (group.image, group.files, group.prepare) == ("python:3.13-slim", {"tests/test_task.py": "2+2"}, False)
-    # Not declared: an Environment Server keeps this verifier in a sandbox.
-    assert "verifier_executes_nothing" not in reply
-
-
-def test_a_verifier_that_executes_nothing_is_declared_on_the_seed_reply_without_a_group() -> None:
-    reply = _resources(_AnswerReader).post("/seed_session", json=SEED).json()
-
-    assert reply["verifier_executes_nothing"] is True
-    assert "sandbox_group" not in reply
-    assert ResourcesSeedSessionResponse.model_validate(reply).verifier_executes_nothing is True
-
-
-def test_a_seed_override_that_drops_the_declaration_declares_nothing() -> None:
-    reply = _resources(_OverriddenSeed).post("/seed_session", json=SEED).json()
-
-    # Fails closed: the verifier of a server whose seed reply drops the declaration cannot opt out.
-    assert ResourcesSeedSessionResponse.model_validate(reply).verifier_executes_nothing is False
 
 
 def test_a_server_that_prepares_the_group_declares_it_and_serves_the_prepare_route() -> None:
@@ -355,7 +327,7 @@ def _refusal(error: pytest.ExceptionInfo[NgFailureEvent]) -> tuple[str, bool]:
 def test_the_agent_and_the_verifier_each_borrow_the_group_unless_they_opt_out(
     opt_out: dict[str, bool], lends: tuple[bool, bool]
 ) -> None:
-    attempt = _server(sandbox_opt_out=opt_out).plan_attempt_sandbox(key="attempt/a", verifier_executes_nothing=True)
+    attempt = _server(sandbox_opt_out=opt_out).plan_attempt_sandbox(key="attempt/a")
 
     assert attempt is not None
     assert (attempt.key, (attempt.lend_to_agent, attempt.lend_to_verifier)) == ("attempt/a", lends)
@@ -364,7 +336,7 @@ def test_the_agent_and_the_verifier_each_borrow_the_group_unless_they_opt_out(
 
 def test_nothing_starts_when_both_opt_out_or_the_server_starts_no_sandboxes() -> None:
     both = _server(sandbox_opt_out={"task": True, "verifier": True})
-    assert both.plan_attempt_sandbox(key="a", verifier_executes_nothing=True) is None
+    assert both.plan_attempt_sandbox(key="a") is None
     assert _server(configured=False).plan_attempt_sandbox(key="a") is None
 
 
@@ -381,10 +353,6 @@ def test_nothing_starts_when_both_opt_out_or_the_server_starts_no_sandboxes() ->
                 "group": SandboxGroupSpec(sidecars=[SandboxGroupSidecar(name="db", image="db")]),
             },
             "this task has ['sidecar db']",
-        ),
-        (
-            {"opt_out": {"verifier": True}},
-            "'resources' does not declare that its verifier does (verifier_executes_nothing)",
         ),
         (
             {"configured": False, "group": SandboxGroupSpec(image="verifier:1")},
@@ -511,7 +479,7 @@ async def test_a_group_for_the_verifier_alone_starts_with_no_egress() -> None:
         global_config={"policy_model": {"responses_api_models": {"vllm_model": {"host": "10.0.0.5", "port": 8000}}}},
     )
 
-    await server.seed_attempt_sandbox(_request(), key="agent", verifier_executes_nothing=True)
+    await server.seed_attempt_sandbox(_request(), key="agent")
     task_opted_out = server.plan_attempt_sandbox(key="verifier").model_copy(update={"lend_to_agent": False})
     await server.verifier_sandbox_access(_request(), task_opted_out)
 
@@ -624,7 +592,7 @@ async def test_a_group_only_the_agent_borrowed_is_released_before_verify() -> No
     provider = _Provider()
     server = _server(provider, sandbox_opt_out={"verifier": True})
 
-    attempt, access = await server.seed_attempt_sandbox(_request(), key="a", verifier_executes_nothing=True)
+    attempt, access = await server.seed_attempt_sandbox(_request(), key="a")
 
     assert access.connection.descriptor["sandbox_id"] == "sb-1"
     assert await server.verifier_sandbox_access(_request(), attempt) is None
