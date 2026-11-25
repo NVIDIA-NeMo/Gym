@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
+import io
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -180,3 +184,75 @@ def test_musl_arm64_explains_unavailable_build(musl_sandbox: tuple[Path, dict[st
     assert "Node 22.19.0 musl build supports x86_64 only" in result.stderr
     assert not (root / "packages.log").exists()
     assert not (root / "download.log").exists()
+
+
+# A stand-in for Node: npm-cli.js install lays out the package and its bin link as npm does on Linux, and running a
+# script prints its contents, so the bin link prints the version it installed.
+FAKE_NODE = """#!/bin/bash
+echo "$*" >> "$TEST_ROOT/node.log"
+case "$1" in
+  --version) echo v22.19.0 ;;
+  */npm-cli.js)
+    prefix=$4
+    version=${!#}
+    package="$prefix/node_modules/@earendil-works/pi-coding-agent"
+    mkdir -p "$package/dist/bundle" "$prefix/node_modules/.bin"
+    echo "${version##*@}" > "$package/dist/bundle/cli.js"
+    [ "${TEST_NO_BIN_LINK:-0}" = 1 ] || ln -s ../@earendil-works/pi-coding-agent/dist/bundle/cli.js \\
+      "$prefix/node_modules/.bin/pi"
+    ;;
+  *) cat "$1" ;;
+esac
+"""
+
+
+def _add_executable(archive: tarfile.TarFile, name: str, body: str) -> None:
+    data = body.encode()
+    info = tarfile.TarInfo(f"node-v22.19.0-linux-x64/{name}")
+    info.size, info.mode = len(data), 0o755
+    archive.addfile(info, io.BytesIO(data))
+
+
+@pytest.fixture
+def downloads(sandbox: tuple[Path, dict[str, str]]) -> tuple[Path, dict[str, str]]:
+    """Serve a Node archive and its checksum from local files instead of nodejs.org."""
+    root, env = sandbox
+    for name in ("awk", "sha256sum", "tar", "gzip", "cat", "touch"):
+        executable = shutil.which(name)
+        if executable is None:
+            pytest.skip(f"Installer test requires {name}")
+        (root / "bin" / name).symlink_to(executable)
+    served = root / "served"
+    served.mkdir()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        _add_executable(archive, "bin/node", FAKE_NODE)
+        _add_executable(archive, "lib/node_modules/npm/bin/npm-cli.js", "")
+    (served / "node-v22.19.0-linux-x64.tar.gz").write_bytes(buffer.getvalue())
+    digest = hashlib.sha256(buffer.getvalue()).hexdigest()
+    (served / "SHASUMS256.txt").write_text(f"{digest}  node-v22.19.0-linux-x64.tar.gz\n")
+    curl = root / "bin/curl"
+    curl.write_text('#!/bin/bash\nfor last; do :; done\ncp "$TEST_ROOT/served/${4##*/}" "$last"\n')
+    curl.chmod(0o755)
+    return root, env
+
+
+@pytest.mark.skipif(platform.machine() != "x86_64", reason="The served Node archive is for x86_64")
+@pytest.mark.parametrize("bin_link", [True, False])
+def test_installer_checks_the_pinned_pi_through_its_bin_link(
+    downloads: tuple[Path, dict[str, str]], bin_link: bool
+) -> None:
+    # Pi 1.x moved its executable to dist/bundle/cli.js; the installer runs it through npm's .bin/pi link.
+    root, env = downloads
+    result = run_installer(root, env | {"TEST_NO_BIN_LINK": "0" if bin_link else "1"})
+    runtime = root / "runtime"
+    if bin_link:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines()[-1] == "0.80.2"
+        assert (runtime / "ready").exists()
+        # A task's npm config cannot turn the bin link off.
+        assert "--bin-links" in (root / "node.log").read_text().split()
+    else:
+        assert result.returncode != 0
+        assert not (runtime / "ready").exists()
+    assert f"{runtime}/pi/node_modules/.bin/pi --version" in (root / "node.log").read_text().splitlines()

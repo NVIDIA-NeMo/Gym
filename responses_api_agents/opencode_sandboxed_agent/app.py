@@ -1756,10 +1756,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         extra_env_str = " ".join(f"{k}={quote(v)}" for k, v in sorted(self._resolve_opencode_env(query).items()))
         # The environment of the first `opencode run`, reused unchanged by every idle-nudge resume: the extra env
-        # (`opencode_env`) and the required-MCP list (the plugin that fails the run when a required server is down).
-        required_mcp_str = (
-            f"NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))}"
-        )
+        # (`opencode_env`); the required-MCP list is added below, once the seeded servers are known.
         run_env_str = f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str}"
         unset_proxy_str = f"{UNSET_PROXY_ENV} && " if self.config.opencode_unset_proxy_env else ""
 
@@ -1804,6 +1801,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
+        seeded_mcp = getattr(request.state, "_ng_opencode_mcp", None)
+        required_mcp_servers = list(seeded_mcp) if isinstance(seeded_mcp, dict) else []
+        # The required-MCP list (the plugin that fails the run when a required server is down), also for every resume.
+        required_mcp_str = f"NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps(required_mcp_servers))}"
         agent_command = f"""
         {unset_proxy_str}{query_seed_str}{required_mcp_str} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} {run_env_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \

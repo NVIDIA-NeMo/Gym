@@ -12,6 +12,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from responses_api_agents.openclaw_agent.app import OpenClawAgentConfig
+from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_OPENCLAW_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -36,7 +37,7 @@ def test_the_overlay_over_the_shipped_config_is_an_openclaw_configuration_with_i
     config = _harness_config(overlay)
     # The prompt has no image, so only this key declares image input to the model.
     assert config.image_input is True
-    assert config.openclaw_version == "2026.6.11"
+    assert config.openclaw_version == DEFAULT_OPENCLAW_VERSION
     # The benchmark overlay lets each task's own budget apply; the training overlay caps an episode at 1800 s.
     assert config.timeout == (10800 if overlay == OVERLAYS[0] else 1800)
 

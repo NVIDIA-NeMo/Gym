@@ -44,14 +44,14 @@ def _private_install_prefix(monkeypatch, tmp_path):
 
 # Every (sys.platform, platform.machine()) pair we claim to support, mapped to the
 # archive nodejs.org actually publishes. Verified against
-# https://nodejs.org/dist/v24.21.0/SHASUMS256.txt.
+# https://nodejs.org/dist/v24.22.3/SHASUMS256.txt.
 SUPPORTED = [
-    ("linux", "x86_64", "node-v24.21.0-linux-x64.tar.xz"),
-    ("linux", "aarch64", "node-v24.21.0-linux-arm64.tar.xz"),
-    ("darwin", "x86_64", "node-v24.21.0-darwin-x64.tar.xz"),
-    ("darwin", "arm64", "node-v24.21.0-darwin-arm64.tar.xz"),
-    ("win32", "AMD64", "node-v24.21.0-win-x64.zip"),
-    ("win32", "ARM64", "node-v24.21.0-win-arm64.zip"),
+    ("linux", "x86_64", "node-v24.22.3-linux-x64.tar.xz"),
+    ("linux", "aarch64", "node-v24.22.3-linux-arm64.tar.xz"),
+    ("darwin", "x86_64", "node-v24.22.3-darwin-x64.tar.xz"),
+    ("darwin", "arm64", "node-v24.22.3-darwin-arm64.tar.xz"),
+    ("win32", "AMD64", "node-v24.22.3-win-x64.zip"),
+    ("win32", "ARM64", "node-v24.22.3-win-arm64.zip"),
 ]
 
 
@@ -124,17 +124,17 @@ class TestNodeDistUrl:
     @pytest.mark.parametrize(("sys_platform", "machine", "archive"), SUPPORTED)
     def test_builds_url_published_by_nodejs_org(self, fake_platform, sys_platform, machine, archive):
         fake_platform(sys_platform, machine)
-        assert setup_openclaw._node_dist_url("24.21.0") == f"https://nodejs.org/dist/v24.21.0/{archive}"
+        assert setup_openclaw._node_dist_url("24.22.3") == f"https://nodejs.org/dist/v24.22.3/{archive}"
 
     def test_windows_uses_zip_and_others_use_tar_xz(self, fake_platform):
         fake_platform("win32", "AMD64")
-        assert setup_openclaw._node_dist_url("24.21.0").endswith(".zip")
+        assert setup_openclaw._node_dist_url("24.22.3").endswith(".zip")
         fake_platform("linux", "x86_64")
-        assert setup_openclaw._node_dist_url("24.21.0").endswith(".tar.xz")
+        assert setup_openclaw._node_dist_url("24.22.3").endswith(".tar.xz")
 
     def test_machine_spelling_is_case_insensitive(self, fake_platform):
         fake_platform("linux", "X86_64")
-        assert "-linux-x64." in setup_openclaw._node_dist_url("24.21.0")
+        assert "-linux-x64." in setup_openclaw._node_dist_url("24.22.3")
 
     def test_version_is_interpolated(self, fake_platform):
         fake_platform("linux", "x86_64")
@@ -145,12 +145,12 @@ class TestNodeDistUrl:
     def test_unsupported_os_raises_actionable_error(self, fake_platform):
         fake_platform("freebsd14", "x86_64")
         with pytest.raises(RuntimeError, match="freebsd14"):
-            setup_openclaw._node_dist_url("24.21.0")
+            setup_openclaw._node_dist_url("24.22.3")
 
     def test_unsupported_arch_raises_actionable_error(self, fake_platform):
         fake_platform("linux", "riscv64")
         with pytest.raises(RuntimeError, match="riscv64"):
-            setup_openclaw._node_dist_url("24.21.0")
+            setup_openclaw._node_dist_url("24.22.3")
 
 
 class TestWindowsMachine:
@@ -213,7 +213,7 @@ class TestWindowsMachine:
         """End-to-end trap: x64-emulated interpreter on an ARM64 host must pick
         the arm64 zip, not the x64 zip its own image would suggest."""
         fake_platform("win32", "ARM64")
-        assert setup_openclaw._node_dist_url("24.21.0").endswith("node-v24.21.0-win-arm64.zip")
+        assert setup_openclaw._node_dist_url("24.22.3").endswith("node-v24.22.3-win-arm64.zip")
 
 
 class TestNodeBinDir:
@@ -235,41 +235,41 @@ class TestNodeBinDir:
 
 class TestExtractNodeArchive:
     def test_extracts_tar_xz(self, tmp_path):
-        payload = tmp_path / "node-v24.21.0-linux-x64" / "bin"
+        payload = tmp_path / "node-v24.22.3-linux-x64" / "bin"
         payload.mkdir(parents=True)
         (payload / "node").write_text("#!/bin/sh\n")
         archive = tmp_path / "node.tar.xz"
         with tarfile.open(archive, "w:xz") as tf:
-            tf.add(payload.parent, arcname="node-v24.21.0-linux-x64")
+            tf.add(payload.parent, arcname="node-v24.22.3-linux-x64")
 
         dest = tmp_path / "dest"
         dest.mkdir()
         setup_openclaw._extract_node_archive(archive, dest)
 
-        assert (dest / "node-v24.21.0-linux-x64" / "bin" / "node").is_file()
+        assert (dest / "node-v24.22.3-linux-x64" / "bin" / "node").is_file()
 
     def test_extracts_zip(self, tmp_path):
         archive = tmp_path / "node.zip"
         with zipfile.ZipFile(archive, "w") as zf:
-            zf.writestr("node-v24.21.0-win-x64/node.exe", "binary")
+            zf.writestr("node-v24.22.3-win-x64/node.exe", "binary")
 
         dest = tmp_path / "dest"
         dest.mkdir()
         setup_openclaw._extract_node_archive(archive, dest)
 
-        assert (dest / "node-v24.21.0-win-x64" / "node.exe").read_text() == "binary"
+        assert (dest / "node-v24.22.3-win-x64" / "node.exe").read_text() == "binary"
 
 
 class TestFlattenExtractedNode:
     def test_hoists_payload_into_prefix(self, tmp_path):
-        nested = tmp_path / "node-v24.21.0-darwin-arm64" / "bin"
+        nested = tmp_path / "node-v24.22.3-darwin-arm64" / "bin"
         nested.mkdir(parents=True)
         (nested / "node").write_text("x")
 
         setup_openclaw._flatten_extracted_node(tmp_path)
 
         assert (tmp_path / "bin" / "node").is_file()
-        assert not (tmp_path / "node-v24.21.0-darwin-arm64").exists()
+        assert not (tmp_path / "node-v24.22.3-darwin-arm64").exists()
 
     def test_raises_when_archive_layout_is_unexpected(self, tmp_path):
         (tmp_path / "unrelated").mkdir()
@@ -309,7 +309,7 @@ class TestResolveVersions:
     def test_default_node_satisfies_every_pinned_engine_range(self):
         """The default Node must satisfy every release in OPENCLAW_ENGINES_NODE."""
         for engines in setup_openclaw.OPENCLAW_ENGINES_NODE.values():
-            assert setup_openclaw._satisfies_range(setup_openclaw.DEFAULT_NODE_VERSION, engines)
+            assert setup_openclaw.node_satisfies_range(setup_openclaw.DEFAULT_NODE_VERSION, engines)
 
 
 class TestSatisfiesRange:
@@ -318,7 +318,7 @@ class TestSatisfiesRange:
     @pytest.mark.parametrize(
         ("node_version", "expected"),
         [
-            ("24.21.0", True),  # the default pin
+            (setup_openclaw.DEFAULT_NODE_VERSION, True),  # the default pin
             ("24.16.0", True),  # inclusive lower bound
             ("24.15.9", False),  # just below the 24-line bound
             ("25.9.0", False),  # between the two alternatives (25 has no build)
@@ -329,23 +329,43 @@ class TestSatisfiesRange:
     )
     def test_openclaw_engine_range(self, node_version, expected):
         assert (
-            setup_openclaw._satisfies_range(node_version, setup_openclaw.OPENCLAW_ENGINES_NODE["2026.9.4"]) is expected
+            setup_openclaw.node_satisfies_range(node_version, setup_openclaw.OPENCLAW_ENGINES_NODE["2026.9.4"])
+            is expected
         )
 
     def test_old_release_range(self):
         """openclaw 2026.6.11 declared '>=22.19.0' — 24.21.0 must still satisfy it."""
-        assert setup_openclaw._satisfies_range("24.21.0", ">=22.19.0")
-        assert not setup_openclaw._satisfies_range("22.15.0", ">=22.19.0")
+        assert setup_openclaw.node_satisfies_range("24.21.0", ">=22.19.0")
+        assert not setup_openclaw.node_satisfies_range("22.15.0", ">=22.19.0")
 
     def test_leading_v_is_accepted(self):
-        assert setup_openclaw._satisfies_range("v24.21.0", ">=22.19.0")
+        assert setup_openclaw.node_satisfies_range("v24.21.0", ">=22.19.0")
 
     def test_prerelease_suffix_is_ignored(self):
-        assert setup_openclaw._satisfies_range("24.21.0-rc.1", ">=22.19.0")
+        assert setup_openclaw.node_satisfies_range("24.21.0-rc.1", ">=22.19.0")
 
     def test_wildcard_operand(self):
-        assert setup_openclaw._satisfies_range("22.9.0", ">=22.x")
-        assert not setup_openclaw._satisfies_range("21.9.0", ">=22.x")
+        assert setup_openclaw.node_satisfies_range("22.9.0", ">=22.x")
+        assert not setup_openclaw.node_satisfies_range("21.9.0", ">=22.x")
+
+    @pytest.mark.parametrize(
+        ("node_range", "inside", "outside"),
+        [
+            ("^24.16.0", "24.22.3", "25.0.0"),
+            ("^24.16.0", "24.16.0", "24.15.9"),
+            ("~24.16.0", "24.16.9", "24.17.0"),
+            ("~24", "24.99.0", "25.0.0"),
+            ("^0.2.3", "0.2.9", "0.3.0"),
+            ("^0.0.3", "0.0.3", "0.0.4"),
+        ],
+    )
+    def test_caret_and_tilde_follow_npm(self, node_range, inside, outside):
+        assert setup_openclaw.node_satisfies_range(inside, node_range)
+        assert not setup_openclaw.node_satisfies_range(outside, node_range)
+
+    def test_hyphen_range_is_refused(self):
+        with pytest.raises(ValueError, match="hyphen"):
+            setup_openclaw.node_satisfies_range("24.22.3", "22 - 25")
 
 
 class _FakeExecutables:
@@ -772,6 +792,26 @@ class TestRealPathSelection:
         setup_openclaw.ensure_openclaw("2026.6.11", node_bin_dir=str(deps))
 
         assert os.environ["PATH"] == path
+
+    @pytest.mark.parametrize(("node", "reinstalled"), [("v22.19.0", True), ("v24.22.3", False)])
+    def test_matching_launcher_is_kept_only_on_a_supported_node(self, monkeypatch, tmp_path, node, reinstalled):
+        """2026.11.5 prints its version on Node 22 but refuses `onboard` and `agent`, so the version alone is not enough."""
+        existing = tmp_path / "existing" / "bin"
+        _script(existing / "node", f"echo {node}")
+        _script(existing / "openclaw", "echo 2026.11.5")
+        monkeypatch.setenv("PATH", os.pathsep.join([str(existing), "/usr/bin:/bin"]))
+        installed = []
+
+        def install(requested, node_bin_dir):
+            installed.append(requested)
+            return str(existing / "openclaw")
+
+        monkeypatch.setattr(setup_openclaw, "_install_openclaw", install)
+        monkeypatch.setattr(setup_openclaw, "record_install", lambda *args, **kwargs: None)
+
+        setup_openclaw.ensure_openclaw("2026.11.5")
+
+        assert installed == (["2026.11.5"] if reinstalled else [])
 
 
 def _first_local_call(results) -> None:
