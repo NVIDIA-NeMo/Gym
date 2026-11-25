@@ -447,6 +447,8 @@ async def test_setup_failure_keeps_real_sandbox_owned_until_cleanup(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *_args: provider)
     monkeypatch.setattr(module, "resolve_provider_metadata", lambda *_args: {})
+    # The agent sandbox is made on the provider every task sandbox shares.
+    monkeypatch.setattr(DeepsweExternal1ResourcesServer, "shared_provider", lambda self: provider)
 
     async def run() -> None:
         if phase == "agent":

@@ -7,22 +7,29 @@ The server serves two kinds of seed. An Environment Server such as ``single_agen
 with a ``ResourcesSeedSessionRequest`` and hands the agent sandbox to the agent through ``sandbox_access``; the
 session lifecycle (verify once, close, expiry, shutdown) is ``SandboxSessionResourcesServer``'s. An agent that runs
 the episode itself through ``/run`` seeds with the flat task row and gets the sandbox handle back.
+
+Episode sessions take part in partial-rollout checkpoints (``CheckpointedSandboxSessionResourcesServer``): a commit
+snapshots the agent sandbox, and a restore forks it for the attempt that replaces the one the checkpoint saved. The
+seed's task row holds the whole task, so a restore rebuilds it from the saved seed. Verify saves the patch it collected
+as a JSON value, so a verify run again after a restore grades the saved patch. An agent-run seed is not exported: its
+episode starts over after a crash. Golden- and null-patch validation seed no sessions and run ``restart_only``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+from base64 import b64decode, b64encode
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 from shutil import rmtree
 from time import monotonic
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import BaseModel, BeforeValidator, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, JsonValue, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -38,6 +45,7 @@ from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseVerifyRequest,
+    CheckpointMode,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -45,6 +53,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
     ReverifyMode,
+    StepType,
     lost_session_verification,
     reject_partial_typed_seed,
 )
@@ -59,6 +68,11 @@ from resources_servers.deepswe.app import (
 from resources_servers.deepswe.task_store import task_sandbox_resources
 from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.task_data import TaskData
+from resources_servers.swebench.repo_task_sessions import _with_network_policy
+from resources_servers.swebench.sandbox_session_checkpoints import (
+    CheckpointedSandboxSessionResourcesServer,
+    SandboxCheckpointFields,
+)
 from resources_servers.swebench.sandbox_sessions import STOP_TIMEOUT_S, SandboxSessionResourcesServer
 
 
@@ -133,7 +147,21 @@ python3 --version
 """
 
 
-class DeepsweExternal1ResourcesServerConfig(BaseResourcesServerConfig):
+def saved_capture(agent_sandbox_id: str | None, model_patch: bytes) -> dict[str, JsonValue]:
+    """What ``/verify`` passes to ``capture_task_sandbox_patch``: the capture as a JSON value a checkpoint can store.
+
+    ``agent_sandbox_id`` names the sandbox the patch was collected from. The patch is kept in base64: the output of
+    ``git diff --binary`` need not be UTF-8, and a verify after a restore must grade the same bytes.
+    """
+    return {"agent_sandbox_id": agent_sandbox_id, "model_patch_base64": b64encode(model_patch).decode("ascii")}
+
+
+def loaded_capture(saved: dict[str, Any]) -> tuple[str | None, bytes]:
+    """The agent sandbox ID and the patch that ``saved_capture`` stored."""
+    return saved["agent_sandbox_id"], b64decode(saved["model_patch_base64"], validate=True)
+
+
+class DeepsweExternal1ResourcesServerConfig(SandboxCheckpointFields, BaseResourcesServerConfig):
     REVERIFY_MODE = ReverifyMode.UNSUPPORTED
 
     is_verifying_golden_patch: bool = False
@@ -183,21 +211,48 @@ class SeededAgentSandbox:
     descriptor: dict[str, Any]
 
 
-class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionResourcesServer):
+class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, CheckpointedSandboxSessionResourcesServer):
     """Reuse DeepSWE collection/grading with self-contained task rows.
 
     Agent sandboxes of both kinds of seed live in ``_session_id_to_sandbox``, so verify, close and shutdown stop
     them. Only an episode session also expires after the sandbox's ``ttl_s``; an agent-run seed that never reaches
     verify keeps its sandbox until a re-seed or shutdown, and the provider reclaims it after ``ttl_s``. Golden- and
     null-patch validation start and stop their own sandboxes and hold no session.
+
+    Agent sandboxes run on the provider every task sandbox shares (``new_task_sandbox``), so an episode session's
+    sandbox takes part in checkpoints; verifier sandboxes are not session state and keep a provider of their own.
     """
 
     config: DeepsweExternal1ResourcesServerConfig
+    # A restore rebuilds the session's task from the saved seed's row, which holds the whole task.
+    task_model: ClassVar[type[BaseModel]] = TaskData
+    # The patch is collected once per session, inside ``capture_task_sandbox_patch``, and the agent sandbox is stopped
+    # only through ``_stop_task_sandbox``; both hold the lock a commit holds while it snapshots the sandbox. A verify
+    # repeated after a restore grades the saved patch.
+    checkpoint_verify: ClassVar[StepType] = "replay"
 
     def model_post_init(self, context: Any, /) -> None:
         # Skip DeepSWE's initialization, which loads its filesystem task store: these rows carry their whole task.
-        SandboxSessionResourcesServer.model_post_init(self, context)
+        CheckpointedSandboxSessionResourcesServer.model_post_init(self, context)
         self._seeded_agent_sandboxes: dict[str, SeededAgentSandbox] = {}
+
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        # Golden- and null-patch validation seed no episode sessions, so they have nothing to checkpoint.
+        if self.config.is_verifying_golden_patch or self.config.is_verifying_null_patch:
+            return "restart_only"
+        return super().checkpoint_mode_in_effect()
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        """Restore as the base does, forking each agent sandbox with this job's egress rule.
+
+        The saved rule allows the host of ``sandbox_model_server`` in the job that took the checkpoint. A job
+        resubmitted on other nodes serves its model from another host, which that rule would block for the rest of
+        the episode.
+        """
+        policy = self._provider_options(phase="agent").get("network_policy")
+        if policy is not None:
+            states = {session_id: _with_network_policy(state, policy) for session_id, state in states.items()}
+        await super().restore_session_states(states)
 
     async def close_resources_session(
         self, request: Request, body: ResourcesCloseSessionRequest
@@ -244,10 +299,12 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
             resources=SandboxResources.from_mapping(resources),
             provider_options=self._provider_options(phase=phase),
         )
-        sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config))
         # Register before startup awaits so cancelled setup remains reachable by session cleanup.
         if session_id is not None:
-            self._session_id_to_sandbox[session_id] = sandbox
+            # On the provider every task sandbox shares, and registered for the session and its checkpoints.
+            sandbox = self.new_task_sandbox(session_id, spec)
+        else:
+            sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config))
         if verifier_session_id is not None:
             self._verifier_sandboxes[verifier_session_id] = sandbox
 
@@ -400,12 +457,16 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
         """Return the ID of the agent sandbox the session seeded, or raise when it does not match the verify task.
 
         The shared base already matched an episode session's verify task against its seed. Its retry may find the
-        sandbox stopped and return ``None``; the saved capture then holds the sandbox's ID.
+        sandbox stopped and return ``None``; the saved capture then holds the sandbox's ID. A session a restore
+        installed continues in the fork of the checkpoint's snapshot, which no seed here recorded: its ID is the fork's.
         """
         seeded = self._seeded_agent_sandboxes.get(session_id)
         record = self._task_sessions.get(session_id)
         if record is not None and record.seed is not None:
-            return seeded.sandbox_id if seeded is not None else None
+            if seeded is not None:
+                return seeded.sandbox_id
+            restored = self._session_id_to_sandbox.get(session_id)
+            return restored.sandbox_id if restored is not None else None
         if seeded is None or session_id not in self._session_id_to_sandbox:
             raise SessionMismatchError("No seeded agent sandbox exists for this session")
         if seeded.task_id != task.data.task_id or seeded.image != task.data.image:
@@ -513,14 +574,15 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
                     started = monotonic()
                     seeded_id = agent_id
 
-                    async def capture() -> tuple[str | None, bytes]:
+                    async def capture() -> dict[str, JsonValue]:
                         sandbox = self._session_id_to_sandbox[session_id]
-                        return seeded_id, await self._collect_model_patch(sandbox, task)
+                        return saved_capture(seeded_id, await self._collect_model_patch(sandbox, task))
 
                     # An episode session keeps the capture with its sandbox's ID, so a verify cancelled after it
                     # reports the same sandbox and patch on retry. A failed stop below is masked instead, and that
-                    # verdict is the one a retry replays.
-                    agent_id, model_patch = await self.capture_task_sandbox_patch(session_id, capture)
+                    # verdict is the one a retry replays. The capture is saved as a JSON value, so a checkpoint can
+                    # export it and a verify after a restore grades the saved patch.
+                    agent_id, model_patch = loaded_capture(await self.capture_task_sandbox_patch(session_id, capture))
                     collect_time = monotonic() - started
                 finally:
                     for attempt in range(2):

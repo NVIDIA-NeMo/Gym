@@ -54,6 +54,10 @@ through `sandbox_access`, and after the agent closes grades the committed patch 
 fresh verifier. Rows reach it through the `deepswe_external1` taskset. An episode
 session is verified once; an identical retry replays the verdict, and a verify after
 close is masked as a lost session. Close stops the agent sandbox if verify did not.
+With partial-rollout checkpoints on and a sandbox provider that can snapshot, a commit
+snapshots the agent sandbox and a restore continues the episode in a fork of it; a
+verify after the restore grades the patch collected before the crash, if there was one.
+Agent-run seeds and golden- or null-patch validation start over after a crash.
 
 `deepswe_external1_opencode_legacy_agent.yaml` is deprecated. It runs
 `opencode_sandboxed_agent` through the `legacy_agent` relay, which seeds with the flat
