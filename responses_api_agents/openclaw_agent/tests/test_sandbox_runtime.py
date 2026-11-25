@@ -36,7 +36,7 @@ X86_64_GLIBC = SandboxPlatform("x86_64", "gnu", 36)
 # Stands in for node on every test host: it reports the pinned version, plays npm, and does what the installer's
 # two JavaScript snippets do. The snippets themselves run under a real node in the tests that require one.
 _FAKE_NODE = r"""
-import errno, json, os, sys, time
+import errno, json, os, subprocess, sys, time
 from pathlib import Path
 
 LOGGED = ("NPM_CONFIG_", "OPENCLAW_", "STATE_DIRECTORY", "TMPDIR", "NODE_COMPILE_CACHE")
@@ -59,6 +59,9 @@ elif args[0].endswith("npm-cli.js") and args[1] == "install":
     sys.exit(int(os.environ.get("FAKE_NPM_EXIT", "0")))
 elif args[0].endswith("npm-cli.js"):
     sys.exit(int(os.environ.get("FAKE_NPM_EXIT", "0")))
+elif args[0] == "-e" and "spawnSync" in args[1]:
+    env = {name: value for name, value in os.environ.items() if not name.lower().startswith("npm_config_")}
+    sys.exit(subprocess.run([sys.executable, sys.argv[0], *args[2:]], env=env).returncode)
 elif args[0] == "-e" and "renameSync" in args[1]:
     try:
         os.rename(args[2], args[3])
@@ -709,12 +712,123 @@ def test_the_installer_keeps_openclaw_out_of_directories_the_task_names(image) -
     assert [call["argv"][0].rsplit("/", 1)[-1] for call in calls] == ["npm-cli.js", "openclaw.mjs"]
     for call in calls:
         assert call["home"] == f"{setup}/home"
-        assert call["env"] == {
-            "npm_config_cache": f"{setup}/cache/npm",
-            "TMPDIR": f"{setup}/tmp",
-            "NODE_COMPILE_CACHE": f"{setup}/cache/node-compile",
-        }
+        assert call["env"] == {"TMPDIR": f"{setup}/tmp", "NODE_COMPILE_CACHE": f"{setup}/cache/node-compile"}
     assert _tree(image.workdir) == [] and _tree(image.home) == []
+
+
+def test_the_installer_rebuilds_without_the_npm_settings_of_the_task(image) -> None:
+    """Whatever spelling the image uses; npm reads npm_config_* in any case."""
+    setup = _setup(image, _fake_node(image))
+    task_env = {
+        "npm_config_ignore_scripts": "true",
+        "NPM_CONFIG_GLOBAL": "true",
+        "Npm_Config_Userconfig": str(image.workdir / "npmrc"),
+        "FAKE_NODE_LOG": str(image.log),
+    }
+
+    done = _install(image, setup, task_env)
+
+    assert done.returncode == 0, done.stderr
+    (rebuild,) = _npm(image.log, "rebuild")
+    assert rebuild["env"] == {"TMPDIR": f"{setup}/tmp", "NODE_COMPILE_CACHE": f"{setup}/cache/node-compile"}
+    argv = rebuild["argv"]
+    # The settings the rebuild depends on are also given, and every file npm reads or writes is private.
+    assert {"--ignore-scripts=false", "--global=false", "--location=project", "--offline"} <= set(argv)
+    for option, path in (
+        ("--prefix", "runtime/openclaw"),
+        ("--cache", "cache/npm"),
+        ("--userconfig", "user-npmrc"),
+        ("--globalconfig", "global-npmrc"),
+    ):
+        assert argv[argv.index(option) + 1] == f"{setup}/{path}"
+
+
+def _real_npm(image, install_script: str) -> Path:
+    """A setup directory whose npm is the host's and whose package needs its install script to have run."""
+    npm = shutil.which("npm")
+    cli = Path(npm).resolve() if npm else None
+    node = shutil.which("node")
+    if node is None or cli is None or cli.name != "npm-cli.js":
+        pytest.skip("needs node and an npm whose launcher is npm-cli.js")
+    archive = image.root / "real-npm.tar.gz"
+    _node_archive(
+        archive,
+        "linux-x64",
+        node=f'#!/bin/sh\nexec {shlex.quote(node)} "$@"\n',
+        npm=f"require({json.dumps(str(cli))});\n",
+    )
+    setup = image.root / "rt.setup-direct"
+    setup.mkdir()
+    shutil.copy(archive, setup / "node.tar.gz")
+    package = "openclaw/node_modules/openclaw"
+    cli_needs_the_install_script = (
+        'import { existsSync } from "node:fs";\n'
+        'if (!existsSync(new URL("./installed.marker", import.meta.url))) {\n'
+        '  console.error("the install script did not run");\n'
+        "  process.exit(1);\n"
+        "}\n"
+        'console.log("OpenClaw CLI");\n'
+    )
+    with tarfile.open(setup / "openclaw.tar.gz", "w:gz") as tar:
+        _add(tar, "openclaw/package.json", json.dumps({"private": True, "dependencies": {"openclaw": VERSION}}))
+        manifest = {"name": "openclaw", "version": VERSION, "scripts": {"install": "node install.js"}}
+        _add(tar, f"{package}/package.json", json.dumps(manifest))
+        _add(tar, f"{package}/install.js", install_script)
+        _add(tar, f"{package}/openclaw.mjs", cli_needs_the_install_script)
+    return setup
+
+
+_WRITES_MARKER = 'require("node:fs").writeFileSync("installed.marker", "ok");\n'
+
+
+@pytest.mark.parametrize(
+    "task_env",
+    [
+        {},
+        {"npm_config_ignore_scripts": "true"},
+        {"NPM_CONFIG_GLOBAL": "true"},
+        {"npm_config_ignore_scripts": "true", "npm_config_global": "true", "npm_config_dry_run": "true"},
+        {"npm_config_script_shell": "/missing-shell"},
+    ],
+    ids=["no_settings", "ignore_scripts", "global", "all", "script_shell"],
+)
+def test_install_scripts_run_under_real_npm_whatever_npm_settings_the_task_has(image, task_env) -> None:
+    setup = _real_npm(image, _WRITES_MARKER)
+    # An npmrc of the task, which the private HOME and the given config files keep npm from reading. No option of
+    # the rebuild overrides this setting, so reading the file would fail the install script.
+    (image.home / ".npmrc").write_text("script-shell=/missing-shell\n")
+
+    done = _install(image, setup, task_env)
+
+    assert done.returncode == 0, done.stderr
+    # The CLI check before publication fails without the file the install script writes.
+    assert (image.runtime / "openclaw/node_modules/openclaw/installed.marker").read_text() == "ok"
+    assert not setup.exists()
+    assert _tree(image.home) == [".npmrc"]
+
+
+def test_the_installer_needs_no_tool_beyond_the_ones_it_names(image) -> None:
+    """Bash, tar with gzip, mkdir and rm, and the sh npm runs install scripts with: for one, no env."""
+    setup = _real_npm(image, _WRITES_MARKER)
+    tools = image.root / "tools"
+    tools.mkdir()
+    for tool in ("bash", "sh", "tar", "gzip", "mkdir", "rm"):
+        (tools / tool).symlink_to(shutil.which(tool))
+
+    done = _install(image, setup, {"PATH": str(tools), "npm_config_ignore_scripts": "true"})
+
+    assert done.returncode == 0, done.stderr
+    assert (image.runtime / "openclaw/node_modules/openclaw/installed.marker").read_text() == "ok"
+
+
+def test_a_failing_install_script_under_real_npm_publishes_nothing(image) -> None:
+    setup = _real_npm(image, 'console.error("install script failed"); process.exit(7);\n')
+
+    done = _install(image, setup, {"npm_config_ignore_scripts": "true", "npm_config_global": "true"})
+
+    assert done.returncode != 0
+    assert "install script failed" in done.stderr + done.stdout
+    assert not image.runtime.exists() and not setup.exists()
 
 
 def test_the_installer_never_publishes_a_runtime_that_holds_another_version(image, node_archive) -> None:

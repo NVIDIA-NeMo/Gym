@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Publishes an OpenClaw runtime that sandbox_runtime.py prepared on the Agent Server host. Runs in the task sandbox
-# and needs only bash, tar with gzip, mkdir and rm: no network, no root and no package manager.
+# and needs only bash, tar with gzip, mkdir and rm to install: no network, no root and no package manager. The
+# image must hold the shared libraries the official Node.js build links to, such as libstdc++.so.6.
 #
 # usage: install_uploaded_openclaw_runtime.sh RUNTIME_DIR SETUP_DIR OPENCLAW_VERSION
 #
@@ -20,7 +21,6 @@ trap 'rm -rf "$setup_dir"' EXIT
 # npm, OpenClaw's install script and the CLI write under HOME, their caches and the temporary directory; keep them
 # out of the task's files.
 export HOME=$setup_dir/home
-export npm_config_cache=$setup_dir/cache/npm
 export XDG_CACHE_HOME=$setup_dir/cache
 export XDG_CONFIG_HOME=$setup_dir/config
 export TMPDIR=$setup_dir/tmp
@@ -36,9 +36,21 @@ tar --no-same-owner -xzf "$setup_dir/openclaw.tar.gz" -C "$fresh"
 node=$fresh/node/bin/node
 "$node" --version
 # The host installed the packages for this platform without running their install scripts. Run them here, on the
-# platform they are for; --offline fails a script's package fetch instead of reaching for the network.
-PATH="$fresh/node/bin:$PATH" "$node" "$fresh/node/lib/node_modules/npm/bin/npm-cli.js" rebuild \
-  --prefix "$fresh/openclaw" --offline --no-update-notifier
+# platform they are for. A task image's npm settings must not steer this: one that skipped the scripts, or rebuilt
+# another tree, would still be published. So npm starts without the image's npm_config_* variables, which npm
+# reads in any letter case, no npmrc file is read, and the settings the rebuild depends on are given. --offline
+# keeps npm itself from fetching packages; whether an install script can reach the network is up to the sandbox's
+# network policy.
+without_npm_settings='const { spawnSync } = require("node:child_process");
+const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^npm_config_/i.test(name)));
+const done = spawnSync(process.execPath, process.argv.slice(1), { env, stdio: "inherit" });
+if (done.error) throw done.error;
+process.exit(done.status ?? 1);'
+PATH="$fresh/node/bin:$PATH" "$node" -e "$without_npm_settings" \
+  "$fresh/node/lib/node_modules/npm/bin/npm-cli.js" rebuild \
+  --prefix "$fresh/openclaw" --ignore-scripts=false --global=false --location=project --offline \
+  --cache "$setup_dir/cache/npm" --userconfig "$setup_dir/user-npmrc" --globalconfig "$setup_dir/global-npmrc" \
+  --no-update-notifier
 declared_version='const declared = require(process.argv[1]).version;
 if (declared !== process.argv[2]) {
   throw Error("OpenClaw version mismatch: the runtime holds " + declared + ", not " + process.argv[2]);

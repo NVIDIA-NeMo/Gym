@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """OpenClaw's sandbox runtime, prepared on the Agent Server host and uploaded into the task sandbox.
 
-With ``sandbox_runtime_upload`` the sandbox needs only Bash, ``tar`` and ``gzip``: no network, no root, no package
-manager and no ``curl``. For each sandbox platform the host downloads the pinned Node.js build and checks its
+With ``sandbox_runtime_upload`` installing needs only Bash, ``tar`` and ``gzip`` in the sandbox: no network, no
+root, no package manager and no ``curl``. The image must hold the shared libraries the official Node.js build links
+to, such as ``libstdc++.so.6``. For each sandbox platform the host downloads the pinned Node.js build and checks its
 SHA-256, then installs ``openclaw`` for that platform with that build's own npm, the one the in-sandbox installer
 would run. The package tree is not portable: npm selects per-platform packages that hold prebuilt binaries, so
 ``--os``, ``--cpu`` and ``--libc`` name the sandbox, never the host, and no install script runs on the host. Both
@@ -16,8 +17,9 @@ Only glibc sandboxes are supported. A musl sandbox is refused: the in-sandbox in
 runtime its Node.js build needs, as root, and nothing is installed into the image here.
 
 In the sandbox, ``install_uploaded_openclaw_runtime.sh`` unpacks both archives in a private directory, runs the
-packages' install scripts there with ``npm rebuild --offline``, checks that the CLI runs and renames the runtime
-into place in one step, so a concurrent seed never sees a partial runtime.
+packages' install scripts there with ``npm rebuild --offline``, which the task image's npm settings do not reach,
+checks that the CLI runs and renames the runtime into place in one step, so a concurrent seed never sees a partial
+runtime.
 """
 
 import asyncio

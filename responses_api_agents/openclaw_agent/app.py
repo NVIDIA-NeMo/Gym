@@ -590,8 +590,9 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
         default=False,
         description=(
             "Prepare the runtime on the agent server host for the sandbox's platform and upload it, instead of "
-            "downloading it inside the sandbox. The sandbox then needs only `bash`, `tar` and `gzip`: no network, no "
-            "root and no package manager. Cannot be combined with `sandbox_runtime_dir`."
+            "downloading it inside the sandbox. Installing then needs only `bash`, `tar` and `gzip` in the sandbox: "
+            "no network, no root and no package manager. The image must hold the shared libraries the official "
+            "Node.js build links to, such as `libstdc++.so.6`. Cannot be combined with `sandbox_runtime_dir`."
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)

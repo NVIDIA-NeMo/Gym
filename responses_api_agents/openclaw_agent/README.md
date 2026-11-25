@@ -200,8 +200,10 @@ openclaw_agent:
       sandbox_runtime_upload: true
 ```
 
-It is off by default, and the in-sandbox installer stays the default. With it on, the sandbox needs only Bash,
-`tar` and `gzip`, and a `/tmp` its user can write: no `curl`, no network, no root and no package manager.
+It is off by default, and the in-sandbox installer stays the default. With it on, installing needs only Bash,
+`tar` and `gzip` in the sandbox, and a `/tmp` its user can write: no `curl`, no network, no root and no package
+manager. Running is another matter: the image must hold the shared libraries the official Node.js build links to,
+such as `libstdc++.so.6`, as it must for the in-sandbox installer. Setup cannot add them.
 
 - **Host.** On the first seed for a sandbox platform, the Agent Server host downloads the pinned Node 22.19.0 build
   for that platform and checks it against a SHA-256 pinned in `sandbox_runtime.py`. It then installs
@@ -235,8 +237,10 @@ Platform limits:
   of the sandbox's architecture. Otherwise the pinned Node 22.19.0 build for the host is downloaded too, on macOS
   and glibc Linux, x86_64/arm64. So a macOS/arm64 host can prepare a Linux x86_64 runtime. On any other host, such
   as Windows or musl Linux, the seed fails with an error that names the cache directory to fill.
-- **Packages:** an install script that compiles or downloads fails in the sandbox instead of producing a runtime
-  that differs from the in-sandbox one. No script of 2026.6.11 does either on the supported platforms.
+- **Packages:** the install scripts run in the sandbox whatever npm settings the task image carries: its
+  `npm_config_*` variables and npmrc files do not apply to the rebuild. `--offline` keeps npm itself from fetching
+  packages. It does not keep an install script from making network calls of its own; whether a script can download
+  depends on the sandbox's network policy. No script of 2026.6.11 compiles or downloads on the supported platforms.
 
 The runner uses ordinary sandbox `exec`; no PTY/session API is required. Its internal deadline
 leaves time for harness termination before the provider deadline. Session close requests a stop and
