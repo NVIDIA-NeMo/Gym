@@ -95,13 +95,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.config import OwnerConcurrency, resolve_provider_config, resolve_provider_owner_concurrency
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
     SandboxProvider,
@@ -147,8 +148,10 @@ class SandboxCheckpointConfig(BaseModel):
     parallelism: int = Field(
         default=16,
         ge=1,
-        description="Concurrent snapshot submits, creates, stops and deletes against the sandbox backend. "
-        "Readiness waits are not counted: a commit waits for every snapshot at once.",
+        description="Concurrent snapshot submits and deletes against the sandbox backend. "
+        "Readiness waits are not counted: a commit waits for every snapshot at once. "
+        "A server's self.sandboxes takes its start and stop limits from the provider block's owner_concurrency; "
+        "an instance built with OwnedSandboxes.from_config bounds starts and stops by this value too.",
     )
     snapshot_attempts: int = Field(
         default=3,
@@ -404,10 +407,80 @@ class _SnapshotIndex:
             os.close(descriptor)
 
 
+def _optional_semaphore(limit: int | None) -> asyncio.Semaphore | None:
+    return asyncio.Semaphore(limit) if limit is not None else None
+
+
+def _settle_s(spec: SandboxSpec) -> float:
+    """How long a cancelled caller waits for the provider to return a handle."""
+    return (spec.ready_timeout_s or 0) + STOP_TIMEOUT_S
+
+
+async def _wait_through_cancellation(*futures: asyncio.Future[Any], timeout_s: float) -> None:
+    """Wait for the first completion or the deadline, including through repeated cancellation of the caller."""
+    deadline = time.monotonic() + timeout_s
+    with anyio.CancelScope(shield=True):
+        # A repeatedly cancelled gather can interrupt even a wait on an already completed fork.
+        while not any(future.done() for future in futures) and (remaining := deadline - time.monotonic()) > 0:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait(futures, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                return
+
+
+async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, snapshot_id: str | None = None) -> None:
+    """On cancellation, wait for a provider handle so the owner can stop it, then interrupt any file upload."""
+    handle_ready: asyncio.Future[AsyncSandbox] = asyncio.get_running_loop().create_future()
+    start = asyncio.create_task(sandbox.start(snapshot_id=snapshot_id, take_ownership=handle_ready.set_result))
+    try:
+        await asyncio.shield(start)
+    except asyncio.CancelledError:
+        # Cutting short the provider create can leave a sandbox without a handle to stop. Some providers
+        # (including Enroot) do not enforce ttl_s. Give the provider a bounded chance to return its handle.
+        await _wait_through_cancellation(handle_ready, start, timeout_s=settle_s)
+        if not start.done():
+            start.cancel()
+            await _wait_through_cancellation(start, timeout_s=STOP_TIMEOUT_S)
+        if start.done() and not start.cancelled() and start.exception() is not None:
+            # Retrieved so it is not reported as never retrieved; the caller's cancellation is what goes on.
+            LOGGER.info("a cancelled caller's start failed: %r", start.exception())
+        raise
+
+
 @dataclass
 class _Entry:
     sandbox: AsyncSandbox
     spec: SandboxSpec
+    # False while a create starts the sandbox, and for good if its start failed and its stop failed too: such an
+    # entry stays tracked, so a stop or aclose stops it, but get, in, access and export pass it over.
+    ready: bool = True
+
+
+@dataclass
+class _KeyLock:
+    lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+class _KeyLocks:
+    """One lock per key, which exists only while someone holds it or waits for it."""
+
+    def __init__(self) -> None:
+        self._locks: dict[str, _KeyLock] = {}
+
+    @contextlib.asynccontextmanager
+    async def locked(self, key: str) -> AsyncIterator[None]:
+        entry = self._locks.setdefault(key, _KeyLock())
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users == 0:
+                del self._locks[key]
+
+    def __len__(self) -> int:
+        return len(self._locks)
 
 
 class OwnedSandboxes:
@@ -417,7 +490,10 @@ class OwnedSandboxes:
     directly. ``state_dir`` and ``server_name`` place the snapshot index at ``<state_dir>/<server_name>/snapshots``;
     see the module docstring for what ``state_dir`` must be. Without a ``state_dir``, for a server whose checkpointing
     is off, sandboxes are tracked and stopped but cannot be exported. ``parallelism`` bounds concurrent snapshot
-    submits, creates, stops and deletes against the backend; size it with the commit deadline.
+    submits and deletes against the backend; size it with the commit deadline. ``max_concurrent_starts`` bounds
+    concurrent starts and forks, and ``max_concurrent_stops`` concurrent stops, each unbounded by default, so a server
+    that seeds hundreds of episodes at once starts all of their sandboxes at once, and a stop never waits behind
+    starts. A server sets both per provider with its block's ``owner_concurrency``.
     ``provider_config_ref`` names the provider's config block, which :meth:`access` hands to a borrower.
     With ``owns_provider``, :meth:`aclose` closes the provider too; otherwise the caller that made it closes it.
     ``provider_field`` names the server's config field for a provider other than its ``sandbox_provider``, which gets
@@ -435,8 +511,11 @@ class OwnedSandboxes:
         snapshot_retry_delay_s: float = 5.0,
         provider_config_ref: str | None = None,
         owns_provider: bool = False,
+        max_concurrent_starts: int | None = None,
+        max_concurrent_stops: int | None = None,
         provider_field: str | None = None,
     ) -> None:
+        concurrency = OwnerConcurrency(starts=max_concurrent_starts, stops=max_concurrent_stops)
         config = SandboxCheckpointConfig(
             parallelism=parallelism,
             snapshot_attempts=snapshot_attempts,
@@ -457,6 +536,12 @@ class OwnedSandboxes:
         self._snapshot_attempts = config.snapshot_attempts
         self._snapshot_retry_delay_s = config.snapshot_retry_delay_s
         self._semaphore = asyncio.Semaphore(config.parallelism)
+        self._start_limit = _optional_semaphore(concurrency.starts)
+        self._stop_limit = _optional_semaphore(concurrency.stops)
+        # Held by a create, a stop, an export and a restore of one key, so an export never snapshots a sandbox that is
+        # still starting or being stopped, a stop waits for the key's restore and then stops its fork, and each waits
+        # for nothing but its own keys.
+        self._key_locks = _KeyLocks()
         self._entries: dict[str, _Entry] = {}
         self._index: _SnapshotIndex | None = None
         self._state_dir_id: str | None = None
@@ -489,8 +574,19 @@ class OwnedSandboxes:
         state_dir: str | os.PathLike[str] | None,
         server_name: str,
     ) -> "OwnedSandboxes":
-        """Build an instance from a server's ``SandboxCheckpointConfig``; the rest as in the constructor."""
-        return cls(provider, state_dir=state_dir, server_name=server_name, **config.model_dump())
+        """Build an instance from a server's ``SandboxCheckpointConfig``; the rest as in the constructor.
+
+        ``parallelism`` also bounds its starts, forks and stops, as it did before they had limits of their own, since
+        such a server has no ``owner_concurrency`` to set them.
+        """
+        return cls(
+            provider,
+            state_dir=state_dir,
+            server_name=server_name,
+            max_concurrent_starts=config.parallelism,
+            max_concurrent_stops=config.parallelism,
+            **config.model_dump(),
+        )
 
     @classmethod
     def for_server(
@@ -523,6 +619,7 @@ class OwnedSandboxes:
             raise ValueError(f"{config.name} sets no {provider_field}, so it cannot own sandboxes on it")
         # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
         provider_config = resolve_provider_config(reference, global_config)
+        concurrency = resolve_provider_owner_concurrency(reference, global_config)
         state_dir = _configured_state_dir(global_config)
         server_name = _path_component(config.name, "server name")
         other_field = None if provider_field == "sandbox_provider" else _path_component(provider_field, "field")
@@ -541,6 +638,8 @@ class OwnedSandboxes:
             server_name=server_name,
             provider_config_ref=reference if isinstance(reference, str) else None,
             owns_provider=True,
+            max_concurrent_starts=concurrency.starts,
+            max_concurrent_stops=concurrency.stops,
             provider_field=other_field,
         )
         owned._on = on
@@ -563,7 +662,8 @@ class OwnedSandboxes:
 
     @property
     def keys(self) -> list[str]:
-        """The keys that currently have a sandbox, including one whose stop failed and awaits a retry."""
+        """Every key with a tracked sandbox: also one still starting, and one whose start or stop failed and that the
+        next stop or :meth:`aclose` stops again."""
         return list(self._entries)
 
     @property
@@ -586,13 +686,18 @@ class OwnedSandboxes:
         return f"{prefix}{name_hash(checkpoint_id)}-{name_hash(key)}-{attempt}"
 
     def __contains__(self, key: object) -> bool:
-        """Whether ``key`` currently has a sandbox."""
-        return key in self._entries
+        """Whether ``key`` has a sandbox ready to use: not one still starting, nor one whose start failed."""
+        entry = self._entries.get(key)  # type: ignore[call-overload]
+        return entry is not None and entry.ready and entry.sandbox.started
 
     def get(self, key: str) -> AsyncSandbox | None:
-        """``key``'s current sandbox, or ``None``; after a restore it is the fork, under a new id."""
+        """``key``'s sandbox if it is ready to use, else ``None``; after a restore it is the fork, under a new id.
+
+        A sandbox still starting, or one whose start failed and whose stop failed too, is not returned; :attr:`keys`
+        still lists its key.
+        """
         entry = self._entries.get(key)
-        return entry.sandbox if entry is not None else None
+        return entry.sandbox if entry is not None and entry.ready and entry.sandbox.started else None
 
     def add(self, key: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
         """Track a sandbox the owner started itself; ``spec`` is what a restore re-creates its fork from.
@@ -618,20 +723,60 @@ class OwnedSandboxes:
     async def create(self, key: str, spec: SandboxSpec) -> AsyncSandbox:
         """Start a sandbox for ``key`` on the shared provider and track it.
 
-        The key is taken from the first moment, so a second create for it is refused while the first is starting.
+        The key is taken from the first moment, so a second create for it is refused while the first is starting. A
+        create of a key that an export is snapshotting waits for that export; creates of other keys do not.
+
+        The sandbox is tracked before it starts, but :meth:`get`, ``in`` and :meth:`access` show it only once its start
+        succeeded. If the caller cancels before the provider returns a handle, the owner waits up to
+        ``ready_timeout_s`` (zero when unset) plus ``STOP_TIMEOUT_S`` for the handle. Once it has a handle,
+        the owner interrupts any file upload and stops the sandbox, shielded from cancellation.
+        If the provider never returns a handle, cleanup depends on its support for ``ttl_s``. If the stop fails,
+        the key stays tracked for the next :meth:`stop` or :meth:`aclose` and stays unavailable to borrowers.
+        The start's error is raised with the stop's as its context.
+
+        Raises:
+            ValueError: If ``key`` already has a sandbox, or one is starting, or ``spec`` sets no ``ttl_s``.
         """
         self._require_open()
+        if spec.ttl_s is None:
+            # The shutdown sweep is bounded and a crash runs none: ttl_s is what ends a sandbox its owner never stops.
+            raise ValueError(f"the sandbox of {key!r} needs a ttl_s, so the provider ends it if its owner never does")
         if key in self._entries or key in self._pending:
             raise ValueError(f"{key!r} already has a sandbox")
         self._take_keys([key])
         try:
-            sandbox = AsyncSandbox(self._provider, spec, owns_provider=False)
-            async with self._semaphore:
-                await sandbox.start()
-            self._entries[key] = _Entry(sandbox=sandbox, spec=spec)
+            async with self._key_locks.locked(key):
+                sandbox = AsyncSandbox(self._provider, spec, owns_provider=False)
+                entry = _Entry(sandbox=sandbox, spec=spec, ready=False)
+                self._entries[key] = entry
+                try:
+                    async with self._start_slot():
+                        # A create queued for a slot when the shutdown began starts nothing.
+                        self._require_open()
+                        await _start_to_the_end(sandbox, settle_s=_settle_s(spec))
+                    entry.ready = True
+                except BaseException as error:
+                    try:
+                        await self._stop_key(key)
+                    except Exception as stop_error:
+                        LOGGER.warning(
+                            "sandbox of %s failed to start and was not stopped; the next stop of the key or aclose "
+                            "stops it again: %r",
+                            key,
+                            stop_error,
+                        )
+                        # The start's error, with the failed stop as its context.
+                        raise error
+                    raise
         finally:
             self._give_back_keys([key])
         return sandbox
+
+    def _start_slot(self) -> contextlib.AbstractAsyncContextManager[Any]:
+        return self._start_limit if self._start_limit is not None else contextlib.nullcontext()
+
+    def _stop_slot(self) -> contextlib.AbstractAsyncContextManager[Any]:
+        return self._stop_limit if self._stop_limit is not None else contextlib.nullcontext()
 
     def _require_open(self) -> None:
         if self._closed:
@@ -656,13 +801,15 @@ class OwnedSandboxes:
         ``provider_config_ref`` defaults to the one this instance was built with.
 
         Raises:
-            KeyError: If ``key`` has no sandbox.
+            KeyError: If ``key`` has no running sandbox: none, one still starting, or one whose start failed and whose
+                stop failed too.
             ValueError: If neither this call nor the instance names the provider's config block, as for a server
                 whose ``sandbox_provider`` is an inline block rather than a named one.
         """
         entry = self._entries.get(key)
-        if entry is None:
-            raise KeyError(f"{key!r} has no sandbox")
+        # A key is tracked from before its start, so being tracked does not mean there is a sandbox to lend.
+        if entry is None or not entry.ready or not entry.sandbox.started:
+            raise KeyError(f"{key!r} has no running sandbox")
         provider_config_ref = provider_config_ref or self._provider_config_ref
         if provider_config_ref is None:
             raise ValueError("lending needs provider_config_ref: the borrower resolves the provider by that name")
@@ -695,12 +842,12 @@ class OwnedSandboxes:
         Snapshots are not touched: the controller may still restore from them, and only its release deletes them.
         """
         self._closed = True
+        # What runs now is stopped first: a create cancelled at shutdown may take its whole start to settle.
+        running = [key for key in self._entries if key not in self._pending]
+        await self._stop_at_shutdown(running)
         await self._none_pending.wait()
-        keys = list(self._entries)
-        outcomes = await asyncio.gather(*(self.stop(key) for key in keys), return_exceptions=True)
-        for key, outcome in zip(keys, outcomes):
-            if isinstance(outcome, BaseException):
-                LOGGER.warning("sandbox of %s was not stopped at shutdown; its lifetime ends it: %r", key, outcome)
+        # Each key is tried once per call; one whose stop failed stays for the next call.
+        await self._stop_at_shutdown([key for key in self._entries if key not in running])
         await self.settle()
         if self._owns_provider and not self._entries and not self._unstopped_forks:
             # Last, and only once nothing is left to stop, so a later call can still retry a failed stop. Closing
@@ -709,6 +856,12 @@ class OwnedSandboxes:
                 if self._owns_provider:
                     await self._provider.aclose()
                     self._owns_provider = False
+
+    async def _stop_at_shutdown(self, keys: list[str]) -> None:
+        outcomes = await asyncio.gather(*(self.stop(key) for key in keys), return_exceptions=True)
+        for key, outcome in zip(keys, outcomes):
+            if isinstance(outcome, BaseException):
+                LOGGER.warning("sandbox of %s was not stopped at shutdown; its lifetime ends it: %r", key, outcome)
 
     # -- commit -------------------------------------------------------------------------------------------------
 
@@ -728,7 +881,7 @@ class OwnedSandboxes:
         """
         keys = list(keys)
         outcomes = await asyncio.gather(
-            *(self._export_one(key, checkpoint_id) for key in keys), return_exceptions=True
+            *(self._export_locked(key, checkpoint_id) for key in keys), return_exceptions=True
         )
         await self._warn_of_unreleased_checkpoints(checkpoint_id)
         failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
@@ -765,9 +918,14 @@ class OwnedSandboxes:
                 self.snapshot_name_prefix,
             )
 
+    async def _export_locked(self, key: str, checkpoint_id: str) -> dict[str, JsonValue] | None:
+        # After the key's create or stop, if one is running; a create or stop of the key waits for the export.
+        async with self._key_locks.locked(key):
+            return await self._export_one(key, checkpoint_id)
+
     async def _export_one(self, key: str, checkpoint_id: str) -> dict[str, JsonValue] | None:
         entry = self._entries.get(key)
-        if entry is None or not entry.sandbox.started:
+        if entry is None or not entry.ready or not entry.sandbox.started:
             return None
         provider = self._provider
         if not isinstance(provider, SupportsSandboxSnapshot):
@@ -904,24 +1062,29 @@ class OwnedSandboxes:
         created: dict[str, AsyncSandbox] = {}
         self._take_keys(parsed)
         try:
-            try:
-                outcomes = await asyncio.gather(
-                    *(self._fork(key, state, spec, created) for key, (state, spec) in parsed.items()),
-                    return_exceptions=True,
-                )
-            except asyncio.CancelledError:
-                # The gather cancelled the forks still starting and waited for them, so ``created`` is complete.
-                self._track_unstopped(created)
-                self._spawn(self._stop_forks())
-                raise
-            failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
-            if failures:
-                # Tracked before the first stop is awaited: a cancel from here on leaves every fork recorded.
-                self._track_unstopped(created)
-                await self._stop_forks()
-                raise failures[0]
-            for key, sandbox in created.items():
-                self._entries[key] = _Entry(sandbox=sandbox, spec=parsed[key][1])
+            async with contextlib.AsyncExitStack() as held:
+                # Every key's lock, in one order so two restores cannot deadlock: a stop of a key waits for its fork
+                # to be installed, then stops it.
+                for key in sorted(parsed):
+                    await held.enter_async_context(self._key_locks.locked(key))
+                try:
+                    outcomes = await asyncio.gather(
+                        *(self._fork(key, state, spec, created) for key, (state, spec) in parsed.items()),
+                        return_exceptions=True,
+                    )
+                except asyncio.CancelledError:
+                    # The gather cancelled the forks still starting and waited for them, so ``created`` is complete.
+                    self._track_unstopped(created)
+                    self._spawn(self._stop_forks())
+                    raise
+                failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+                if failures:
+                    # Tracked before the first stop is awaited: a cancel from here on leaves every fork recorded.
+                    self._track_unstopped(created)
+                    await self._stop_forks()
+                    raise failures[0]
+                for key, sandbox in created.items():
+                    self._entries[key] = _Entry(sandbox=sandbox, spec=parsed[key][1])
         finally:
             self._give_back_keys(parsed)
         # The crashed process's sandboxes are superseded: nothing continues them. Off the critical path: the install
@@ -936,8 +1099,8 @@ class OwnedSandboxes:
         for attempt in range(FORK_NOT_FOUND_RETRIES + 1):
             sandbox = AsyncSandbox(self._provider, fork_spec, owns_provider=False)
             try:
-                async with self._semaphore:
-                    await sandbox.start(snapshot_id=state.snapshot_id)
+                async with self._start_slot():
+                    await _start_to_the_end(sandbox, settle_s=_settle_s(fork_spec), snapshot_id=state.snapshot_id)
                 break
             except SandboxSnapshotNotFoundError as error:
                 if attempt == FORK_NOT_FOUND_RETRIES:
@@ -956,7 +1119,10 @@ class OwnedSandboxes:
                 raise SandboxCheckpointError(
                     key, f"could not be re-created from snapshot {state.snapshot_id!r}: {error}"
                 ) from error
-        created[key] = sandbox
+            finally:
+                # A caller can be cancelled as the provider returns its handle. Rollback must own that fork too.
+                if sandbox.started:
+                    created[key] = sandbox
 
     def _track_unstopped(self, created: Mapping[str, AsyncSandbox]) -> None:
         """Record the forks of a restore that will not install them, before anything stops them."""
@@ -991,9 +1157,10 @@ class OwnedSandboxes:
             return
         sandbox_id = state.descriptor.get("sandbox_id")
         try:
-            async with self._semaphore:
-                async with asyncio.timeout(STOP_TIMEOUT_S):
-                    old = await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
+            # Bounded as a whole, the wait for a slot included: a superseded sandbox's stop is best effort, and its
+            # lifetime ends it if this one gives up.
+            async with asyncio.timeout(STOP_TIMEOUT_S), self._stop_slot():
+                old = await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
                 await old.stop(timeout_s=STOP_TIMEOUT_S)
         except Exception as error:
             # Already gone (ended by its lifetime), or unreachable: its lifetime ends it.
@@ -1102,10 +1269,21 @@ class OwnedSandboxes:
     async def stop(self, key: str) -> None:
         """Stop and forget ``key``'s sandbox; a no-op for a key without one, so a retire may repeat it.
 
-        If the stop fails, or takes longer than ``STOP_TIMEOUT_S`` and raises ``TimeoutError``, the key stays
-        tracked, so a retried retire stops it again. The sandbox's snapshots stay: a checkpoint the controller may
-        still restore can name them, and only a release knows which.
+        It first waits for a create, an export or a restore of the same key to finish, and stops the fork a restore
+        installed. The whole stop is shielded from the caller's cancellation, so a client that disconnects cannot
+        leave the sandbox running. The wait for the key's lock is bounded by ``STOP_TIMEOUT_S``, and so is the
+        provider's stop once it has a stop slot; the wait for a slot has no limit of its own, since every stop ahead
+        holds its slot for at most ``STOP_TIMEOUT_S``. If the stop fails, or times out and raises ``TimeoutError``,
+        the key stays tracked, so a retried retire stops it again. The sandbox's snapshots stay: a checkpoint the
+        controller may still restore can name them, and only a release knows which.
         """
+        with anyio.CancelScope(shield=True):
+            async with contextlib.AsyncExitStack() as held:
+                with anyio.fail_after(STOP_TIMEOUT_S):
+                    await held.enter_async_context(self._key_locks.locked(key))
+                await self._stop_key(key)
+
+    async def _stop_key(self, key: str) -> None:
         entry = self._entries.get(key)
         if entry is None:
             return
@@ -1118,19 +1296,30 @@ class OwnedSandboxes:
     async def discard(self, keys: Iterable[str]) -> None:
         """Give up the sandboxes of ``keys`` and stop them; for the forks of a restore its owner could not install.
 
-        Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
-        forks that :meth:`settle`, the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped.
+        Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox
+        whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the forks that :meth:`settle`,
+        the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped. A create, export, stop or
+        restore of a key that is running is let finish first, so a sandbox still starting is not left running
+        untracked.
         """
-        for key in keys:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self._unstopped_forks.append(entry.sandbox)
+        keys = sorted(set(keys))
+        async with contextlib.AsyncExitStack() as held:
+            # In one order, as a restore takes them, so two calls that share keys cannot wait on each other.
+            for key in keys:
+                await held.enter_async_context(self._key_locks.locked(key))
+            for key in keys:
+                entry = self._entries.pop(key, None)
+                if entry is not None:
+                    self._unstopped_forks.append(entry.sandbox)
         await self._stop_forks()
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
-        # The stop's own limit starts once it has its turn, so a stop that waits behind others is not cut short.
-        async with self._semaphore:
-            await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
+        # Shielded, so a cancelled request cannot leave the sandbox running. The provider's stop is bounded once it has
+        # its slot (AsyncSandbox.stop shields and bounds itself); the wait for the slot is not, so a stop queued behind
+        # others under load is not cut short and left to ttl_s.
+        with anyio.CancelScope(shield=True):
+            async with self._stop_slot():
+                await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
 
     def _provider_name(self) -> str:
         return getattr(self._provider, "name", type(self._provider).__name__)

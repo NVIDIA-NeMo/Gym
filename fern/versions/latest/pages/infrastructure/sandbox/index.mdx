@@ -184,6 +184,20 @@ Every provider config can bind the same name, such as `sandbox`, so swapping bac
 
 `default_metadata` is merged into `SandboxSpec.metadata` before create. The agent's own `sandbox_spec.metadata` wins on key conflicts.
 
+`owner_concurrency` limits how many sandboxes one server starts, and stops, at once on the provider, when it owns them through `self.sandboxes`. Both limits are unbounded when unset, and a stop never waits behind starts:
+
+```yaml
+sandbox:
+  owner_concurrency:
+    starts: 128
+    stops: 64
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN}
+```
+
+For operations routed through an owner built with `OwnedSandboxes.from_config`, `parallelism` sets three independent limits. Creates and restore forks share one limit, stops use another, and snapshot submits and deletes share the third. SWE-bench uses the owner for checkpoint operations. Its ordinary task setup and teardown call `AsyncSandbox` directly and run outside these limits.
+
 The helpers used by agents are public:
 
 ```python

@@ -196,7 +196,7 @@ class NoSnapshotProvider(FakeSnapshotProvider):
     list_snapshots = None  # type: ignore[assignment]
 
 
-SPEC = SandboxSpec(image="img:1", workdir="/work", env={"A": "1"}, resources={"cpu": 2}, ports=[8080])
+SPEC = SandboxSpec(image="img:1", ttl_s=3600, workdir="/work", env={"A": "1"}, resources={"cpu": 2}, ports=[8080])
 # What a checkpoint record keeps of SPEC: the snapshot stands in for the image.
 RESTORED_SPEC = dataclasses.replace(SPEC, image=None)
 
@@ -529,7 +529,8 @@ async def test_export_maps_a_tracked_sandbox_that_was_never_started_to_none(stat
     states = await checkpointer.export(["s1", "s2"], checkpoint_id="c1")
     assert states["s2"] is None and states["s1"] is not None
     assert ops(provider, "snapshot") == ["sb-1"]
-    assert "s2" in checkpointer and checkpointer.get("s2") is unstarted
+    assert "s2" in checkpointer.keys, "unstarted entries remain tracked for cleanup"
+    assert "s2" not in checkpointer and checkpointer.get("s2") is None
 
 
 def test_add_rejects_a_duplicate_or_a_sandbox_that_is_not_on_the_shared_provider(state_dir: Path) -> None:
@@ -581,7 +582,10 @@ async def test_two_creates_for_one_key_at_once_start_one_sandbox(state_dir: Path
     assert all(box["state"] == "stopped" for box in provider.boxes.values()), "no sandbox is left unreachable"
 
 
-async def test_a_create_that_failed_or_was_cancelled_can_be_retried(state_dir: Path) -> None:
+async def test_a_create_that_failed_or_was_cancelled_can_be_retried(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(checkpoint_sandbox, "STOP_TIMEOUT_S", 0.2)
     provider = FakeSnapshotProvider()
     checkpointer = make_checkpointer(state_dir, provider)
     provider.fail[("create", "sb-1")] = RuntimeError("quota")
@@ -894,7 +898,7 @@ async def test_restore_rolls_back_when_one_sandbox_cannot_be_rebuilt(state_dir: 
     # Forks are sb-5 and sb-6 (sb-1, sb-2 are originals; snap-3, snap-4 their snapshots). One of them fails.
     provider.fail[("create", "sb-6")] = RuntimeError("quota")
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     with pytest.raises(SandboxCheckpointError, match="could not be re-created"):
         await fresh.restore(states)
 
@@ -988,8 +992,11 @@ async def test_restore_refuses_a_state_from_another_provider_or_a_key_already_he
         await make_checkpointer(state_dir, NoSnapshotProvider()).restore({"s1": plain})
 
 
-async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_dir: Path) -> None:
+async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A restore cancelled at shutdown must not leave the forks it already made running."""
+    monkeypatch.setattr(checkpoint_sandbox, "STOP_TIMEOUT_S", 0.2)
     provider = FakeSnapshotProvider()
     states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
     # sb-1, sb-2 are the originals and snap-3, snap-4 their snapshots: the forks are sb-5, then sb-6.
@@ -1005,7 +1012,7 @@ async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_
 
     provider.create_from_snapshot = fork_then_hang  # type: ignore[method-assign]
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(second_started.wait(), timeout=5)
     assert provider.boxes["sb-5"]["state"] == "running", "the first fork is complete; the second is in flight"
@@ -1025,9 +1032,11 @@ async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_
 
 
 async def test_a_fork_of_a_cancelled_restore_whose_stop_fails_stays_tracked_until_settle_stops_it(
-    state_dir: Path,
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The cancel path must record the forks before it stops them: a stop that fails would otherwise lose one."""
+    # The cancelled restore lets the hanging fork run for the stop limit before it cuts it short.
+    monkeypatch.setattr(checkpoint_sandbox, "STOP_TIMEOUT_S", 0.2)
     provider = FakeSnapshotProvider()
     states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
     # The forks are sb-5, then sb-6: the restore is cancelled while sb-6 is created, and sb-5's first stop fails.
@@ -1043,7 +1052,7 @@ async def test_a_fork_of_a_cancelled_restore_whose_stop_fails_stays_tracked_unti
     provider.create_from_snapshot = fork_then_hang  # type: ignore[method-assign]
     provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(second_started.wait(), timeout=5)
     restore.cancel()
@@ -1070,7 +1079,7 @@ async def test_a_fork_whose_rollback_stop_failed_is_logged_and_stopped_by_the_ne
     provider.fail[("create", "sb-6")] = RuntimeError("quota")
     provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     with caplog.at_level(logging.WARNING, logger=checkpoint_sandbox.__name__):
         with pytest.raises(SandboxCheckpointError, match="could not be re-created.*quota"):
             await fresh.restore(states)
@@ -1091,7 +1100,7 @@ async def failed_restore_with_an_unstopped_fork(state_dir: Path, provider: FakeS
     states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
     provider.fail[("create", "sb-6")] = RuntimeError("quota")
     provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     with pytest.raises(SandboxCheckpointError, match="quota"):
         await fresh.restore(states)
     assert provider.boxes["sb-5"]["state"] == "running"
@@ -1143,7 +1152,7 @@ async def test_a_rollback_cancelled_while_it_stops_a_fork_keeps_the_fork_tracked
         await close(handle)
 
     provider.close = close_that_hangs  # type: ignore[method-assign]
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(stopping.wait(), timeout=5)
     restore.cancel()
@@ -1231,11 +1240,12 @@ async def test_discarded_keys_can_be_restored_again_while_their_stops_fail_and_a
 async def test_a_stop_of_a_key_whose_sandbox_already_stopped_does_not_wait_for_a_turn(state_dir: Path) -> None:
     """Its caller may be cancelled while it waits, and would then leave a key with nothing left to stop."""
     provider = FakeSnapshotProvider()
-    checkpointer = await seeded(provider, state_dir, "s1", "s2", parallelism=1)
+    checkpointer = await seeded(provider, state_dir, "s1", "s2", max_concurrent_stops=1)
     # The owner stopped the sandbox itself, as a server does before it drops the key.
     await checkpointer._entries["s1"].sandbox.stop()
 
-    async with checkpointer._semaphore:  # every turn is taken, as while a commit submits its snapshots
+    assert checkpointer._stop_limit is not None
+    async with checkpointer._stop_limit:  # every stop slot is taken, as while other sessions stop theirs
         await asyncio.wait_for(checkpointer.stop("s1"), timeout=5)
         waiting = asyncio.create_task(checkpointer.stop("s2"))
         await asyncio.sleep(0.05)
@@ -1282,7 +1292,7 @@ async def test_aclose_waits_for_a_running_restore_and_stops_the_forks_it_install
         return await original_fork(snapshot_id, spec)
 
     provider.create_from_snapshot = fork_then_wait  # type: ignore[method-assign]
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(second_started.wait(), timeout=5)
 
