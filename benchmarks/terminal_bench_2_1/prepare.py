@@ -44,7 +44,8 @@ def prepare(*, task_revision: str | None = None, task_repository: str = TASK_REP
         BENCHMARK_DIR.mkdir(parents=True, exist_ok=True)
         run(["git", "clone", "--", task_repository, str(repo_path)], check=True)
     if task_revision is not None:
-        if _git(repo_path, "remote", "get-url", "origin") != task_repository:
+        # The stored URL, not `remote get-url`: that one applies url.*.insteadOf rewrites (a mirror, a token).
+        if _git(repo_path, "config", "--get", "remote.origin.url") != task_repository:
             raise ValueError(
                 f"Task checkout {repo_path} has a different origin; move it aside or use its repository URL"
             )
