@@ -11,7 +11,9 @@ derives from :class:`ToolSidecarResourcesConfig`. With ``tool_sidecar`` set:
   episode's session in it with the seed's identity and ``task_data``, which the prepare request carries. The tool host
   signs sessions with this server's key, so the Resources session's cookies name the same session there;
 - ``/tool_sidecar/import_state`` reads the session's tool state from the tool host (:meth:`export_tool_state` there) and
-  hands it to :meth:`import_tool_state` here, so ``/verify`` grades the state the agent's tool calls left.
+  hands it to :meth:`import_tool_state` here, so ``/verify`` grades the state the agent's tool calls left. ``/verify``
+  refuses (HTTP 409) a session whose state was never read back, as with an Environment Server that does not grant tool
+  sidecars: grading it would score state no tool call touched.
 
 A server whose tools keep no state the grader reads, such as a lookup, overrides neither hook. With ``tool_sidecar``
 set, the Resources Server itself refuses every tool call (HTTP 409), so none falls back to its process.
@@ -30,12 +32,13 @@ import shlex
 import tarfile
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.routing import APIRoute
 from pydantic import JsonValue, model_validator
 
 import nemo_gym
@@ -89,8 +92,11 @@ _ROOT = "/tmp/nemo-gym-tool-sidecar"
 _HOST = f"{_ROOT}/tool_host/nemo_gym/environment/tool_sidecar_host.py"
 # A config key that names a credential. Code in the agent container can read a tool sidecar's files and environment
 # (the provider's exec daemon is reachable from it), so no such value may go there.
+# Matched against the key with hyphens read as underscores, so a header such as X-Api-Key counts.
 _SECRET_KEY = re.compile(
-    r"(api_?key|token|secret|password|passwd|credential|private_?key|access_?key|auth|authorization)s?$", re.IGNORECASE
+    r"(api_?key|token|secret|password|passwd|credential|(private|access|secret|signing|session|encryption)_?key"
+    r"|(^|_)key|auth|authorization|bearer|cookie)s?$",
+    re.IGNORECASE,
 )
 # A URL that carries a user name or password.
 _URL_CREDENTIALS = re.compile(r"^[a-z][a-z0-9+.-]*://[^/@\s]+@", re.IGNORECASE)
@@ -103,7 +109,7 @@ def secret_paths(value: Any, path: str = "") -> list[str]:
     if isinstance(value, Mapping):
         for key, item in value.items():
             child = f"{path}.{key}" if path else str(key)
-            if isinstance(key, str) and _SECRET_KEY.search(key) and _holds_text(item):
+            if isinstance(key, str) and _SECRET_KEY.search(key.replace("-", "_")) and _holds_text(item):
                 found.append(child)
             else:
                 found.extend(secret_paths(item, child))
@@ -222,7 +228,9 @@ class ToolSidecarResources:
     The tool host gets the Python files of the server's own directory and of ``tool_sidecar_sources``, not their data
     files. Until the provider limits the agent container to the sidecar's tools port, pair a tool sidecar only with an
     agent that runs no model-written code in the agent container, such as Simple Agent without a code-execution tool:
-    code there can reach the sidecar's exec daemon on OpenSandbox and change the tool state the grader reads.
+    code there can reach the sidecar's exec daemon on OpenSandbox and change the tool state the grader reads. The tool
+    host knows no other Gym server and reaches only the sidecar's ``egress_hosts``, so a tool that calls a model or
+    another Gym server cannot run there.
 
     Attributes:
         tool_sidecar_requirements: Packages the server's own module needs beyond Gym's, as requirement strings.
@@ -241,6 +249,18 @@ class ToolSidecarResources:
                 f"{type(self).__name__} signs sessions with a secret the tool host does not share, so its tools "
                 "cannot run in a sidecar"
             )
+        if self.config.tool_sidecar is not None and self._manages_session_state():  # type: ignore[attr-defined]
+            missing = [
+                name
+                for name in ("export_tool_state", "import_tool_state")
+                if getattr(type(self), name) is getattr(ToolSidecarResources, name)
+            ]
+            if missing:
+                raise ValueError(
+                    f"{type(self).__name__} keeps session state, which its tools change in the sidecar; implement "
+                    f"{missing} to bring that state to /verify, or return None from export_tool_state when grading "
+                    "reads none of it"
+                )
 
     def export_tool_state(self, session_id: str) -> JsonValue:
         """In the sidecar: the session's tool state that grading reads, as JSON. None when the tools keep none."""
@@ -269,6 +289,10 @@ class ToolSidecarResources:
         super().register_protocol_routes(app)  # type: ignore[misc]
         if self.config.tool_sidecar is not None:  # type: ignore[attr-defined]
             app.post(TOOL_SIDECAR_IMPORT_STATE_PATH)(self.import_tool_sidecar_state)
+            # The sessions whose tool state was read back from the sidecar, until their /verify succeeds. A session's
+            # import and verify reach the same worker, so each worker keeps its own.
+            app.state.nemo_gym_tool_state_collected = set()
+            _guard_route(app, "/verify", self._graded_after_collecting)
 
     def sandbox_declaration(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
         """The seed's declaration, with the tool sidecar that serves this server's tools added to whatever group the
@@ -352,10 +376,32 @@ class ToolSidecarResources:
                 f"The tool host did not export its state: HTTP {reply['status']}: {reply['body'][:2000]}"
             )
         state = json.loads(reply["body"])["state"]
-        if state is None:
-            return ToolSidecarImportStateResponse(imported=False)
-        await self.import_tool_state(request.session[SESSION_ID_KEY], state)
-        return ToolSidecarImportStateResponse(imported=True)
+        session_id = request.session[SESSION_ID_KEY]
+        if state is not None:
+            await self.import_tool_state(session_id, state)
+        request.app.state.nemo_gym_tool_state_collected.add(session_id)
+        return ToolSidecarImportStateResponse(imported=state is not None)
+
+    async def _graded_after_collecting(self, request: Request) -> AsyncIterator[None]:
+        """Refuse ``/verify`` for a session whose tool state was never read back from the tool sidecar.
+
+        A session already verified passes, so a resent ``/verify`` gets the grade the server kept for it.
+        """
+        collected: set[str] = request.app.state.nemo_gym_tool_state_collected
+        session_id = request.session.get(SESSION_ID_KEY)
+        verified = session_id is not None and self.session_is_verified(session_id)  # type: ignore[attr-defined]
+        if session_id not in collected and not verified:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "this Resources Server's tools ran in a tool sidecar, and the session's tool state was never read "
+                    f"back from it ({TOOL_SIDECAR_IMPORT_STATE_PATH}); pair it with an Environment Server that grants "
+                    "tool sidecars"
+                ),
+            )
+        yield
+        # Kept when grading raises, so a retried /verify still grades the state read back.
+        collected.discard(session_id)
 
     def _tool_sidecar_config(self) -> ToolSidecarConfig:
         config = self.config.tool_sidecar  # type: ignore[attr-defined]
@@ -443,11 +489,30 @@ class ToolSidecarResources:
 
 
 async def _tools_run_in_the_sidecar(request: Request) -> None:
-    """Refuse a tool call on the Resources host: its tools run in the tool sidecar. Health checks still answer."""
-    if request.method not in ("GET", "HEAD"):
-        raise HTTPException(
-            status_code=409, detail="this Resources Server's tools run in its tool sidecar, not in this process"
-        )
+    """Refuse a tool call on the Resources host, whatever its method: its tools run in the tool sidecar.
+
+    Only routes the server adds after the base's own get this dependency, so health checks and the protocol routes
+    still answer.
+    """
+    raise HTTPException(
+        status_code=409, detail="this Resources Server's tools run in its tool sidecar, not in this process"
+    )
+
+
+def _guard_route(app: FastAPI, path: str, guard: Any) -> None:
+    """Add ``guard`` to the dependencies of the POST route at ``path``, in its place among the routes."""
+    routes = app.router.routes
+    [index] = [i for i, route in enumerate(routes) if isinstance(route, APIRoute) and route.path == path]
+    route = routes[index]
+    app.router.add_api_route(
+        path,
+        route.endpoint,
+        methods=list(route.methods),
+        name=route.name,
+        response_model=route.response_model,
+        dependencies=[*route.dependencies, Depends(guard)],
+    )
+    routes[index] = routes.pop()
 
 
 async def _ready(sidecar: AsyncSandboxSidecar, python: str, port: int) -> bool:
@@ -480,15 +545,20 @@ async def _call(
         request = Path(scratch) / "request.json"
         await asyncio.to_thread(request.write_bytes, payload)
         await sidecar.upload(request, f"{call}.request.json")
-    result = await sidecar.exec(
-        python, "-E", "-s", _HOST, "--call", str(port), f"{call}.request.json", f"{call}.reply.json", timeout_s=300
-    )
-    _check(result, f"call {path} on the tool host")
     try:
+        result = await sidecar.exec(
+            python, "-E", "-s", _HOST, "--call", str(port), f"{call}.request.json", f"{call}.reply.json", timeout_s=300
+        )
+        _check(result, f"call {path} on the tool host")
         with tempfile.TemporaryDirectory(dir=_private_dir()) as scratch:
             local = Path(scratch) / "reply.json"
             await sidecar.download(f"{call}.reply.json", local)
             return json.loads(await asyncio.to_thread(local.read_text))
     finally:
-        # The seed and the state stay in the sidecar no longer than the call.
-        await sidecar.exec("rm", "-f", f"{call}.request.json", f"{call}.reply.json", timeout_s=30)
+        # The seed and the state stay in the sidecar no longer than the call, whether or not it succeeded. A failed
+        # removal is logged, not raised over the call's own outcome.
+        try:
+            removed = await sidecar.exec("rm", "-f", f"{call}.request.json", f"{call}.reply.json", timeout_s=30)
+            _check(removed, "remove the call's files")
+        except Exception:
+            LOG.warning("The tool sidecar kept the files of call %s", call, exc_info=True)

@@ -34,11 +34,6 @@ automationbench_resources_server:
         # Building the tool environment (verifiers, the api_search index) can take minutes on a cold filesystem.
         ready_timeout_seconds: 600
 
-automationbench:
-  responses_api_agents:
-    simple_agent:
-      sandboxed: true
-
 automationbench_environment_server:
   environment_servers:
     single_agent_turn_legacy:

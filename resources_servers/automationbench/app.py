@@ -175,8 +175,6 @@ class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer
     tool_sidecar_sources: ClassVar[dict[str, str]] = {
         "benchmarks/automationbench/automationbench_env": "automationbench_env"
     }
-    # The rubric reads the final world and runs nothing the model wrote.
-    verifier_executes_nothing: ClassVar[bool] = True
 
     _episodes: Dict[str, _Episode] = PrivateAttr(default_factory=dict)
 

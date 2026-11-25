@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """The resources server's session lifecycle, tools and scoring, on a real AutomationBench example task."""
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -302,7 +301,18 @@ def test_close_releases_the_world_and_the_session_follows_the_contract():
     )
 
 
-def test_the_world_a_tool_sidecar_hands_back_is_what_verify_scores():
+# Operate-scope access to an attempt's group with a tool sidecar, as the Environment Server sends it.
+_SANDBOX_ACCESS = {
+    "connection": {
+        "kind": "direct",
+        "provider_config_ref": "attempt_sandboxes",
+        "descriptor": {"sandbox_id": "group-1", "sidecars": [{"name": "tools", "image": "python:3.13-slim"}]},
+    },
+    "workdir": "/workspace",
+}
+
+
+def test_the_world_a_tool_sidecar_hands_back_is_what_verify_scores(monkeypatch):
     host_server = _server(tool_sidecar={"image": "python:3.13-slim"})
     # The tool host runs this same class without tool_sidecar, seeded with the task as the host hands it over.
     sidecar_tool = _server()
@@ -319,10 +329,31 @@ def test_the_world_a_tool_sidecar_hands_back_is_what_verify_scores():
         sidecar.cookies.update(dict(host.cookies))
         _win_the_deal(sidecar)
 
-        # The world crosses a process boundary as JSON.
-        exported = json.loads(json.dumps(sidecar_tool.export_tool_state("session")))
-        asyncio.run(host_server.import_tool_state("session", exported))
+        # The world crosses a process boundary as JSON: the tool host's state route answers in the sidecar, and the
+        # host reads it back before /verify, which grades only a world read back.
+        assert host.post("/verify", json=_verify_body()).status_code == 409
+
+        class _Group:
+            def sidecar(self, name):
+                return name
+
+            async def disconnect(self):
+                return None
+
+        async def borrow(access):
+            return _Group()
+
+        async def call(sidecar, python, port, method, path, body, *, cookies):
+            state = sidecar_tool.export_tool_state("session")
+            return {"status": 200, "body": json.dumps({"state": state}), "cookies": {}}
+
+        monkeypatch.setattr("nemo_gym.environment.tool_sidecar.borrow", borrow)
+        monkeypatch.setattr("nemo_gym.environment.tool_sidecar._call", call)
+        imported = host.post("/tool_sidecar/import_state", json={"sandbox_access": _SANDBOX_ACCESS})
+        assert imported.json() == {"imported": True}
         on_host = _verify(host)
+        # A resent /verify gets the grade the server kept, not a refusal for a world no longer read back.
+        assert _verify(host)["reward"] == on_host["reward"]
 
     # Graded on the host with the real assertions, the sidecar's world scores as a world built in one process does.
     with TestClient(_server().setup_webserver()) as in_process:

@@ -110,7 +110,7 @@ own process (`ToolSidecarResources` in `nemo_gym.environment`). Its seed declare
 |------|------|
 | Grant | Grants the agent `http://<name>:<port>` (`direct_http`) with the Resources session's cookies, which the tool host reads as its own, in place of the Resources host. |
 | Check | Probes that address from the agent container before the agent is seeded, with `python3` or else `bash`; an agent image with neither fails the attempt for good. |
-| Import state | After the agent closes and before `/verify`, asks the Resources Server to copy the session's tool state out of the sidecar (`/tool_sidecar/import_state`), so the grader reads what the tool calls left. |
+| Import state | After the agent closes and before `/verify`, asks the Resources Server to copy the session's tool state out of the sidecar (`/tool_sidecar/import_state`), so the grader reads what the tool calls left. The Resources Server refuses `/verify` (HTTP 409) for a session whose state was never copied. |
 
 The pairing needs `sandbox_provider`, `sandbox_config`, `resources_tool_transports: [direct_http]` and no task
 sandbox opt-out, and a provider that runs sidecars; startup refuses anything else. Since the tools run in the group,

@@ -6,7 +6,6 @@
 import asyncio
 import functools
 import logging
-import shlex
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 from uuid import uuid4
@@ -83,6 +82,7 @@ from nemo_gym.server_runtime import (
     ToolAccess,
     ToolSidecarConfig,
     ToolSidecarImportStateRequest,
+    check_tool_sidecar_reachable,
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
@@ -644,9 +644,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         sidecar = serving[0]
         url = f"http://{sidecar.name}:{sidecar.tools_port}"
         try:
-            checked = await self._check_tool_sidecar_reachable(
-                handles.attempt_sandbox, sidecar.name, sidecar.tools_port
-            )
+            sandbox = self.sandboxes.get(handles.attempt_sandbox.key)
+            if sandbox is None:
+                raise RuntimeError("the attempt's sandbox group is gone before its tool sidecar was checked")
+            checked = await check_tool_sidecar_reachable(sandbox, sidecar.name, sidecar.tools_port)
         except Exception as error:
             raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
         if not checked:
@@ -659,34 +660,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=True,
             )
         handles.tool_sidecar_url = url
-
-    async def _check_tool_sidecar_reachable(self, attempt: AttemptSandbox, host: str, port: int) -> bool:
-        """Probe the tool host from the agent container, as the agent's tool calls will reach it.
-
-        With ``python3`` the probe asks the tool host whether it is ready; with only ``bash`` it opens a connection to
-        its port. Returns False when the image has neither, so the reach was not checked.
-
-        Raises:
-            RuntimeError: If the agent container cannot reach the tool host.
-        """
-        sandbox = self.sandboxes.get(attempt.key)
-        if sandbox is None:
-            raise RuntimeError("the attempt's sandbox group is gone before its tool sidecar was checked")
-        ready = shlex.quote(f"http://{host}:{port}/_tool_sidecar/ready")
-        probe = (
-            "if command -v python3 >/dev/null; then "
-            f"python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' {ready}; "
-            "elif command -v bash >/dev/null; then "
-            f"bash -c 'exec 3<>\"/dev/tcp/$0/$1\"' {shlex.quote(host)} {int(port)}; "
-            "else exit 127; fi"
-        )
-        result = await sandbox.exec(probe, cwd="/", timeout_s=60)
-        if result.return_code == 127 and result.error_type is None:
-            return False
-        if result.return_code != 0 or result.error_type is not None:
-            detail = result.error_type or (result.stderr or result.stdout or "").strip()[-1000:]
-            raise RuntimeError(f"The agent container cannot reach the tool sidecar at {host}:{port}: {detail}")
-        return True
 
     async def _import_tool_sidecar_state(self, handles: "SessionHandles", access: SandboxAccess) -> None:
         """Have the Resources Server copy the session's tool state out of the sidecar, before ``/verify`` grades it."""

@@ -24,11 +24,6 @@ example_single_tool_call:
         # A stock image: the Resources Server installs the tool host's runtime at the first prepare of each group.
         image: python:3.13-slim
 
-example_single_tool_call_session_agent:
-  responses_api_agents:
-    simple_agent:
-      sandboxed: true
-
 example_single_tool_call_single_agent_turn:
   environment_servers:
     single_agent_turn_legacy:
