@@ -320,7 +320,10 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         )
         body_dict["model"] = self.config.openai_model
         for field in self.config.drop_request_fields:
-            if body_dict.pop(field, None) is not None and field not in self._logged_dropped_fields:
+            if field not in body_dict:
+                continue
+            body_dict.pop(field)
+            if field not in self._logged_dropped_fields:
                 self._logged_dropped_fields.add(field)
                 LOG.warning(
                     "NeMo Gym server `%s`: dropping the request field %r (drop_request_fields). Logged once per field.",

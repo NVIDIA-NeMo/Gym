@@ -758,9 +758,19 @@ class TestApp:
             assert "chat_template_kwargs" not in sent and "top_k" not in sent
             assert sent["temperature"] == 0.5 and sent["model"] == "dummy_model"
         assert server.config.extra_body["chat_template_kwargs"] == {"enable_thinking": True}
-        # Each dropped field is logged once, however many requests carry it; an absent one is not.
+        # Each dropped field is logged once, however many requests carry it, also when it is null; an absent one is not.
         assert caplog.text.count("dropping the request field 'chat_template_kwargs'") == 1
         assert "absent_field" not in caplog.text
+
+    async def test_a_null_field_is_dropped_and_logged(self, caplog) -> None:
+        server = self._setup_server(drop_request_fields=["temperature"])
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=_response_data())
+        with caplog.at_level(logging.WARNING), TestClient(server.setup_webserver()) as client:
+            client.post("/v1/responses", json={"input": "hi", "temperature": None})
+
+        assert "temperature" not in server._client.create_response.await_args.kwargs
+        assert "dropping the request field 'temperature'" in caplog.text
 
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()
