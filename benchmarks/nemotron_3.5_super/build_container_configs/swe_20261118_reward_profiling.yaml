@@ -10,8 +10,8 @@ slurm:
   partition: batch_long
 
 shared_run_warmup_env_vars:
-  NUM_PREFILL_NODES: 6
-  NUM_DECODE_NODES: 6
+  NUM_PREFILL_NODES: 8
+  NUM_DECODE_NODES: 8
   SEGMENT: 1
 
 run:
@@ -36,4 +36,4 @@ run:
     ++r2e_gym_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.datasets=[] \
     ++input_jsonl_fpath=data/swe_20261118.jsonl \
     ++num_repeats=8 \
-    ++num_samples_in_parallel=5120
+    ++num_samples_in_parallel=7168
