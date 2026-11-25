@@ -1,0 +1,33 @@
+config_paths:
+- resources_servers/audio_eval/configs/audio_eval.yaml
+
+contextual_earnings22_resources_server:
+  _inherit_from: audio_eval
+  resources_servers:
+    audio_eval:
+      profile_contracts: benchmarks/contextual_earnings22/profiles.json
+
+contextual_earnings22_simple_agent:
+  _inherit_from: audio_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: contextual_earnings22_resources_server
+      datasets:
+      - name: contextual_earnings22
+        type: benchmark
+        jsonl_fpath: benchmarks/contextual_earnings22/data/contextual_earnings22_benchmark.jsonl
+        prepare_script: benchmarks/contextual_earnings22/prepare.py
+        prepare_dependencies:
+        - soundfile
+        license: Creative Commons Attribution-ShareAlike 4.0 International (the license of Earnings-22)
+
+contextual_earnings22_environment_server:
+  _inherit_from: audio_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: contextual_earnings22_simple_agent
+      resources_server:
+        type: resources_servers
+        name: contextual_earnings22_resources_server
