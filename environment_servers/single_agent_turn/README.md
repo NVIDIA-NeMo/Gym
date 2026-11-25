@@ -91,19 +91,18 @@ Grading runs with the network rule the sandbox started with, and anything the ag
 
 ### What the Resources Server declares
 
-At seed, the Resources Server may declare what the group holds, as `sandbox_group` (`SandboxGroupSpec`) on its seed reply, and that its verifier executes nothing (`verifier_executes_nothing`). The group starts from `sandbox_config` (provider, network rule, `ttl_s`, resources) with the declared fields over it. A server that inherits `SimpleResourcesServer.seed_session` declares through class hooks; one that builds its own seed reply passes them on with `ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))`.
+At seed, the Resources Server may declare what the group holds, as `sandbox_group` (`SandboxGroupSpec`) on its seed reply. The group starts from `sandbox_config` (provider, network rule, `ttl_s`, resources) with the declared fields over it. A server that inherits `SimpleResourcesServer.seed_session` declares through class hooks; one that builds its own seed reply passes the declaration on with `ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))`.
 
 | Hook on the Resources Server | Declares |
 |------|------|
 | `sandbox_group(body)` | The task's `image`, `workdir`, `env`, text `files` delivered before anyone borrows the group, and `sidecars` that serve its environment tools. `image` and `workdir` fall back to `sandbox_config`. Each sidecar gets its own egress, never the main container's: only its `egress_hosts` (`hosts_only`), or none (`no_network`). `tools_port` names the port on which it serves the Resources Server's HTTP tools; an Environment Server that does not grant those tools to the agent (`grants_tool_sidecars`, not yet set here) refuses such a sidecar. Sidecars need a provider that starts them and applies those rules. |
-| `verifier_executes_nothing = True` | The verifier only reads the answer (rules, math-verify, a judge call): it executes nothing and calls no tools, so it may opt out of the sandbox. A verifier that runs model output, or passes model-chosen text to `eval` or to sympy's `parse_expr`, leaves it unset; math-verify qualifies, since it parses only text its patterns limit to numbers and arithmetic. |
 | `prepare_sandbox(body)` | Serves `/prepare_sandbox`: once the group has started, this server sends the seed's `task_data` and operate-scope access to the group, and the Resources Server prepares the task through `borrow()`, such as starting a sidecar's tool service, before the agent or the verifier borrows it. |
 
 A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both. An episode that holds a group this server starts is a restart: no checkpoint exports it, and the declared files and environment variables never reach a checkpoint.
 
 ### Opting out
 
-Every task and every verifier runs in the group unless `sandbox_opt_out` says otherwise. Only what executes nothing may opt out, to save sandbox capacity on large QA runs:
+Every task and every verifier runs in the group unless `sandbox_opt_out` opts it out explicitly; neither opt-out is ever the default. Only what executes nothing should opt out, to save sandbox capacity on large QA runs:
 
 ```yaml
 environment_servers:
@@ -122,10 +121,10 @@ environment_servers:
 | `false` | `true` | One group at seed for the agent. It stops once the agent closes, and `/verify` runs in the Resources Server. |
 | `true` | `true` | Nothing. At startup the provider is neither checked nor built, so a large QA run can opt out of a configuration that names one. |
 
-Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed. The opt-outs are checked at seed, and a refused one fails the attempt for good (a terminal seed failure), since every attempt would fail alike:
+Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed. The task opt-out is checked at seed, and a refused one fails the attempt for good (a terminal seed failure), since every attempt would fail alike:
 
 - `task` is refused for a task that declares tools (`responses_create_params.tools`), for an episode that grants tools (`resources_tool_transports` or `tool_servers`; also refused at startup), and for a group with sidecars. A `resources_tool_transports` grant counts even when its Resources Server serves no tools: drop it from a pure QA pairing. With `task` set, the provider must apply `no_network`, which startup checks. Pair it with an agent whose loop runs in its own process, such as Simple Agent: an agent that runs a harness in a sandbox of its own is not pure QA.
-- `verifier` is refused unless the Resources Server declares `verifier_executes_nothing`, so a verifier that is not declared so, or whose server's seed reply drops the declaration, still gets a sandbox.
+- `verifier` is the configuration's explicit choice, for a verifier that executes nothing and calls no tools (rules, math-verify, a judge call). It is never the default, and nothing else is checked for it.
 
 A group no attempt can start (no image or working directory, or sidecars on a provider that cannot start them) is also refused at seed, before the agent's turn. A group for the verifier alone that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
 
