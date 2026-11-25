@@ -55,6 +55,31 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
+## Sandboxing
+
+SimpleQA is a pure QA task with a judge grader: the model calls no tools, and the judge call executes nothing. Both
+may therefore opt out of the attempt's sandbox group, which saves sandbox capacity on large runs.
+
+| Config | Pairing | Agent loop | Judge call |
+|--------|---------|------------|------------|
+| `simpleqa.yaml` | `simpleqa_environment_server` | Agent Server process | Resources Server |
+| `simpleqa_sandboxed.yaml` | `simpleqa_sandboxed_environment_server` | The attempt's sandbox group (`sandboxed: true`) | Resources Server |
+
+`simpleqa_environment_server` sets `sandbox_opt_out: {task: true, grader: true}` and needs no sandbox provider.
+`simpleqa_sandboxed_environment_server` starts one sandbox per attempt from its `sandbox_config` and runs Simple
+Agent's loop there; its grader still opts out. Its `model_only` network rule lets the sandbox reach only the policy
+model, so it needs a provider that applies that rule, in a provider block named `sandbox`, and a model server address
+the sandbox can reach. Add `simpleqa_sandboxed.yaml` and the provider config to the config paths, then run the
+sandboxed agent:
+
+```bash
+gym eval run --no-serve \
+    --agent simpleqa_sandboxed_simple_agent \
+    --input resources_servers/simpleqa/data/example.jsonl \
+    --output results/simpleqa_sandboxed_rollouts.jsonl \
+    --num-repeats 1
+```
+
 ## Data Format
 
 Each JSONL row must have:
