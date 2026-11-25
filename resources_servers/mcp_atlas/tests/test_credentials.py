@@ -4,15 +4,10 @@ import json
 from pathlib import Path
 
 import pytest
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import (
-    INPUT_READ_ROOTS_KEY_NAME,
-    BaseServerConfig,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-)
+from nemo_gym.config import BaseServerConfig
 from resources_servers.mcp_atlas.credentials import (
     SERVER_CREDENTIALS,
     SERVICE_ENV_NAMES,
@@ -41,31 +36,6 @@ def agent_config(path: Path, **dataset_fields) -> dict:
             }
         }
     }
-
-
-def controller_config(config: dict) -> DictConfig:
-    """Use the real controller loader, then the same serialized config boundary as a worker."""
-    config = OmegaConf.create(config)
-    config.setdefault("allow_openai_version_skew", True)
-    config.setdefault("mcp_atlas", {"resources_servers": {"mcp_atlas": {"entrypoint": "app.py", "domain": "other"}}})
-    for component in config.values():
-        if not isinstance(component, dict) and not OmegaConf.is_dict(component):
-            continue
-        for server_type in ("resources_servers", "responses_api_agents"):
-            for server in (component.get(server_type) or {}).values():
-                server.setdefault("entrypoint", "app.py")
-                for index, dataset in enumerate(server.get("datasets") or []):
-                    dataset.setdefault("name", f"tasks-{index}")
-                    dataset.setdefault("type", "benchmark")
-    loaded = GlobalConfigDictParser().parse(
-        GlobalConfigDictParserConfig(
-            initial_global_config_dict=config,
-            skip_load_from_cli=True,
-            skip_load_from_dotenv=True,
-            offline=True,
-        )
-    )
-    return OmegaConf.create(OmegaConf.to_yaml(loaded))
 
 
 def test_credential_registry_covers_the_catalog_without_aliasing_weather() -> None:
@@ -121,17 +91,19 @@ def test_dataset_preflight_ignores_unrelated_agents_and_reads_required_servers(t
     }
 
 
-def test_missing_requested_dataset_is_rejected_but_declared_prepare_is_explicitly_deferred(tmp_path) -> None:
+def test_a_dataset_the_host_cannot_read_is_deferred_to_the_seed_time_check(tmp_path, caplog) -> None:
     source = tmp_path / "not-prepared.jsonl"
-    with pytest.raises(CredentialConfigurationError, match="dataset does not exist"):
-        configured_dataset_servers(agent_config(source), resources_server="mcp_atlas", root=tmp_path)
-    required = configured_dataset_servers(
-        agent_config(source, prepare_script="benchmarks/mcp_atlas/prepare.py"),
-        resources_server="mcp_atlas",
-        root=tmp_path,
-    )
+    with caplog.at_level("WARNING"):
+        required = configured_dataset_servers(agent_config(source), resources_server="mcp_atlas", root=tmp_path)
     assert required.servers == frozenset()
     assert required.deferred_inputs == (source,)
+    assert "checked at seed time" in caplog.text
+    # A directory where the file should be is unreadable in the same way.
+    (tmp_path / "tasks.jsonl").mkdir()
+    required = configured_dataset_servers(
+        agent_config(Path("tasks.jsonl")), resources_server="mcp_atlas", root=tmp_path
+    )
+    assert required.deferred_inputs == (tmp_path / "tasks.jsonl",)
 
 
 def test_dataset_inventory_includes_bound_resource_and_agent_declarations(tmp_path) -> None:
@@ -191,106 +163,21 @@ def test_dataset_inventory_rejects_malformed_materialized_containers(tmp_path, t
         configured_dataset_servers(agent_config(source), resources_server="mcp_atlas", root=tmp_path)
 
 
-def test_dataset_inventory_uses_controller_precedence_after_worker_cwd_and_import_roots_change(
-    monkeypatch, tmp_path
-) -> None:
-    controller = tmp_path / "controller"
+def test_relative_dataset_paths_follow_the_component_search_roots(monkeypatch, tmp_path) -> None:
     extra = tmp_path / "extra"
-    component = tmp_path / "component"
-    worker = component / "resources_servers" / "mcp_atlas"
-    worker.mkdir(parents=True)
-    for directory, server in [(controller, "notion"), (extra, "exa"), (component, "github"), (worker, "weather-data")]:
-        directory.mkdir(exist_ok=True)
-        (directory / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": [server]}}) + "\n")
-    monkeypatch.chdir(controller)
-    monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(extra))
-    extra_config = controller_config(agent_config(Path("tasks.jsonl")))
-    monkeypatch.delenv("NEMO_GYM_EXTRA_ROOTS")
-    controller_only_config = controller_config(agent_config(Path("tasks.jsonl")))
-    monkeypatch.chdir(worker)
-    monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(component))
-    required = configured_dataset_servers(extra_config, resources_server="mcp_atlas", root=component)
-    assert required.servers == {"exa"}
-    assert configured_dataset_servers(
-        controller_only_config, resources_server="mcp_atlas", root=component
-    ).servers == {"notion"}
-
-
-def test_dataset_inventory_missing_prepared_input_keeps_controller_origin(monkeypatch, tmp_path) -> None:
-    origin = tmp_path / "controller"
-    origin.mkdir()
-    monkeypatch.chdir(origin)
-    monkeypatch.delenv("NEMO_GYM_EXTRA_ROOTS", raising=False)
-    config = controller_config(agent_config(Path("pending.jsonl"), prepare_script="prepare.py"))
-    required = configured_dataset_servers(config, resources_server="mcp_atlas", root=tmp_path)
-    assert required.servers == frozenset()
-    assert required.deferred_inputs == (origin / "pending.jsonl",)
-    config["agent"]["responses_api_agents"]["simple_agent"]["datasets"][0].pop("prepare_script")
-    with pytest.raises(CredentialConfigurationError, match="absolute resource-host-visible.*--search-dir"):
-        configured_dataset_servers(config, resources_server="mcp_atlas", root=tmp_path)
-
-
-def test_dataset_inventory_does_not_fall_through_a_shadowing_directory(monkeypatch, tmp_path) -> None:
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    (first / "tasks.jsonl").mkdir(parents=True)
-    second.mkdir()
-    (second / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
-    monkeypatch.chdir(second)
-    monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(first))
-    config = controller_config(agent_config(Path("tasks.jsonl"), prepare_script="prepare.py"))
-    with pytest.raises(CredentialConfigurationError, match="dataset is not readable.*absolute resource-host-visible"):
-        configured_dataset_servers(config, resources_server="mcp_atlas", root=tmp_path)
-
-
-def test_dataset_inventory_direct_call_uses_explicit_origin(tmp_path) -> None:
-    (tmp_path / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
-    required = configured_dataset_servers(
-        agent_config(Path("tasks.jsonl")), resources_server="mcp_atlas", root=tmp_path
-    )
-    assert required.servers == {"exa"}
-
-
-@pytest.mark.parametrize("roots", ["not-a-list", [], ["relative"]])
-def test_invalid_read_roots_require_controller_config_reload(tmp_path, roots) -> None:
-    (tmp_path / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
-    config = agent_config(Path("tasks.jsonl")) | {INPUT_READ_ROOTS_KEY_NAME: roots}
-    with pytest.raises(CredentialConfigurationError, match="reload the config in the controller"):
-        configured_dataset_servers(config, resources_server="mcp_atlas", root=tmp_path)
-
-
-def test_dataset_inventory_finds_input_prepared_after_controller_config_load(monkeypatch, tmp_path) -> None:
-    controller = tmp_path / "controller"
-    extra = tmp_path / "extra"
-    worker = tmp_path / "worker"
-    for directory in (controller, extra, worker):
+    cwd = tmp_path / "cwd"
+    fallback = tmp_path / "fallback"
+    for directory, server in [(extra, "exa"), (cwd, "notion"), (fallback, "github")]:
         directory.mkdir()
-    monkeypatch.chdir(controller)
+        (directory / "tasks.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": [server]}}) + "\n")
+    config = agent_config(Path("tasks.jsonl"))
+    monkeypatch.chdir(cwd)
     monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(extra))
-    config = controller_config(agent_config(Path("pending.jsonl"), prepare_script="prepare.py"))
-    (controller / "pending.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["exa"]}}) + "\n")
-    (worker / "pending.jsonl").write_text(json.dumps({"verifier_metadata": {"servers": ["notion"]}}) + "\n")
-    monkeypatch.chdir(worker)
-    monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(worker))
-    required = configured_dataset_servers(config, resources_server="mcp_atlas", root=worker)
-    assert required.servers == {"exa"}
-    assert required.deferred_inputs == ()
-
-
-def test_dataset_inventory_uses_current_relative_path_after_config_load(monkeypatch, tmp_path) -> None:
-    controller = tmp_path / "controller"
-    worker = tmp_path / "worker"
-    controller.mkdir()
-    worker.mkdir()
-    for name, server in (("before.jsonl", "exa"), ("after.jsonl", "notion")):
-        (controller / name).write_text(json.dumps({"verifier_metadata": {"servers": [server]}}) + "\n")
-    monkeypatch.chdir(controller)
-    monkeypatch.delenv("NEMO_GYM_EXTRA_ROOTS", raising=False)
-    config = controller_config(agent_config(Path("before.jsonl")))
-    config["agent"]["responses_api_agents"]["simple_agent"]["datasets"][0]["jsonl_fpath"] = "after.jsonl"
-    monkeypatch.chdir(worker)
-    required = configured_dataset_servers(config, resources_server="mcp_atlas", root=worker)
-    assert required.servers == {"notion"}
+    assert configured_dataset_servers(config, resources_server="mcp_atlas", root=fallback).servers == {"exa"}
+    monkeypatch.delenv("NEMO_GYM_EXTRA_ROOTS")
+    assert configured_dataset_servers(config, resources_server="mcp_atlas", root=fallback).servers == {"notion"}
+    monkeypatch.chdir(tmp_path)
+    assert configured_dataset_servers(config, resources_server="mcp_atlas", root=fallback).servers == {"github"}
 
 
 def test_actual_five_examples_require_no_service_credential_at_startup(monkeypatch, tmp_path) -> None:

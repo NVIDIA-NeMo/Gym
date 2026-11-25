@@ -33,7 +33,6 @@ from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.resolved_config import write_resolved_config
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.cli.eval import _finalize_live_exporters
-from nemo_gym.config.config_types import INPUT_READ_ROOTS_KEY_NAME
 from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -1346,20 +1345,3 @@ def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omission
         assert values["health/trial/failed_lower_bound"] == 0
         assert values["health/trial/failure_rate_lower_bound"] == 0
         assert values["health/trial_failures/rate"] == 0 and values["health/response_failures/rate"] == 0
-
-
-@pytest.mark.parametrize("live", [{INPUT_READ_ROOTS_KEY_NAME: ["/controller"]}], indirect=True)
-def test_live_delivery_omits_controller_read_roots_from_saved_and_exported_config(live) -> None:
-    artifacts, exporter, client = live
-    assert list(exporter.global_config_dict[INPUT_READ_ROOTS_KEY_NAME]) == ["/controller"]
-    saved_config = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
-    assert INPUT_READ_ROOTS_KEY_NAME not in saved_config
-    assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved_config
-    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
-    exported_config = client.artifacts[exporter.CONFIG_ARTIFACT_FILE]
-    assert exported_config == saved_config
-    assert INPUT_READ_ROOTS_KEY_NAME not in exported_config
-    assert not any(key.startswith(INPUT_READ_ROOTS_KEY_NAME) for key in client.params)
-    assert client.status == "FINISHED"
-    # The worker-side config keeps its read roots; only the authored artifact omits them.
-    assert list(exporter.global_config_dict[INPUT_READ_ROOTS_KEY_NAME]) == ["/controller"]

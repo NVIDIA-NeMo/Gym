@@ -38,10 +38,6 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 
-# Reserved runtime-config handoff: controller read origins, not a user setting or an environment variable.
-INPUT_READ_ROOTS_KEY_NAME = "_input_read_roots"
-
-
 ########################################
 # Base CLI configs
 ########################################

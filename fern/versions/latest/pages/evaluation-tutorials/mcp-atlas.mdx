@@ -50,14 +50,13 @@ Provision the service credentials in the runtime environment using the upstream 
 Airtable, Google Calendar, Notion, MongoDB and Slack also require accounts populated with the upstream
 `data_exports/` fixtures. Use approved secret configuration; do not put credential values in commands or commits.
 Each sandbox receives only known service credentials for its enabled servers, including filtering known
-credential names supplied through `sandbox_env`. Startup preflight reads available datasets declared by
-this resources server or agents using it, including materialized task inputs and canonical `task_data`
-rows. Relative JSONL paths follow the controller's search root order captured before worker launch,
-including configured `--search-dir` roots. The resolved files must be readable on the resources server host.
-A resolution failure gives guidance to supply an absolute `jsonl_fpath` or an appropriate `--search-dir`.
-Missing required credentials fail startup. Inputs awaiting a declared preparation script are checked
-before each sandbox allocation; missing credentials, unknown
-server names or an empty server list reject the seed with HTTP 422. Recognized authentication failures in
+credential names supplied through `sandbox_env`. At startup the server reads the datasets declared for it (relative paths resolve through Gym's component
+search roots: `NEMO_GYM_EXTRA_ROOTS` or `--search-dir`, the current directory, the install root) and fails
+fast when a credential their servers need is missing. A dataset it cannot find or read is logged with
+`checked at seed time` and left to the seed-time check, which rejects the task with HTTP 422 before any
+sandbox is allocated.
+Missing required credentials fail startup; at each seed, missing credentials, unknown server names or an
+empty server list reject the seed with HTTP 422. Recognized authentication failures in
 health or tool listing reject configuration after sandbox cleanup instead of becoming masked startup
 failures.
 Credential presence does not validate scopes, seeded accounts or quotas. Keep model, judge and provider

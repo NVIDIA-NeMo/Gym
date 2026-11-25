@@ -22,7 +22,6 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.config.config_types import (
-        INPUT_READ_ROOTS_KEY_NAME,
         ROLLOUT_PATH_PREFIX,
         TOKEN_CAPTURE_PATH_SEGMENT,
         AgentServerRef,
@@ -98,7 +97,6 @@ _PUBLIC_API = {
     "GlobalConfigDictParser": "global_config",
     "GlobalConfigDictParserConfig": "global_config",
     "HF_TOKEN_KEY_NAME": "global_config",
-    "INPUT_READ_ROOTS_KEY_NAME": "config_types",
     "MODEL_CALL_SAMPLING_BLOCK": "global_config",
     "MODEL_SAMPLING_KEY_NAME": "global_config",
     "ModelCallSamplingConfig": "global_config",

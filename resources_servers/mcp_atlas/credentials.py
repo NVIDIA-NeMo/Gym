@@ -30,12 +30,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from nemo_gym.config import INPUT_READ_ROOTS_KEY_NAME
+from nemo_gym import component_search_roots
 from nemo_gym.core import is_materialized_task_row
 from nemo_gym.data import normalize_task_fields
 
@@ -92,6 +93,9 @@ SERVICE_ENV_NAMES = tuple(name for names in SERVER_CREDENTIALS.values() for name
 HOST_CREDENTIAL_NAMES = frozenset(
     {"OPENSANDBOX_API_KEY", "INFERENCE_API_KEY", "NVAUTH_TOKEN", "HF_TOKEN", "AWS_ACCESS_KEY_ID"}
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialConfigurationError(BackendConfigurationError):
@@ -213,34 +217,23 @@ def _row_servers(row: object) -> list[str]:
     return enabled_servers(fields.get("servers"))
 
 
-def _dataset_path(jsonl_fpath: str | Path, *, read_roots: object, root: Path) -> Path:
+def _dataset_path(jsonl_fpath: str | Path, *, root: Path) -> Path:
+    """Resolve a declared dataset path as Gym resolves components: the search roots first, then ``root``."""
     path = Path(jsonl_fpath)
     if path.is_absolute():
         return path
-    if read_roots is None:
-        return root.absolute() / path  # Direct library callers supply their known input origin.
-    if (
-        not isinstance(read_roots, Sequence)
-        or isinstance(read_roots, (str, bytes))
-        or not read_roots
-        or not all(isinstance(value, (str, Path)) and Path(value).is_absolute() for value in read_roots)
-    ):
-        raise CredentialConfigurationError(
-            "internal controller read roots must be nonempty absolute resource-host-visible paths; "
-            "reload the config in the controller before launching the resources server"
-        )
-    paths = [Path(value) / path for value in read_roots]
-    return next((candidate for candidate in paths if candidate.exists()), paths[0])
+    candidates = [Path(search_root) / path for search_root in component_search_roots()] + [root.absolute() / path]
+    return next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
 
 
 def configured_dataset_servers(
     global_config: Mapping[str, object], *, resources_server: str, root: Path
 ) -> DatasetServerRequirements:
-    """Read server requirements only from datasets wired to this resources server.
+    """Read server requirements from the datasets wired to this resources server, for a fail-fast credential check.
 
-    Relative reads follow the controller's captured read roots; direct callers provide their known origin in
-    ``root``. A declared prepare script permits a missing input to be materialized later; every actual seed
-    is checked again before provider allocation, including deferred inputs.
+    A dataset that cannot be found or read at startup (not prepared yet, or declared with a path this host does
+    not see) is logged and deferred: every seed checks its own task's credentials and servers before any sandbox
+    is allocated, so the startup check only moves a failure earlier. Malformed task rows are still errors.
     """
     servers: set[str] = set()
     deferred: set[Path] = set()
@@ -248,32 +241,23 @@ def configured_dataset_servers(
         for dataset in declaration.get("datasets") or ():
             if not isinstance(dataset, Mapping) or not isinstance(dataset.get("jsonl_fpath"), (str, Path)):
                 raise CredentialConfigurationError("MCP-Atlas datasets require an explicit jsonl_fpath")
-            path = _dataset_path(
-                dataset["jsonl_fpath"], read_roots=global_config.get(INPUT_READ_ROOTS_KEY_NAME), root=root
-            )
-            if not path.exists():
-                if dataset.get("prepare_script"):
-                    deferred.add(path)
-                else:
-                    raise CredentialConfigurationError(
-                        f"MCP-Atlas dataset does not exist: {path}; use an absolute resource-host-visible "
-                        "jsonl_fpath or --search-dir available on the resources-server host"
-                    )
-            else:
-                try:
-                    with path.open() as source:
-                        for line_number, line in enumerate(source, 1):
-                            if line.strip():
-                                try:
-                                    enabled = _row_servers(json.loads(line))
-                                except (KeyError, TypeError, ValueError) as exc:
-                                    raise CredentialConfigurationError(
-                                        f"invalid MCP-Atlas server metadata at {path}:{line_number}: {exc}"
-                                    ) from exc
-                                servers.update(enabled)
-                except OSError as exc:
-                    raise CredentialConfigurationError(
-                        f"MCP-Atlas dataset is not readable: {path}; use an absolute resource-host-visible "
-                        "jsonl_fpath or --search-dir available on the resources-server host"
-                    ) from exc
+            path = _dataset_path(dataset["jsonl_fpath"], root=root)
+            try:
+                with path.open() as source:
+                    for line_number, line in enumerate(source, 1):
+                        if line.strip():
+                            try:
+                                enabled = _row_servers(json.loads(line))
+                            except (KeyError, TypeError, ValueError) as exc:
+                                raise CredentialConfigurationError(
+                                    f"invalid MCP-Atlas server metadata at {path}:{line_number}: {exc}"
+                                ) from exc
+                            servers.update(enabled)
+            except OSError as exc:
+                logger.warning(
+                    "MCP-Atlas credential preflight cannot read %s (%s); its tasks are checked at seed time",
+                    path,
+                    exc.strerror or type(exc).__name__,
+                )
+                deferred.add(path)
     return DatasetServerRequirements(frozenset(servers), tuple(sorted(deferred)))

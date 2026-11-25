@@ -374,10 +374,7 @@ class TestCLISetupCommandRunCommand:
             executable="/bin/bash",
             shell=True,
             # Default (no project_root): only the server dir is on PYTHONPATH.
-            env={
-                "PYTHONPATH": "/my path",
-                "UV_CACHE_DIR": "default uv cache dir",
-            },
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
             start_new_session=False,
@@ -400,10 +397,7 @@ class TestCLISetupCommandRunCommand:
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={
-                "PYTHONPATH": "/my path:existing pythonpath",
-                "UV_CACHE_DIR": "default uv cache dir",
-            },
+            env={"PYTHONPATH": "/my path:existing pythonpath", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
             start_new_session=False,
@@ -506,10 +500,7 @@ class TestCLISetupCommandRunCommand:
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={
-                "PYTHONPATH": "/my path",
-                "UV_CACHE_DIR": "my uv cache dir",
-            },
+            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "my uv cache dir"},
             stdout="stdout",
             stderr="stderr",
             start_new_session=False,
@@ -589,10 +580,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             f"set -o pipefail; (my command) 2>&1 | tee -a {tmp_path}/gym_logs/my_resources_my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={
-                "PYTHONPATH": "/root/resources_servers/my_server",
-                "UV_CACHE_DIR": "default uv cache dir",
-            },
+            env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -616,10 +604,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             f"set -o pipefail; (my command) 2>&1 | tee -a {tmp_path}/gym_logs/my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={
-                "PYTHONPATH": "/root/resources_servers/my_server",
-                "UV_CACHE_DIR": "default uv cache dir",
-            },
+            env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -1014,10 +999,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             "set -o pipefail; (my command) 2>&1 | tee -i -a /tmp/gym_logs/my_resources_my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={
-                "PYTHONPATH": "/root/resources_servers/my_server",
-                "UV_CACHE_DIR": "default uv cache dir",
-            },
+            env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
             start_new_session=False,
@@ -1042,10 +1024,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             "set -o pipefail; (my command) 2>&1 | tee -i -a /tmp/gym_logs/my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={
-                "PYTHONPATH": "/root/resources_servers/my_server",
-                "UV_CACHE_DIR": "default uv cache dir",
-            },
+            env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
             start_new_session=False,

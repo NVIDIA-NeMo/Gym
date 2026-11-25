@@ -199,9 +199,7 @@ class ScaleLiveBackend(MCPAtlasBackend):
         if required.servers:
             task_environment(environment, sorted(required.servers))
         for path in required.deferred_inputs:
-            logger.warning(
-                "MCP-Atlas credential preflight awaits prepared input %s; each task is checked before startup", path
-            )
+            logger.warning("MCP-Atlas credential preflight skipped %s; its tasks are checked at seed time", path)
         self.pool = SandboxPool(
             image=config.sandbox_image,
             sandbox_provider=provider,

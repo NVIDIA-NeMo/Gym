@@ -173,14 +173,14 @@ An evaluated Python tool must be unable to reach other rollouts or the NeMo Gym 
 3. Export the service credentials under the upstream names (`service_env_names`, for example `EXA_API_KEY`,
    `GITHUB_TOKEN`, `NOTION_TOKEN`). Each sandbox receives only known service credentials required by its
    `ENABLED_SERVERS`; unrelated known credential names are removed even when supplied through `sandbox_env`.
-   Startup preflight reads available datasets declared by this resources server or agents using it,
-   including materialized task inputs and canonical `task_data` rows. Relative JSONL paths follow the
-   controller's search root order captured before worker launch, including configured `--search-dir`
-   roots. The resolved files must be readable on the resources server host. A resolution failure gives
-   guidance to supply an absolute `jsonl_fpath` or an appropriate `--search-dir`.
-   Missing credentials fail startup with `CredentialConfigurationError`. Inputs awaiting a declared
-   preparation script are checked at each seed: missing credentials, unknown server names or an empty
-   server list reject the seed with HTTP 422 before provider allocation. Recognized authentication failures
+   At startup the server reads the datasets declared for it, resolving relative paths through Gym's
+   component search roots (`NEMO_GYM_EXTRA_ROOTS` or `--search-dir`, the current directory, the install
+   root), and fails fast when a credential their servers need is missing. A dataset it cannot find or read
+   is logged with `checked at seed time` and left to the seed, which rejects the task with HTTP 422 before
+   any sandbox is allocated.
+   Missing credentials fail startup with `CredentialConfigurationError`; at each seed, missing credentials,
+   unknown server names or an empty server list reject the seed with HTTP 422 before provider allocation.
+   Recognized authentication failures
    in health or tool listing also reject configuration after sandbox cleanup, rather than becoming masked
    startup failures.
    Nonblank values establish presence, not valid scopes or account state.
