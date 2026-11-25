@@ -71,6 +71,10 @@ model).
 Saved judge failures with complete responses support judge-only recovery through `--settle-into-source`.
 Built-in `judge_failsafe` results retain their saved answers without a reward;
 the collector accepts their two known legacy judge markers while rejecting other reserved result keys.
+A masked episode result (`mask_sample: true`) may also name its failure class in `_ng_failure_class` and mark it final
+with `_ng_failure_terminal`, as a flat `/run` reply does: it goes to the failures file, where failure-class selectors
+still match that class, and resume runs it again only when it is not final. A judge failure class still needs the
+`judge_failsafe` form.
 
 Malformed replies become terminal `environment_protocol_violation` failures when routing is enabled; running the whole task again
 cannot fix an invalid response format. A reply from a different execution attempt remains retryable because a transport
