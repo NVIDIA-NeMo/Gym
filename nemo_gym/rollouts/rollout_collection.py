@@ -3413,28 +3413,52 @@ def refresh_agent_complete_files(output_fpath: Path, global_config_dict: DictCon
             _atomic_write_json(fpath, refreshed | {"completed_at": datetime.now(timezone.utc).isoformat()})
 
 
-def remove_agent_complete_files(
-    output_fpath: Path, rollout_ids: Iterable[str], global_config_dict: DictConfig
-) -> None:
-    """Remove the completion files of the environment servers that score the given rollouts.
+def _selected_outcome_records(output_fpath: Path) -> Dict[str, Tuple[str, RolloutRecord]]:
+    """Each rollout's selected outcome in the Store, with its disposition."""
+    store = RolloutStore.read(output_fpath, import_legacy=False)
+    if store is None:
+        raise RuntimeError(f"{output_fpath} has no Store to read its selected outcomes from.")
+    return {
+        identity: (disposition, record)
+        for disposition in ("success", "failure", "omitted")
+        for (identity, _), record in store.selected_records(disposition).items()
+    }
+
+
+def selected_outcomes(output_fpath: Path) -> Dict[str, Tuple[str, Path, int]]:
+    """Where each rollout's selected outcome is saved, so a later write that replaces it can be told apart."""
+    return {
+        identity: (disposition, record.path, record.offset)
+        for identity, (disposition, record) in _selected_outcome_records(output_fpath).items()
+    }
+
+
+def remove_agent_complete_files(output_fpath: Path, selected_before: Mapping[str, Tuple[str, Path, int]]) -> None:
+    """Remove the completion files of the environment servers whose rollouts got a new selected outcome since
+    ``selected_before`` (``selected_outcomes``).
 
     A strict run that the saved-answer re-judge pass leaves incomplete gets no recomputed metrics, so the files of
-    the agents whose rollouts the pass graded again cannot be brought up to date. Every other agent's file still
-    matches its rows, so it stands. Rollouts are grouped as ``refresh_agent_complete_files`` groups them.
+    the environment servers whose outcomes the pass saved cannot be brought up to date. A re-grade the pass did not
+    save leaves its file standing, as does every other server's. Each changed outcome is grouped by the environment
+    server stamped on it, which does not depend on the local config. A changed outcome without a stamp, or a rollout
+    that lost its outcome, raises, so the caller removes every file.
     """
     complete_dir = agent_complete_dir_for(output_fpath)
     if not complete_dir.is_dir():
         return
-    store = RolloutStore.read(output_fpath, import_legacy=False)
-    if store is None:
-        raise RuntimeError(f"{output_fpath} has no Store to group its rollouts by agent.")
-    servers_by_agent = _environment_servers_by_agent(global_config_dict)
-    groups = {
-        _metrics_group(row, lambda: servers_by_agent) or RolloutCollectionHelper._dispatch_name(row)
-        for row in store.inputs_for([{ROLLOUT_ID_KEY_NAME: identity} for identity in rollout_ids])
-    }
+    selected_after = _selected_outcome_records(output_fpath)
+    lost = set(selected_before) - set(selected_after)
+    if lost:
+        raise RuntimeError(f"{len(lost)} rollout(s) of {output_fpath} lost their selected outcome.")
+    servers = set()
+    for identity, (disposition, record) in selected_after.items():
+        if selected_before.get(identity) != (disposition, record.path, record.offset):
+            server = record.read().get(NG_ENVIRONMENT_SERVER_KEY)
+            if not isinstance(server, str):
+                raise RuntimeError(f"The new outcome of rollout {identity!r} names no environment server.")
+            servers.add(server)
     for fpath in complete_dir.glob("*.json"):
-        if orjson.loads(fpath.read_bytes()).get(NG_ENVIRONMENT_SERVER_KEY) in groups:
+        if orjson.loads(fpath.read_bytes()).get(NG_ENVIRONMENT_SERVER_KEY) in servers:
             fpath.unlink()
 
 

@@ -130,27 +130,27 @@ def test_completion_files_follow_the_recomputed_metrics_or_are_removed(
     assert complete_dir.exists() is (failing_step is None)
 
 
-@pytest.mark.parametrize("due", [["alpha-rollout"], RuntimeError("no store")], ids=["read", "unreadable"])
+@pytest.mark.parametrize("before", [{"alpha-rollout": ()}, RuntimeError("no store")], ids=["read", "unreadable"])
 def test_a_strict_run_left_incomplete_by_the_pass_removes_the_files_it_regraded(
-    tmp_path, monkeypatch, pass_settles_one_row, due
+    tmp_path, monkeypatch, pass_settles_one_row, before
 ) -> None:
-    """No run-wide metrics follow the pass, so the files of the agents it graded again would keep their old scores;
-    the other agents' files stand. Rollouts that cannot be read leave no file standing."""
+    """No run-wide metrics follow the pass, so the files of the outcomes it saved would keep their old scores; the
+    other files stand. Outcomes that cannot be read before the pass leave no file standing."""
     complete_dir = tmp_path / "rollouts_agent_complete"
     complete_dir.mkdir()
     (complete_dir / "alpha.json").write_text("{}")
     removed = []
 
-    def due_judge_failures(output):
-        if isinstance(due, Exception):
-            raise due
-        return due
+    def selected_outcomes(output):
+        if isinstance(before, Exception):
+            raise before
+        return before
 
     monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: False)
-    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.due_judge_failures", due_judge_failures)
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.selected_outcomes", selected_outcomes)
     monkeypatch.setattr(
         "nemo_gym.rollouts.rollout_collection.remove_agent_complete_files",
-        lambda output, rollout_ids, global_config_dict: removed.append(rollout_ids),
+        lambda output, selected_before: removed.append(selected_before),
     )
 
     eval_cli._rejudge_saved_judge_failures(
@@ -158,8 +158,8 @@ def test_a_strict_run_left_incomplete_by_the_pass_removes_the_files_it_regraded(
     )
 
     assert pass_settles_one_row == []
-    assert removed == ([["alpha-rollout"]] if isinstance(due, list) else [])
-    assert complete_dir.exists() is isinstance(due, list)
+    assert removed == ([before] if isinstance(before, dict) else [])
+    assert complete_dir.exists() is isinstance(before, dict)
 
 
 @pytest.mark.parametrize(

@@ -147,6 +147,7 @@ from nemo_gym.rollouts.rollout_collection import (
     loads_jsonl_line,
     refresh_agent_complete_files,
     remove_agent_complete_files,
+    selected_outcomes,
 )
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
 from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf, _build_ng_perf
@@ -1894,36 +1895,64 @@ class TestRolloutCollection:
         assert (complete_dir / "beta.json").read_bytes() == beta_before
         assert not (complete_dir / "gamma.json").exists()
 
-    def test_only_the_agents_of_the_given_rollouts_lose_their_completion_files(self, tmp_path: Path) -> None:
-        """A re-judge that leaves a strict run incomplete removes the files of the agents it graded again, not all."""
-        from nemo_gym.rollouts.rollout_records import logical_rollout_id
+    @pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "unstamped"])
+    def test_only_the_servers_of_outcomes_saved_since_the_snapshot_lose_their_completion_files(
+        self, tmp_path: Path, stamped: bool
+    ) -> None:
+        """A re-judge that leaves a strict run incomplete removes the files of the environment servers whose re-grades
+        it saved, read from each outcome's stamp, not the local config: alpha's re-grade is saved, beta's is not.
+        An outcome without a stamp cannot be placed, so the caller removes every file."""
         from nemo_gym.rollouts.rollout_recovery import RunManifest
         from nemo_gym.rollouts.rollout_store import RolloutStore
+        from tests.unit_tests.eval.test_rejudge_saved_judge_failures import ANSWER, _settle
 
+        agents = ("alpha_agent", "beta_agent")
         rows = [
             {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": agent}}
-            for task, agent in enumerate(("alpha", "beta"))
+            for task, agent in enumerate(agents)
         ]
         source = tmp_path / "source.jsonl"
         source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
-        agents = {name: {"responses_api_agents": {}} for name in ("alpha", "beta")}
         output = tmp_path / "rollouts.jsonl"
+        failures = []
         with RolloutStore.start_or_resume(
-            output, lambda: (rows, RunManifest.create(source, rows, {}, agents)), resume=False
+            output,
+            lambda: (
+                rows,
+                RunManifest.create(source, rows, {}, {name: {"responses_api_agents": {}} for name in agents}),
+            ),
+            resume=False,
         ) as store:
             for row in store.pending():
                 store.record_dispatch(row)
-                store.record_outcome(row | {"reward": 1.0})
+                server = row[AGENT_REF_KEY_NAME]["name"].replace("_agent", "_environment_server")
+                failure = row | {
+                    "_ng_failure_class": "judge_failed",
+                    "_ng_failure_id": f"judge-{row[TASK_INDEX_KEY_NAME]}",
+                    "failure_kind": "judge_failed",
+                    "mask_sample": True,
+                    "reward": 0.0,
+                    "response": ANSWER,
+                }
+                failure |= {NG_ENVIRONMENT_SERVER_KEY: server} if stamped else {}
+                store.record_outcome(failure)
+                failures.append(failure)
         complete_dir = tmp_path / "rollouts_agent_complete"
         complete_dir.mkdir()
-        for agent in ("alpha", "beta"):
-            (complete_dir / f"{agent}.json").write_bytes(
-                orjson.dumps({AGENT_REF_KEY_NAME: {"name": agent}, NG_ENVIRONMENT_SERVER_KEY: agent})
+        for agent in agents:
+            server = agent.replace("_agent", "_environment_server")
+            (complete_dir / f"{server}.json").write_bytes(
+                orjson.dumps({AGENT_REF_KEY_NAME: {"name": agent}, NG_ENVIRONMENT_SERVER_KEY: server})
             )
+        before = selected_outcomes(output)
+        _settle(output, failures[0], 1.0)
 
-        remove_agent_complete_files(output, [logical_rollout_id(rows[0])], OmegaConf.create({}))
-
-        assert sorted(path.name for path in complete_dir.iterdir()) == ["beta.json"]
+        if stamped:
+            remove_agent_complete_files(output, before)
+            assert sorted(path.name for path in complete_dir.iterdir()) == ["beta_environment_server.json"]
+        else:
+            with pytest.raises(RuntimeError, match="names no environment server"):
+                remove_agent_complete_files(output, before)
 
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",
