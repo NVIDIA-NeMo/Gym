@@ -105,6 +105,11 @@ class SidecarProvider(PlainProvider):
         self.sidecar_calls.append(("download", handle.sandbox_id, sidecar, source_path, target_path))
         target_path.write_text(f"{sidecar}:{source_path}", encoding="utf-8")
 
+    async def upload_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: Path, target_path: str
+    ) -> None:
+        self.sidecar_calls.append(("upload", handle.sandbox_id, sidecar, source_path.read_text(), target_path))
+
 
 _RECORDER = {
     "name": "recorder",
@@ -189,7 +194,7 @@ async def test_sidecar_requires_a_started_sandbox() -> None:
         sandbox.sidecar("recorder")
 
 
-async def test_sidecar_exec_and_download_delegate_to_provider(tmp_path: Path) -> None:
+async def test_sidecar_exec_and_file_transfers_delegate_to_provider(tmp_path: Path) -> None:
     provider = SidecarProvider()
     sandbox = await AsyncSandbox(provider, SandboxSpec(image="task:1", sidecars=[_RECORDER])).start()
     sandbox_id = sandbox._require_handle().sandbox_id
@@ -199,12 +204,15 @@ async def test_sidecar_exec_and_download_delegate_to_provider(tmp_path: Path) ->
     output: list[str] = []
     result = await sidecar.exec("serve", "--port", "9000", timeout_s=30, on_stdout=output.append)
     await sidecar.download("/var/log/record.jsonl", str(tmp_path / "record.jsonl"))
+    (tmp_path / "service.json").write_text('{"port": 9000}', encoding="utf-8")
+    await sidecar.upload(str(tmp_path / "service.json"), "/etc/service.json")
 
     assert result.stdout == "recorder: serve --port 9000"
     assert output == ["recorder started\n"]
     assert provider.sidecar_calls == [
         ("exec", sandbox_id, "recorder", ["serve", "--port", "9000"], 30),
         ("download", sandbox_id, "recorder", "/var/log/record.jsonl", tmp_path / "record.jsonl"),
+        ("upload", sandbox_id, "recorder", '{"port": 9000}', "/etc/service.json"),
     ]
     assert (tmp_path / "record.jsonl").read_text(encoding="utf-8") == "recorder:/var/log/record.jsonl"
     await sandbox.stop()

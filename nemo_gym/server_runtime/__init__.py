@@ -154,6 +154,16 @@ if TYPE_CHECKING:
         MCPToolAccess,
         ToolAccess,
     )
+    from nemo_gym.server_runtime.tool_sidecar import (
+        TOOL_SIDECAR_COLLECT_PATH,
+        TOOL_SIDECAR_PREPARE_PATH,
+        ToolSidecarCollectRequest,
+        ToolSidecarCollectResponse,
+        ToolSidecarConfig,
+        ToolSidecarPrepareRequest,
+        ToolSidecarPrepareResponse,
+        tool_sidecar_config_of,
+    )
     from nemo_gym.server_runtime.verifier_observability import (
         observe_llm_judge_grading,
         observe_programmatic_grading,
@@ -256,6 +266,14 @@ _PUBLIC_API = {
     "ToolCallRecord": "episode_tools",
     "ToolResult": "episode_tools",
     "ToolSpec": "episode_tools",
+    "TOOL_SIDECAR_COLLECT_PATH": "tool_sidecar",
+    "TOOL_SIDECAR_PREPARE_PATH": "tool_sidecar",
+    "ToolSidecarCollectRequest": "tool_sidecar",
+    "ToolSidecarCollectResponse": "tool_sidecar",
+    "ToolSidecarConfig": "tool_sidecar",
+    "ToolSidecarPrepareRequest": "tool_sidecar",
+    "ToolSidecarPrepareResponse": "tool_sidecar",
+    "tool_sidecar_config_of": "tool_sidecar",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
     "checkpoint_state_dir": "owned_sandboxes",

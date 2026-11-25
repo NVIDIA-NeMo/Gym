@@ -1186,6 +1186,10 @@ class AsyncSandboxSidecar:
         """Download one file from the sidecar's filesystem."""
         await self._provider.download_sidecar_file(self._handle, self.name, remote_path, Path(local_path))
 
+    async def upload(self, local_path: Path | str, remote_path: str) -> None:
+        """Upload one local file to the sidecar's filesystem."""
+        await self._provider.upload_sidecar_file(self._handle, self.name, Path(local_path), remote_path)
+
 
 class _AsyncLoopRunner:
     """Run async sandbox operations for sync callers."""

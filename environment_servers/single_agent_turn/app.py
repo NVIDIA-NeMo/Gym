@@ -4,6 +4,8 @@
 """Resources-backed single-agent environment server."""
 
 import asyncio
+import dataclasses
+import functools
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
@@ -59,6 +61,8 @@ from nemo_gym.sandbox import SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     NG_SANDBOX_ACCESS_KEY,
+    TOOL_SIDECAR_COLLECT_PATH,
+    TOOL_SIDECAR_PREPARE_PATH,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
@@ -74,12 +78,17 @@ from nemo_gym.server_runtime import (
     SingleAgentTurnResult,
     StepType,
     ToolAccess,
+    ToolSidecarCollectRequest,
+    ToolSidecarConfig,
+    ToolSidecarPrepareRequest,
+    ToolSidecarPrepareResponse,
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
     seed_rebinds_tool_accesses,
     seed_restarts,
     seed_verify_step_type,
+    tool_sidecar_config_of,
 )
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -123,6 +132,8 @@ class SessionHandles(BaseModel):
     # Whether this server started the attempt's sandbox and lent it to the agent, because the Resources Server lent
     # none.
     attempt_sandbox: bool = False
+    # The tool host's session cookies in the attempt group's tool sidecar, once the Resources Server seeded it there.
+    tool_sidecar_cookies: dict[str, str] | None = None
 
     @classmethod
     def new(cls, tool_servers: Sequence[str] = ()) -> "SessionHandles":
@@ -226,9 +237,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         """
         super().check_sandbox_provider()
         config = self.config.sandbox_config
+        self._check_tool_sidecar()
         if config is None:
             return
-        granted = {*([self.config.resources_server.name] if self.config.resources_tool_transports else [])}
+        # The Resources Server's tools run in the group's tool sidecar when it declares one, so the sandbox need not
+        # reach its host.
+        serves_resources_tools = self.config.resources_tool_transports and self.tool_sidecar is None
+        granted = {*([self.config.resources_server.name] if serves_resources_tools else [])}
         granted.update(self.tool_server_names)
         # inherit leaves egress open, and hosts_only names hosts rather than servers, so neither can be checked here.
         missing = sorted(granted - set(config.tool_servers))
@@ -238,6 +253,32 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 "use network: model_and_tools with these servers in tool_servers"
             )
         self.sandboxes  # noqa: B018 - builds the provider, which raises for a bad provider block
+        if self.tool_sidecar is not None:
+            self.tool_sidecar.check_provider(self.sandboxes.provider)
+
+    @functools.cached_property
+    def tool_sidecar(self) -> ToolSidecarConfig | None:
+        """The sidecar the Resources Server's tools run in, as its config declares; None when they run in its process."""
+        return tool_sidecar_config_of(
+            get_first_server_config_dict(self.server_client.global_config_dict, self.config.resources_server.name)
+        )
+
+    def _check_tool_sidecar(self) -> None:
+        """Refuse a pairing whose Resources Server serves its tools from a sidecar this server cannot run or grant."""
+        if self.tool_sidecar is None:
+            return
+        server = f"Environment Server {self.config.name!r}"
+        resources = self.config.resources_server.name
+        if self.config.sandbox_config is None:
+            raise ValueError(
+                f"{resources!r} serves its tools from a sidecar of the attempt's sandbox group, which {server} starts "
+                "only with sandbox_provider and sandbox_config set"
+            )
+        if self.config.resources_tool_transports != ["direct_http"]:
+            raise ValueError(
+                f"{server} grants the tool sidecar of {resources!r} over direct_http only; "
+                f"set resources_tool_transports: [direct_http], not {self.config.resources_tool_transports}"
+            )
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -571,6 +612,17 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         sandbox_access = None
         if seed.sandbox_access is None and self.config.sandbox_provider is not None:
             sandbox_access = await self._start_attempt_sandbox(request, handles)
+            if self.tool_sidecar is not None:
+                await self._prepare_tool_sidecar(request, handles, sandbox_access)
+        elif self.tool_sidecar is not None:
+            raise self._failure(
+                stage="seed",
+                failure_reason=(
+                    f"{self.config.resources_server.name!r} lent its own sandbox, which has no tool sidecar; a "
+                    "Resources Server that serves its tools from a sidecar runs in the group this server starts"
+                ),
+                terminal=True,
+            )
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
         await self._seed_agent(request, handles, seed, tool_accesses, sandbox_access=sandbox_access)
         return registered
@@ -599,11 +651,73 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "rollout_id": request.episode_id.capture_key[:_LABEL_LIMIT],
                 },
             )
+            if self.tool_sidecar is not None:
+                # The Resources Server's tools run beside the agent container, reaching only their own hosts.
+                spec = dataclasses.replace(
+                    spec, sidecars=(*spec.sidecars, self.tool_sidecar.sidecar_spec(self.sandboxes.provider))
+                )
             await self.sandboxes.create(key, spec)
             handles.attempt_sandbox = True
             return await self.sandboxes.access(key, workdir=config.workdir)
         except Exception as error:
             raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
+
+    async def _prepare_tool_sidecar(
+        self, request: SingleAgentTurnRequest, handles: "SessionHandles", sandbox_access: SandboxAccess
+    ) -> None:
+        """Have the Resources Server start its tool host in the group's sidecar, then check the agent container reaches
+        it. Either failing is an infrastructure failure of the attempt: no tool call falls back to the Resources host.
+        """
+        assert self.tool_sidecar is not None
+        try:
+            prepared = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=TOOL_SIDECAR_PREPARE_PATH,
+                json=ToolSidecarPrepareRequest(
+                    seed=self._resources_seed_body(request, handles), sandbox_access=sandbox_access
+                ).model_dump(mode="json"),
+                cookies=handles.resources_cookies,
+            )
+            await raise_boundary_failure(prepared)
+            reply = ToolSidecarPrepareResponse.model_validate(await get_response_json(prepared))
+            handles.tool_sidecar_cookies = reply.cookies
+            await self._check_tool_sidecar_reachable(handles)
+        except Exception as error:
+            raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
+
+    async def _check_tool_sidecar_reachable(self, handles: "SessionHandles") -> None:
+        """Probe the tool host from the agent container, as the agent's tool calls will reach it.
+
+        An image without ``python3`` cannot run the probe; the check is skipped there with a warning.
+        """
+        assert self.tool_sidecar is not None
+        sandbox = self.sandboxes.get(self._attempt_sandbox_key(handles))
+        if sandbox is None:
+            raise RuntimeError("the attempt's sandbox is gone before its tool sidecar was checked")
+        url = f"{self.tool_sidecar.url}/_tool_sidecar/ready"
+        probe = (
+            "command -v python3 >/dev/null || exit 127; "
+            f"python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' {url}"
+        )
+        result = await sandbox.exec(probe, cwd="/", timeout_s=60)
+        if result.return_code == 127 and result.error_type is None:
+            LOGGER.warning("The agent container has no python3, so its path to the tool sidecar was not checked")
+            return
+        if result.return_code != 0 or result.error_type is not None:
+            detail = result.error_type or (result.stderr or result.stdout or "").strip()[-1000:]
+            raise RuntimeError(f"The agent container cannot reach the tool sidecar at {url}: {detail}")
+
+    async def _collect_tool_sidecar(self, handles: "SessionHandles", access: SandboxAccess) -> None:
+        """Have the Resources Server copy the session's tool state out of the sidecar, before ``/verify`` grades it."""
+        collected = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path=TOOL_SIDECAR_COLLECT_PATH,
+            json=ToolSidecarCollectRequest(
+                sandbox_access=access, cookies=handles.tool_sidecar_cookies or {}
+            ).model_dump(mode="json"),
+            cookies=handles.resources_cookies,
+        )
+        await raise_boundary_failure(collected)
 
     async def _stop_attempt_sandbox(self, handles: "SessionHandles") -> None:
         """Stop the attempt's sandbox; a no-op when none was started, so cleanup may repeat it.
@@ -637,22 +751,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     async def _seed_resources(
         self, request: SingleAgentTurnRequest, handles: "SessionHandles"
     ) -> ResourcesSeedSessionResponse:
-        task_input = request.task.task_input
         try:
             seed_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
-                json=ResourcesSeedSessionRequest(
-                    resources_session_id=handles.resources_session_id,
-                    episode_id=request.episode_id,
-                    task_id=request.task.task_id,
-                    task_data=task_input.task_data,
-                    # As _verify_body sends them: a server whose session is built from the task's history or tools
-                    # reads them at seed. Tool servers' seeds do not get them.
-                    responses_create_params=task_input.responses_create_params.model_dump(
-                        mode="json", exclude_unset=True
-                    ),
-                ).model_dump(mode="json"),
+                json=self._resources_seed_body(request, handles),
             )
             await raise_boundary_failure(seed_http_response)
             handles.resources_cookies = _cookies(seed_http_response)
@@ -672,6 +775,20 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ) from error
         handles.observation = seed.observation
         return seed
+
+    @staticmethod
+    def _resources_seed_body(request: SingleAgentTurnRequest, handles: "SessionHandles") -> dict[str, Any]:
+        """The Resources Server's seed, which its tool sidecar's session is seeded with too."""
+        task_input = request.task.task_input
+        return ResourcesSeedSessionRequest(
+            resources_session_id=handles.resources_session_id,
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            task_data=task_input.task_data,
+            # As _verify_body sends them: a server whose session is built from the task's history or tools reads them
+            # at seed. Tool servers' seeds do not get them.
+            responses_create_params=task_input.responses_create_params.model_dump(mode="json", exclude_unset=True),
+        ).model_dump(mode="json")
 
     async def _seed_tool_servers(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> list[ToolAccess]:
         """Seed the episode's session on each tool server and grant the agent its MCP tools."""
@@ -745,7 +862,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         sandbox_access = sandbox_access or seed.sandbox_access
         resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
-        if "direct_http" in self.config.resources_tool_transports:
+        if handles.tool_sidecar_cookies is not None:
+            # The tools run in the group's tool sidecar, which the agent container reaches by its name. The attempt
+            # restarts after a crash (its sandbox cannot be rebuilt), so the grant carries no rollout prefix.
+            assert self.tool_sidecar is not None
+            tool_accesses.append(
+                DirectHTTPToolAccess(
+                    name=f"{self.config.resources_server.name}.direct_http",
+                    required=True,
+                    base_url=self.tool_sidecar.url,
+                    cookies=handles.tool_sidecar_cookies,
+                )
+            )
+        elif "direct_http" in self.config.resources_tool_transports:
             # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
             # so the grant carries this attempt's rollout prefix.
             # An agent that continues the session after a restore sends its calls under the replacement's prefix.
@@ -910,6 +1039,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 access = await self.sandboxes.access(
                     self._attempt_sandbox_key(handles), workdir=self.config.sandbox_config.workdir
                 )
+                if handles.tool_sidecar_cookies is not None:
+                    # Before /verify grades it, and before the group (and the tool state in its sidecar) is stopped.
+                    await self._collect_tool_sidecar(handles, access)
             except Exception as error:
                 raise dependency_failure(
                     error,

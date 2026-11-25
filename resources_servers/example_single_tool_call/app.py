@@ -19,8 +19,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.environment import ToolSidecarResources, ToolSidecarResourcesConfig
 from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
@@ -39,7 +39,7 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 
 
-class SimpleWeatherResourcesServerConfig(BaseResourcesServerConfig):
+class SimpleWeatherResourcesServerConfig(ToolSidecarResourcesConfig):
     pass
 
 
@@ -63,7 +63,9 @@ class SimpleWeatherVerifier:
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
-class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
+# With `tool_sidecar` set, get_weather runs in a sidecar of the attempt's sandbox group instead of this process; the tool
+# keeps no state, so grading reads only the agent's response.
+class SimpleWeatherResourcesServer(ToolSidecarResources, SimpleWeatherVerifier, SimpleResourcesServer):
     # Tool results depend only on the request, so a continuation needs no session state.
     checkpoint_mode = "stateless"
     config: SimpleWeatherResourcesServerConfig

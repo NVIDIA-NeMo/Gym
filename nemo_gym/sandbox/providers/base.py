@@ -691,6 +691,12 @@ class SupportsSandboxSidecars(Protocol):
         """Download one file from ``sidecar`` to the local filesystem."""
         ...
 
+    async def upload_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: Path, target_path: str
+    ) -> None:
+        """Upload one local file into ``sidecar``, for example a service's runtime or its configuration."""
+        ...
+
 
 @runtime_checkable
 class SupportsSandboxPauseResume(Protocol):
