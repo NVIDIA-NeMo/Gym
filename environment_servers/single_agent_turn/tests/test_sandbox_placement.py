@@ -4,6 +4,7 @@
 capabilities, the verifier's side configured in ``verifier.mode`` or declared by the Resources Server
 (``verifier_mode``)."""
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -121,6 +122,41 @@ async def test_a_separate_verifier_after_an_agent_group_gets_a_fresh_group_once_
         "sandbox_id"
     ] == ("sb-2")
     assert provider.rules == [("model_only", [MODEL_HOST]), ("no_network", [])]
+    assert provider.running() == []
+
+
+@pytest.mark.parametrize("tools", [False, True], ids=["in-process agent", "agent's group"])
+async def test_a_separate_verifiers_group_stops_when_verify_fails(tools: bool) -> None:
+    provider = _Provider()
+    server, client = _server(provider, agent=None if tools else IN_PROCESS_AGENT)
+    client.responses[0] = _seed_reply(verifier_mode="separate")
+    client.responses[4] = ConnectionResetError("resources went away during /verify")
+    seen = _recording(client, provider)
+
+    result = await server.run_request(_with_tools(_request()) if tools else _request())
+
+    assert result.result is None
+    assert result.failure.stage == "verification"
+    verifier_group = "sb-2" if tools else "sb-1"
+    assert dict(seen)["/verify"] == [verifier_group]
+    assert list(provider.boxes)[-1] == verifier_group
+    assert provider.running() == []
+
+
+async def test_a_separate_verifiers_group_stops_when_the_episode_is_cancelled_during_verify() -> None:
+    provider = _Provider()
+    server, client = _server(provider, agent=IN_PROCESS_AGENT)
+    client.responses[0] = _seed_reply(verifier_mode="separate")
+    client.slow_path = "/verify"
+
+    episode = asyncio.create_task(server.run_request(_request()))
+    while "/verify" not in _paths(client):
+        await asyncio.sleep(0.01)
+    assert provider.running() == ["sb-1"]
+    episode.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await episode
+
     assert provider.running() == []
 
 
@@ -425,6 +461,20 @@ async def test_without_a_task_sandbox_a_task_whose_agent_needs_a_group_is_refuse
     )
     assert _paths(client) == ["/seed_session", "/close_session"]
     assert provider.boxes == {}
+
+
+def test_startup_refuses_granted_tools_without_a_task_sandbox_to_run_the_agent_in() -> None:
+    verifier = {"mode": "separate", "sandbox": {"image": "grader:1", "workdir": "/grade", "ttl_s": 25200}}
+    server, client = _server(_Provider(), sandbox_config=None, verifier=verifier, resources_tool_transports=["mcp"])
+    opensandbox = {"opensandbox": {"networking": {"enforces_network_policy": True}}}
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": opensandbox})
+
+    with pytest.raises(ValueError, match=r"grants the tools of \['resources'\], .* but sets no sandbox_config"):
+        server.check_sandbox_provider()
+    # Without granted tools, the separate verifier's group alone is fine.
+    server, client = _server(_Provider(), sandbox_config=None, verifier=verifier)
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": opensandbox})
+    server.check_sandbox_provider()
 
 
 @pytest.mark.parametrize("provider, refused", [(_ModelOnlyProvider(), True), (_Provider(), False)])
