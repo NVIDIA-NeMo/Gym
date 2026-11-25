@@ -171,7 +171,8 @@ class SimpleQAServer(SimpleResourcesServer):
     config: SimpleQAConfig
 
     # verify() formats the judge prompt, calls the judge model and parses one letter: it executes nothing and calls no
-    # tools, so /verify runs here with no sandbox. "none" is the default; it is stated so the example shows the choice.
+    # tools, so it runs only in the Resources Server. "none" is the mode a pairing gets when it leaves verifier.mode
+    # unset, and the only one supported: a pairing that configures "shared" or "separate" is refused.
     verifier_mode: ClassVar[VerifierMode] = "none"
 
     def model_post_init(self, context):
