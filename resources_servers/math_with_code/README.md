@@ -141,10 +141,10 @@ short list of builtins (with `__import__`, so `import` works). Each attempt gets
 defines for the next call. Errors and timeouts come back to the model as `success: false` with the message, as they did
 when this server ran the code.
 
-The grader only compares answers, so the environment server opts it out of the sandbox (`sandbox_opt_out.grader`):
-the sandbox stops once the agent closes, and `/verify` runs here. This server keeps the session contract for
-`math_with_code_environment_server` (`single_agent_turn_legacy`): a `/verify` for a closed session returns a masked
-sample instead of a reward of 0.
+The verifier only compares answers and declares so (`verifier_executes_nothing`), so the environment server opts it out
+of the sandbox (`sandbox_opt_out.verifier`): the sandbox stops once the agent closes, and `/verify` runs here. This
+server keeps the session contract for `math_with_code_environment_server` (`single_agent_turn_legacy`): a `/verify`
+for a closed session returns a masked sample instead of a reward of 0.
 
 ### Additional Details
 

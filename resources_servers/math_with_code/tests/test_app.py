@@ -254,6 +254,12 @@ class TestResourcesSessions:
         assert calls == 2
         await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
 
+    def test_the_seed_declares_that_the_verifier_executes_nothing(self) -> None:
+        """Only this declaration lets an Environment Server run /verify outside the attempt's sandbox."""
+        _, app = _session_server()
+        seeded = TestClient(app).post("/seed_session", json=_seed("rs-1"))
+        assert seeded.status_code == 200 and seeded.json()["verifier_executes_nothing"] is True
+
     def test_session_contract(self) -> None:
         server, app = _session_server()
 
