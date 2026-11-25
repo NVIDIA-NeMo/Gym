@@ -352,7 +352,8 @@ A seed with `continuation: {mode: resume_harness_session}` keeps one Claude Code
 - The first activation starts a Claude Code session. Each later one runs `claude -p --resume <session id>`, with the id from the previous run's stream-json events.
 - The saved session stays in the sandbox, in `CLAUDE_CONFIG_DIR` under the session directory. Each activation gets its own supervisor directory beside it.
 - Every activation passes the same settings, MCP config and model endpoint. The system prompt is the first activation's; a later activation that sends a different one gets HTTP 422.
-- `metadata.agent_timeout_sec` bounds each activation, including its preparation.
+- `metadata.agent_timeout_sec` bounds each activation, including its preparation and the wait for a concurrency slot. An activation whose budget runs out before Claude Code launches returns an `incomplete` reply, and the session continues.
+- An activation fails if an earlier one ran but Claude Code reported no session id, rather than start a new conversation.
 - Each reply carries that activation's output alone, with `activation_id` and `harness_session_id` in its metadata.
 - Close returns one root invocation per activation (`<agent session>:activation-<N>:<Claude session>`, with `activation_id` and `harness_session_id`) and the cumulative trajectory, one turn per activation.
 
