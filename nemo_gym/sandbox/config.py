@@ -211,8 +211,9 @@ def resolve_provider_owner_concurrency(
     block, source = _resolve_block(sandbox_provider, named_configs)
     if not isinstance(block, Mapping):
         raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+    value = block.get(SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY)
     try:
-        return OwnerConcurrency.model_validate(block.get(SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY) or {})
+        return OwnerConcurrency.model_validate({} if value is None else value)
     except ValidationError as error:
         raise ValueError(
             f"Sandbox '{SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY}' from {source} is invalid: {error}"

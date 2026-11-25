@@ -412,31 +412,34 @@ def _optional_semaphore(limit: int | None) -> asyncio.Semaphore | None:
 
 
 def _settle_s(spec: SandboxSpec) -> float:
-    """How long a cancelled caller waits for a start to end: the spec's readiness wait, then a stop's limit."""
+    """How long a cancelled caller waits for the provider to return a handle."""
     return (spec.ready_timeout_s or 0) + STOP_TIMEOUT_S
 
 
-async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_kwargs: Any) -> None:
-    """Let a cancelled start settle so its owner can roll back the handle under its stop limit.
+async def _wait_through_cancellation(*futures: asyncio.Future[Any], timeout_s: float) -> None:
+    """Wait for the first completion or the deadline, including through repeated cancellation of the caller."""
+    deadline = time.monotonic() + timeout_s
+    with anyio.CancelScope(shield=True):
+        # A repeatedly cancelled gather can interrupt even a wait on an already completed fork.
+        while not any(future.done() for future in futures) and (remaining := deadline - time.monotonic()) > 0:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait(futures, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                return
 
-    A provider create cut short can leave a sandbox with no handle to stop, and not every provider applies ``ttl_s``
-    (Enroot does not). So a cancelled caller waits for the start, shielded through any further cancellation and
-    bounded by ``settle_s``, before handing cleanup back to the owner. A start still running after ``settle_s`` is
-    cancelled. If the provider never returned a handle, only its ``ttl_s`` can reclaim what it made.
-    """
-    start = asyncio.ensure_future(sandbox.start(_owner_rolls_back=True, **start_kwargs))
+
+async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, snapshot_id: str | None = None) -> None:
+    """On cancellation, wait for a provider handle so the owner can stop it, then interrupt any file upload."""
+    handle_ready: asyncio.Future[AsyncSandbox] = asyncio.get_running_loop().create_future()
+    start = asyncio.create_task(sandbox.start(snapshot_id=snapshot_id, take_ownership=handle_ready.set_result))
     try:
         await asyncio.shield(start)
     except asyncio.CancelledError:
-        deadline = time.monotonic() + settle_s
-        while not start.done() and (remaining := deadline - time.monotonic()) > 0:
-            with contextlib.suppress(asyncio.CancelledError), anyio.CancelScope(shield=True):
-                await asyncio.wait({start}, timeout=remaining)
-        with anyio.CancelScope(shield=True):
-            if not start.done():
-                start.cancel()
-                with anyio.move_on_after(STOP_TIMEOUT_S):
-                    await asyncio.wait({start})
+        # Cutting short the provider create can leave a sandbox without a handle to stop. Some providers
+        # (including Enroot) do not enforce ttl_s. Give the provider a bounded chance to return its handle.
+        await _wait_through_cancellation(handle_ready, start, timeout_s=settle_s)
+        if not start.done():
+            start.cancel()
+            await _wait_through_cancellation(start, timeout_s=STOP_TIMEOUT_S)
         if start.done() and not start.cancelled() and start.exception() is not None:
             # Retrieved so it is not reported as never retrieved; the caller's cancellation is what goes on.
             LOGGER.info("a cancelled caller's start failed: %r", start.exception())
@@ -724,13 +727,12 @@ class OwnedSandboxes:
         create of a key that an export is snapshotting waits for that export; creates of other keys do not.
 
         The sandbox is tracked before it starts, but :meth:`get`, ``in`` and :meth:`access` show it only once its start
-        succeeded. A start that fails or is cancelled is stopped here, shielded from the cancellation. A start
-        cancelled before the provider returned the sandbox is first let finish, shielded and bounded by
-        ``STOP_TIMEOUT_S``: a provider create cut short can leave a sandbox with no handle to stop, and not every
-        provider applies ``ttl_s`` (Enroot does not). Only a start still running after that is cut short, and the
-        spec's ``ttl_s`` is all that reclaims what it made. If the stop fails too, the key stays tracked, so the next
-        :meth:`stop` of the key or :meth:`aclose` stops it again, it is never lent or exported, and the start's error
-        is raised with the stop's as its context.
+        succeeded. If the caller cancels before the provider returns a handle, the owner waits up to
+        ``ready_timeout_s`` (zero when unset) plus ``STOP_TIMEOUT_S`` for the handle. Once it has a handle,
+        the owner interrupts any file upload and stops the sandbox, shielded from cancellation.
+        If the provider never returns a handle, cleanup depends on its support for ``ttl_s``. If the stop fails,
+        the key stays tracked for the next :meth:`stop` or :meth:`aclose` and stays unavailable to borrowers.
+        The start's error is raised with the stop's as its context.
 
         Raises:
             ValueError: If ``key`` already has a sandbox, or one is starting, or ``spec`` sets no ``ttl_s``.

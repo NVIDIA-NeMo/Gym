@@ -196,7 +196,7 @@ sandbox:
       domain: ${oc.env:OPENSANDBOX_DOMAIN}
 ```
 
-Servers using `OwnedSandboxes.from_config`, including SWE-bench checkpoint sessions, retain `parallelism` as each of their start, stop and snapshot limits. These limits are independent: the maximum concurrent backend calls can be three times the previous shared limit.
+For operations routed through an owner built with `OwnedSandboxes.from_config`, `parallelism` sets three independent limits. Creates and restore forks share one limit, stops use another, and snapshot submits and deletes share the third. SWE-bench uses the owner for checkpoint operations. Its ordinary task setup and teardown call `AsyncSandbox` directly and run outside these limits.
 
 The helpers used by agents are public:
 
