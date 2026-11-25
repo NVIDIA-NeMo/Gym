@@ -441,6 +441,7 @@ def write_reports(output: Path, results: list[dict], dataset: Dataset) -> None:
 async def write_aggregate_metrics(output: Path, records: list[dict], client: ServerClient) -> None:
     """Aggregate settled full records through the resource server and save Gym's artifact shape."""
     from nemo_gym.client import get_response_json, raise_for_status
+    from nemo_gym.rollouts.rollout_collection import _aggregated_agent_implementation
 
     stripped = []
     for record in records:
@@ -473,11 +474,15 @@ async def write_aggregate_metrics(output: Path, records: list[dict], client: Ser
         aggregate = AggregateMetrics.model_validate(await get_response_json(response))
     finally:
         response.release()
+    agent_ref = {"name": "agentic_if_realworld_agent"}
+    implementation = _aggregated_agent_implementation(records, client.global_config_dict, agent_ref["name"])
+    if implementation is not None:
+        agent_ref["implementation"] = implementation
     write(
         output.with_name(output.stem + "_aggregate_metrics.json"),
         [
             {
-                "agent_ref": {"name": "agentic_if_realworld_agent"},
+                "agent_ref": agent_ref,
                 "_ng_environment_server": "agentic_if_realworld_environment",
                 **aggregate.model_dump(exclude_none=True),
             }

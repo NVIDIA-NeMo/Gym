@@ -267,6 +267,7 @@ def test_generic_agent_still_skips_aggregation():
 def test_empty_driver_aggregation_and_invalid_reply_preserve_accounting(aggregation, tmp_path):
     server, _, _ = aggregation
     client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
 
     async def post(**kwargs):
         assert kwargs["json"].verify_responses == []
