@@ -153,7 +153,7 @@ def resolve_provider_config(
     """
     block, source = _resolve_block(sandbox_provider, named_configs)
     if not isinstance(block, Mapping):
-        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got {type(block).__name__}")
 
     provider_keys = _provider_keys(block)
     if len(provider_keys) != 1:
@@ -214,8 +214,9 @@ def resolve_provider_owner_concurrency(
     block, source = _resolve_block(sandbox_provider, named_configs)
     if not isinstance(block, Mapping):
         raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+    value = block.get(SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY)
     try:
-        return OwnerConcurrency.model_validate(block.get(SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY) or {})
+        return OwnerConcurrency.model_validate({} if value is None else value)
     except ValidationError as error:
         raise ValueError(
             f"Sandbox '{SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY}' from {source} is invalid: {error}"
@@ -256,8 +257,7 @@ def validate_volume_sources(sources: Any, source: str = "the sandbox block") -> 
     return dict(sources)
 
 
-# provider_options entries that set a sandbox's network themselves, which a typed ``network`` rule replaces. Today
-# only OpenSandbox reads one (network_policy); the other providers set their network in the provider block.
+# Provider options replaced by a typed network rule. OpenSandbox and E2B both consume network_policy.
 PROVIDER_NETWORK_OPTIONS = ("network_policy", "network")
 
 
@@ -322,7 +322,7 @@ class SandboxConfig(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, Any] = Field(default_factory=dict)
     network: NetworkRule | None = None
-    model_server: str | None = None
+    model_server: str | None = Field(default=None, pattern=r"\S")
     tool_servers: list[str] = Field(default_factory=list)
     allowed_hosts: list[str] = Field(default_factory=list)
 

@@ -27,6 +27,8 @@ deepswe_opencode_agent:
         type: resources_servers
         name: deepswe_opencode_resources_server
       timeout: 10800  # DeepSWE agent budget: 3 hours.
+      # The sandbox has no network, so OpenCode is a binary the operator stages (README); this recipe uses 1.17.11.
+      opencode_version: 1.17.11
       report_agent_sandbox_oom: true
       # One worker runs every session. An admitted episode already holds its agent sandbox, so let it run at once
       # instead of waiting for one of the default 8 OpenCode slots.
