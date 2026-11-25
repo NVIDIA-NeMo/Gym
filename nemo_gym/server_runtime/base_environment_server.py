@@ -46,7 +46,7 @@ from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxSpec, SupportsSandboxSidecars
+from nemo_gym.sandbox.providers.base import NetworkRule, SandboxSpec, SupportsSandboxSidecars
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 from nemo_gym.server_runtime._checkpoint.errors import ControlError
@@ -364,6 +364,19 @@ def dependency_failure(
     # The dependency's error is this failure's explicit cause, whether or not the caller writes ``from``.
     handled.__cause__ = error
     return handled
+
+
+def _check_separate_verifier_network(provider: object, network: NetworkRule) -> None:
+    """Refuse a provider that cannot start a separate verifier's group with ``network``, or with ``no_network``.
+
+    A separate verifier is one that may run model output, so it needs a provider that can cut its egress, even when
+    its config opens the network: no fallback to an open network is decided (Enroot applies no ``no_network``).
+
+    Raises:
+        ValueError: Naming the rule the provider cannot apply.
+    """
+    for rule in dict.fromkeys(("no_network", network)):
+        check_network_rule(provider, rule)
 
 
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
@@ -797,7 +810,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         verifier = settings.verifier_sandbox_config
         if settings.verifier.mode == "separate" and verifier is not None and verifier.network is not None:
             try:
-                check_network_rule(provider, verifier.network)
+                _check_separate_verifier_network(provider, verifier.network)
             except ValueError as error:
                 raise ValueError(
                     f"{self.config.name} sets verifier.mode separate, whose group starts with network "
@@ -914,7 +927,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             verifier = settings.verifier_sandbox_config
             assert verifier is not None and verifier.network is not None  # sandbox_provider comes with settings
             try:
-                check_network_rule(self.sandboxes.provider, verifier.network)
+                _check_separate_verifier_network(self.sandboxes.provider, verifier.network)
             except ValueError as error:
                 raise self._attempt_sandbox_refusal(
                     f"a separate verifier's group starts with network {verifier.network!r}, but {error}"
@@ -1118,12 +1131,16 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Stop the attempt's groups, the agent's and a separate verifier's; a no-op for one never started, so cleanup
         may repeat it.
 
-        It never builds the provider, so an episode whose Resources Server lent the sandbox builds none here.
+        It never builds the provider, so an episode whose Resources Server lent the sandbox builds none here. Each
+        group's stop is tried even when the other's fails: a separate verifier's group starts after a failed stop of
+        the agent's, and must not outlive it.
         """
         owned = self._owned_sandboxes.get("sandbox_provider")
         if owned is not None:
-            await owned.stop(key)
-            await owned.stop(verifier_group_key(key))
+            try:
+                await owned.stop(verifier_group_key(key))
+            finally:
+                await owned.stop(key)
 
     async def release_attempt_sandbox(self, key: str) -> None:
         """Stop the group as soon as nothing borrows it any more, before the episode ends.

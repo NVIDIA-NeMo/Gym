@@ -14,18 +14,21 @@
 # limitations under the License.
 
 import base64
+import functools
 import json
 import logging
 import zlib
 from asyncio import Lock, Semaphore
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 from weakref import WeakValueDictionary
 
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
-from sandbox_execution import check_correctness_in_sandbox
+from sandbox_execution import check_assertions_in_sandbox, check_correctness_in_sandbox, task_deadline_s
+from task_data import AssertionTests, ResourceLimits
 
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import PROVIDER_UNAVAILABLE
@@ -52,6 +55,9 @@ from nemo_gym.verification import SandboxVerificationConfig, SandboxVerification
 
 
 LOG = logging.getLogger(__name__)
+
+# Assertion tests without a task memory limit get 4 GB by default.
+_ASSERTION_MEMORY_LIMIT_MB = 4096
 
 
 # ----------------------------
@@ -85,6 +91,7 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
 
 # This is LiveCodeBench format
 class UnitTests(BaseModel):
+    type: Literal["unit-tests"] = "unit-tests"
     inputs: List[str]
     outputs: List[str]
     fn_name: Optional[str] = None
@@ -110,6 +117,8 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     unit_tests_time_taken: Optional[float] = None
     reasoning_format_violation_rate: float = 0.0
     difficulty: Optional[str] = None
+    # The limits applied; a None memory limit is the fixed 4 GB guard.
+    limits: ResourceLimits | None = None
 
 
 # ----------------------------
@@ -228,14 +237,30 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # for this verification instead of for the whole run. Falls back to the
         # old plaintext shape so pre-patch artifacts still verify.
         _raw_tests = body.verifier_metadata["unit_tests"]
-        if isinstance(_raw_tests, dict) and "packed" in _raw_tests:
+        if (
+            isinstance(_raw_tests, dict)
+            and "packed" in _raw_tests
+            and _raw_tests.get("type", "unit-tests") == "unit-tests"
+        ):
             _decoded = json.loads(zlib.decompress(base64.b64decode(_raw_tests["packed"])))
             _raw_tests = {
                 "inputs": _decoded["inputs"],
                 "outputs": _decoded["outputs"],
                 "fn_name": _raw_tests.get("fn_name"),
             }
-        tests = UnitTests.model_validate(_raw_tests)
+        if isinstance(_raw_tests, dict) and _raw_tests.get("type") == "assertions":
+            tests = AssertionTests.model_validate(_raw_tests)
+        else:
+            tests = UnitTests.model_validate(_raw_tests)
+        raw_limits = body.verifier_metadata.get("resource_limits")
+        task_limits = ResourceLimits.model_validate({} if raw_limits is None else raw_limits)
+        timeout = (
+            task_limits.time_limit_s if task_limits.time_limit_s is not None else self.config.unit_test_timeout_secs
+        )
+        memory_limit_mb = task_limits.memory_limit_mb
+        if isinstance(tests, AssertionTests) and memory_limit_mb is None:
+            memory_limit_mb = _ASSERTION_MEMORY_LIMIT_MB
+        limits = ResourceLimits(time_limit_s=timeout or None, memory_limit_mb=memory_limit_mb)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
@@ -279,17 +304,11 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             # sandbox and waiting for an earlier grade in it.
             start_time = time()
 
-            task_args = (
-                {"input_output": tests.model_dump_json()},  # sample
-                code,  # generation
-                self.config.unit_test_timeout_secs,  # timeout
-                self.config.debug,  # debug
+            grade = self._grader(
+                code, tests, timeout=timeout, memory_limit_mb=memory_limit_mb, task_limits=task_limits
             )
-
             try:
-                result, metadata = await self._run_tests(
-                    body.ng_sandbox_access, task_args, num_tests=len(tests.inputs)
-                )
+                result, metadata = await self._run_tests(body.ng_sandbox_access, grade)
             except SandboxVerificationError as e:
                 # The environment failed, not the policy: exclude the sample rather than score it.
                 LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
@@ -302,6 +321,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                     extracted_model_output=model_out,
                     extracted_model_code=code,
                     difficulty=difficulty,
+                    limits=limits,
                 )
 
             unit_tests_time_taken = time() - start_time
@@ -322,14 +342,51 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 unit_tests_time_taken=unit_tests_time_taken,
                 reasoning_format_violation_rate=1.0 if has_violation else 0.0,
                 difficulty=difficulty,
+                limits=limits,
             )
 
         return observe_programmatic_grading(_grade)
 
+    def _grader(
+        self,
+        code: str,
+        tests: UnitTests | AssertionTests,
+        *,
+        timeout: float,
+        memory_limit_mb: int | None,
+        task_limits: ResourceLimits,
+    ) -> Callable[..., Awaitable[tuple[list[bool | int], dict[str, Any] | None]]]:
+        """How to grade ``code`` against ``tests`` under the task's limits; call it with the sandbox to grade in
+        (``sandbox=``) or the provider of a fresh one (``provider=``, ``metadata=``)."""
+        if isinstance(tests, AssertionTests):
+            return functools.partial(
+                check_assertions_in_sandbox,
+                code,
+                tests.tests,
+                time_limit_s=timeout,
+                memory_limit_mb=memory_limit_mb,
+                config=self.config.sandbox_config,
+            )
+        # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
+        deadline_s = task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
+        return functools.partial(
+            check_correctness_in_sandbox,
+            {"input_output": tests.model_dump_json()},  # sample
+            code,  # generation
+            timeout,
+            self.config.debug,
+            num_tests=len(tests.inputs),
+            config=self.config.sandbox_config,
+            memory_limit_mb=memory_limit_mb,
+            deadline_s=deadline_s,
+        )
+
     async def _run_tests(
-        self, access: SandboxAccess | None, task_args: tuple[Any, ...], *, num_tests: int
+        self,
+        access: SandboxAccess | None,
+        grade: Callable[..., Awaitable[tuple[list[bool | int], dict[str, Any] | None]]],
     ) -> tuple[list[bool | int], dict[str, Any] | None]:
-        """Run the unit tests in the sandbox lent to /verify, or else in a fresh sandbox of this server's own.
+        """Run the tests in the sandbox lent to /verify, or else in a fresh sandbox of this server's own.
 
         A lent sandbox is borrowed: this server releases its client after the tests, and the Environment Server that
         owns the sandbox stops it.
@@ -341,20 +398,16 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             key = json.dumps(access.connection.model_dump(mode="json"), sort_keys=True)
             lock = self._lent_sandbox_locks.setdefault(key, Lock())
             async with lock:
-                return await self._run_tests_in_lent_sandbox(access, task_args, num_tests=num_tests)
+                return await self._run_tests_in_lent_sandbox(access, grade)
         provider, sandbox_metadata = self._resolve_sandbox_target()
-        return await check_correctness_in_sandbox(
-            *task_args,
-            num_tests=num_tests,
-            provider=provider,
-            config=self.config.sandbox_config,
-            metadata=sandbox_metadata,
-        )
+        return await grade(provider=provider, metadata=sandbox_metadata)
 
     async def _run_tests_in_lent_sandbox(
-        self, access: SandboxAccess, task_args: tuple[Any, ...], *, num_tests: int
+        self,
+        access: SandboxAccess,
+        grade: Callable[..., Awaitable[tuple[list[bool | int], dict[str, Any] | None]]],
     ) -> tuple[list[bool | int], dict[str, Any] | None]:
-        """Borrow the lent sandbox, run the unit tests in it, and release the client; its owner stops it."""
+        """Borrow the lent sandbox, run the tests in it, and release the client; its owner stops it."""
         try:
             sandbox = await borrow(access)
         except (ImportError, ValueError):
@@ -365,12 +418,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         except Exception as e:
             raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}") from e
         try:
-            return await check_correctness_in_sandbox(
-                *task_args,
-                num_tests=num_tests,
-                sandbox=sandbox,
-                config=self.config.sandbox_config,
-            )
+            return await grade(sandbox=sandbox)
         finally:
             # A failed release must not replace the grade or the error above it.
             try:

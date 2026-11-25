@@ -935,10 +935,12 @@ class AsyncSandbox:
         if not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
-        declared = [sidecar.name for sidecar in self._spec.sidecars] if self._spec is not None else []
+        declared = {sidecar.name: sidecar for sidecar in self._spec.sidecars} if self._spec is not None else {}
         if name not in declared:
-            raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
-        return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
+            raise ValueError(
+                f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {list(declared)!r}"
+            )
+        return AsyncSandboxSidecar(self._provider, self._require_handle(), name, ports=declared[name].ports)
 
     async def exec_processes_terminated(self) -> bool:
         """True only when the provider proves that no process of any exec of this sandbox can still run.
@@ -1125,9 +1127,12 @@ class AsyncSandbox:
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
             descriptor = {**descriptor, "ports": list(self._spec.ports)}
         # Carry the declared sidecars so a borrower that connects can use `sidecar(name)` without re-declaring them.
-        # Only name and image travel: a sidecar's environment may hold secrets, and a borrower never starts it.
+        # Only name, image and ports travel: a sidecar's environment may hold secrets, and a borrower never starts it.
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.sidecars:
-            sidecars = [{"name": sidecar.name, "image": sidecar.image} for sidecar in self._spec.sidecars]
+            sidecars = [
+                {"name": sidecar.name, "image": sidecar.image, "ports": list(sidecar.ports)}
+                for sidecar in self._spec.sidecars
+            ]
             descriptor = {**descriptor, "sidecars": sidecars}
         # Carry the default user too, so a harness that reattaches runs commands as the same user.
         if isinstance(descriptor, dict) and descriptor.get("user") is None and self._spec is not None:
@@ -1149,6 +1154,7 @@ class AsyncSandbox:
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
         ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
+        # Sidecars the sandbox was created with, so `sidecar(name)` works on the reconnected sandbox.
         sidecars = descriptor.get("sidecars", ()) if isinstance(descriptor, Mapping) else ()
         user = descriptor.get("user") if isinstance(descriptor, Mapping) else None
         sandbox = cls(
@@ -1171,10 +1177,27 @@ class AsyncSandbox:
 class AsyncSandboxSidecar:
     """A sidecar container of a started sandbox; get one with ``AsyncSandbox.sidecar(name)``."""
 
-    def __init__(self, provider: SupportsSandboxSidecars, handle: SandboxHandle, name: str) -> None:
+    def __init__(
+        self, provider: SupportsSandboxSidecars, handle: SandboxHandle, name: str, *, ports: tuple[int, ...] = ()
+    ) -> None:
         self._provider = provider
         self._handle = handle
+        self._ports = ports
         self.name = name
+
+    def url(self, port: int | None = None) -> str:
+        """The ``http://host:port`` URL at which the sandbox reaches this sidecar's service.
+
+        Use it inside the sandbox, for example in the environment of a command; it need not resolve anywhere else.
+        ``port`` is one of the sidecar's declared ``ports`` and defaults to the only one.
+        """
+        if port is None and len(self._ports) == 1:
+            port = self._ports[0]
+        if port not in self._ports:
+            raise ValueError(
+                f"The URL of sidecar {self.name!r} needs one of its declared ports {list(self._ports)!r}, got {port!r}"
+            )
+        return f"http://{self._provider.sidecar_host(self._handle, self.name)}:{port}"
 
     async def exec(
         self, *argv: str, timeout_s: int | float, on_stdout: Callable[[str], None] | None = None

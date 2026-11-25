@@ -1478,8 +1478,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
+        seeded_mcp = getattr(request.state, "_ng_opencode_mcp", None)
+        required_mcp_servers = list(seeded_mcp) if isinstance(seeded_mcp, dict) else []
         agent_command = f"""
-        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
+        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps(required_mcp_servers))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """

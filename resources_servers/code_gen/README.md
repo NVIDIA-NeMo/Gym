@@ -10,8 +10,16 @@ The dataset is in preparation and the example data can be found in `data/example
   - Use only a user message with the problem statement and instructions (e.g., "You are an expert competitive programmer...").
   - `verifier_metadata` (required):
     - `unit_tests` (required): dict with `inputs` and `outputs` arrays containing test cases.
+      - `type` (optional): `unit-tests` (the default) or `assertions`.
       - `inputs`: list of strings representing stdin input for each test case
       - `outputs`: list of strings representing expected stdout output for each test case
+      - With `type: assertions`, `tests` replaces `inputs` and `outputs`: Python statements, usually asserts,
+        run in order after the candidate's code.
+    - `resource_limits` (optional): the task's own limits. Each applies on its own; one left out keeps the server's.
+      - `time_limit_s`: seconds per test case, or for all assertions together; fractions allowed.
+        Default: `unit_test_timeout_secs`.
+      - `memory_limit_mb`: memory for the candidate, see [Test execution](#test-execution). Default: none
+        beyond the fixed 4 GiB guard for unit tests, 4096 MB for assertions.
 
 **Notes**
 - All test cases must pass for a solution to receive a reward of 1.0
@@ -19,9 +27,31 @@ The dataset is in preparation and the example data can be found in `data/example
 
 ### Test execution
 Every candidate runs in a sandbox using the LiveCodeBench harness: a per-test
-alarm of `unit_test_timeout_secs`, an overall deadline of
-`(unit_test_timeout_secs + 1) * num_tests + 5` seconds, 4 GiB `RLIMIT_DATA` and
-`RLIMIT_STACK`, and disabled destructive builtins. The stack limit cannot exceed the provider's hard limit.
+timer of the time limit, 4 GiB `RLIMIT_DATA` and `RLIMIT_STACK`, and disabled destructive builtins.
+The stack limit cannot exceed the provider's hard limit. The overall deadline is
+`(time_limit + 1) * num_tests + 5` seconds, plus one time limit for compilation when the task sets `time_limit_s`.
+With the server setting `unit_test_timeout_secs: 0`, the per-case timer is disabled and the overall deadline still
+applies. The response then reports `limits.time_limit_s` as null. An explicit task time limit must be positive.
+
+A task's `memory_limit_mb` also caps address space (`RLIMIT_AS`) at the grading process's size before grading
+(harness, NumPy and test inputs) plus `memory_limit_mb`. The harness's per-test stdin copies, about 11 times the
+input, count against it. `metadata.memory` records the baseline and cap; without Linux's `/proc` the sample is masked.
+A fresh sandbox of this server's own gets the task's `memory_limit_mb` plus 2 GiB; the verifier's group the
+Environment Server lends has the memory its `verifier.sandbox.resources` sets, so set it above the largest task's.
+
+Confirmed timeouts return `-3`. `metadata.stage` identifies `compilation` (including module initialization),
+`test`, `preparation`, or the overall `grading` deadline. A worker that exits early without a result returns
+`-1` with stage `worker` and its `exit_code`; it is not reported as a timeout.
+
+All assertion statements are compiled before measuring the worker's memory baseline and held in an immutable
+tuple, so fixture compilation does not consume the candidate's memory allowance. Invalid task syntax or a worker
+setup failure makes the runner fail and verification mask the sample with `failure_kind: verifier_error`.
+Candidate syntax errors remain ordinary compilation failures.
+
+Assertions run in a child process the same way (`assertion_harness/`): the candidate's code, then each statement of
+`tests` in one `__main__` module, under one timer and the same memory cap, stopping at the first failure. Exiting
+before the last statement fails. Tests are compiled with `optimize=0`, so assertions remain active even when
+the sandbox interpreter uses `-O`, `-OO`, or `PYTHONOPTIMIZE`. Results use the harness's codes (`-1` compile, `-2` assertion, `-3` time, `-4` runtime).
 
 ### Where it runs
 The shipped pairing (`code_gen_environment_server`) sets `sandbox_provider` and a `verifier` block with
@@ -74,6 +104,8 @@ Where each part runs:
 |---|---|
 | `sandbox/sandbox_runner.py` | Only in the sandbox; uploaded with every verification. |
 | `lcb_integration/__init__.py`, `correctness.py`, `testing_util.py` | The grading harness, uploaded next to the runner in each sandbox. |
+| `assertion_harness/__init__.py`, `check.py` | The assertion harness, uploaded the same way. |
+| `sandbox_limits.py` | Task memory limits for both harnesses, uploaded the same way. |
 | `sandbox/Dockerfile` | Builds the sandbox image; not uploaded. |
 | Everything else, including the server entrypoints and `sandbox_execution.py` (which does the upload) | Only in the Gym server. |
 

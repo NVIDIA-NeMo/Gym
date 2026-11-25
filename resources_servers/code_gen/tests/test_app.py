@@ -14,7 +14,10 @@
 # limitations under the License.
 
 import asyncio
+import base64
+import json
 import sys
+import zlib
 from typing import Generator
 from unittest.mock import MagicMock
 
@@ -29,6 +32,7 @@ from app import (
 from fastapi.testclient import TestClient
 from lcb_integration.testing_util import MockStdinWithBuffer
 from pydantic import ValidationError
+from task_data import TaskData
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
@@ -358,12 +362,190 @@ class TestSandboxVerify:
         assert calls[0]["num_tests"] == 2
         assert calls[0]["metadata"] == {"nemo_gym_server": "code_gen"}
 
-    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "resource_limits, timeout, memory_limit_mb, deadline_s",
+        [
+            (None, 10, None, None),
+            ({}, 10, None, None),
+            ({"time_limit_s": 1.5}, 1.5, None, 1.5 + (1.5 + 1) * 2 + 5),
+            ({"memory_limit_mb": 256}, 10, 256, None),
+            ({"time_limit_s": 1.5, "memory_limit_mb": 256}, 1.5, 256, 1.5 + (1.5 + 1) * 2 + 5),
+        ],
+    )
+    async def test_task_limits_apply_independently(
+        self, monkeypatch, resource_limits, timeout, memory_limit_mb, deadline_s
+    ) -> None:
+        calls = []
+
+        async def _passing(*args, **kwargs):
+            calls.append((args, kwargs))
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        request = _verify_request("n=int(input())\nprint(n*n)")
+        request.verifier_metadata["difficulty"] = "hard"
+        if resource_limits is not None:
+            request.verifier_metadata["unit_tests"]["type"] = "unit-tests"
+            request.verifier_metadata["resource_limits"] = resource_limits
+        res = await self._sandbox_server().verify(request)
+
+        ((args, kwargs),) = calls
+        assert args[2] == timeout
+        assert (kwargs["memory_limit_mb"], kwargs["deadline_s"]) == (memory_limit_mb, deadline_s)
+        assert res.limits.model_dump() == {"time_limit_s": timeout, "memory_limit_mb": memory_limit_mb}
+        assert res.difficulty == "hard"
+
+    async def test_null_task_limits_keep_the_server_defaults(self, monkeypatch) -> None:
+        async def _passing(*args, **kwargs):
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        request = _verify_request("n=int(input())\nprint(n*n)")
+        request.verifier_metadata["resource_limits"] = None
+        res = await self._sandbox_server().verify(request)
+
+        assert res.limits.model_dump() == {"time_limit_s": 10, "memory_limit_mb": None}
+
+    async def test_disabled_server_timer_keeps_the_outer_deadline(self, monkeypatch) -> None:
+        async def _passing(sample, generation, timeout, debug, **kwargs):
+            assert timeout == 0
+            assert kwargs["deadline_s"] is None
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        server = self._sandbox_server()
+        server.config.unit_test_timeout_secs = 0
+        res = await server.verify(_verify_request("print(9)"))
+
+        assert res.reward == 1
+        assert res.limits.time_limit_s is None
+
+    @pytest.mark.parametrize("format_tag", [None, "unit-tests", "unknown-format"])
+    async def test_packed_unit_tests_respect_the_format_tag(self, monkeypatch, format_tag) -> None:
+        async def _passing(sample, *args, **kwargs):
+            assert json.loads(sample["input_output"])["inputs"] == ["3\n", "5\n"]
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        request = _verify_request("print(9)")
+        original = json.dumps(request.verifier_metadata["unit_tests"]).encode()
+        packed = {"packed": base64.b64encode(zlib.compress(original)).decode()}
+        if format_tag is not None:
+            packed["type"] = format_tag
+        request.verifier_metadata["unit_tests"] = packed
+        server = self._sandbox_server()
+
+        if format_tag == "unknown-format":
+            with pytest.raises(ValidationError):
+                await server.verify(request)
+        else:
+            assert (await server.verify(request)).reward == 1
+
+    @pytest.mark.parametrize(
+        "resource_limits",
+        [
+            [],
+            "",
+            False,
+            0,
+            {"time_limit_secs": 0.5},
+            {"time_limit_s": 0},
+            {"time_limit_s": -1.0},
+            {"time_limit_s": float("inf")},
+            {"time_limit_s": float("nan")},
+            {"memory_limit_mb": 0},
+            {"memory_limit_mb": -256},
+        ],
+    )
+    async def test_invalid_task_limits_are_rejected_before_grading(self, monkeypatch, resource_limits) -> None:
+        calls = []
+
+        async def _passing(*args, **kwargs):
+            calls.append(kwargs)
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        request = _verify_request("n=int(input())\nprint(n*n)")
+        request.verifier_metadata["resource_limits"] = resource_limits
+        with pytest.raises(ValidationError):
+            TaskData.model_validate(request.verifier_metadata)
+        with pytest.raises(ValidationError):
+            await self._sandbox_server().verify(request)
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "resource_limits, time_limit_s, memory_limit_mb",
+        [(None, 10, 4096), ({"time_limit_s": 1.5, "memory_limit_mb": 256}, 1.5, 256)],
+    )
+    async def test_assertion_tests_use_the_assertion_harness(
+        self, monkeypatch, resource_limits, time_limit_s, memory_limit_mb
+    ) -> None:
+        calls = []
+
+        async def _passing(generation, tests, **kwargs):
+            calls.append((tests, kwargs))
+            return [True], None
+
+        monkeypatch.setattr(code_gen_app, "check_assertions_in_sandbox", _passing)
+        request = _verify_request("def f(x):\n    return x")
+        request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert f(1) == 1"]}
+        if resource_limits is not None:
+            request.verifier_metadata["resource_limits"] = resource_limits
+        res = await self._sandbox_server().verify(request)
+
+        ((tests, kwargs),) = calls
+        assert tests == ["assert f(1) == 1"]
+        assert (kwargs["time_limit_s"], kwargs["memory_limit_mb"]) == (time_limit_s, memory_limit_mb)
+        assert res.reward == 1.0
+        assert res.limits.model_dump() == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
+
+    @pytest.mark.parametrize(
+        "unit_tests",
+        [
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "unexpected": 1},
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "packed": ""},
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "inputs": ["1"], "outputs": ["1"]},
+            {"type": "assertions", "tests": []},
+            {"type": "assertions"},
+        ],
+    )
+    async def test_invalid_assertion_tests_are_rejected_before_grading(self, monkeypatch, unit_tests) -> None:
+        calls = []
+
+        async def _passing(generation, tests, **kwargs):
+            calls.append(tests)
+            return [True], None
+
+        monkeypatch.setattr(code_gen_app, "check_assertions_in_sandbox", _passing)
+        request = _verify_request("def f(x):\n    return x")
+        request.verifier_metadata["unit_tests"] = unit_tests
+        with pytest.raises(ValidationError):
+            await self._sandbox_server().verify(request)
+        assert calls == []
+
+    async def test_invalid_assertion_syntax_masks_the_sample(self, tmp_path) -> None:
+        # Exercise the actual local provider, runner, and server error translation.
+        server = self._sandbox_server()
+        server._sandbox_target = ({"local": {}}, {})
+        server.config.sandbox_config.python = sys.executable
+        request = _verify_request("answer = 42")
+        request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert False", "assert answer =="]}
+        response = await server.verify(request)
+        assert response.mask_sample is True
+        assert response.failure_kind == VERIFIER_ERROR
+        assert "Invalid assertion test at index 1" in response.failure_reason
+
+    @pytest.mark.parametrize("test_format", ["unit-tests", "assertions"])
+    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch, test_format) -> None:
         async def _failing(*args, **kwargs):
             raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")
 
-        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _failing)
-        res = await self._sandbox_server().verify(_verify_request("print(9)"))
+        harness = "check_assertions_in_sandbox" if test_format == "assertions" else "check_correctness_in_sandbox"
+        monkeypatch.setattr(code_gen_app, harness, _failing)
+        request = _verify_request("print(9)")
+        if test_format == "assertions":
+            request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert True"]}
+        res = await self._sandbox_server().verify(request)
 
         assert res.mask_sample is True
         assert res.failure_kind == VERIFIER_ERROR
@@ -431,6 +613,37 @@ class TestLentSandboxVerify:
         assert calls[0]["sandbox"] is lent and "provider" not in calls[0]
         assert lent.disconnected == 1
         assert NG_SANDBOX_ACCESS_KEY not in res.model_dump()
+
+    async def test_an_assertion_task_with_limits_grades_in_the_borrowed_sandbox(self, monkeypatch) -> None:
+        # A task's own format and limits apply in the lent sandbox as in a fresh one.
+        lent = _LentSandbox()
+        calls = []
+
+        async def _borrow(access):
+            return lent
+
+        async def _assertions(generation, tests, **kwargs):
+            calls.append((generation, tests, kwargs))
+            return [True], None
+
+        async def _not_called(*args, **kwargs):
+            raise AssertionError("an assertion task never runs the stdin/stdout harness")
+
+        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
+        monkeypatch.setattr(code_gen_app, "check_assertions_in_sandbox", _assertions)
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _not_called)
+        request = self._lent_request("def f(x):\n    return x")
+        request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert f(1) == 1"]}
+        request.verifier_metadata["resource_limits"] = {"time_limit_s": 2, "memory_limit_mb": 256}
+
+        res = await _make_server().verify(request)
+
+        assert res.reward == 1.0 and not res.mask_sample
+        [(generation, tests, kwargs)] = calls
+        assert tests == ["assert f(1) == 1"] and "return x" in generation
+        assert kwargs["sandbox"] is lent and "provider" not in kwargs
+        assert (kwargs["time_limit_s"], kwargs["memory_limit_mb"]) == (2, 256)
+        assert lent.disconnected == 1
 
     async def test_a_grade_in_a_lent_sandbox_does_not_wait_for_num_processes(self, monkeypatch) -> None:
         async def _borrow(access):
