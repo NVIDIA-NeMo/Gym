@@ -334,19 +334,22 @@ def get_row_eval_report(
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _KARMA_SUMMARY = re.compile(r"Executed (\d+) of (\d+)((?: \([^)\n]*\))*)")
 _KARMA_SKIPPED = re.compile(r"\(skipped (\d+)\)")
+KARMA_COMPLETE_FRACTION = 0.95
 
 
 def karma_runs_completed(test_output: str) -> bool:
-    """Whether Karma, if the output shows it ran, executed or skipped every test it planned in some run.
+    """Whether Karma, if the output shows it ran, executed or skipped nearly every test it planned in some run.
 
-    Karma prints a running count ("Executed 3 of 1604") and a final summary; a completed run's summary accounts for
-    every planned test, e.g. "Executed 1339 of 1346 (skipped 7) SUCCESS". Output without Karma summaries passes.
+    Karma prints a running count ("Executed 3 of 1604") and a final summary such as "Executed 1339 of 1346 (skipped 7)
+    SUCCESS". A few planned tests may never run in a completed suite (bpmn-js-1011: 1262 + 7 skipped of 1273 in every
+    run), while a suite a hook error ended stops far short ("Executed 1723 of 3052"), so a summary that accounts for
+    ``KARMA_COMPLETE_FRACTION`` of the planned tests counts as complete. Output without Karma summaries passes.
     """
     summaries = _KARMA_SUMMARY.findall(_ANSI_ESCAPE.sub("", test_output))
     if not summaries:
         return True
     for done, total, notes in summaries:
         skipped = sum(int(count) for count in _KARMA_SKIPPED.findall(notes))
-        if int(total) > 0 and int(done) + skipped == int(total):
+        if int(total) > 0 and int(done) + skipped >= KARMA_COMPLETE_FRACTION * int(total):
             return True
     return False

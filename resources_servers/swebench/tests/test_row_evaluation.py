@@ -244,6 +244,9 @@ class TestKarmaRunsCompleted:
             ),
             ("Chrome 120.0.0.0 (Linux x86_64): Executed 980 of 980 SUCCESS (12 secs)", True),
             ("Chrome 151.0.0 (Linux 0.0.0): Executed 1723 of 3052 (2 FAILED) (5.611 secs / 2.785 secs)", False),
+            # Four of bpmn-js-1011's planned tests never run, in every run; openlayers runs that stopped part way.
+            ("HeadlessChrome 151.0.0 (Linux 0.0.0): Executed 1262 of 1273 (14 FAILED) (skipped 7) (33.6 secs)", True),
+            ("Chrome 151.0.0 (Linux 0.0.0): Executed 2278 of 3276 (1 FAILED) (9.1 secs / 6.2 secs)", False),
             ("Executed 0 of 0 ERROR", False),
             ("18812 passing\n15 failing", True),
         ],
