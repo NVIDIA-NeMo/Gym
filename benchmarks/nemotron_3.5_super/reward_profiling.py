@@ -24,7 +24,6 @@ Masked or evaluation_completed=false results never contribute rewards.
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import sys
 from collections import Counter
@@ -32,6 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import orjson
 from tqdm import tqdm
 
 
@@ -55,8 +55,8 @@ def _read_jsonl(path: Path) -> Iterator[tuple[int, str, dict[str, object]]]:
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             try:
-                row = json.loads(line)
-            except ValueError as error:
+                row = orjson.loads(line)
+            except orjson.JSONDecodeError as error:
                 raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
             if not isinstance(row, dict):
                 raise ValueError(f"{path}:{line_number}: expected a JSON object")
@@ -83,7 +83,7 @@ def _load_inputs(path: Path) -> tuple[list[tuple[int, str]], dict[int, Task]]:
         task_index = (
             _index(row, TASK_INDEX, location) if TASK_INDEX in row else unstamped.setdefault(line, len(unstamped))
         )
-        if task_index in tasks and json.loads(tasks[task_index].source) != row:
+        if task_index in tasks and orjson.loads(tasks[task_index].source) != row:
             raise ValueError(f"{location}: conflicting inputs share {TASK_INDEX}={task_index}")
         tasks.setdefault(task_index, Task(source=line))
         rows.append((task_index, line))
@@ -274,10 +274,10 @@ def filter_inputs(
         for task_index, line in tqdm(inputs, desc="Writing filtered inputs", unit="rows"):
             if task_index in kept:
                 handle.write(line if line.endswith("\n") else line + "\n")
-    with outputs[1].open("w", encoding="utf-8") as handle:
+    with outputs[1].open("wb") as handle:
         for profile in tqdm(profiles, desc="Writing reward profiles", unit="tasks"):
-            handle.write(json.dumps(profile, allow_nan=False) + "\n")
-    outputs[2].write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+            handle.write(orjson.dumps(profile, option=orjson.OPT_APPEND_NEWLINE))
+    outputs[2].write_bytes(orjson.dumps(summary, option=orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE))
     print(
         f"Done: kept {summary['kept_rows']:,}/{len(inputs):,} input rows ({len(kept):,}/{len(tasks):,} tasks)",
         file=sys.stderr,
@@ -309,7 +309,7 @@ def main() -> None:
         summary = filter_inputs(**vars(args))
     except (ValueError, OSError) as error:
         parser.error(str(error))
-    print(json.dumps(summary, indent=2))
+    print(orjson.dumps(summary, option=orjson.OPT_INDENT_2).decode("utf-8"))
     print(f"Filtered dataset: {args.output_dir / 'filtered_inputs.jsonl'}")
 
 
