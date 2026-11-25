@@ -411,7 +411,7 @@ built-in collector saves a rejected incomplete run's rollouts, failures and cove
 `rollouts_aggregate_metrics.json` and exports no score. It writes the aggregate when a resume completes the run.
 Set `+allow_incomplete_aggregate=true` to write it anyway when no more rollouts can be retried: the aggregate then covers
 the settled rollouts only, so its denominator is smaller than the expected one. The run still ends incomplete, and the
-aggregate is not exported, live or by `gym eval export mlflow` or `wandb`, so no tracker shows it as the run's score.
+aggregate is not exported: no exporter takes it, live or after the run, so nothing publishes it as the run's score.
 Custom collection drivers can differ: GDPVal multistage keeps its stage-aware aggregate before checking completion.
 
 With completion required, the CLI exits with **75** if the evaluation is incomplete, tasks remain eligible for resume,

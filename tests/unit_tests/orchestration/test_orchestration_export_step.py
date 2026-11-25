@@ -93,6 +93,15 @@ def test_a_failed_export_is_recorded_with_its_exit_code_and_error(tmp_path: Path
     }
 
 
+def test_an_incomplete_strict_run_is_refused_and_recorded_as_failed(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(runner, "incomplete_run_export_error", lambda output: "The run is incomplete")
+
+    result = runner.run_export("fake", _config(tmp_path))
+
+    assert (result.state, result.error) == (ExportState.FAILED, "The run is incomplete")
+    assert _result(tmp_path)["state"] == "failed"
+
+
 @pytest.mark.parametrize("previous", ["succeeded", "skipped"])
 def test_an_export_that_already_succeeded_is_not_repeated_and_its_result_is_kept(
     tmp_path: Path, previous: str

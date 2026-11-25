@@ -25,12 +25,14 @@ import os
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import orjson
+from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
@@ -64,6 +66,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
     _get_max_rollout_attempts,
     atomic_write_json,
+    has_only_intentional_gaps,
     manifest_path_for,
     record_resubmit_offset,
     saved_failure_classification,
@@ -76,6 +79,7 @@ from nemo_gym.utils.path_utils import (
     attempt_extension_path_for,
     failures_path_for,
     rerun_masked_journal_path_for,
+    resolved_config_path_for,
     resubmit_offset_path_for,
     task_selection_path_for,
 )
@@ -796,3 +800,35 @@ class RolloutStore:
                 "allocation_id": os.environ.get("SLURM_JOB_ID"),
             },
         )
+
+
+def coverage_complete(coverage: Mapping[str, Any]) -> bool:
+    """Whether a Store's coverage meets ``check_completion``: every rollout settled, or only intentional gaps."""
+    completed = coverage["settled"]
+    return completed == coverage["expected"] or has_only_intentional_gaps(
+        expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
+    )
+
+
+def incomplete_run_export_error(output: Path) -> str | None:
+    """Why the saved run at ``output`` must not be exported, or None when it may.
+
+    A run with ``require_complete`` scores only when it is complete, by the rule ``check_completion`` applies. The
+    aggregate ``allow_incomplete_aggregate`` writes for it otherwise covers the settled rollouts only and is not the
+    run's score, so no exporter publishes it. A run without ``require_complete`` accepts its aggregate as it is, and a
+    run with no Store predates coverage: neither is judged here.
+    """
+    saved_config = resolved_config_path_for(output)
+    if not saved_config.is_file() or OmegaConf.load(saved_config).get("require_complete") is not True:
+        return None
+    store = RolloutStore.read(output, import_legacy=False)
+    if store is None:
+        return None
+    coverage = store.coverage()
+    if coverage_complete(coverage):
+        return None
+    return (
+        f"The run is incomplete: {coverage['settled']}/{coverage['expected']} rollouts settled "
+        f"(details in {output.stem}_coverage.json). Its aggregate covers the settled rollouts only and is not the "
+        "run's score, so it is not exported."
+    )

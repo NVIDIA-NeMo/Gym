@@ -34,6 +34,7 @@ from nemo_gym.artifacts.exporters.base import ExportResult, ExportState
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import RunExportConfig
 from nemo_gym.orchestration.exports import RESULT_JSON_FPATH_KEY
+from nemo_gym.rollouts.rollout_store import incomplete_run_export_error
 
 
 RUNNING_STATE = "running"
@@ -84,7 +85,11 @@ def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
     try:
         settings = RunExportConfig.model_validate(global_config_dict)
         exporter = load_run_exporter_class(name).from_global_config(global_config_dict)
-        result = exporter.export(RunArtifacts(settings.rollouts_jsonl_fpath))
+        incomplete = incomplete_run_export_error(settings.rollouts_jsonl_fpath)
+        if incomplete is not None:
+            result = ExportResult.failed(incomplete)
+        else:
+            result = exporter.export(RunArtifacts(settings.rollouts_jsonl_fpath))
     except Exception as exc:
         if result_fpath is not None:
             _write_json_atomically(

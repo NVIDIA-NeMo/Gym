@@ -930,6 +930,7 @@ def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
 def _saved_run_complete(output: Path) -> bool:
     """Whether the saved Store selection now meets ``check_completion``: unreadable evidence is not complete."""
     from nemo_gym.rollouts import RolloutStore
+    from nemo_gym.rollouts.rollout_store import coverage_complete
 
     try:
         store = RolloutStore.read(output, import_legacy=False)
@@ -938,44 +939,7 @@ def _saved_run_complete(output: Path) -> bool:
         coverage = store.coverage()
     except Exception:  # the original rejection stands
         return False
-    return _coverage_complete(coverage)
-
-
-def _coverage_complete(coverage: Mapping[str, Any]) -> bool:
-    """Whether a Store's coverage meets ``check_completion``: every rollout settled, or only intentional gaps."""
-    from nemo_gym.rollouts.rollout_recovery import has_only_intentional_gaps
-
-    completed = coverage["settled"]
-    return completed == coverage["expected"] or has_only_intentional_gaps(
-        expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
-    )
-
-
-def _incomplete_run_export_error(output: Path) -> str | None:
-    """Why the saved run at ``output`` must not go to a tracking exporter, or None when it may.
-
-    A run with ``require_complete`` scores only when it is complete, by the rule ``check_completion`` applies. The
-    aggregate ``allow_incomplete_aggregate`` writes for it otherwise covers the settled rollouts only and is not the
-    run's score, so no tracker logs it as one. A run without ``require_complete`` accepts its aggregate as it is, and a
-    run with no Store predates coverage: neither is judged here.
-    """
-    from nemo_gym.rollouts.rollout_store import RolloutStore
-    from nemo_gym.utils.path_utils import resolved_config_path_for
-
-    saved_config = resolved_config_path_for(output)
-    if not saved_config.is_file() or OmegaConf.load(saved_config).get("require_complete") is not True:
-        return None
-    store = RolloutStore.read(output, import_legacy=False)
-    if store is None:
-        return None
-    coverage = store.coverage()
-    if _coverage_complete(coverage):
-        return None
-    return (
-        f"The run is incomplete: {coverage['settled']}/{coverage['expected']} rollouts settled "
-        f"(details in {output.stem}_coverage.json). Its aggregate covers the settled rollouts only and is not the "
-        "run's score, so it is not exported."
-    )
+    return coverage_complete(coverage)
 
 
 def _rejudge_saved_judge_failures(
@@ -1369,11 +1333,9 @@ def export_run() -> None:  # pragma: no cover
 
     artifacts = RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath)
     from nemo_gym.artifacts.exporters.base import BaseExporter, ExportResult
+    from nemo_gym.rollouts.rollout_store import incomplete_run_export_error
 
-    # A tracking exporter logs the aggregate as the run's metrics, so it receives only a complete run's.
-    incomplete = (
-        _incomplete_run_export_error(artifacts.rollouts_jsonl_fpath) if isinstance(exporter, BaseExporter) else None
-    )
+    incomplete = incomplete_run_export_error(artifacts.rollouts_jsonl_fpath)
     if incomplete is not None:
         result = ExportResult.failed(incomplete)
     elif isinstance(exporter, BaseExporter) and artifacts.export_done_fpath(name).exists():

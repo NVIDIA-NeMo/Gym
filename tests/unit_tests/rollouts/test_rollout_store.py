@@ -36,7 +36,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     config_identity_path_for,
     manifest_path_for,
 )
-from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_store import RolloutStore, incomplete_run_export_error
 from nemo_gym.utils.path_utils import failures_path_for, rerun_masked_journal_path_for
 
 
@@ -1652,3 +1652,48 @@ def test_coverage_reports_masked_failure_records_apart_from_masked_results(prepa
         assert (coverage["failed"], coverage["failed_final"], coverage["failed_masked"]) == (1, 1, 1)
         assert (coverage["masked"], coverage["final_zeros"], coverage["open"]) == (0, 0, 0)
         assert coverage["complete"] is False
+
+
+class TestIncompleteRunExportError:
+    """No exporter receives a strict run that ``check_completion`` rejects."""
+
+    @staticmethod
+    def _run(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, coverage: dict | None, *, require_complete: bool
+    ) -> Path:
+        store = None if coverage is None else type("Store", (), {"coverage": lambda self: coverage})()
+        monkeypatch.setattr(
+            "nemo_gym.rollouts.rollout_store.RolloutStore.read", lambda output, import_legacy=True: store
+        )
+        (tmp_path / "rollouts_resolved_config.yaml").write_text(f"require_complete: {str(require_complete).lower()}\n")
+        return tmp_path / "rollouts.jsonl"
+
+    @pytest.mark.parametrize(
+        ("settled", "omitted", "exportable"),
+        [(3, 0, True), (2, 1, True), (2, 0, False), (0, 3, False)],
+        ids=["complete", "intentional-gaps", "incomplete", "nothing-settled"],
+    )
+    def test_a_strict_run_is_exported_only_when_complete(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settled: int, omitted: int, exportable: bool
+    ) -> None:
+        output = self._run(
+            monkeypatch,
+            tmp_path,
+            {"settled": settled, "expected": 3, "intentionally_omitted": omitted},
+            require_complete=True,
+        )
+        error = incomplete_run_export_error(output)
+        assert (error is None) == exportable
+        if not exportable:
+            assert f"{settled}/3 rollouts settled" in error and "rollouts_coverage.json" in error
+
+    def test_a_run_without_require_complete_is_exported_as_before(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        output = self._run(
+            monkeypatch, tmp_path, {"settled": 2, "expected": 3, "intentionally_omitted": 0}, require_complete=False
+        )
+        assert incomplete_run_export_error(output) is None
+
+    def test_a_run_without_a_store_is_not_judged(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        assert incomplete_run_export_error(self._run(monkeypatch, tmp_path, None, require_complete=True)) is None
