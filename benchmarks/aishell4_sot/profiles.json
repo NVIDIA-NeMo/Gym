@@ -1,0 +1,18 @@
+{
+  "profiles": {
+    "aishell4-sot": {
+      "prompt_override": {
+        "system_prompt": "",
+        "user_prompt": "Transcribe this audio. Include all spoken words and verbal fillers. Write numbers as spoken. No punctuation or capitalization. Put a distinct <spk:N> tag before every speaker turn, assigning a different N to every speaker."
+      },
+      "request": {
+        "preset": "greedy",
+        "max_output_tokens": 16384
+      },
+      "skills": {
+        "EVAL_ARGS": "++eval_type=mandarin_meeting ++eval_config.speaker_token=spk ++eval_config.normalization=aishell4-sot ++eval_config.cleanup_generation_loops=true",
+        "METRICS_TYPE": "mandarin_meeting"
+      }
+    }
+  }
+}
