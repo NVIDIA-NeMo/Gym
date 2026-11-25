@@ -42,10 +42,6 @@ def _seed_reply(**fields: Any) -> _Response:
     return _Response({"resources_session_id": "resources-session"} | fields)
 
 
-# The seed reply of a Resources Server whose verifier only reads the answer.
-ANSWER_READER = {"verifier_executes_nothing": True}
-
-
 def _verify_body(client: Any) -> dict[str, Any]:
     return next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
 
@@ -76,10 +72,9 @@ async def test_a_pure_qa_task_runs_its_turn_lent_nothing_and_its_verifier_gets_a
     assert provider.rules == [("no_network", [])]
 
 
-async def test_a_verifier_that_executes_nothing_gets_no_sandbox_and_the_agents_stops_before_verify() -> None:
+async def test_a_verifier_opted_out_by_the_configuration_gets_no_sandbox_and_the_agents_stops_before_verify() -> None:
     provider = _Provider()
     server, client = _lending_server(provider, sandbox_opt_out={"verifier": True})
-    client.responses[0] = _seed_reply(**ANSWER_READER)
     seen = _recording(client, provider)
 
     result = await server.run_request(_request())
@@ -96,7 +91,6 @@ async def test_a_verifier_that_executes_nothing_gets_no_sandbox_and_the_agents_s
 
 async def test_a_task_and_a_verifier_that_both_opt_out_start_no_sandbox() -> None:
     server, client = _lending_server(None, sandbox_opt_out={"task": True, "verifier": True})
-    client.responses[0] = _seed_reply(**ANSWER_READER)
 
     result = await server.run_request(_request())
 
@@ -121,19 +115,6 @@ async def test_a_task_that_declares_tools_cannot_opt_out_and_no_agent_runs() -> 
     assert "pure QA task" in result.failure.failure_reason
     assert "run_python" in result.failure.failure_reason
     assert _paths(client) == ["/seed_session", "/close_session"]
-
-
-async def test_a_verifier_its_resources_server_does_not_declare_cannot_opt_out_and_no_agent_runs() -> None:
-    provider = _Provider()
-    server, client = _lending_server(provider, sandbox_opt_out={"verifier": True})
-
-    result = await server.run_request(_request())
-
-    assert result.result is None
-    assert (result.failure.stage, result.failure.terminal) == ("seed", True)
-    assert "does not declare that its verifier does (verifier_executes_nothing)" in result.failure.failure_reason
-    assert _paths(client) == ["/seed_session", "/close_session"]
-    assert provider.boxes == {}
 
 
 async def test_the_verifier_of_a_pure_qa_task_verifies_in_the_group_its_resources_server_declared() -> None:
@@ -242,9 +223,8 @@ def test_startup_refuses_a_task_sandbox_opt_out_for_an_episode_that_grants_tools
 
 
 @pytest.mark.parametrize("opt_out", [{}, {"task": True}, {"verifier": True}, {"task": True, "verifier": True}])
-async def test_without_a_sandbox_provider_the_allowed_opt_outs_change_nothing(opt_out: dict[str, bool]) -> None:
+async def test_without_a_sandbox_provider_the_opt_outs_change_nothing(opt_out: dict[str, bool]) -> None:
     server, client = _environment_server()
-    client.responses[0] = _seed_reply(**ANSWER_READER)
     config = server.config.model_copy(
         update={"sandbox_opt_out": server.config.sandbox_opt_out.model_validate(opt_out)}
     )
