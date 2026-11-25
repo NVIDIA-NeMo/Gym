@@ -630,5 +630,5 @@ Two things differ from the stock eval container build:
 Building all three lanes' servers gives 63 baked venvs. Building only a subset and then running a
 manifest that needs more is the failure above -- it presents as a hang, not an error.
 
-You also need a **sandbox container** if any entry uses `ns_tools` or `math_formal_lean`. Only one
+You also need a **sandbox container** if any entry uses `ns_tools` or `math_formal_lean`.
 Set `srun.sandbox_container` to a sandbox image available in your environment.
