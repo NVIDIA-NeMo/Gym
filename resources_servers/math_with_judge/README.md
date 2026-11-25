@@ -52,6 +52,55 @@ gym dataset collate \
     --download
 ```
 
+# Sandbox
+
+### Where it runs
+`/verify` runs where the pairing's `verifier.mode` says: `none` (this server's default) or `separate`. The rules are
+in [Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs).
+
+| Agent | Verifier | Why |
+|---|---|---|
+| Agent Server process | `separate` | AIME 2025 (`benchmarks/aime25/config.yaml`). No tools; Math-Verify hands answer text to SymPy's evaluating parser, so the check runs in a group of its own with no network. |
+| Agent Server process | `none` | Every other pairing. No tools; the check runs in this server, where Math-Verify passes the evaluating parser only numerals and arithmetic (below). |
+
+A `separate` pairing sets `sandbox_provider` and a complete `verifier.sandbox` (`image`, `workdir`, `ttl_s`), and no
+`sandbox_config`, since the task has no sandbox. The provider must apply `no_network`: Docker and OpenSandbox do.
+Enroot does not, so the Environment Server refuses to start on it.
+
+#### With `separate`: the check in the lent sandbox
+
+- `library_check.py` holds the check. It imports only the standard library and Math-Verify, so the same file runs in
+  this server and, uploaded, in the lent sandbox.
+- A sandbox that lacks the check's private Python runtime gets it first: a pinned CPython with Math-Verify at this
+  server's versions. The sandbox needs no network; this host builds the runtime once (it needs `uv` and access to
+  the package index) and uploads it to each sandbox that lacks it, which is every attempt's when each `/verify` gets
+  a fresh sandbox. `sandbox_install_timeout_seconds` bounds the build and the install, and at most
+  `library_verifier_max_concurrency` checks install or run at once.
+- The check scores an answer that times out or crashes its child 0, as this server's own check does. When the sandbox
+  cannot run the check (it cannot be borrowed, the runtime does not install, the command fails), the sample is masked
+  (`mask_sample`, with a `failure_kind`) instead of scored, and nothing falls back to this server. When this host
+  cannot build the runtime, the request fails instead, since every sample would be masked alike.
+- With `should_use_judge: true`, an answer Math-Verify rejects still goes to a judge model from this server: a model
+  call, not code.
+
+#### With `none`: the check in this server
+
+What reaches code there:
+
+- Math-Verify reads a LaTeX answer with latex2sympy2_extended's ANTLR parser, which builds SymPy objects. Names it
+  dispatches on come from fixed lists in its grammar and code; any other name becomes an undefined SymPy function.
+- SymPy's evaluating parser (`parse_expr`, which `sympify` and `Number` also call on a string) receives numerals
+  (including `1.5E3` and percentages), formulas SymPy builds itself from fixed names (`\gcd` of a decimal goes
+  through `nsimplify`), and the text Math-Verify's plain-expression regex admits: digits, a decimal point, whitespace
+  and `+ - * × / ^ ( ) ÷`. None of these characters can start a Python identifier, so that text names nothing that
+  could be called.
+
+Each check runs in a forked child that is killed after `library_verifier_timeout_seconds`, which bounds the time an
+answer can take, such as `9^9^9`. On Linux the child may also map at most `library_verifier_memory_limit_mb` (default
+4096) beyond what it inherits, so an answer that asks for a huge object, such as `\operatorname{eye}(1000000000)`,
+fails in its child and scores 0; `null` removes the cap. In this server the child is not otherwise isolated: it runs
+as this server's user, with its files and network. `test_verifier_does_not_run_code_in_the_answer` checks this for the pinned `math-verify`; check it again when you upgrade `math-verify` or `latex2sympy2_extended`.
+
 # Licensing information
 Code: Apache 2.0<br>
 Data:

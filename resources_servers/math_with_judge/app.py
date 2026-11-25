@@ -14,27 +14,32 @@
 # limitations under the License.
 import asyncio
 import contextlib
+import json
 import logging
 import multiprocessing as mp
 import re
+import shlex
 import unicodedata
-from io import StringIO
+from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Union
+from uuid import uuid4
 
 from fastapi import FastAPI
-from math_verify import grader
-from math_verify.errors import TimeoutException
-from math_verify.metric import math_metric
-from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
 
+from nemo_gym.agents import SandboxPythonRuntime, probe_sandbox_platform
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    PROVIDER_REQUEST_FAILED,
+    PROVIDER_UNAVAILABLE,
+    VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import SandboxAccess, upload_text
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -42,10 +47,39 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    VerifierMode,
+    borrow,
 )
 from nemo_gym.telemetry import MeteredSemaphore, resources_operation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import call_judge, normalize_math_judge_verdict
+from resources_servers.math_with_judge.library_check import (
+    build_library_verifier,
+    cap_address_space,
+    run_math_verify,
+)
+
+
+LOG = logging.getLogger(__name__)
+
+# The Math-Verify check runs from this file in the Resources Server and, uploaded, in the sandbox lent to /verify.
+_LIBRARY_CHECK = Path(__file__).with_name("library_check.py")
+# The check's private Python in the lent sandbox, built on this host from this server's package versions.
+# Math-Verify's LaTeX parser pins antlr4-python3-runtime 4.9.*, which PyPI ships only as source: a direct URL is the
+# one kind of requirement the runtime builds on this host, and it is pure Python.
+LIBRARY_CHECK_RUNTIME = SandboxPythonRuntime(
+    harness="math_with_judge_verifier",
+    requirements=(
+        "math-verify",
+        "antlr4-python3-runtime @ https://files.pythonhosted.org/packages/3e/38/7859ff46355f76f8d19459005ca000b6e7012f2f1ca597746cbcd1fbfe5e/"
+        "antlr4-python3-runtime-4.9.3.tar.gz#sha256=f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b",
+    ),
+    import_check="import math_verify, latex2sympy2_extended, sympy",
+)
+# Time the runtime's interpreter may take to start and import Math-Verify before the check's own timeout starts.
+_SANDBOX_CHECK_STARTUP_SECONDS = 60.0
+# The sandbox the Environment Server lent to the /verify request being served, if any.
+_LENT_SANDBOX: ContextVar[SandboxAccess | None] = ContextVar("math_with_judge_lent_sandbox", default=None)
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -55,7 +89,12 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     should_use_judge: bool = True
     format_tolerant_answer_extraction: bool = False
     library_verifier_timeout_seconds: PositiveFloat = 10.0
+    # Address space each verifier child may add to what it inherits from this server (Linux only), so an answer that
+    # asks for a huge object fails in its child instead of exhausting the host. None leaves it uncapped.
+    library_verifier_memory_limit_mb: Optional[PositiveInt] = 4096
     library_verifier_max_concurrency: PositiveInt = 32
+    # Bounds building (on the first check) and installing the check's Python runtime in a sandbox lent to /verify.
+    sandbox_install_timeout_seconds: PositiveFloat = 900.0
 
 
 class LibraryJudgeMathRunRequest(BaseRunRequest):
@@ -64,7 +103,9 @@ class LibraryJudgeMathRunRequest(BaseRunRequest):
 
 
 class LibraryJudgeMathVerifyRequest(LibraryJudgeMathRunRequest, BaseVerifyRequest):
-    pass
+    # The attempt's sandbox (body key NG_SANDBOX_ACCESS_KEY), lent by the Environment Server that owns it. When it is
+    # set, the Math-Verify check runs in it instead of in this server. Excluded from dumps, so no response carries it.
+    ng_sandbox_access: SandboxAccess | None = Field(default=None, exclude=True)
 
 
 class JudgeEvaluation(BaseModel):
@@ -325,55 +366,34 @@ def _prepare_format_tolerant_response(response: str) -> str:
     return _repair_final_unclosed_box(_normalize_unicode_digits(response))
 
 
-def _run_math_verify(
-    library_verifier: Any, expected_answer: str, generated_answer: str
-) -> tuple[float, Optional[str]]:
-    # This functionality is migrated from Nemo RL.
-    # https://github.com/NVIDIA-NeMo/RL/blob/e1f56c42ae175d3863ccaf4e21b7de7e9c46c2e1/nemo_rl/environments/math_environment.py
-    try:
-        stripped = LibraryJudgeMathResourcesServer._strip_math_delimiters(expected_answer)
-        ground_truth_parsable = "\\boxed{" + stripped + "}"
-        with LibraryJudgeMathResourcesServer._mute_output():
-            ret_score, extracted_answer = library_verifier([ground_truth_parsable], [generated_answer])
-
-        reward = float(ret_score)
-
-        if extracted_answer is not None:
-            # Make sure the extracted answer has two elements.
-            assert len(extracted_answer) == 2
-
-            extracted_gold, extracted_prediction = extracted_answer
-
-            # Get the extracted answer.
-            for pred in extracted_prediction:
-                if any(grader.verify(gold, pred) for gold in extracted_gold):
-                    extracted_answer = pred
-                    break
-            else:
-                # If no match is found, that means all the answers are
-                # incorrect.  The first prediction is used as the extracted
-                # answer.
-                extracted_answer = extracted_prediction[0] if extracted_prediction else None
-
-        return reward, extracted_answer
-
-    # It's possible to emit a TimeoutException and that wouldn't be caught since
-    # it actually subclasses from BaseException and math-verify itself does not
-    # catch it.
-    except (Exception, TimeoutException):
-        return 0.0, None
+# Shared with the copy of library_check.py that runs in a lent sandbox, so both grade alike.
+_run_math_verify = run_math_verify
+_cap_address_space = cap_address_space
 
 
-def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, result_connection: Any) -> None:
+class _RuntimeBuildError(RuntimeError):
+    """This host cannot build the check's runtime (no uv, no download, no wheel).
+
+    It would fail every sample alike, so the request fails instead of masking each one.
+    """
+
+
+class _InconclusiveCheck(Exception):
+    """The check could not run in the lent sandbox: the environment failed, not the policy, so the sample is masked."""
+
+    def __init__(self, failure_kind: str, reason: str) -> None:
+        super().__init__(reason)
+        self.failure_kind = failure_kind
+
+
+def _run_math_verify_in_subprocess(
+    expected_answer: str, generated_answer: str, result_connection: Any, memory_limit_mb: Optional[int] = None
+) -> None:
     # Keep math_verify construction inside the child process. A wedged SymPy call
-    # can then be killed by terminating this process without poisoning the server.
-    library_verifier = math_metric(
-        gold_extraction_target=(LatexExtractionConfig(),),
-        pred_extraction_target=(
-            ExprExtractionConfig(),
-            LatexExtractionConfig(),
-        ),
-    )
+    # can then be killed by terminating this process without poisoning the server,
+    # and an answer that allocates past the cap fails here (MemoryError scores 0).
+    _cap_address_space(memory_limit_mb)
+    library_verifier = build_library_verifier()
     try:
         result_connection.send(_run_math_verify(library_verifier, expected_answer, generated_answer))
     finally:
@@ -385,6 +405,11 @@ class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
+    # Unless the pairing's verifier.mode says otherwise, /verify runs the check in this server, lent nothing. With
+    # verifier.mode: separate it is lent a sandbox and runs the check there (_verify_answer_in_lent_sandbox); see the
+    # README's Where it runs.
+    verifier_mode: ClassVar[VerifierMode] = "none"
+    supported_verifier_modes: ClassVar[frozenset[VerifierMode] | None] = frozenset({"none", "separate"})
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not
@@ -447,9 +472,25 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
-            body.question, body.expected_answer, combined_response
-        )
+        lent = _LENT_SANDBOX.set(body.ng_sandbox_access)
+        try:
+            reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
+                body.question, body.expected_answer, combined_response
+            )
+        except _InconclusiveCheck as error:
+            LOG.warning("math_with_judge could not check the answer in the lent sandbox: %s", error)
+            return LibraryJudgeMathVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                extracted_answer=None,
+                library_reward=0.0,
+                judge_evaluations=None,
+                mask_sample=True,
+                failure_kind=error.failure_kind,
+                failure_reason=str(error),
+            )
+        finally:
+            _LENT_SANDBOX.reset(lent)
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -493,34 +534,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
         )
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
-    @classmethod
-    @contextlib.contextmanager
-    def _mute_output(cls):
-        devnull_out, devnull_err = StringIO(), StringIO()
-        with (
-            contextlib.redirect_stdout(devnull_out),
-            contextlib.redirect_stderr(devnull_err),
-        ):
-            yield
-
-    @staticmethod
-    def _strip_math_delimiters(s: str) -> str:
-        """Strip outer math delimiters from expected answers.
-
-        Many expected_answer values are wrapped in \\(...\\) or $...$,
-        which causes the math_verify parser to fail when we wrap them
-        in \\boxed{}.  Removing these outer delimiters fixes parsing.
-        """
-        s = s.strip()
-        if s.startswith("\\(") and s.endswith("\\)"):
-            s = s[2:-2].strip()
-        if s.startswith("$") and s.endswith("$") and len(s) > 1:
-            s = s[1:-1].strip()
-        return s
-
     async def _verify_answer_with_library_async(
         self, expected_answer: str, generated_answer: str
     ) -> tuple[float, Optional[str]]:
+        lent = _LENT_SANDBOX.get()
+        if lent is not None:
+            return await self._verify_answer_in_lent_sandbox(lent, expected_answer, generated_answer)
         async with resources_operation(
             self._library_verifier_semaphore, operation="verify", executor="subprocess"
         ) as operation:
@@ -531,7 +550,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
             result_connection, child_connection = ctx.Pipe(duplex=False)
             process = ctx.Process(
                 target=_run_math_verify_in_subprocess,
-                args=(expected_answer, generated_answer, child_connection),
+                args=(
+                    expected_answer,
+                    generated_answer,
+                    child_connection,
+                    self.config.library_verifier_memory_limit_mb,
+                ),
             )
             process.start()
             child_connection.close()
@@ -541,6 +565,98 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 self.config.library_verifier_timeout_seconds,
                 operation=operation,
             )
+
+    async def _verify_answer_in_lent_sandbox(
+        self, access: SandboxAccess, expected_answer: str, generated_answer: str
+    ) -> tuple[float, Optional[str]]:
+        """Run the Math-Verify check in the sandbox lent to /verify, and release the client; its owner stops it.
+
+        The check's Python runtime is installed there first unless the sandbox already has it. The check scores an
+        answer that times out or crashes its child 0, as this server's own check does. At most
+        ``library_verifier_max_concurrency`` checks install or run at once, as for this server's own check.
+
+        Raises:
+            _InconclusiveCheck: When the sandbox cannot run the check; the caller masks the sample.
+            _RuntimeBuildError: When this host cannot build the check's runtime.
+        """
+        async with resources_operation(
+            self._library_verifier_semaphore, operation="verify", executor="other"
+        ) as operation:
+            reward, extracted_answer, outcome = await self._check_in_lent_sandbox(
+                access, expected_answer, generated_answer
+            )
+            if outcome in ("timeout", "crashed"):
+                operation.outcome = outcome
+            return reward, extracted_answer
+
+    async def _check_in_lent_sandbox(
+        self, access: SandboxAccess, expected_answer: str, generated_answer: str
+    ) -> tuple[float, Optional[str], str]:
+        try:
+            sandbox = await borrow(access)
+        except (ImportError, ValueError):
+            # A missing provider SDK or a provider block this server cannot resolve would mask every sample: fail the
+            # request instead, which the Environment Server retries as an infrastructure failure.
+            raise
+        except Exception as error:
+            raise _InconclusiveCheck(PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {error!r}") from error
+        try:
+            try:
+                if not await LIBRARY_CHECK_RUNTIME.is_installed(sandbox):
+                    platform = await probe_sandbox_platform(sandbox)
+                    try:
+                        async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                            await LIBRARY_CHECK_RUNTIME.archives(platform)
+                    except (RuntimeError, TimeoutError) as error:
+                        raise _RuntimeBuildError(
+                            f"building the check's runtime on this host failed: {error}"
+                        ) from error
+                    await LIBRARY_CHECK_RUNTIME.install(sandbox, timeout_s=self.config.sandbox_install_timeout_seconds)
+            except _RuntimeBuildError:
+                raise
+            except (RuntimeError, TimeoutError) as error:
+                raise _InconclusiveCheck(VERIFIER_ERROR, f"installing the check's runtime failed: {error}") from error
+            directory = f"{LIBRARY_CHECK_RUNTIME.directory}/checks/{uuid4().hex}"
+            prepared = await sandbox.exec(f"mkdir -p {shlex.quote(directory)}", cwd="/", timeout_s=30)
+            if prepared.return_code != 0 or prepared.error_type is not None:
+                raise _InconclusiveCheck(
+                    PROVIDER_REQUEST_FAILED, f"preparing the check failed: {prepared.error_type or prepared.stderr}"
+                )
+            request = {
+                "expected_answer": expected_answer,
+                "generated_answer": generated_answer,
+                "timeout_s": self.config.library_verifier_timeout_seconds,
+                "memory_limit_mb": self.config.library_verifier_memory_limit_mb,
+            }
+            await upload_text(sandbox, path=f"{directory}/library_check.py", text=_LIBRARY_CHECK.read_text())
+            await upload_text(sandbox, path=f"{directory}/request.json", text=json.dumps(request))
+            result = await sandbox.exec(
+                [LIBRARY_CHECK_RUNTIME.python, "-I", f"{directory}/library_check.py", f"{directory}/request.json"],
+                cwd="/",
+                timeout_s=self.config.library_verifier_timeout_seconds + _SANDBOX_CHECK_STARTUP_SECONDS,
+            )
+        except (_InconclusiveCheck, _RuntimeBuildError):
+            raise
+        except Exception as error:
+            raise _InconclusiveCheck(PROVIDER_REQUEST_FAILED, f"the lent sandbox failed: {error!r}") from error
+        finally:
+            # A failed release must not replace the grade or the error above it.
+            try:
+                await sandbox.disconnect()
+            except Exception:
+                LOG.warning("math_with_judge could not release its client of the lent sandbox", exc_info=True)
+        if result.error_type is not None:
+            raise _InconclusiveCheck(PROVIDER_REQUEST_FAILED, f"the check did not finish: {result.error_type}")
+        lines = (result.stdout or "").strip().splitlines()
+        try:
+            if result.return_code != 0 or not lines:
+                raise ValueError(f"exit {result.return_code}")
+            outcome = json.loads(lines[-1])
+            return float(outcome["reward"]), outcome["extracted_answer"], str(outcome.get("outcome", "checked"))
+        except (ValueError, KeyError, TypeError) as error:
+            raise _InconclusiveCheck(
+                VERIFIER_ERROR, f"the check failed ({error}): {(result.stderr or '')[-2000:]}"
+            ) from error
 
     @staticmethod
     async def _wait_for_library_verifier_process(
