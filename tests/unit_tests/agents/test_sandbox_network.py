@@ -7,6 +7,7 @@ import pytest
 from nemo_gym.agents.base_responses_api_agent import AgentSeedRejectedError
 from nemo_gym.agents.utils.sandbox_network import restrict_sandbox_network
 from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.utils.network_policy import reachable_host
 
 
 MODEL_URL = "http://model.example:8000/v1"
@@ -113,3 +114,13 @@ def test_a_required_tool_grant_needs_model_and_tools(network_access: str) -> Non
             restrict()
         return
     assert {rule["target"] for rule in restrict().provider_options["network_policy"]["egress"]} >= {"tools.example"}
+
+
+def test_reachable_host_returns_the_canonical_name_to_every_caller() -> None:
+    assert reachable_host("https://MODEL.example./v1") == "model.example"
+
+
+@pytest.mark.parametrize("host", ["localhost.", "127.0.0.1.", "0.0.0.0.", "."])
+def test_reachable_host_validates_the_normalized_host(host: str) -> None:
+    with pytest.raises(ValueError, match="sandbox-reachable host"):
+        reachable_host(f"http://{host}:8000/v1")
