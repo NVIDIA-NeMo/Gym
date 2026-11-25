@@ -282,7 +282,7 @@ def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_acce
     """A resume of saved rollouts writes its resolved config only once the collector has accepted it. A resume the
     collector refuses leaves the saved rollouts as the earlier run's, and so that run's resolved config, or none
     where it had none. A run with nothing saved under its output names writes the file before it collects."""
-    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import _ON_RUN_ACCEPTED, RolloutCollectionHelper
     from nemo_gym.rollouts.rollout_recovery import ResumeRefusedError
     from nemo_gym.telemetry import setup
     from nemo_gym.utils.path_utils import resolved_config_path_for
@@ -307,7 +307,7 @@ def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_acce
             before_collection.append(resolved_config.read_text() if resolved_config.exists() else None)
             if not accepts:
                 raise ResumeRefusedError("Cannot resume with incompatible resolved configuration.")
-            self._on_run_accepted()
+            _ON_RUN_ACCEPTED.get()()
             raise ConfigError("The input file is missing.")
 
         monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", run_from_config)
@@ -332,6 +332,7 @@ def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_acce
 
     collect(saved_rollouts=False, accepts=False)
     assert "policy_model_name: current" in before_collection[-1]
+    assert _ON_RUN_ACCEPTED.get() is None
 
 
 @pytest.mark.parametrize("fails", [False, True])

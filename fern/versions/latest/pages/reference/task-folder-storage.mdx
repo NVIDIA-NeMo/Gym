@@ -114,8 +114,8 @@ Paths other than `dataset.folder` and `summary_dir` are relative to the summary'
 move as a whole. A command writes the summary once it starts its servers, whatever happens next. So does a
 `gym dataset validate` in which no task has a `solution/`. A command refused earlier, while it prepares the tasks or
 on a `--resume` that no longer matches them, writes none. Neither does a resume that data preparation stops, or
-that the collector refuses because its configuration differs from the saved run's (another agent or model, for
-example): the summary of the saved run stays.
+that the collector does not accept, for example because its configuration differs from the saved run's (another
+agent or model): the summary of the saved run stays.
 
 ## Verifier log folders
 

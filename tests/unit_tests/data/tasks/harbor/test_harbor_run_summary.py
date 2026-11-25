@@ -1125,11 +1125,23 @@ def test_a_resumed_run_summarizes_the_saved_schedule_it_resumed_not_the_current_
     assert entry["input"]["digest"] == saved[0]["task_input"]["task_data"]["_ng_digest"]
 
 
-def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(tmp_path, monkeypatch, capsys, oracle_collection):
+async def _single_pass_driver(rollout_collection_config, global_config_dict):
+    """A custom ``rollout_collection_driver`` that runs the built-in collector, as a benchmark's driver may."""
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+
+    await RolloutCollectionHelper().run_from_config(rollout_collection_config)
+
+
+@pytest.mark.parametrize("driver", [(), (f"+rollout_collection_driver={__name__}:_single_pass_driver",)])
+def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(
+    tmp_path, monkeypatch, capsys, oracle_collection, driver
+):
     """A run collected with one agent is resumed on the same output with another. The resume stops before the
     collector accepts it and leaves the saved rollouts alone, so they stay the first agent's, and so do the run
     summary and the resolved config beside them. When the resume reuses the prepared input, the collector refuses
-    the changed configuration; otherwise data preparation stops it first."""
+    the changed configuration; otherwise data preparation stops it first. A resume the collector does not accept
+    for another reason, here a missing file of the saved run, keeps them too. The same holds when a custom driver
+    runs the collector."""
     write_task(tmp_path / "ds" / "a")
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     oracle_collection.payload = lambda row: result(response={"output": []})
@@ -1149,7 +1161,7 @@ def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(tmp_path, mo
         monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
         argv = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", agent, "--model-type", "vllm_model"]
         policy = ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
-        monkeypatch.setattr(sys, "argv", [*argv, *policy, "+disable_aggregation=true", *flags])
+        monkeypatch.setattr(sys, "argv", [*argv, *policy, "+disable_aggregation=true", *driver, *flags])
         main_module.main()
 
     run("opencode_agent")
@@ -1176,6 +1188,17 @@ def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(tmp_path, mo
     assert len(oracle_collection.dispatched) == 1
     assert {path: path.read_bytes() for path in run_files} == collected
     assert "Run summary written" not in capsys.readouterr().out
+
+    failures = failures_path_for(rollouts)
+    saved_failures = failures.read_bytes()
+    failures.unlink()
+    with pytest.raises(SystemExit):
+        run("hermes_agent", "+resume_from_cache=true", "+reuse_existing_data_preparation=true")
+    out = capsys.readouterr().out
+    assert "failure sidecar are missing" in " ".join(out.split())
+    assert {path: path.read_bytes() for path in run_files} == collected
+    assert "Run summary written" not in out
+    failures.write_bytes(saved_failures)
 
     # The run's own agent still resumes it, and that command writes the summary and the resolved config again.
     run("opencode_agent", "+resume_from_cache=true", "+reuse_existing_data_preparation=true")

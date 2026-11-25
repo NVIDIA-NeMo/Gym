@@ -2665,6 +2665,11 @@ _MAX_FAILURE_BODY_CHARS = 2000
 #: duration of that run. None under an embedder's trace or when the ``job`` group is off. With
 #: traces off it holds the *invalid* context of a non-recording span rather than None;
 #: ``linked_root_span`` checks validity, so that case nests like the others.
+# Called under the run lock once a collection's store has started its run or accepted its resume. A resume the store
+# refuses never reaches it, so the CLI writes here what must describe an accepted run only. A context variable, so
+# the collector a custom ``rollout_collection_driver`` runs calls it too.
+_ON_RUN_ACCEPTED: ContextVar[Callable[[], None] | None] = ContextVar("_ON_RUN_ACCEPTED", default=None)
+
 _OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
     "nemo_gym_owned_job_span_context", default=None
 )
@@ -3911,9 +3916,6 @@ class RolloutCollectionHelper(BaseModel):
     _landed_keys: set = PrivateAttr(default_factory=set)
     # The CLI supplies its signal state; library callers need no CLI import or signal handler.
     _termination_requested: Callable[[], bool] | None = PrivateAttr(default=None)
-    # Called under the run lock once the store has started the run or accepted its resume. A resume the store
-    # refuses never reaches it, so the CLI writes here what must describe an accepted run only.
-    _on_run_accepted: Callable[[], None] | None = PrivateAttr(default=None)
     _collection_started: bool = PrivateAttr(default=False)
     _store: RolloutStore | None = PrivateAttr(default=None)
 
@@ -4560,8 +4562,9 @@ executions → not run again (left to recovery)
             return input_rows, manifest
 
         store = _start_or_resume_store(output_fpath, config, prepare_inputs)
-        if self._on_run_accepted is not None:
-            self._on_run_accepted()
+        on_run_accepted = _ON_RUN_ACCEPTED.get()
+        if on_run_accepted is not None:
+            on_run_accepted()
         if store.started_fresh and agent_complete_dir_for(output_fpath).exists():
             # A fresh run must not inherit completion files from an older run that used the same output path.
             shutil.rmtree(agent_complete_dir_for(output_fpath))

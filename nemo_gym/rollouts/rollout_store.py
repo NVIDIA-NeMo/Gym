@@ -135,6 +135,18 @@ _REJUDGE_GRADING_KEYS = frozenset(
 _REJUDGE_DROPPED_PREFIXES = ("_ng_failure", "_ng_rejudge")
 
 
+def saved_run_files(output: Path) -> tuple[Path, ...]:
+    """The files a run leaves under ``output``'s names. Where any of them exists, ``RolloutStore.start_or_resume``
+    checks a resume against the saved run before it changes anything."""
+    return (
+        output,
+        failures_path_for(output),
+        materialized_path_for(output),
+        manifest_path_for(output),
+        journal_path_for(output),
+    )
+
+
 class RolloutStore:
     """Saved outcomes shared by the evaluation controller and offline readers."""
 
@@ -185,7 +197,7 @@ class RolloutStore:
         output = resolve_rollout_path(output)
         manifest_path = manifest_path_for(output)
         materialized = materialized_path_for(output)
-        artifacts = (output, failures_path_for(output), materialized, manifest_path, journal_path_for(output))
+        artifacts = saved_run_files(output)
         output.parent.mkdir(parents=True, exist_ok=True)
         if resume and journal_path_for(output).exists():
             raise ConfigError(
