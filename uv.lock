@@ -3840,7 +3840,7 @@ requires-dist = [
     { name = "tqdm" },
     { name = "urllib3", specifier = ">=2.8.0" },
     { name = "uvicorn" },
-    { name = "uvloop" },
+    { name = "uvloop", specifier = ">=0.23.0" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.29.0" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },

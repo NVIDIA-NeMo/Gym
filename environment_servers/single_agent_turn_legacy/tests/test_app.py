@@ -174,7 +174,7 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
 
 @pytest.mark.parametrize("benchmark", ["VideoMME", "Molmo2VideoTrack", "video_caption"])
 async def test_direct_benchmark_result_has_no_external_harness(benchmark) -> None:
-    from nemo_gym.core.harness_routing import HarnessRoutingMetadata
+    from nemo_gym.core import HarnessRoutingMetadata
 
     server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=server.config, server_client=client)

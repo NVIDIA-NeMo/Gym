@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         reply_failure_report,
         report_for_current_request,
     )
+    from nemo_gym.core.harness_routing import HARNESS_NAMES, HarnessRoutingMetadata, annotate_prompt_groups
     from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
     from nemo_gym.core.model_call_sampling import (
         MODEL_SAMPLING_HEADER,
@@ -182,6 +183,9 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "HARNESS_NAMES": "harness_routing",
+    "HarnessRoutingMetadata": "harness_routing",
+    "annotate_prompt_groups": "harness_routing",
     "AGENT_COMMAND_NOT_ALLOWED": "failure_kinds",
     "MediaFile": "media",
     "UnsupportedContentError": "media",
