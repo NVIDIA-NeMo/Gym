@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, read_rollout_timing, summarize_timeouts
     from nemo_gym.rollouts.health.types import Verdict
     from nemo_gym.rollouts.looping_assessment import assess_looping_record
+    from nemo_gym.rollouts.looping_runtime import LoopingExecutor
     from nemo_gym.rollouts.model_calls import (
         aggregate_model_call_metrics,
         await_model_call_capture_quiescence,
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "assess_looping_record": "looping_assessment",
+    "LoopingExecutor": "looping_runtime",
     "enrich_run_result": "rollout_collection",
     "AGENT_REQUEST_FAILED_FAILURE_CLASS": "rollout_collection",
     "DispatchLatencyTracker": "rollout_perf",
