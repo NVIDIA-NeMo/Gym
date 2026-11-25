@@ -99,7 +99,8 @@ with no MCP tools. Each episode also:
    follows it, on every exposure. Otherwise the run ends at Pi's timeout or when the model stops.
    A harness whose type cannot stop a run in flight (not in `ROLLOUT_STOP_AGENT_TYPES`: today
    mini-SWE, OpenCode, OpenClaw and Terminus 2) runs until it stops by itself
-   (`close_tools_on_task_end` refuses its later calls). `/verify` first closes the episode's tools and file API and stops its sandbox, then
+   (`close_tools_on_task_end`, which `configs/officeenv_sandbox_episodes.yaml` sets for every
+   harness, refuses its later tool and file API calls, so they cannot change the grade). `/verify` first closes the episode's tools and file API and stops its sandbox, then
    grades the world as for any row: a process the harness left running in the background can act
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.

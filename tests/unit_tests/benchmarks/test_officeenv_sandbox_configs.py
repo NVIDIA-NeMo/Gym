@@ -111,6 +111,8 @@ def check_harness(resolved: dict, harness: str) -> None:
     # The MCP endpoint lists itself under a company's name, never an instance's
     assert server["mcp_server_name"] == "company" and server["expose_tools_over_mcp"]
     assert server["sandbox_config"].get("mcp_tool_prefix", "") == (prefix or "")
+    # Calls after the task ended are refused, so they cannot change the grade: only Pi's run is stopped at the end.
+    assert server.get("close_tools_on_task_end") is True
 
 
 @pytest.mark.parametrize("harness", HARNESSES)
