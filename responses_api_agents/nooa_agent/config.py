@@ -16,10 +16,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SandboxNetworkAccess
 from nemo_gym.config import BenchmarkDatasetConfig, DatasetConfig, ModelServerRef, ResourcesServerRef
 from responses_api_agents.nooa_agent.invocation import (
     NOOAInvocationAdapter as NOOAInvocationAdapter,
@@ -49,6 +50,11 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Dataset/schema discovery metadata; runtime access comes from environment session grants.",
     )
     model_server: ModelServerRef
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit", description="Egress policy for a sandbox created by this agent; borrowed sandboxes inherit."
+    )
     datasets: list[DatasetConfig | BenchmarkDatasetConfig] | None = Field(
         default=None,
         description="Rows rollout collection reads for this agent, such as a Harbor taskset's; this server does not.",

@@ -45,6 +45,7 @@ from responses_api_agents.nooa_agent.resource_tools import (
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
+from responses_api_agents.nooa_agent.task_agent import _task_instructions
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason, cleanup_errors, policy_termination
 
 
@@ -211,6 +212,7 @@ class InProcessNOOARunner:
             sampling_overrides=sampling_overrides,
             context_window=self._policy.context_window if self._policy is not None else None,
             media_inputs=self._policy.media_inputs if self._policy is not None else (),
+            instructions=_task_instructions(request.responses_create_params),
         )
         dispatcher = ResourceToolDispatcher(
             tool_access=request.tool_access,

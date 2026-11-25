@@ -89,6 +89,7 @@ class GymTraceHooks:
     def __init__(self, *, on_progress: Callable[[], None] | None = None) -> None:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
         self._invocations: dict[str, AgentInvocation] = {}
+        self._agent_ids: dict[str, str] = {}
         self._events: list[GymModelCall | _ToolCall] = []
         self._python_outputs: dict[tuple[str, str], str] = {}
         self._captured_python_outputs: dict[tuple[str, str], str] = {}
@@ -115,10 +116,14 @@ class GymTraceHooks:
             if key[0] == call.invocation_id and value in visible_text
         )
 
-    def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
+    def before_agent_call(
+        self, *, call_id: str, parent_call_id: str | None, agent: Agent | None = None, **_: Any
+    ) -> _AgentCall:
         self._invocations[call_id] = AgentInvocation(
             invocation_id=call_id, parent_invocation_id=parent_call_id, status="incomplete"
         )
+        if agent is not None:
+            self._agent_ids[call_id] = agent.agent_id
         return _AgentCall(call_id, perf_counter(), self._current.set(call_id))
 
     def after_agent_call(self, *, context: Any, exception: BaseException | None, **_: Any) -> None:
@@ -471,10 +476,48 @@ class GymTraceHooks:
         # Aggregate only returned responses. A failed attempt has no reported
         # usage of its own; it must not erase known totals or invent per-call zeroes.
         usages = [call.response.usage for call in state.calls if call.response is not None]
-        latest_response = next((call.response for call in reversed(state.calls) if call.response is not None), None)
+        model_owners = {call.invocation_id for call in state.calls if not call.auxiliary}
+
+        def is_model_root(identity: str) -> bool:
+            # Atom's harness is a pure orchestration wrapper. Its root session
+            # may be parented under that wrapper; a child of a model-calling
+            # invocation must never become the scored root instead.
+            seen = {identity}
+            parent = invocations[identity].parent_invocation_id
+            while parent is not None:
+                if parent in seen or parent in model_owners or parent not in invocations:
+                    return False
+                seen.add(parent)
+                parent = invocations[parent].parent_invocation_id
+            return True
+
+        root_id = next(
+            (
+                call.invocation_id
+                for call in state.calls
+                if not call.auxiliary and call.invocation_id in invocations and is_model_root(call.invocation_id)
+            ),
+            None,
+        )
+        root_agent_id = self._agent_ids.get(root_id)
+        latest_response = next(
+            (
+                call.response
+                for call in reversed(state.calls)
+                if call.response is not None
+                and root_id is not None
+                and (
+                    call.invocation_id == root_id
+                    or root_agent_id is not None
+                    and self._agent_ids.get(call.invocation_id) == root_agent_id
+                )
+                and not call.auxiliary
+            ),
+            None,
+        )
         episode = AgentEpisode(
             response=NeMoGymResponse(
-                id=f"nooa-{rollout_id}",
+                id=latest_response.id if latest_response is not None else f"nooa-{rollout_id}",
                 created_at=time(),
                 model=create_params.model or default_model,
                 object="response",
@@ -528,6 +571,7 @@ def ensure_verifier_final_message(
     output.append(
         NeMoGymResponseOutputMessage(
             id="nooa_fallback",
+            synthetic=True,
             content=[NeMoGymResponseOutputText(annotations=[], text=_json_output(return_value))],
         )
     )

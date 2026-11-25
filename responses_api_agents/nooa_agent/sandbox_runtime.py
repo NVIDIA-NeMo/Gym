@@ -165,6 +165,17 @@ def _runtime_archive(root: Path) -> tuple[bytes, str]:
     return output.getvalue(), digest.hexdigest()
 
 
+def _installer_archive() -> bytes:
+    """Package the installed controller's installer; offline code comes from wheels."""
+    contents = Path(__file__).with_name("install_nooa_runtime.sh").read_bytes()
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        entry = tarfile.TarInfo(_INSTALLER_PATH)
+        entry.size = len(contents)
+        archive.addfile(entry, io.BytesIO(contents))
+    return output.getvalue()
+
+
 def _python_download_url(target: str) -> str:
     arch, libc = target.split("/")
     return (
@@ -186,8 +197,13 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
     local wheels, without package indexes, URL requirements or build isolation.
     A healthy preinstalled or mounted runtime is reused without writing into it.
     """
-    root = Path(__file__).resolve().parents[2]
-    source, fingerprint = await _runtime_io(_runtime_archive, root)
+    if wheelhouse_path is None:
+        source, fingerprint = await _runtime_io(_runtime_archive, Path(__file__).resolve().parents[2])
+    else:
+        # The bundle already contains Gym, NOOA and their dependencies. Do not
+        # inspect a checkout or substitute local source for its installed wheels.
+        source = await _runtime_io(_installer_archive)
+        fingerprint = None
     scratch = f"/tmp/nemo-gym-nooa-setup-{uuid4().hex}"
     script = scratch + ".sh"
     completed = False
@@ -212,6 +228,7 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
                 wheelhouse = await _runtime_io(
                     load_runtime_wheelhouse, wheelhouse_path, target=target, source_fingerprint=fingerprint
                 )
+                fingerprint = str(wheelhouse["source_fingerprint"])
                 libc_result = await sandbox.exec("getconf GNU_LIBC_VERSION", cwd="/", timeout_s=30)
                 libc_fields = (libc_result.stdout or "").strip().split()
                 required_glibc = str(wheelhouse["glibc"])
@@ -226,6 +243,7 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
                 # Dependency resolution can change independently of source; never reuse
                 # a runtime installed from different wheel bytes.
                 fingerprint = hashlib.sha256(f"{fingerprint}:{wheelhouse['wheels_sha256']}".encode()).hexdigest()
+            assert fingerprint is not None
             runtime = f"{_RUNTIME_ROOT}/{fingerprint}-{arch}-{libc}"
             python = f"{runtime}/python/bin/python3"
             check = shlex.join(["bash", script, "check", runtime, fingerprint, _IMPORT_CHECK])

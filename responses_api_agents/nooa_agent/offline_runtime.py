@@ -31,8 +31,12 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def load_runtime_wheelhouse(output: Path, *, target: str, source_fingerprint: str) -> dict[str, object]:
-    """Validate the exact source, platform and artifact bytes before staging."""
+def load_runtime_wheelhouse(output: Path, *, target: str, source_fingerprint: str | None = None) -> dict[str, object]:
+    """Validate a bundle's platform and bytes, optionally requiring checkout identity.
+
+    A supplied bundle is an immutable worker runtime in its own right. Installed
+    controllers use its recorded source identity rather than rebuilding one with Git.
+    """
     output = output.expanduser().resolve()
     if target not in _TARGETS:
         raise ValueError(f"Offline NOOA runtime supports only {', '.join(_TARGETS)}; got {target!r}")
@@ -45,7 +49,6 @@ def load_runtime_wheelhouse(output: Path, *, target: str, source_fingerprint: st
         for key, expected in {
             "version": 1,
             "target": target,
-            "source_fingerprint": source_fingerprint,
             "python_version": _PYTHON_VERSION,
             "python_sha256": _PYTHON_SHA256[target],
         }.items()
@@ -53,6 +56,14 @@ def load_runtime_wheelhouse(output: Path, *, target: str, source_fingerprint: st
         raise ValueError(
             f"NOOA wheelhouse is incompatible with this source/platform; prepare a fresh directory: {output}"
         )
+    identity = manifest.get("source_fingerprint")
+    if (
+        not isinstance(identity, str)
+        or not identity
+        or source_fingerprint is not None
+        and identity != source_fingerprint
+    ):
+        raise ValueError(f"NOOA wheelhouse source fingerprint mismatch: {output}")
     glibc = manifest.get("glibc")
     if not isinstance(glibc, str) or len(glibc.split(".")) != 2 or not all(p.isdigit() for p in glibc.split(".")):
         raise ValueError("NOOA wheelhouse manifest requires its builder glibc version")

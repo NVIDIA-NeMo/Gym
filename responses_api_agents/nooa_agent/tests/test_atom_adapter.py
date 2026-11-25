@@ -108,11 +108,10 @@ async def test_atom_runs_through_the_runner_with_a_scripted_model(tmp_path: Path
     assert "python_cell" in tools, tools
     response, observations = finalize_run_result(result)
     assert response.status == "completed"
-    # Two gaps the current projection records for Atom: the scripted model carries no training
-    # metadata, and Atom always ends with return_result() rather than a model-authored message, so
-    # the projection appends a synthetic one and flags the terminal output as non-trainable. The
-    # second gap is the RL blocker: token-id capture cannot attribute the scored response to a
-    # captured call through that synthetic message (declared terminal_response_id is the fix).
+    assert response.id == "response-0"
+    assert response.output[-1].synthetic  # Verifiers keep the structured return; it is not a sampled action.
+    # The scripted model carries no training metadata. The synthesized final message
+    # remains observable, while the served response ID identifies the scored root call.
     assert sorted(gap.code for gap in observations.gaps) == [
         "non_trainable_terminal_output",
         "public_assistant_metadata_unavailable",

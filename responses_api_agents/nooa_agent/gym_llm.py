@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -83,6 +84,7 @@ class GymModelCall:
     request: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse | None = None
     invocation_id: str | None = None
+    auxiliary: bool = False
 
 
 @dataclass(slots=True)
@@ -370,6 +372,7 @@ class GymResponsesLLM(UnifiedLLM):
         sampling_overrides: dict[str, Any] | None = None,
         context_window: int | None = None,
         media_inputs: tuple[str, ...] = (),
+        instructions: str | None = None,
     ) -> None:
         super().__init__(model=model, context_window=context_window, media_inputs=media_inputs)
         self._server_client = server_client
@@ -379,12 +382,34 @@ class GymResponsesLLM(UnifiedLLM):
         self._on_call = on_call
         self._on_response = on_response
         self._sampling_overrides = dict(sampling_overrides or {})
+        self._instructions = instructions
         # Rollout IDs in model_url_path change across restores; the configured
         # model server and alias identify the compatible inference route.
         self._gym_replay_scope = _GYM_REPLAY_SCOPE + json.dumps([model_server_name, model])
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
+        # The cached renderer regenerates live context instead of retaining it in
+        # history. Restore only the suffix attached to the same unedited response.
+        self._response_context: dict[str, tuple[LLMResponse, list[dict[str, Any]]]] = {}
+
+    def _replay_context(
+        self, messages: list[dict[str, Any] | LLMResponse | CacheBoundary]
+    ) -> list[dict[str, Any] | LLMResponse | CacheBoundary]:
+        result: list[dict[str, Any] | LLMResponse | CacheBoundary] = []
+        for message in messages:
+            saved = self._response_context.get(message.id) if isinstance(message, LLMResponse) else None
+            if saved is not None:
+                response, context = saved
+                if (
+                    message.replay_scope == response.replay_scope == self._gym_replay_scope
+                    and message.parts == response.parts
+                    and all(_native_matches_public(part) for part in message.parts)
+                    and result[-len(context) :] != context
+                ):
+                    result.extend(deepcopy(context))
+            result.append(message)
+        return result
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -448,7 +473,7 @@ class GymResponsesLLM(UnifiedLLM):
             # the declared model does not accept is replaced with NOOA's note here, before the request is built.
             messages = self._prepare_media_messages(messages, {})
             input_items, instructions = _responses_input(
-                messages, gaps=self._state.gaps, replay_scope=self._gym_replay_scope
+                self._replay_context(messages), gaps=self._state.gaps, replay_scope=self._gym_replay_scope
             )
             request: dict[str, Any] = {
                 "input": input_items,
@@ -475,6 +500,11 @@ class GymResponsesLLM(UnifiedLLM):
 
             # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
             request.update(self._sampling_overrides)
+            # Benchmark instructions precede the harness prompt on every call,
+            # including calls made by wrappers and child agents sharing this LLM.
+            request["instructions"] = (
+                "\n\n".join(text for text in (self._instructions, request.get("instructions")) if text) or None
+            )
             if limits.reserve_is_fallback:
                 request.pop("max_output_tokens", None)
             else:
@@ -491,6 +521,7 @@ class GymResponsesLLM(UnifiedLLM):
         call = GymModelCall(
             model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
             request=body.model_copy(deep=True),
+            auxiliary=summary_fork_active(),
         )
         self._state.calls.append(call)
         if self._on_call is not None:
@@ -561,7 +592,7 @@ class GymResponsesLLM(UnifiedLLM):
             except (json.JSONDecodeError, ValueError, TypeError) as error:
                 raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
-        return LLMResponse(
+        result = LLMResponse(
             raw_response=response,
             parts=parts,
             replay_scope=self._gym_replay_scope,
@@ -569,3 +600,9 @@ class GymResponsesLLM(UnifiedLLM):
             finish_reason="tool_calls" if function_calls else _finish_reason(response),
             usage=usage,
         )
+        boundaries = [index for index, message in enumerate(messages) if isinstance(message, CacheBoundary)]
+        if len(boundaries) == 1:
+            suffix = messages[boundaries[0] + 1 :]
+            if suffix and all(isinstance(item, dict) and item.get("role") == "user" for item in suffix):
+                self._response_context[result.id] = (result, deepcopy(suffix))
+        return result

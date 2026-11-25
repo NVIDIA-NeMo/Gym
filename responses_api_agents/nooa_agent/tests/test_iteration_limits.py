@@ -266,13 +266,15 @@ async def test_real_codeact_environment_verifies_partial_response_once(
         assert result.result.response.status == "completed"
         assert result.result.response.error is None
         assert result.result.response.incomplete_details is None
-        assert result.result.response.output[-1].content[0].text == "recovered"
+        assert result.result.verifier_response.output[-1].content[0].text == "recovered"
         assert len(model_calls) == 2
     else:
         assert_partial_evidence(result.result.response, scenario=scenario)
         assert len(model_calls) == 1
     assert len(verified) == _paths(client).count("/verify") == 1
-    assert verified[0]["response"] == result.result.response.model_dump(mode="json")
+    assert verified[0]["response"] == (result.result.verifier_response or result.result.response).model_dump(
+        mode="json"
+    )
     record = _episode_record(result.model_dump(mode="json"))
     assert "_ng_failure_class" not in record
     assert record["reward"] == 0.75

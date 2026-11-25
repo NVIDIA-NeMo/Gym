@@ -64,6 +64,18 @@ Atom's session wraps a strategy failure in `TurnFailedError`; the adapter re-rai
 termination policy sees the same CodeAct stops and model rejections it sees from any other NOOA agent. Gym resource
 tools are bound on the harness class, not on Atom's session agent.
 
+The response ID names the last served model response from the root agent. A later child or summary call does not
+replace it. The adapter keeps Atom's structured return as a synthetic assistant message for text verifiers.
+After verification, the generic `SingleAgentTurnResult` contract retains the graded response in `verifier_response`
+and leaves only model-authored actions in `response.output`. Synthetic messages carry `synthetic: true`; ordinary
+output keeps its existing wire shape. Strict capture matching still checks the exact model-authored items and IDs.
+
+For a normal continuation, the Gym model bridge restores the exact live-context suffix before the same unedited
+reply, then appends the renderer's fresh context. It does not recover context for foreign, edited or removed replies.
+Intentional history rewrites still have to satisfy capture's normal context checks. Benchmark `instructions` and
+leading system/developer text precede NOOA's own prompt on every model request, including wrapper and child calls.
+Atom's `solve()` receives the user task separately. Non-text system/developer instructions are rejected explicitly.
+
 ## Policy model settings
 
 The agent server declares the policy model as NOOA must know it, and refuses to start without every value: a run
@@ -88,12 +100,26 @@ values, so Gym's run settings keep their meaning. For GLM 5.3 served by vLLM tha
 
 ## Sandboxed execution
 
-`nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.
-NOOA stages its own runtime and closes its worker before disconnecting; Resources owns sandbox creation and teardown.
-The runtime packages the launching Gym checkout with its unchanged root `pyproject.toml` and full core dependency set.
-Tracked package source and assets are copied with their current contents; untracked files, Git metadata, and caches are excluded.
-The controller therefore needs a Git checkout and Git installed. The package is installed into NOOA's private Python,
-leaving the task's Python environment unchanged. Offline wheelhouses must be rebuilt whenever these packaged bytes change.
+`nooa.execution_mode: sandboxed` borrows the task sandbox supplied by Resources when present. Otherwise it creates a
+sandbox using `sandbox_provider` and `sandbox_config` (including the task image); absent either a borrowed sandbox or
+a configured provider, seeding fails before inference. NOOA closes its worker and disconnects from borrowed sandboxes;
+Resources owns their teardown. NOOA stops its own sandboxes, including after failed or cancelled runtime setup.
+
+`network_access` controls agent-owned sandboxes: `inherit` keeps provider defaults, `model_only` allows the model
+host, and `model_and_tools` also allows direct HTTP tool hosts. Restricted modes require an offline runtime bundle
+and a provider that enforces network policies. Required tool grants blocked by `model_only`, conflicting explicit
+network policies, unsupported providers and restricted settings on borrowed sandboxes are rejected before creation.
+MCP grants remain a separate capability; this change does not add MCP transport support.
+
+When `runtime_wheelhouse` is supplied, its wheels, Python archive, source identity and platform define the worker
+runtime. The controller uses the bundle directly and needs neither Git nor a checkout. It validates the bundle's
+existing platform, glibc and artifact digests and keeps the source-plus-wheel identity in the runtime path. Supplying
+a bundle does not update its worker code from the controller: prepare a new bundle to adopt worker source changes.
+
+Without a supplied bundle, the runtime packages the launching Gym checkout with its unchanged root `pyproject.toml`
+and full core dependency set. Tracked package source and assets are copied with their current contents; untracked
+files, Git metadata and caches are excluded. This source-building path still requires Git and a checkout. Both paths
+install into NOOA's private Python, leaving the task's Python environment unchanged.
 Agent and resource sessions use Gym's existing `single_agent_turn` environment. Agent close returns the evidence and final
 Resources cookies before verification; Resources closes its sandbox afterward.
 
@@ -109,8 +135,7 @@ fire first. Final cleanup runs after the episode deadline under its own `cleanup
 See [NOOA sessions and SWE-bench Pro](../../fern/versions/latest/pages/evaluation-tutorials/nooa-swe-bench-pro.mdx)
 for setup, recipes, service lifecycle and observation limits.
 
-Sandboxed mode requires the Resources server to provide `sandbox_access`; otherwise seeding returns HTTP 422.
-Its provider must support `AsyncSandbox.connect`. The Gym model server address must be reachable from inside
+Borrowed mode requires a provider supporting `AsyncSandbox.connect`. The Gym model server address must be reachable from inside
 the task sandbox: configure `use_absolute_ip` / `default_host` for the deployment instead of a controller-only
 loopback address. Harbor runs (`gym eval run <target> --agent <name>`) set `use_absolute_ip` for the model server
 automatically, so this applies only outside Harbor. Runtime packaging runs in a thread so seeding does not block

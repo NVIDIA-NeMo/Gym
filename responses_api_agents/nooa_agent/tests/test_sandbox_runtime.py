@@ -520,6 +520,29 @@ async def test_offline_runtime_stages_only_verified_local_artifacts(
     assert python == f"/opt/nemo-gym-nooa/{expected_fingerprint}-x86_64-gnu/python/bin/python3"
 
 
+async def test_prepared_bundle_needs_no_checkout_and_keeps_its_runtime_identity(
+    monkeypatch, tmp_path, sandbox, wheelhouse, portable_download
+):
+    def no_checkout(*args):
+        raise AssertionError("A supplied bundle must not inspect Git or rebuild controller source")
+
+    monkeypatch.setattr(sandbox_runtime, "_runtime_archive", no_checkout)
+    monkeypatch.chdir(tmp_path)
+    manifest = json.loads((wheelhouse / "manifest.json").read_text())
+    manifest["source_fingerprint"] = "b" * 64
+    (wheelhouse / "manifest.json").write_text(json.dumps(manifest))
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.31", "", 0),
+        SandboxExecResult("ready", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    python = await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
+    expected = hashlib.sha256(f"{manifest['source_fingerprint']}:{manifest['wheels_sha256']}".encode()).hexdigest()
+    assert python == f"/opt/nemo-gym-nooa/{expected}-x86_64-gnu/python/bin/python3"
+    portable_download.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("libc", ["glibc 2.17", "unknown", "glibc 2.31 extra"])
 async def test_offline_runtime_rejects_incompatible_libc_without_online_fallback(
@@ -539,7 +562,7 @@ async def test_offline_runtime_rejects_incompatible_or_damaged_bundle_without_on
 ) -> None:
     if changed in {"source", "target"}:
         manifest = json.loads((wheelhouse / "manifest.json").read_text())
-        manifest["source_fingerprint" if changed == "source" else "target"] = "changed"
+        manifest["source_fingerprint" if changed == "source" else "target"] = "" if changed == "source" else "changed"
         (wheelhouse / "manifest.json").write_text(json.dumps(manifest))
     elif changed == "missing":
         (wheelhouse / "wheels.tar.gz").unlink()

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar
@@ -25,11 +26,13 @@ from fastapi import Body, HTTPException, Request
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     SimpleResponsesAPIAgent,
+    restrict_sandbox_network,
 )
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
@@ -37,7 +40,14 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     rollout_context,
 )
-from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -110,24 +120,56 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 trace_dir=self.config.artifacts_dir / "embedded",
             )
         else:
-            if body.sandbox_access is None:
-                raise HTTPException(422, "Sandboxed NOOA requires Resources-provided sandbox_access")
+            owns_sandbox = body.sandbox_access is None
+            if owns_sandbox:
+                if self.config.sandbox_provider is None:
+                    raise AgentSeedRejectedError("NOOA requires sandbox_access or a configured sandbox_provider")
+                if self.config.network_access != "inherit" and self.config.runtime_wheelhouse is None:
+                    raise AgentSeedRejectedError("Restricted NOOA sandboxes require an offline runtime_wheelhouse")
+                provider_ref = self.config.sandbox_provider
+                sandbox_config = {"workdir": "/app", **self.config.sandbox_config}
+                sandbox_config.setdefault("ttl_s", self.config.sandbox_runner_timeout_seconds + 2400)
+                sandbox_config["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, self.server_client.global_config_dict),
+                    **sandbox_config.get("metadata", {}),
+                    "episode_id": body.episode_id.capture_key[:63],
+                }
+                spec = SandboxSpec(**sandbox_config)
+                workdir = spec.workdir
+                if not isinstance(workdir, str) or not workdir.startswith("/"):
+                    raise AgentSeedRejectedError("NOOA sandbox workdir must be absolute")
+            else:
+                connection = body.sandbox_access.connection
+                if not isinstance(connection, DirectSandboxConnection):
+                    raise AgentSeedRejectedError("NOOA requires direct sandbox_access")
+                if self.config.network_access != "inherit":
+                    raise AgentSeedRejectedError("NOOA network_access applies only to a sandbox it creates")
+                provider_ref = connection.provider_config_ref
+                workdir = body.sandbox_access.workdir
             # The runner prefixes every call path with its rollout segment, so the base URL carries no trace segment.
             model_base_url = self.resolve_model_base_url(
                 self.config.model_server.name, trace_context=False
             ).removesuffix("/v1")
-            connection = body.sandbox_access.connection
-            provider = create_provider(
-                resolve_provider_config(connection.provider_config_ref, self.server_client.global_config_dict)
-            )
+            provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
             try:
-                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+                if owns_sandbox:
+                    spec = restrict_sandbox_network(
+                        spec,
+                        network_access=self.config.network_access,
+                        provider=provider,
+                        model_base_url=model_base_url,
+                        tool_urls=[str(access.base_url)] if access else [],
+                        required_tool_urls=[str(access.base_url)] if access and access.required else [],
+                    )
+                    sandbox = AsyncSandbox(provider)
+                else:
+                    sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
             except BaseException:
                 await provider.aclose()
                 raise
             runner = SandboxNOOARunner(
                 sandbox=sandbox,
-                workdir=body.sandbox_access.workdir,
+                workdir=workdir,
                 python="",
                 invocation=self.config.nooa,
                 model_base_url=model_base_url,
@@ -137,9 +179,15 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 max_policy_calls=self.config.max_policy_calls,
                 policy=self.config.policy_settings,
                 artifacts_dir=self.config.artifacts_dir,
+                owns_sandbox=owns_sandbox,
             )
             state.runner = runner
             try:
+                if owns_sandbox:
+                    await sandbox.start(spec)
+                    workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+                    if workspace.return_code != 0 or workspace.error_type:
+                        raise RuntimeError(f"Could not create NOOA workdir: {workspace.stderr or workspace.stdout}")
                 runner.python = await prepare_nooa_runtime(
                     sandbox,
                     wheelhouse_path=self.config.runtime_wheelhouse,

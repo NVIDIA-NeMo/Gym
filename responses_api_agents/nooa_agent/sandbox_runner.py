@@ -50,6 +50,7 @@ class SandboxNOOARunner:
         timeout: float = 21600,
         close_timeout: float = 30,
         artifacts_dir: Path | None = None,
+        owns_sandbox: bool = False,
     ) -> None:
         self.sandbox = sandbox
         self.python = python
@@ -69,7 +70,7 @@ class SandboxNOOARunner:
             session_dir=f"/tmp/nemo-gym-nooa/{uuid4().hex}",
             workdir=workdir,
             harness="NOOA",
-            owns_sandbox=False,
+            owns_sandbox=owns_sandbox,
         )
         self.artifact: SandboxResult | None = None
         self.checkpoint: SandboxCheckpoint | None = None

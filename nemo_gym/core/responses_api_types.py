@@ -344,6 +344,11 @@ class NeMoGymResponseOutputMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
+    synthetic: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        description="Harness-authored verifier text, excluded from model-action matching after verification.",
+    )
     # Preserve the response phase when replaying the item.
     phase: Optional[Literal["commentary", "final_answer"]] = None
 
