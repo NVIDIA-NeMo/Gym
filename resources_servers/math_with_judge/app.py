@@ -28,7 +28,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
 
-from nemo_gym.agents import SandboxPythonRuntime
+from nemo_gym.agents import SandboxPythonRuntime, probe_sandbox_platform
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     PROVIDER_REQUEST_FAILED,
@@ -63,9 +63,9 @@ LOG = logging.getLogger(__name__)
 
 # The Math-Verify check runs from this file in the Resources Server and, uploaded, in the sandbox lent to /verify.
 _LIBRARY_CHECK = Path(__file__).with_name("library_check.py")
-# The check's private Python in the lent sandbox, built on this host from this server's package versions. OmegaConf
-# is absent here, but Math-Verify's LaTeX parser pins antlr4-python3-runtime 4.9.*, which PyPI ships only as source:
-# a direct URL is the one kind of requirement the runtime builds on this host, and it is pure Python.
+# The check's private Python in the lent sandbox, built on this host from this server's package versions.
+# Math-Verify's LaTeX parser pins antlr4-python3-runtime 4.9.*, which PyPI ships only as source: a direct URL is the
+# one kind of requirement the runtime builds on this host, and it is pure Python.
 LIBRARY_CHECK_RUNTIME = SandboxPythonRuntime(
     harness="math_with_judge_verifier",
     requirements=(
@@ -370,6 +370,13 @@ _run_math_verify = run_math_verify
 _cap_address_space = cap_address_space
 
 
+class _RuntimeBuildError(RuntimeError):
+    """This host cannot build the check's runtime (no uv, no download, no wheel).
+
+    It would fail every sample alike, so the request fails instead of masking each one.
+    """
+
+
 class _InconclusiveCheck(Exception):
     """The check could not run in the lent sandbox: the environment failed, not the policy, so the sample is masked."""
 
@@ -559,11 +566,26 @@ Example output: "My final verdict is different [[A!=B]]"."""
         """Run the Math-Verify check in the sandbox lent to /verify, and release the client; its owner stops it.
 
         The check's Python runtime is installed there first unless the sandbox already has it. The check scores an
-        answer that times out or crashes its child 0, as this server's own check does.
+        answer that times out or crashes its child 0, as this server's own check does. At most
+        ``library_verifier_max_concurrency`` checks install or run at once, as for this server's own check.
 
         Raises:
             _InconclusiveCheck: When the sandbox cannot run the check; the caller masks the sample.
+            _RuntimeBuildError: When this host cannot build the check's runtime.
         """
+        async with resources_operation(
+            self._library_verifier_semaphore, operation="verify", executor="other"
+        ) as operation:
+            reward, extracted_answer, outcome = await self._check_in_lent_sandbox(
+                access, expected_answer, generated_answer
+            )
+            if outcome in ("timeout", "crashed"):
+                operation.outcome = outcome
+            return reward, extracted_answer
+
+    async def _check_in_lent_sandbox(
+        self, access: SandboxAccess, expected_answer: str, generated_answer: str
+    ) -> tuple[float, Optional[str], str]:
         try:
             sandbox = await borrow(access)
         except (ImportError, ValueError):
@@ -575,7 +597,17 @@ Example output: "My final verdict is different [[A!=B]]"."""
         try:
             try:
                 if not await LIBRARY_CHECK_RUNTIME.is_installed(sandbox):
+                    platform = await probe_sandbox_platform(sandbox)
+                    try:
+                        async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                            await LIBRARY_CHECK_RUNTIME.archives(platform)
+                    except (RuntimeError, TimeoutError) as error:
+                        raise _RuntimeBuildError(
+                            f"building the check's runtime on this host failed: {error}"
+                        ) from error
                     await LIBRARY_CHECK_RUNTIME.install(sandbox, timeout_s=self.config.sandbox_install_timeout_seconds)
+            except _RuntimeBuildError:
+                raise
             except (RuntimeError, TimeoutError) as error:
                 raise _InconclusiveCheck(VERIFIER_ERROR, f"installing the check's runtime failed: {error}") from error
             directory = f"{LIBRARY_CHECK_RUNTIME.directory}/checks/{uuid4().hex}"
@@ -597,7 +629,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 cwd="/",
                 timeout_s=self.config.library_verifier_timeout_seconds + _SANDBOX_CHECK_STARTUP_SECONDS,
             )
-        except _InconclusiveCheck:
+        except (_InconclusiveCheck, _RuntimeBuildError):
             raise
         except Exception as error:
             raise _InconclusiveCheck(PROVIDER_REQUEST_FAILED, f"the lent sandbox failed: {error!r}") from error
@@ -614,7 +646,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             if result.return_code != 0 or not lines:
                 raise ValueError(f"exit {result.return_code}")
             outcome = json.loads(lines[-1])
-            return float(outcome["reward"]), outcome["extracted_answer"]
+            return float(outcome["reward"]), outcome["extracted_answer"], str(outcome.get("outcome", "checked"))
         except (ValueError, KeyError, TypeError) as error:
             raise _InconclusiveCheck(
                 VERIFIER_ERROR, f"the check failed ({error}): {(result.stderr or '')[-2000:]}"

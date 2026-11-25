@@ -44,6 +44,10 @@ aime25_math_with_judge_environment_server:
         workdir: /workspace
         ttl_s: 25200  # above the episode timeout plus the cleanup timeout
         network: no_network
+        resources:
+          # Above the check's own cap (library_verifier_memory_limit_mb, 4096), so an answer that allocates too much
+          # fails in the check's child and scores 0 instead of the sandbox running out of memory.
+          memory_mib: 6144
       sandbox_opt_out:
         task: true
         verifier: false

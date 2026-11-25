@@ -1628,12 +1628,24 @@ class _InstalledRuntime:
     directory = "/tmp/nemo-gym-math_with_judge_verifier-runtime-test"
     python = "/tmp/nemo-gym-math_with_judge_verifier-runtime-test/python/bin/python3"
 
-    def __init__(self, *, installed: bool = True, install_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        installed: bool = True,
+        install_error: Exception | None = None,
+        build_error: Exception | None = None,
+    ) -> None:
         self.installed = installed
         self.install_error = install_error
+        self.build_error = build_error
 
     async def is_installed(self, sandbox: Any) -> bool:
         return self.installed
+
+    async def archives(self, platform: Any) -> tuple[Path, Path]:
+        if self.build_error is not None:
+            raise self.build_error
+        return Path("python.tar.gz"), Path("site-packages.tar.gz")
 
     async def install(self, sandbox: Any, *, timeout_s: float) -> None:
         if self.install_error is not None:
@@ -1642,6 +1654,10 @@ class _InstalledRuntime:
 
 
 class TestLentSandboxCheck:
+    @fixture(autouse=True)
+    def _platform(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(math_with_judge_app, "probe_sandbox_platform", AsyncMock(return_value="linux-x86_64"))
+
     @fixture
     def server(self) -> LibraryJudgeMathResourcesServer:
         server = LibraryJudgeMathResourcesServer(
@@ -1758,6 +1774,52 @@ class TestLentSandboxCheck:
 
         assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, True, failure_kind)
         assert sandbox.disconnected == (borrow_error is None)
+
+    async def test_a_runtime_this_host_cannot_build_fails_the_request(
+        self, server: LibraryJudgeMathResourcesServer, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Masking would hide a host problem (no uv, no package index) in every sample.
+        sandbox = _FakeLentSandbox(tmp_path)
+        monkeypatch.setattr(math_with_judge_app, "borrow", AsyncMock(return_value=sandbox))
+        runtime = _InstalledRuntime(installed=False, build_error=RuntimeError("requires uv on the host"))
+        monkeypatch.setattr(math_with_judge_app, "LIBRARY_CHECK_RUNTIME", runtime)
+
+        with raises(RuntimeError, match="requires uv on the host"):
+            await server.verify(self._request("\\boxed{4}"))
+        assert not runtime.installed and sandbox.disconnected
+
+    async def test_an_answer_whose_check_times_out_in_the_sandbox_scores_0(
+        self, server: LibraryJudgeMathResourcesServer, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        # The answer, not the sandbox, failed: it is scored, not masked.
+        server.config = server.config.model_copy(update={"library_verifier_timeout_seconds": 1e-6})
+        monkeypatch.setattr(math_with_judge_app, "borrow", AsyncMock(return_value=_FakeLentSandbox(tmp_path)))
+        monkeypatch.setattr(math_with_judge_app, "LIBRARY_CHECK_RUNTIME", _InstalledRuntime())
+
+        response = await server.verify(self._request("\\boxed{4}"))
+
+        assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, False, None)
+
+    async def test_checks_in_lent_sandboxes_share_the_verifier_limit(
+        self, server: LibraryJudgeMathResourcesServer, monkeypatch: MonkeyPatch
+    ) -> None:
+        server._library_verifier_semaphore = asyncio.Semaphore(1)
+        running, most = 0, 0
+
+        async def check(*args: Any) -> tuple[float, str | None, str]:
+            nonlocal running, most
+            running += 1
+            most = max(most, running)
+            await asyncio.sleep(0.01)
+            running -= 1
+            return 1.0, "4", "checked"
+
+        monkeypatch.setattr(server, "_check_in_lent_sandbox", check)
+        access = self._request("\\boxed{4}").ng_sandbox_access
+
+        await asyncio.gather(*(server._verify_answer_in_lent_sandbox(access, "4", "\\boxed{4}") for _ in range(3)))
+
+        assert most == 1
 
     async def test_an_unresolvable_provider_fails_the_request(
         self, server: LibraryJudgeMathResourcesServer, monkeypatch: MonkeyPatch
