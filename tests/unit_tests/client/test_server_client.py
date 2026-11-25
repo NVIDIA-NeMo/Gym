@@ -505,3 +505,35 @@ class TestServerClient:
 
         sent = orjson.loads(aiohttp_client_request_mock.call_args.kwargs["data"])
         assert sent["input"][0]["content"][0]["logprobs"] == logprobs
+
+
+class TestPollForStatus:
+    def _client(self, monkeypatch: MonkeyPatch) -> MagicMock:
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_first_server_config_dict", MagicMock())
+        client = MagicMock()
+        client._build_server_base_url.return_value = "http://localhost:1"
+        return client
+
+    def test_by_default_the_request_keeps_its_per_phase_timeout(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._client(monkeypatch)
+        requests_get = MagicMock()
+        within_deadline = MagicMock()
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", requests_get)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_within_deadline", within_deadline)
+
+        assert ServerClient.poll_for_status(client, "s", timeout_seconds=7) == "success"
+
+        requests_get.assert_called_once_with("http://localhost:1", timeout=7)
+        within_deadline.assert_not_called()
+
+    def test_with_a_total_deadline_the_poll_ends_at_it(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._client(monkeypatch)
+        requests_get = MagicMock()
+        within_deadline = MagicMock(side_effect=TimeoutError("late"))
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", requests_get)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_within_deadline", within_deadline)
+
+        assert ServerClient.poll_for_status(client, "s", timeout_seconds=7, total_deadline=True) == "timeout"
+
+        within_deadline.assert_called_once_with("http://localhost:1", timeout_s=7, read_body=False)
+        requests_get.assert_not_called()
