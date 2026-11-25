@@ -148,8 +148,9 @@ class SessionHandles(BaseModel):
 class SingleAgentTurnEnvironmentServerConfig(AttemptSandboxEnvironmentServerConfig):
     """Bind Resources and Agent Servers for one agent turn.
 
-    ``sandbox_provider`` and ``sandbox_config`` configure how the attempt's sandbox groups start, which the
-    base class starts, lends and stops (see ``AttemptSandboxEnvironmentServerConfig``).
+    ``sandbox_provider``, ``sandbox_config`` and ``verifier`` configure how the attempt's sandbox groups start and
+    where ``/verify`` runs; the base class starts, lends and stops the groups (see
+    ``AttemptSandboxEnvironmentServerConfig``).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -590,6 +591,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             lent=seed.sandbox_access,
             group=seed.sandbox_group,
             verifier_mode=seed.verifier_mode,
+            supported_verifier_modes=seed.supported_verifier_modes,
             task_tools=task_tools,
             # Asked only when it decides anything: groups this server starts, for a task without tools or sidecars.
             agent_runs_loop_without_sandbox=(
