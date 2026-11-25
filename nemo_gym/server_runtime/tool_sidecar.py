@@ -29,7 +29,7 @@ class ToolSidecarConfig(BaseModel):
     """Where a Resources Server's tools run: a sidecar of the attempt's sandbox group, never the Resources host.
 
     The sidecar runs the Resources Server's own class, with this server's config, and serves its tool routes, so a
-    tool answers as it does in process. It is meant to reach only ``egress_hosts``, none by default. The agent
+    tool answers as it does in process. It reaches only ``egress_hosts``, none by default. The agent
     container reaches it as ``http://<name>:<port>``; on OpenSandbox that needs ``networking.enabled``. Code in the
     agent container can also reach the sidecar's other ports, such as the provider's exec daemon, so the sidecar must
     hold no secret: a config that would put one there is refused.
@@ -78,8 +78,15 @@ class ToolSidecarConfig(BaseModel):
         check_network_rule(provider, self.network_rule)
 
     def group_sidecar(self) -> SandboxGroupSidecar:
-        """The sidecar the Resources Server's seed declares in its ``sandbox_group``."""
-        return SandboxGroupSidecar(name=self.name, image=self.image, resources=dict(self.resources))
+        """The sidecar the Resources Server's seed declares in its ``sandbox_group``, with its own egress and the port
+        its tools are served on."""
+        return SandboxGroupSidecar(
+            name=self.name,
+            image=self.image,
+            resources=dict(self.resources),
+            egress_hosts=list(self.egress_hosts),
+            tools_port=self.port,
+        )
 
 
 class ToolSidecarCollectRequest(BaseModel):

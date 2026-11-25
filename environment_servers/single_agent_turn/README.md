@@ -91,15 +91,15 @@ Grading runs with the network rule the sandbox started with, and anything the ag
 
 ### What the Resources Server declares
 
-At seed, the Resources Server may declare what the group holds, as `sandbox_group` (`SandboxGroupSpec`) on its seed reply. The group starts from `sandbox_config` (provider, network rule, `ttl_s`, resources) with the declared fields over it. A server that inherits `SimpleResourcesServer.seed_session` declares through class hooks; one that builds its own seed reply sets `sandbox_group=self.declared_sandbox_group(body)` on it.
+At seed, the Resources Server may declare what the group holds, as `sandbox_group` (`SandboxGroupSpec`) on its seed reply, and that its verifier executes nothing (`verifier_executes_nothing`). The group starts from `sandbox_config` (provider, network rule, `ttl_s`, resources) with the declared fields over it. A server that inherits `SimpleResourcesServer.seed_session` declares through class hooks; one that builds its own seed reply passes them on with `ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))`.
 
 | Hook on the Resources Server | Declares |
 |------|------|
-| `sandbox_group(body)` | The task's `image`, `workdir`, `env`, text `files` delivered before anyone borrows the group, and `sidecars` that serve its environment tools. `image` and `workdir` fall back to `sandbox_config`. Sidecars need a provider that starts them; on any other, the attempt fails for good. |
-| `grader_runs_code = True` | The grader executes model output or calls tools, so it always gets a sandbox and never opts out. |
-| `prepare_sandbox(body)` | Serves `/prepare_sandbox`: once the group has started, this server sends operate-scope access to it, and the Resources Server prepares the task through `borrow()`, such as starting a sidecar's tool service, before the agent or the grader borrows it. |
+| `sandbox_group(body)` | The task's `image`, `workdir`, `env`, text `files` delivered before anyone borrows the group, and `sidecars` that serve its environment tools. `image` and `workdir` fall back to `sandbox_config`. Each sidecar gets its own egress, never the main container's: only its `egress_hosts` (`hosts_only`), or none (`no_network`). `tools_port` names the port on which it serves the Resources Server's HTTP tools. Sidecars need a provider that starts them and applies those rules. |
+| `verifier_executes_nothing = True` | The verifier only reads the answer (rules, math-verify, a judge call): it executes nothing and calls no tools, so it may opt out of the sandbox. A verifier that runs model output, or passes it to `eval` or to sympy's `parse_expr`, leaves it unset. |
+| `prepare_sandbox(body)` | Serves `/prepare_sandbox`: once the group has started, this server sends the seed's `task_data` and operate-scope access to the group, and the Resources Server prepares the task through `borrow()`, such as starting a sidecar's tool service, before the agent or the verifier borrows it. |
 
-A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both.
+A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both. An episode that holds a group this server starts is a restart: no checkpoint exports it, and the declared files and environment variables never reach a checkpoint.
 
 ### Tools in a sidecar
 
@@ -124,7 +124,7 @@ a tool sidecar holds no secret: a config that would copy a credential there is r
 
 ### Opting out
 
-Every task and every grader runs in the group unless `sandbox_opt_out` says otherwise. Only what executes nothing may opt out, to save sandbox capacity on large QA runs:
+Every task and every verifier runs in the group unless `sandbox_opt_out` says otherwise. Only what executes nothing may opt out, to save sandbox capacity on large QA runs:
 
 ```yaml
 environment_servers:
@@ -132,22 +132,22 @@ environment_servers:
     sandbox_provider: attempt_sandboxes
     sandbox_config: {...}
     sandbox_opt_out:
-      task: true    # a pure QA task: the agent is lent no sandbox, so its loop runs in the Agent Server process
-      grader: false # the grader still gets a sandbox: one of its own, started after the agent closes
+      task: true      # a pure QA task: the agent is lent no sandbox, so Simple Agent runs its loop in its own process
+      verifier: false # the verifier still gets a sandbox: one of its own, started after the agent closes
 ```
 
-| `task` | `grader` | What starts |
+| `task` | `verifier` | What starts |
 |------|------|------|
 | `false` | `false` | One group at seed: the agent borrows it, then `/verify`. |
-| `true` | `false` | No sandbox during the agent's turn. A group for the grader alone starts after the agent closes, is lent to `/verify`, and stops with the episode. |
+| `true` | `false` | No sandbox during the agent's turn. A group for the verifier alone starts after the agent closes, with `no_network` whatever `sandbox_config.network` says, and is lent to `/verify`. |
 | `false` | `true` | One group at seed for the agent. It stops once the agent closes, and `/verify` runs in the Resources Server. |
-| `true` | `true` | Nothing. |
+| `true` | `true` | Nothing. At startup the provider is neither checked nor built, so a large QA run can opt out of a configuration that names one. |
 
-The opt-outs are checked at seed, and a refused one fails the attempt for good (a terminal seed failure), since every attempt would fail alike:
+Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed. The opt-outs are checked at seed, and a refused one fails the attempt for good (a terminal seed failure), since every attempt would fail alike:
 
-- `task` is refused for a task that declares tools (`responses_create_params.tools`), for an episode that grants tools (`resources_tool_transports` or `tool_servers`; also refused at startup), and for a group with sidecars.
-- `grader` is refused when the Resources Server declares `grader_runs_code`.
+- `task` is refused for a task that declares tools (`responses_create_params.tools`), for an episode that grants tools (`resources_tool_transports` or `tool_servers`; also refused at startup), and for a group with sidecars. A `resources_tool_transports` grant counts even when its Resources Server serves no tools: drop it from a pure QA pairing. With `task` set, the provider must apply `no_network`, which startup checks. Pair it with an agent whose loop runs in its own process, such as Simple Agent: an agent that runs a harness in a sandbox of its own is not pure QA.
+- `verifier` is refused unless the Resources Server declares `verifier_executes_nothing`, so a verifier that is not declared so, or whose server's seed reply drops the declaration, still gets a sandbox.
 
-A group for the grader alone that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
+A group no attempt can start (no image or working directory, or sidecars on a provider that cannot start them) is also refused at seed, before the agent's turn. A group for the verifier alone that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
 
 The server supports `num_workers > 1`. Episode state and cleanup remain local to the worker handling that request. `max_concurrent_episodes` and queue admission are also enforced independently by each worker, so the deployment-wide concurrency limit is approximately `num_workers * max_concurrent_episodes`.

@@ -66,6 +66,7 @@ from nemo_gym.server_runtime.episode_tokens import (
     episode_token_secret,
 )
 from nemo_gym.server_runtime.episode_tools import EpisodeToolset, ToolArgumentsError, ToolCallRecord, ToolSpec
+from nemo_gym.server_runtime.owned_sandboxes import check_network_rule
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import (
@@ -335,12 +336,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     episode's ``CleanupContext``. When the server shuts down, it finishes the cleanups of every episode still
     running (see ``finish_running_cleanups``).
 
-    The server owns each attempt's sandbox group. With an ``AttemptSandboxEnvironmentServerConfig`` that sets
-    ``sandbox_provider``, a subclass's ``run`` uses the attempt sandbox methods: it registers
-    ``stop_attempt_sandbox`` in the episode's cleanup, decides at seed with ``plan_attempt_sandbox`` who borrows the
-    group, starts it with ``start_attempt_sandbox`` and lends the access it returns to the agent, lends it to
-    ``/verify`` with ``attempt_sandbox_access`` (or starts it then, for a grader alone), and stops it after the agent
-    closes when only the agent needed it. Such a subclass sets ``lends_sandboxes`` and lists
+    The server owns each attempt's sandbox group. With an ``AttemptSandboxEnvironmentServerConfig``, a subclass's
+    ``run`` takes it through three calls: it registers ``stop_attempt_sandbox`` in the episode's cleanup, calls
+    ``seed_attempt_sandbox`` with the Resources seed reply's declaration and lends the access it returns to the agent,
+    then, after the agent closes, lends ``verifier_sandbox_access`` to ``/verify`` and calls
+    ``release_attempt_sandbox`` once ``/verify`` replies. Such a subclass sets ``lends_sandboxes`` and lists
     ``ATTEMPT_SANDBOX_BLOCKS`` in ``owned_sandbox_blocks``. The Resources Server and the agent only borrow the group.
     """
 
@@ -723,19 +723,28 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
     @property
     def starts_attempt_sandboxes(self) -> bool:
-        """Whether this server starts attempt sandbox groups: its config sets ``sandbox_provider``."""
+        """Whether this server starts attempt sandbox groups: its config sets ``sandbox_provider``, and not both the
+        task and the verifier opt out."""
         settings = self._attempt_sandbox_settings()
-        return settings is not None and settings.sandbox_config is not None
+        if settings is None or settings.sandbox_config is None:
+            return False
+        opt_out = settings.sandbox_opt_out
+        return not (opt_out.task and opt_out.verifier)
 
     def check_sandbox_provider(self) -> None:
         """Refuse at startup what the server's sandbox providers cannot do; see ``SimpleServer.check_sandbox_provider``.
 
         A server that starts attempt sandboxes must also declare that it owns and lends them, and its provider is
-        built now, so a bad provider block fails startup instead of every attempt.
+        built now, so a bad provider block fails startup instead of every attempt. With the task opted out, it starts
+        groups for the verifier alone, which cut all egress, so the provider must apply ``no_network``. A server whose
+        task and verifier both opt out starts no sandbox, so its provider is neither checked nor built.
 
         Raises:
             ValueError: Naming the first need the configuration or the provider cannot meet.
         """
+        settings = self._attempt_sandbox_settings()
+        if settings is not None and settings.sandbox_config is not None and not self.starts_attempt_sandboxes:
+            return
         starts = self.starts_attempt_sandboxes
         if starts and (
             not ATTEMPT_SANDBOX_BLOCKS.items() <= dict(self.owned_sandbox_blocks).items() or not self.lends_sandboxes
@@ -746,7 +755,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             )
         super().check_sandbox_provider()
         if starts:
-            self.sandboxes  # noqa: B018 - builds the provider, which raises for a bad provider block
+            # Building the provider raises for a bad provider block.
+            if settings.sandbox_opt_out.task:
+                check_network_rule(self.sandboxes.provider, "no_network")
+            else:
+                self.sandboxes  # noqa: B018
 
     def plan_attempt_sandbox(
         self,
@@ -754,6 +767,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         key: str,
         lent: SandboxAccess | None = None,
         group: SandboxGroupSpec | None = None,
+        verifier_executes_nothing: bool = False,
         task_tools: Sequence[str] = (),
         resources_server: str = "the Resources Server",
     ) -> AttemptSandbox | None:
@@ -761,16 +775,18 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         ``key`` names the group in ``self.sandboxes`` and must be unique to the attempt. ``lent`` is a sandbox the
         Resources seed lent itself: without ``sandbox_provider`` it is lent on and this server starts none; with it,
-        the attempt fails, since one attempt has one sandbox owner. ``group`` is what the seed declared,
-        and ``task_tools`` names the tools the task declares or the episode grants, for the task opt-out check.
-        Unless ``sandbox_opt_out`` says otherwise, the agent borrows the group for its turn and ``/verify`` borrows
-        it after the agent closes. Returns ``None`` when nothing borrows a group this server starts, which is always
-        the case without ``sandbox_provider``.
+        the attempt fails, since one attempt has one sandbox owner. ``group`` and ``verifier_executes_nothing`` are
+        what the seed declared, and ``task_tools`` names the tools the task declares or the episode grants. Unless
+        ``sandbox_opt_out`` says otherwise, the agent borrows the group for its turn and ``/verify`` borrows it after
+        the agent closes. Returns ``None`` when nothing borrows a group this server starts, which is always the case
+        without ``sandbox_provider``. What no attempt can start is refused here, before the agent's turn.
 
         Raises:
             NgFailureEvent: A terminal seed failure, which no retry changes: a refused opt-out (a task opt-out with
-                tools, a grader opt-out for a grader that runs code), a declared group without a ``sandbox_provider``
-                to start it, or a Resources Server that lends a sandbox although this server owns the attempt's.
+                tools; a verifier opt-out the Resources Server does not declare ``verifier_executes_nothing`` for), a
+                declared group without a ``sandbox_provider`` to start it, a group without an image or a working
+                directory, sidecars on a provider that cannot start them, or a Resources Server that lends a sandbox
+                although this server owns the attempt's.
         """
         settings = self._attempt_sandbox_settings()
         if settings is None:
@@ -783,10 +799,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 "sandbox_opt_out.task is only for a pure QA task, whose model calls no tools, but this task has "
                 f"{tools}; a task with tools always runs in the attempt's sandbox group"
             )
-        if opt_out.grader and group is not None and group.grader_runs_code:
+        if opt_out.verifier and not verifier_executes_nothing:
             raise self._attempt_sandbox_refusal(
-                f"sandbox_opt_out.grader is only for a grader that executes nothing, but {resources_server} declares "
-                "that its grader runs code; such a grader always gets a sandbox"
+                "sandbox_opt_out.verifier is only for a verifier that executes nothing and calls no tools, and "
+                f"{resources_server} does not declare that its verifier does (verifier_executes_nothing); a verifier "
+                "that is not declared so always gets a sandbox"
             )
         if lent is not None:
             if settings.sandbox_config is not None:
@@ -797,17 +814,104 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     "the sandbox the Environment Server lends"
                 )
             return None
-        lend_to_agent, lend_to_grader = not opt_out.task, not opt_out.grader
-        if not (lend_to_agent or lend_to_grader):
+        lend_to_agent, lend_to_verifier = not opt_out.task, not opt_out.verifier
+        if not (lend_to_agent or lend_to_verifier):
             return None
-        if settings.sandbox_config is None:
+        config = settings.sandbox_config
+        if config is None:
             if group is not None:
                 raise self._attempt_sandbox_refusal(
                     f"{resources_server} declares a sandbox group at seed, but {self.config.name} sets no "
                     "sandbox_provider and sandbox_config to start it; nothing falls back to a host"
                 )
             return None
-        return AttemptSandbox(key=key, lend_to_agent=lend_to_agent, lend_to_grader=lend_to_grader, group=group)
+        declared = group or SandboxGroupSpec()
+        image, workdir = declared.image or config.image, declared.workdir or config.workdir
+        if image is None or workdir is None:
+            missing = " or ".join(name for name, value in (("image", image), ("workdir", workdir)) if value is None)
+            raise self._attempt_sandbox_refusal(
+                f"the attempt's sandbox group has no {missing}: set it in sandbox_config or declare it in the seed's "
+                "sandbox_group"
+            )
+        if declared.sidecars and not isinstance(self.sandboxes.provider, SupportsSandboxSidecars):
+            raise self._attempt_sandbox_refusal(
+                f"the seed's sandbox_group declares sidecars, which provider {type(self.sandboxes.provider).__name__} "
+                f"of {settings.sandbox_provider!r} cannot start"
+            )
+        for sidecar in declared.sidecars:
+            try:
+                check_network_rule(self.sandboxes.provider, sidecar.network)
+            except ValueError as error:
+                raise self._attempt_sandbox_refusal(
+                    f"sidecar {sidecar.name!r} reaches only its own hosts, but {error}"
+                ) from error
+        return AttemptSandbox(
+            key=key,
+            lend_to_agent=lend_to_agent,
+            lend_to_verifier=lend_to_verifier,
+            group=group,
+            image=image,
+            workdir=workdir,
+        )
+
+    async def seed_attempt_sandbox(
+        self,
+        request: EpisodeRequestT,
+        *,
+        key: str,
+        lent: SandboxAccess | None = None,
+        group: SandboxGroupSpec | None = None,
+        verifier_executes_nothing: bool = False,
+        task_tools: Sequence[str] = (),
+        resources_server: str = "the Resources Server",
+        prepare: Callable[[SandboxAccess], Awaitable[None]] | None = None,
+    ) -> tuple[AttemptSandbox | None, SandboxAccess | None]:
+        """Plan the attempt's sandbox group at seed (``plan_attempt_sandbox``) and start it when the agent borrows it.
+
+        Returns the plan, which the episode keeps for ``verifier_sandbox_access``, and the access the agent is lent,
+        or ``None`` for an agent lent none. No checkpoint can rebuild the group, and the declaration may carry files
+        and environment variables, so an episode with a plan becomes a restart before the group starts: no
+        checkpoint exports it, and after a crash it starts over from its input. Register ``stop_attempt_sandbox``
+        with the plan's key in the episode's cleanup first.
+        """
+        attempt = self.plan_attempt_sandbox(
+            key=key,
+            lent=lent,
+            group=group,
+            verifier_executes_nothing=verifier_executes_nothing,
+            task_tools=task_tools,
+            resources_server=resources_server,
+        )
+        if attempt is None:
+            return None, None
+        await self.checkpoint_restart(request)
+        if not attempt.lend_to_agent:
+            return attempt, None
+        return attempt, await self.start_attempt_sandbox(request, attempt, stage="seed", prepare=prepare)
+
+    async def verifier_sandbox_access(
+        self,
+        request: EpisodeRequestT,
+        attempt: AttemptSandbox | None,
+        *,
+        prepare: Callable[[SandboxAccess], Awaitable[None]] | None = None,
+        **evidence: Any,
+    ) -> SandboxAccess | None:
+        """The access ``/verify`` is lent once the agent has closed, or ``None`` for a verifier lent none.
+
+        That is the group the agent borrowed, or one started now for the verifier alone, when the task opted out. A
+        group only the agent borrowed is released here, before ``/verify`` runs. Release the group once ``/verify``
+        has replied (``release_attempt_sandbox``). A group that cannot start or be described fails the attempt as a
+        retryable infrastructure failure at verification, with ``evidence`` kept.
+        """
+        if attempt is None:
+            return None
+        if not attempt.lend_to_verifier:
+            await self.release_attempt_sandbox(attempt.key)
+            return None
+        if attempt.lend_to_agent:
+            return await self.attempt_sandbox_access(attempt, stage="verification", **evidence)
+        return await self.start_attempt_sandbox(request, attempt, stage="verification", prepare=prepare, **evidence)
 
     async def start_attempt_sandbox(
         self,
@@ -821,53 +925,43 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Start the attempt's sandbox group, wait until it is ready, let the Resources Server prepare it, and return
         the operate-scope access a borrower takes it with.
 
-        Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled start still stops what it
-        created. ``prepare`` runs when the seed declared ``prepare``: it asks the Resources Server to prepare the task
-        through the access. A group the agent borrows is held across checkpoint boundaries, and no checkpoint can
-        rebuild it, so its episode becomes a restart first; a group for the grader alone starts and stops inside the
-        verify step. There is no host fallback: a group that cannot start or be described fails the attempt as a
-        retryable infrastructure failure at ``stage``, with ``evidence`` kept, and records no reward; a failed
-        prepare is retried when the Resources Server's error is. A group no attempt can start, one without an image
-        or with sidecars on a provider without them, fails the attempt terminally.
+        The group starts from ``sandbox_config`` with the declared image, working directory, environment variables,
+        files and sidecars over it. A group for the verifier alone starts with ``no_network``, and each sidecar with
+        its own rule (``SandboxGroupSidecar.network``), never the main container's. Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled
+        start still stops what it created. ``prepare`` runs when the seed declared ``prepare``: it asks the Resources
+        Server to prepare the task through the access. There is no host fallback: a group that cannot start or be
+        described fails the attempt as a retryable infrastructure failure at ``stage``, with ``evidence`` kept, and
+        records no reward; a failed prepare is retried when the Resources Server's error is.
         """
-        if attempt.lend_to_agent:
-            # Marked before the group and the agent session exist, so no checkpoint exports an episode that holds them.
-            await self.checkpoint_restart(request)
         settings = self._attempt_sandbox_settings()
         assert settings is not None and settings.sandbox_config is not None  # plan_attempt_sandbox returned a plan
-        config = settings.sandbox_config
         group = attempt.group or SandboxGroupSpec()
-        image, workdir = group.image or config.image, group.workdir or config.workdir
-        missing = [name for name, value in (("image", image), ("workdir", workdir)) if value is None]
-        if missing:
-            raise self._attempt_sandbox_refusal(
-                f"the attempt's sandbox group has no {' or '.join(missing)}: set it in sandbox_config or declare it in "
-                "the seed's sandbox_group",
-                stage=stage,
+        config = settings.sandbox_config
+        if not attempt.lend_to_agent:
+            # A group for the verifier alone runs only the verifier, which needs no egress.
+            config = type(config).model_validate(
+                config.model_dump()
+                | {"network": "no_network", "model_server": None, "tool_servers": [], "allowed_hosts": []}
             )
-        if group.sidecars and not isinstance(self.sandboxes.provider, SupportsSandboxSidecars):
-            raise self._attempt_sandbox_refusal(
-                f"the seed's sandbox_group declares sidecars, which provider {type(self.sandboxes.provider).__name__} "
-                f"of {settings.sandbox_provider!r} cannot start",
-                stage=stage,
-            )
-        attempt.workdir = workdir
+        provider = self.sandboxes.provider
         try:
+            sidecars = tuple(
+                sidecar.spec(provider_options=provider.network_options(sidecar.network, sidecar.egress_hosts, {}))
+                for sidecar in group.sidecars
+            )
             spec = self.sandboxes.spec(
                 config,
-                image=image,
-                workdir=workdir,
+                image=attempt.image,
+                workdir=attempt.workdir,
                 metadata={
                     "task_id": request.task.task_id.task_id[:_LABEL_LIMIT],
                     "rollout_id": request.episode_id.capture_key[:_LABEL_LIMIT],
                 },
                 files=group.files,
             )
-            spec = dataclasses.replace(
-                spec, env=spec.env | group.env, sidecars=tuple(sidecar.spec() for sidecar in group.sidecars)
-            )
+            spec = dataclasses.replace(spec, env=spec.env | group.env, sidecars=sidecars)
             await self.sandboxes.create(attempt.key, spec)
-            access = await self.sandboxes.access(attempt.key, workdir=workdir)
+            access = await self.sandboxes.access(attempt.key, workdir=attempt.workdir)
         except Exception as error:
             raise dependency_failure(error, stage=stage, terminal=False, name_error_type=True, **evidence) from error
         if prepare is not None and group.prepare:
@@ -886,7 +980,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         without it.
         """
         try:
-            return await self.sandboxes.access(attempt.key, workdir=attempt.workdir or "")
+            return await self.sandboxes.access(attempt.key, workdir=attempt.workdir)
         except Exception as error:
             raise dependency_failure(error, stage=stage, terminal=False, name_error_type=True, **evidence) from error
 
@@ -898,6 +992,16 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         owned = self._owned_sandboxes.get("sandbox_provider")
         if owned is not None:
             await owned.stop(key)
+
+    async def release_attempt_sandbox(self, key: str) -> None:
+        """Stop the group as soon as nothing borrows it any more, before the episode ends.
+
+        A failed stop is logged and left to the episode's cleanup, which stops it again.
+        """
+        try:
+            await self.stop_attempt_sandbox(key)
+        except Exception as error:
+            LOGGER.warning("The attempt sandbox %s was not stopped yet; the episode's cleanup retries: %r", key, error)
 
     def _attempt_sandbox_refusal(self, reason: str, *, stage: FailureStage = "seed") -> NgFailureEvent:
         """A terminal failure for an attempt sandbox the configuration cannot give: every attempt would fail alike."""
