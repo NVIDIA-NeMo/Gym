@@ -196,7 +196,7 @@ def _resolve_cli_config(flags):
 
 @pytest.mark.parametrize("override", [False, True])
 def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, override):
-    from benchmarks.numb3rs.prepare import _format_row
+    from benchmarks.numb3rs.prepare import iter_rows
     from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
@@ -206,9 +206,18 @@ def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, 
     config = _resolve_cli_config(flags)
     indic = module.build_rows([source_row()], language="hi")[0]
     indic["agent_ref"] = {"name": "indic_ifeval_instruction_following_simple_agent"}
-    audio = _format_row(
-        {"original_text": "42", "text": "forty two", "file_name": "sample.wav", "duration": 5, "category": "NUMBER"},
-        audio_prefix=str(tmp_path),
+    [audio] = iter_rows(
+        [
+            {
+                "original_text": "42",
+                "text": "forty two",
+                "audio_filepath": "NUMBER/sample.wav",
+                "duration": 5,
+                "info": "number",
+            }
+        ],
+        str(tmp_path),
+        ["numb3rs"],
     )
     audio = apply_prompt_to_row(audio, load_prompt_config("benchmarks/numb3rs/prompts/default.yaml"))
     audio["agent_ref"] = {"name": "numb3rs_asr_with_pc_simple_agent"}

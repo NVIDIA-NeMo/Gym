@@ -6,6 +6,7 @@ numb3rs_asr_with_pc_resources_server:
   resources_servers:
     asr_with_pc:
       task_type: ASR_LEADERBOARD
+      cleanup_generation_loops: true
 
 numb3rs_asr_with_pc_simple_agent:
   _inherit_from: asr_with_pc_simple_agent
@@ -19,7 +20,7 @@ numb3rs_asr_with_pc_simple_agent:
         jsonl_fpath: benchmarks/numb3rs/data/numb3rs_benchmark.jsonl
         prompt_config: benchmarks/numb3rs/prompts/default.yaml
         prepare_script: benchmarks/numb3rs/prepare.py
-        license: Creative Commons Attribution 4.0 International
+        license: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 
 numb3rs_asr_with_pc_environment_server:
   _inherit_from: asr_with_pc_environment_server

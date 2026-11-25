@@ -3,10 +3,10 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
-description: ASR with WER scoring (standard, case-sensitive, punctuation+capitalization)
+domain: asr
+description: Spoken numbers with neutral, written-form and spoken-form transcription prompts, scored by corpus word error rate.
 modality: audio
-licensing: unknown
+licensing: CC-BY-NC-SA-4.0
 authors:
 - gwarmstrong
 reward:

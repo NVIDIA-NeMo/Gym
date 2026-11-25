@@ -1,2 +1,2 @@
-*benchmark.jsonl
-*.wav
+*
+!.gitignore

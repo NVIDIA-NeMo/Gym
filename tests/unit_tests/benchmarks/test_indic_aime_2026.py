@@ -346,7 +346,7 @@ def test_cli_sampling_materializes_four_distinct_seeded_requests(flags, expected
 
 @pytest.mark.parametrize("cli_override", [False, True])
 def test_combined_benchmarks_preserve_numb3rs_audio_and_routing(tmp_path, source_dataset, cli_override) -> None:
-    from benchmarks.numb3rs.prepare import _format_row
+    from benchmarks.numb3rs.prepare import iter_rows
 
     flags = ["--benchmark", "numb3rs"]
     if cli_override:
@@ -356,9 +356,18 @@ def test_combined_benchmarks_preserve_numb3rs_audio_and_routing(tmp_path, source
     indic_agent = "indic_aime_2026_math_with_judge_simple_agent"
     audio_agent = "numb3rs_asr_with_pc_simple_agent"
     indic = _materialize_dataset(config, indic_agent, module.build_rows(records), tmp_path)
-    audio = _format_row(
-        {"original_text": "forty two", "text": "42", "file_name": "sample.wav", "duration": 5, "category": "NUMBER"},
-        audio_prefix=str(tmp_path),
+    [audio] = iter_rows(
+        [
+            {
+                "original_text": "forty two",
+                "text": "42",
+                "audio_filepath": "NUMBER/sample.wav",
+                "duration": 5,
+                "info": "number",
+            }
+        ],
+        str(tmp_path),
+        ["numb3rs"],
     )
     audio_path = Path(audio["responses_create_params"]["metadata"]["audio_path"])
     prepared = indic + _materialize_dataset(config, audio_agent, [audio], tmp_path)
