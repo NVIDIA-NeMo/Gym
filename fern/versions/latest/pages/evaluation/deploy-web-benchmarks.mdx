@@ -1,0 +1,385 @@
+---
+title: "Deploy Web Benchmarks"
+description: "Set up WebVoyager, WebArena, and VisualWebArena from a clean Linux host and verify a smoke rollout."
+position: 9
+---
+
+Run each benchmark from a Gym checkout on a Linux host. Start with one browser and one rollout at a time. The policy model can run on a separate GPU host or behind an API endpoint.
+
+| Benchmark | Websites | Evaluation |
+| --- | --- | --- |
+| [WebVoyager](#webvoyager) | Live public websites reached from the browser | A vision judge receives the task, answer, and screenshots through the Responses API |
+| [WebArena](#webarena) | An owned deployment of the seven WebArena endpoints | Reference evaluator with a Chat Completions judge for semantic checks |
+| [VisualWebArena](#visualwebarena) | An owned deployment of the five VisualWebArena endpoints, plus a reset service | Reference evaluator with local task images, visual checks, and a Chat Completions judge |
+
+## Install Gym and Chromium
+
+These commands use Bash on Ubuntu 24.04. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) at the version required by Gym's `pyproject.toml`.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl ca-certificates xauth xvfb xclip \
+  fonts-liberation fonts-noto-cjk fonts-noto-color-emoji
+git clone https://github.com/NVIDIA-NeMo/Gym.git
+cd Gym
+uv sync --locked --extra dev
+```
+
+Install the Chromium revision from the component's lockfile as the same account that will run Gym. Playwright installs system dependencies using `sudo` as needed. The two commands target the WebVoyager and WebArena-family components respectively. Run the command for your benchmark.
+
+```bash
+uv run --locked --project resources_servers/visual_browser \
+  playwright install --with-deps chromium
+uv run --locked --project resources_servers/webarena_browser \
+  playwright install --with-deps chromium
+```
+
+### Configure the policy and judge
+
+The default Nano Omni composition needs a vision-capable policy endpoint with OpenAI-compatible Chat Completions, inline images, and automatic function calling. Use the checkpoint's matching tokenizer, chat template, and tool and reasoning parsers. For example, deploy the public [Nemotron 3 Nano Omni model](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16) using the vLLM instructions in its model card. They cover the serving image, GPU requirements, `qwen3_coder` tool parser, and `nemotron_v3` reasoning parser. Use an image limit of at least six for VisualWebArena so the request can carry three recent screenshots and up to three task images. The WebVoyager Qwen composition has its own [serving contract](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#select-a-policy).
+
+Export the endpoint and its served model name in the shell where you start Gym. The examples use a local vLLM listener and an OpenAI judge. Replace the endpoint and model IDs if you use another provider. For an unauthenticated local vLLM instance, enter `local-vllm` at the policy key prompt.
+
+```bash
+export POLICY_BASE_URL="http://127.0.0.1:8000/v1"
+read -rp "Served policy model name: " POLICY_MODEL_NAME
+read -rsp "Policy API key: " POLICY_API_KEY
+printf '\n'
+export POLICY_MODEL_NAME POLICY_API_KEY
+
+export WEBARENA_JUDGE_BASE_URL="https://api.openai.com/v1"
+export WEBARENA_JUDGE_MODEL="gpt-4.1"
+read -rsp "Judge API key: " WEBARENA_JUDGE_API_KEY
+printf '\n'
+export WEBARENA_JUDGE_API_KEY
+```
+
+If vLLM listens on another machine, set `POLICY_BASE_URL` to the reachable endpoint, including the `/v1` path. For a remote loopback listener, forward its port in another terminal with `ssh -N -L 127.0.0.1:8000:127.0.0.1:8000 operator@gpu-host.example` and keep the local URL above.
+
+The [example judge model](https://developers.openai.com/api/docs/models/gpt-4.1) supports both APIs. WebVoyager needs `/responses` with inline images and enough capacity for its configured screenshot window. WebArena uses text `/chat/completions`. VisualWebArena also uses `/chat/completions` with inline images for visual question answering. A browser smoke with a deterministic evaluator may never call the judge.
+
+Before starting Gym, check both endpoints with this probe for the Nano Omni profile. It sends a small image from the public Gym repository. Change `webvoyager` to `webarena` or `visualwebarena` to exercise the matching judge request.
+
+```bash
+./.venv/bin/python - webvoyager <<'PY'
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+
+from openai import OpenAI
+
+image = base64.b64encode(Path("fern/assets/images/eval-improve-loop.png").read_bytes()).decode("ascii")
+image_url = f"data:image/png;base64,{image}"
+chat_image = {"type": "image_url", "image_url": {"url": image_url}}
+policy = OpenAI(base_url=os.environ["POLICY_BASE_URL"], api_key=os.environ["POLICY_API_KEY"], timeout=120)
+policy_id = os.environ["POLICY_MODEL_NAME"]
+message = policy.chat.completions.create(
+    model=policy_id,
+    messages=[{"role": "user", "content": [
+        {"type": "text", "text": "Look at the image and call report_ready."}, chat_image
+    ]}],
+    tools=[{"type": "function", "function": {
+        "name": "report_ready", "parameters": {"type": "object", "properties": {}}
+    }}],
+    tool_choice="auto",
+    extra_body={"chat_template_kwargs": {"truncate_history_thinking": False}},
+).choices[0].message
+if not any(call.type == "function" and call.function.name == "report_ready" for call in message.tool_calls or []):
+    raise SystemExit("Policy did not return the expected function call. Check the template and tool parser.")
+
+judge = OpenAI(base_url=os.environ["WEBARENA_JUDGE_BASE_URL"], api_key=os.environ["WEBARENA_JUDGE_API_KEY"], timeout=120)
+judge_id = os.environ["WEBARENA_JUDGE_MODEL"]
+if sys.argv[1] == "webvoyager":
+    result = judge.responses.create(model=judge_id, input=[{"role": "user", "content": [
+        {"type": "input_text", "text": "If the image is visible, reply with exactly SUCCESS."},
+        {"type": "input_image", "image_url": image_url, "detail": "high"},
+    ]}]).output_text
+    ok = result.strip().upper() == "SUCCESS"
+else:
+    if sys.argv[1] == "visualwebarena":
+        content = [{"type": "text", "text": 'If the image is visible, return only {"verdict":"correct"}.'}, chat_image]
+        key = "verdict"
+    else:
+        content = 'Grade the answer "Paris" against the reference "Paris". Return only {"judgement":"correct"}.'
+        key = "judgement"
+    result = judge.chat.completions.create(
+        model=judge_id, messages=[{"role": "user", "content": content}], temperature=0, max_tokens=768,
+    ).choices[0].message.content
+    ok = bool(result) and json.loads(result).get(key) == "correct"
+if not ok:
+    raise SystemExit("Judge did not return the expected verdict")
+print(f"Policy {policy_id} returned a function call and judge {judge_id} returned a verdict")
+PY
+```
+
+The browser smoke below checks the policy's image input and action path. Record the exact judge model because it affects the score.
+
+The prepare commands below write a private `env.yaml` with references to the environment variables. Run them from the Gym repository root. Use `--force-env` if you intend to replace an existing generated configuration.
+
+## WebVoyager
+
+WebVoyager uses public websites, so you can proceed directly from the browser and model setup. The maintained profile requires a configured CAPTCHA provider and uses proxy routing for selected sites. Obtain an approved proxy and provider account and verify that the Gym browser host can reach them and the target websites. The profile's proxy routing and live-site limitations are described in the [WebVoyager README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#configure-external-services).
+
+```bash
+read -rp "Browser proxy host and port: " WA_BROWSER_PROXY_SERVER
+read -rsp "CapSolver API key: " CAPSOLVER_API_KEY
+printf '\n'
+export WA_BROWSER_PROXY_SERVER CAPSOLVER_API_KEY
+export WA_CAPTCHA_PROVIDER=capsolver
+
+reference_date="$(./.venv/bin/python -c 'from datetime import date, timedelta; anchor = date(2026, 7, 26); print(anchor + timedelta(weeks=(date.today() - anchor).days // 7))')"
+./.venv/bin/python benchmarks/webvoyager/prepare.py \
+  --profile nano_omni --reference-date "$reference_date"
+
+./.venv/bin/gym env prefetch --config benchmarks/webvoyager/env.yaml
+xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+  ./.venv/bin/gym env start --config benchmarks/webvoyager/env.yaml
+```
+
+Preparation verifies the pinned 552-task source and renders the dated questions relative to the latest matching weekday. Record `reference_date` or the prepared JSONL hash. Reuse that file when resuming a run.
+
+From another terminal in the Gym checkout, run one task:
+
+```bash
+./.venv/bin/gym eval run --config benchmarks/webvoyager/env.yaml \
+  --no-serve --limit 1 --concurrency 1 --output results/webvoyager/smoke/rollouts.jsonl
+```
+
+Check that Chromium opened the target, the policy executed a browser action, the judge returned a verdict, and the browser lease was released. If the first website is unavailable, save one reachable row from the prepared JSONL in a separate file and pass `--input` to the smoke command with a fresh output path. For the full run, use the full prepared input:
+
+```bash
+./.venv/bin/gym eval run --config benchmarks/webvoyager/env.yaml \
+  --no-serve --concurrency 1 --output results/webvoyager/full/rollouts.jsonl
+```
+
+Use the [README's reconciliation commands](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#reporting-and-sharded-runs) for sharded runs.
+
+## Deploy the WebArena-family sites
+
+For the example below, put Gym, the browser, and one site stack on the same dedicated Linux `x86_64` VM. The published seed images use `linux/amd64`. For a full WebArena setup, the upstream AMI guide budgets about 1 TB for the Docker images, expanded data, and scratch space. Check free space on both the archive partition and the Docker data partition. The separately deployed Map backend has its own storage requirements. Keep site and database ports on a private network restricted to your workers. The seed images ship with public benchmark accounts.
+
+The pinned [site setup scripts](https://github.com/gasse/webarena-setup/tree/8d0e0a20d50e4a8c02d1520195182e19fc3c080f) are an Apache-2.0 Docker deployment recipe used by the BrowserGym documentation. They are run in a separate checkout to install the sites. Gym runs the agent and browser. Install [Docker Engine and Compose](https://docs.docker.com/engine/install/ubuntu/) on the site host, then choose `webarena` or `visualwebarena` for that installation. Use a separate VM for a second site stack because these scripts give containers fixed names.
+
+```bash
+sudo apt-get install -y python3-venv unzip
+export SITE_PROFILE=webarena                  # or visualwebarena
+export SITE_SETUP_DIR="$HOME/web-benchmark-sites"
+git clone https://github.com/gasse/webarena-setup.git "$SITE_SETUP_DIR"
+git -C "$SITE_SETUP_DIR" checkout --detach 8d0e0a20d50e4a8c02d1520195182e19fc3c080f
+cd "$SITE_SETUP_DIR/$SITE_PROFILE"
+```
+
+Download the matching archives from the [WebArena mirrors](https://github.com/web-arena-x/webarena/blob/dce04686a56253aefba7b18a4fa0937cf1dc987b/environment_docker/README.md#individual-website), [VisualWebArena mirrors](https://github.com/web-arena-x/visualwebarena/blob/89f5af29305c3d1e9f97ce4421462060a70c9a03/environment_docker/README.md#classifieds-website), and the [OpenStreetMap archive](https://zenodo.org/records/12636845). Place the files listed for your benchmark beside `00_vars.sh`. Keep the original archives or their checksums to identify the site snapshot.
+
+| Site | Gym variable | Local URL or port | Seed asset | Benchmark |
+| --- | --- | --- | --- | --- |
+| Shopping | `WA_SHOPPING` | `7770` | `shopping_final_0712.tar` | WebArena and VisualWebArena |
+| Shopping admin | `WA_SHOPPING_ADMIN` | `7780/admin` | `shopping_admin_final_0719.tar` | WebArena |
+| Forum (Reddit) | `WA_REDDIT` | `9999` | `postmill-populated-exposed-withimg.tar` | WebArena and VisualWebArena |
+| GitLab | `WA_GITLAB` | `8023` | `gitlab-populated-final-port8023.tar` | WebArena |
+| Wikipedia | `WA_WIKIPEDIA` | `8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing` | `wikipedia_en_all_maxi_2022-05.zim` | WebArena and VisualWebArena |
+| Map | `WA_MAP` | `3000` | `openstreetmap-website.tar.gz`, `openstreetmap-website-db.tar.gz`, `openstreetmap-website-web.tar.gz`, and tile, geocoding, and routing services | WebArena |
+| Classifieds | `WA_CLASSIFIEDS` | `9980` | `classifieds_docker_compose.zip` | VisualWebArena |
+| Homepage | `WA_HOMEPAGE` | `4399` | `webarena-homepage/` from the matching setup directory | WebArena and VisualWebArena |
+
+Assign the ports from the table in `00_vars.sh`. The pinned setup scripts derive application base URLs and homepage links from `PUBLIC_HOSTNAME`. Use `localhost` for this example. For a separate worker host use a private DNS name that resolves from both the browser and the site applications, and update the exports below to match.
+
+```bash
+sed -i -E \
+  -e 's/^PUBLIC_HOSTNAME=.*/PUBLIC_HOSTNAME="localhost"/' \
+  -e 's/^SHOPPING_PORT=.*/SHOPPING_PORT=7770/' \
+  -e 's/^SHOPPING_ADMIN_PORT=.*/SHOPPING_ADMIN_PORT=7780/' \
+  -e 's/^REDDIT_PORT=.*/REDDIT_PORT=9999/' \
+  -e 's/^GITLAB_PORT=.*/GITLAB_PORT=8023/' \
+  -e 's/^WIKIPEDIA_PORT=.*/WIKIPEDIA_PORT=8888/' \
+  -e 's/^MAP_PORT=.*/MAP_PORT=3000/' \
+  -e 's/^CLASSIFIEDS_PORT=.*/CLASSIFIEDS_PORT=9980/' \
+  -e 's/^HOMEPAGE_PORT=.*/HOMEPAGE_PORT=4399/' \
+  00_vars.sh
+```
+
+### Configure WebArena Map and GitLab
+
+For the WebArena stack, start a private Map backend using the [upstream Map backend instructions](https://github.com/web-arena-x/webarena/blob/dce04686a56253aefba7b18a4fa0937cf1dc987b/environment_docker/README.md#setting-up-your-own-map-backend). The published bootstrap serves tiles on `8080`, geocoding on `8085`, and driving, cycling, and walking routes on `5000`, `5001`, and `5002`. Configure the Map frontend installer to use that backend and set GitLab's advertised SSH port to match the task URLs. Run this block from the `webarena` setup directory before creating containers:
+
+```bash
+read -rp "Private Map backend DNS name or IP: " map_backend_host
+sed -i \
+  -e "s|^OSM_TILE_SERVER_URL=.*|OSM_TILE_SERVER_URL=\"http://${map_backend_host}:8080/tile/{z}/{x}/{y}.png\"|" \
+  -e "s|^OSM_GEOCODING_SERVER_URL=.*|OSM_GEOCODING_SERVER_URL=\"http://${map_backend_host}:8085/\"|" \
+  -e "s|^OSM_ROUTING_SERVER_URL=.*|OSM_ROUTING_SERVER_URL=\"http://${map_backend_host}\"|" \
+  -e 's|^OSM_CAR_SUFFIX=.*|OSM_CAR_SUFFIX=":5000"|' \
+  -e 's|^OSM_BIKE_SUFFIX=.*|OSM_BIKE_SUFFIX=":5001"|' \
+  -e 's|^OSM_FOOT_SUFFIX=.*|OSM_FOOT_SUFFIX=":5002"|' \
+  03_docker_create_containers.sh
+sed -i 's/docker create --name gitlab /docker create --name gitlab -p 2222:22 /' \
+  03_docker_create_containers.sh
+sed -i "/^docker exec gitlab gitlab-ctl reconfigure$/i printf \"\\\\ngitlab_rails['gitlab_shell_ssh_port'] = 2222\\\\n\" | docker exec -i gitlab tee -a /etc/gitlab/gitlab.rb >/dev/null" \
+  05_docker_patch_containers.sh
+```
+
+### Load, start, and restore the sites
+
+The deployed site state lives in containers and Compose volumes. Replace the setup checkout's removal script with the version below so a reset also removes the stack's database volumes. Run it only on the dedicated benchmark VM. It operates on the site containers and the two possible Compose projects in that checkout.
+
+```bash
+cat > 02_docker_remove_containers.sh <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+docker info >/dev/null
+for dir in classifieds_docker_compose openstreetmap-website; do
+  if [[ -f "$dir/docker-compose.yml" ]]; then
+    docker compose -f "$dir/docker-compose.yml" down --volumes
+  fi
+done
+for container in shopping shopping_admin forum gitlab wikipedia; do
+  if docker container inspect "$container" >/dev/null 2>&1; then
+    docker rm --force --volumes "$container"
+  fi
+done
+BASH
+
+sudo bash 01_docker_load_images.sh &&
+  sudo bash 02_docker_remove_containers.sh &&
+  sudo bash 03_docker_create_containers.sh &&
+  sudo bash 04_docker_start_containers.sh &&
+  sudo bash 05_docker_patch_containers.sh &&
+  sudo bash 06_serve_homepage.sh
+```
+
+Keep the homepage process running. Scripts 03 through 05 recreate the containers, start the services, and apply the matching seed data and base URLs. For WebArena, rerun scripts 02 through 05 before each independent evaluation, while every browser is idle. For VisualWebArena the reset service calls the same scripts at each required reset. If a startup command fails, inspect that service's `docker logs` and complete the setup before beginning evaluation.
+
+### Check site access from the browser worker
+
+In the Gym launch shell, set the site URLs for your benchmark. If the sites are hosted elsewhere, substitute their private addresses including any required path. The GitLab and Reddit variables use the site root because Gym appends its own paths for login and evaluation.
+
+```bash
+export WA_SHOPPING="http://localhost:7770"
+export WA_REDDIT="http://localhost:9999"
+export WA_WIKIPEDIA="http://localhost:8888/wikipedia_en_all_maxi_2022-05/A/User:The_other_Kiwix_guy/Landing"
+export WA_HOMEPAGE="http://localhost:4399"
+
+# WebArena only
+export WA_SHOPPING_ADMIN="http://localhost:7780/admin"
+export WA_GITLAB="http://localhost:8023"
+export WA_MAP="http://localhost:3000"
+
+# VisualWebArena only
+export WA_CLASSIFIEDS="http://localhost:9980"
+```
+
+Open the homepage and follow each installed site's link from the worker's network namespace. Check the destination and a known seeded record on each site. Log in to the mutable sites with the benchmark accounts and confirm the expected account, repository, or store is visible. Gym uses the seeded accounts by default and supports `WA_SHOPPING_USERNAME` and `WA_SHOPPING_PASSWORD` and corresponding variables for `SHOPPING_ADMIN`, `REDDIT`, `GITLAB`, and `CLASSIFIEDS`. Verify that the GitLab clone box advertises port `2222`. On Map, check that tiles render, a place search returns results, and car, foot, and bicycle routes load. An HTTP response on port `3000` only verifies the frontend is up.
+
+You can check the HTTP paths in a terminal on that worker first. Pass your benchmark's URLs to `check_sites` and inspect the final destination for any unexpected redirect.
+
+```bash
+check_sites() {
+  for url in "$@"; do
+    curl --fail --silent --show-error --location --max-time 30 \
+      --output /dev/null --write-out '%{http_code} %{url_effective}\n' "$url" || return
+  done
+}
+
+# WebArena
+check_sites "$WA_SHOPPING" "$WA_SHOPPING_ADMIN" "$WA_REDDIT" "$WA_GITLAB" \
+  "$WA_WIKIPEDIA" "$WA_MAP" "$WA_HOMEPAGE"
+
+# VisualWebArena
+check_sites "$WA_SHOPPING" "$WA_REDDIT" "$WA_WIKIPEDIA" "$WA_CLASSIFIEDS" "$WA_HOMEPAGE"
+```
+
+## WebArena
+
+From the Gym checkout and with the exports above in the launch shell, prepare the 812-task dataset and start Gym:
+
+```bash
+./.venv/bin/python benchmarks/webarena/prepare.py
+./.venv/bin/gym env prefetch --config benchmarks/webarena/env.yaml
+xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+  ./.venv/bin/gym env start --config benchmarks/webarena/env.yaml
+```
+
+From another terminal in the Gym checkout:
+
+```bash
+./.venv/bin/gym eval run --config benchmarks/webarena/env.yaml \
+  --no-serve --limit 1 --concurrency 1 --output results/webarena/smoke/rollouts.jsonl
+```
+
+Check for a valid verifier result and browser cleanup. Stop Gym, restore the site baseline with scripts 02 through 05, and verify the endpoints again. Start Gym with the same configuration and collect the complete input:
+
+```bash
+./.venv/bin/gym eval run --config benchmarks/webarena/env.yaml \
+  --no-serve --concurrency 1 --output results/webarena/full/rollouts.jsonl
+```
+
+Give each concurrent run its own mutable deployment, or finish and reset the current deployment before starting another run. See the [WebArena README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webarena/README.md) for dataset and evaluator details.
+
+## VisualWebArena
+
+### Start the reset service
+
+Run these commands on the site host from the `visualwebarena` setup directory. Bind the pinned reset service to IPv4 loopback. The same host runs the Gym coordinator in this example. The service launches the restore scripts asynchronously and reports `Reset ongoing` while they run and `Ready for duty!` after successful completion. Its `/reset` URL triggers a restore and `/status` is read-only.
+
+```bash
+sed -i "s/ThreadingHTTPServer(('', args.port)/ThreadingHTTPServer(('127.0.0.1', args.port)/" \
+  reset_server/server.py
+cd reset_server
+sudo python3 server.py --port 7565
+```
+
+Keep it running beside the homepage process. In another terminal, check `curl -fsS http://127.0.0.1:7565/status`. The coordinator triggers and verifies the first actual restore. For a remote coordinator, put the loopback service behind an authenticated HTTPS endpoint. Supply same-origin HTTPS `/reset` and `/status` URLs, `--reset-token-file` containing the bearer token, and `--ca-cert` for a private CA. The control requests must reach the service directly without redirects. See the [VisualWebArena README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/visualwebarena/README.md#run) for its reset, worker health, and lease protocol.
+
+### Start Gym and run the coordinator
+
+Use one state root per deployment. Gym's dataset preparation also downloads and checks all the task images. If the host needs an offline copy, set `VISUALWEBARENA_SOURCE_ROOT` to the pinned source checkout described in the [VisualWebArena README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/visualwebarena/README.md#prepare). For distributed runs, make the state root and the prepared image root available at the same respective absolute paths to the coordinator and all workers. Mount the images read-only on workers.
+
+```bash
+export VISUALWEBARENA_STATE_ROOT="$HOME/visualwebarena-deployment-state"
+install -d -m 700 "$VISUALWEBARENA_STATE_ROOT"
+./.venv/bin/python benchmarks/visualwebarena/prepare.py
+./.venv/bin/gym env prefetch --config benchmarks/visualwebarena/env.yaml
+xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+  ./.venv/bin/gym env start --config benchmarks/visualwebarena/env.yaml
+```
+
+From another terminal in the Gym checkout, use the head server's registry to find the resources server URL. The example uses Gym's default head port, `11000`. Verify the resources server's `/healthz` returns `status: ok` and zero `sessions`, `creating`, `cleanup_pending`, `late_release_pending`, and `browser_provider.active_leases` before the reset.
+
+```bash
+source .venv/bin/activate  # The coordinator launches gym for each phase.
+export VISUALWEBARENA_STATE_ROOT="$HOME/visualwebarena-deployment-state"
+VWA_RESOURCE_BASE_URL="$(curl -fsS http://127.0.0.1:11000/server_instances | ./.venv/bin/python -c '
+import json, sys
+servers = json.load(sys.stdin)
+print(next(s["url"] for s in servers if s["config_path"] == "visualwebarena_environment"))
+')"
+curl -fsS "$VWA_RESOURCE_BASE_URL/healthz"
+
+./.venv/bin/python -m benchmarks.visualwebarena.run \
+  --config benchmarks/visualwebarena/env.yaml \
+  --input benchmarks/visualwebarena/data/visualwebarena.jsonl \
+  --output-dir results/visualwebarena/smoke \
+  --state-root "$VISUALWEBARENA_STATE_ROOT" \
+  --reset-url http://127.0.0.1:7565/reset \
+  --status-url http://127.0.0.1:7565/status \
+  --resource-health-url "$VWA_RESOURCE_BASE_URL/healthz" \
+  --task-ids 86,346
+```
+
+The smoke selects an image task and a protected task by runtime row index. Check that `results/visualwebarena/smoke/summary.json` reports `tasks: 2` and `complete: true`. The coordinator checks the protected task's initial-state receipt. To run all 908 tasks, keep the full input, omit `--task-ids`, and use `results/visualwebarena/full` or another fresh output directory. The coordinator resets before the first wave and before protected epochs.
+
+Each phase has a 24-hour deadline, including retries and cleanup. Estimate capacity from the smoke before launching the 492-task read-only phase and the 408-task ordinary mutating phase. When increasing concurrency, declare every worker with `--resource-health-url` and follow the [benchmark README's lease and writer isolation rules](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/visualwebarena/README.md#run). A pending recovery record requires reconciliation of worker cleanup and restored site state before starting a new run.
+
+## Finish the run
+
+Check coverage before reporting a full result:
+
+| Benchmark | Output file | Full-run check |
+| --- | --- | --- |
+| WebVoyager | `results/webvoyager/full/rollouts_coverage.json` | `expected` and `measured` both equal 552 |
+| WebArena | `results/webarena/full/rollouts_coverage.json` | `expected` and `measured` both equal 812 |
+| VisualWebArena | `results/visualwebarena/full/summary.json` | `tasks` equals 908 and `complete` is `true` |
+
+Treat browser, network, reset, and verifier transport errors as infrastructure failures and report missing coverage. Retain the Gym commit, dataset and site checksums, policy and judge IDs, and run output. Stop `gym env start` with Ctrl-C after all rollouts and cleanup complete. Stop the homepage and reset processes when done with the owned site deployment.

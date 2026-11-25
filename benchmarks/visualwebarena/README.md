@@ -55,13 +55,16 @@ if the images are not below the JSONL's parent directory. The generated
 
 ## Run
 
-Deploy and reset the VisualWebArena site stack, export the deployment-specific
-`WA_*` URLs and approved `WEBARENA_JUDGE_*` credentials, then run:
+Follow the [deployment guide](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#deploy-the-webarena-family-sites)
+for the `visualwebarena` site stack and its [reset service](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#start-the-reset-service).
+Export the deployment-specific `WA_*` URLs and `WEBARENA_JUDGE_*` settings for
+a Chat Completions judge, then run:
 
 ```bash
 export VISUALWEBARENA_STATE_ROOT=/shared/visualwebarena-owned-deployment-state
 gym env prefetch --config benchmarks/visualwebarena/env.yaml
-gym env start --config benchmarks/visualwebarena/env.yaml
+xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+  gym env start --config benchmarks/visualwebarena/env.yaml
 ```
 
 In another terminal:

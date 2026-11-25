@@ -27,8 +27,9 @@ For an offline copy, set `WEBARENA_SOURCE_JSONL`; the same checks still apply.
 
 ## External environment
 
-Deploy and validate the WebArena services before starting Gym, then export the
-task-visible endpoints:
+Follow the [WebArena deployment guide](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#deploy-the-webarena-family-sites)
+to install the site images and Map backend, restore the seed state, and verify
+access from the browser worker. Then export the task-visible endpoints:
 
 ```bash
 export WA_SHOPPING="http://host:7770"
@@ -40,10 +41,10 @@ export WA_MAP="http://host:3000"
 export WA_HOMEPAGE="http://host:4399"
 ```
 
-Some string-match tasks call a model-backed semantic judge. Provide
-`WEBARENA_JUDGE_API_KEY`, and set `WEBARENA_JUDGE_BASE_URL` and
-`WEBARENA_JUDGE_MODEL` when their defaults are not appropriate. Secrets stay
-in the process environment and are never written to benchmark JSONL.
+Some string-match tasks call a model-backed semantic judge. Set
+`WEBARENA_JUDGE_API_KEY`, `WEBARENA_JUDGE_BASE_URL`, and `WEBARENA_JUDGE_MODEL`
+for an endpoint that supports Chat Completions. Secrets stay in the process
+environment and are never written to benchmark JSONL.
 
 Reset the website deployment before every independent benchmark run. Do not
 run two evaluations against the same mutable deployment: even with in-process
