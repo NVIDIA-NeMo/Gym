@@ -1057,7 +1057,7 @@ telemetry = [
 requires-dist = [
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "synclaw", git = "https://github.com/NVIDIA-BioNeMo/SynClaw.git?rev=ca2efb6ca74be3b6288459b61964047c7f08f0e2" },
+    { name = "synclaw", git = "https://github.com/NVIDIA-BioNeMo/SynClaw.git?rev=v0.1.0" },
 ]
 provides-extras = ["telemetry"]
 
@@ -3251,7 +3251,7 @@ wheels = [
 [[package]]
 name = "synclaw"
 version = "0.1.0"
-source = { git = "https://github.com/NVIDIA-BioNeMo/SynClaw.git?rev=ca2efb6ca74be3b6288459b61964047c7f08f0e2#ca2efb6ca74be3b6288459b61964047c7f08f0e2" }
+source = { git = "https://github.com/NVIDIA-BioNeMo/SynClaw.git?rev=v0.1.0#ca2efb6ca74be3b6288459b61964047c7f08f0e2" }
 dependencies = [
     { name = "numpy" },
     { name = "rdkit" },
