@@ -579,6 +579,40 @@ async def test_a_separate_verifier_after_an_agent_group_gets_a_fresh_group_once_
     assert provider.running() == []
 
 
+class _StuckProvider(_Provider):
+    """A provider whose close of ``stuck`` keeps failing."""
+
+    stuck = "sb-1"
+
+    async def close(self, handle: SandboxHandle) -> None:
+        if handle.sandbox_id == self.stuck:
+            raise RuntimeError("provider close failed")
+        await super().close(handle)
+
+
+async def test_a_separate_verifiers_group_stops_even_while_the_agents_group_fails_to_stop() -> None:
+    provider = _StuckProvider()
+    server = _server(provider)
+
+    attempt, _ = await server.seed_attempt_sandbox(
+        _request(), key="a", verifier_mode="separate", task_tools=["run_python"]
+    )
+    # The agent's group fails to stop when it is released for the verifier; the verifier's group starts anyway.
+    lent = await server.verifier_sandbox_access(_request(), attempt)
+    assert lent.connection.descriptor["sandbox_id"] == "sb-2"
+    assert provider.running() == ["sb-1", "sb-2"]
+
+    # Released after /verify and stopped in cleanup: the agent's failed stop never keeps the verifier's running.
+    await server.release_attempt_sandbox(attempt.key)
+    assert provider.running() == ["sb-1"]
+    with pytest.raises(RuntimeError, match="provider close failed"):
+        await server.stop_attempt_sandbox(attempt.key)
+    assert provider.running() == ["sb-1"]
+    provider.stuck = ""
+    await server.stop_attempt_sandbox(attempt.key)
+    assert provider.running() == []
+
+
 async def test_a_verifier_that_runs_in_the_resources_server_is_lent_nothing_and_the_agents_group_stops_first() -> None:
     provider = _Provider()
     server = _server(provider)
@@ -835,18 +869,25 @@ def test_a_separate_verifiers_image_is_its_own_then_the_declared_one_then_the_ta
         AttemptSandbox(key="a", lend_to_agent=True)
 
 
-@pytest.mark.parametrize("provider, refused", [(_OpenProvider(), True), (_Provider(), False)])
+@pytest.mark.parametrize(
+    "provider, verifier, refused",
+    [
+        (_OpenProvider(), {"mode": "separate"}, True),
+        (_Provider(), {"mode": "separate"}, False),
+        # An open network in verifier.sandbox does not get a separate verifier onto a provider that cannot cut it.
+        (_OpenProvider(), {"mode": "separate", "sandbox": {"network": "inherit"}}, True),
+        (_Provider(), {"mode": "separate", "sandbox": {"network": "inherit"}}, False),
+    ],
+)
 def test_startup_refuses_a_configured_separate_verifier_on_a_provider_that_cannot_apply_its_rule(
-    provider: _Provider, refused: bool
+    provider: _Provider, verifier: dict[str, Any], refused: bool
 ) -> None:
-    server = _server(provider, verifier={"mode": "separate"})
+    server = _server(provider, verifier=verifier)
     # A provider block whose class passes the base checks, so the started provider's own capabilities decide.
     server.server_client.global_config_dict = {"attempt_sandboxes": {"docker": {}}}
 
     if refused:
-        with pytest.raises(
-            ValueError, match="sets verifier.mode separate, whose group starts with network 'no_network'"
-        ):
+        with pytest.raises(ValueError, match="sets verifier.mode separate, whose group starts with network '.*', but"):
             server.check_sandbox_provider()
     else:
         server.check_sandbox_provider()

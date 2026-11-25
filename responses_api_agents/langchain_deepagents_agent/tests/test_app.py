@@ -70,6 +70,14 @@ def test_builtin_profile_does_not_build_a_search_graph(monkeypatch):
     build.assert_not_called()
 
 
+async def test_only_the_in_process_profile_runs_its_loop_without_a_sandbox():
+    # An Environment Server lends a sandbox to an agent that cannot run its loop without one, even for a task
+    # without tools: the builtin profile runs deepagents in it, and the tavily_search profile refuses one.
+    builtin = _make_agent(tool_profile="builtin", tavily_api_key=None, resources_server=None)
+    assert (await builtin.agent_session_capabilities()).runs_loop_without_sandbox is False
+    assert (await _make_agent().agent_session_capabilities()).runs_loop_without_sandbox is True
+
+
 def test_legacy_search_class_uses_the_shared_implementation():
     config = ReasoningSearchDeepAgentConfig.model_validate(
         _config().model_dump(exclude_none=True, exclude={"tool_profile"})
