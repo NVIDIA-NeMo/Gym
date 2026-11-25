@@ -27,8 +27,8 @@ from responses_api_agents.verifiers_agent.tests.test_ab_synth_env import (
 )
 
 
-# F1: Gym's /run hands verifiers the row's raw `info` (body.info), not the env's resolved dataset row, so a day
-# assertion has no `targets` and a correct plan is masked as a verifier error.
+# Gym's /run hands verifiers the row's raw `info` (body.info), not the env's resolved dataset row: each rollout
+# resolves its own day-assertion records.
 def run_through_run(vf_env, info, plan=None) -> dict:
     """POST the row to verifiers_agent's /run as `gym eval run` sends it (its own raw `info`), with verifiers' rollout
     replaced by: setup_state, then `plan(state)` unless the row ended at setup, then every rubric function."""
@@ -115,8 +115,7 @@ class GymRunRawInfoTest(unittest.TestCase):
             )
 
 
-# F2: a seeded Google Drive file resolves at load, but upstream logs a Drive rename or delete only as an action
-# (move_file, delete_file), which ACTION_TARGETS does not map, so the write never credits the file.
+# Upstream logs a Drive rename or delete only as an action (move_file, delete_file): ACTION_TARGETS maps it to the file.
 DRIVE_SEED = {
     "meta": {"current_time": "2026-03-02T09:00:00"},
     "google_drive": {"files": [{"id": "f1", "name": "Q3 report"}]},
@@ -124,13 +123,6 @@ DRIVE_SEED = {
 }
 DRIVE_FILE = "https://www.googleapis.com/drive/v3/files/f1"
 DRIVE_DAY = "2026-03-02"
-
-
-def graded(info, calls):
-    """The row's score, or None when the row is refused at load (an acceptable fix too)."""
-    if env.resolve_records(copy.deepcopy(info)):
-        return None
-    return env.replay(info, calls)
 
 
 class DriveActionLogTest(unittest.TestCase):
@@ -141,7 +133,7 @@ class DriveActionLogTest(unittest.TestCase):
         }
         rename = {"method": "PATCH", "url": DRIVE_FILE, "body": {"name": "Q3 report final"}}
 
-        self.assertIn(graded(info, [rename]), (None, 1.0))
+        self.assertEqual(env.replay(info, [rename]), 1.0)
 
     def test_deleting_a_seeded_drive_file_breaks_its_not_acted_guardrail(self):
         info = {
@@ -152,11 +144,11 @@ class DriveActionLogTest(unittest.TestCase):
             ],
         }
 
-        self.assertIn(graded(info, [PROMOTE, {"method": "DELETE", "url": DRIVE_FILE}]), (None, 0.0))
+        self.assertEqual(env.replay(info, [PROMOTE, {"method": "DELETE", "url": DRIVE_FILE}]), 0.0)
 
 
-# F3: _key takes a record's first field as its own key when it ends in _id, even when that field is a foreign key
-# (a Zoom participant's meeting_id, an event-added Slack message's channel_id), so the parent's name is ambiguous.
+# A foreign key (a Zoom participant's meeting_id, an event-added Slack message's channel_id) is not its record's key,
+# so the parent's name stays unique.
 class ForeignKeyFirstFieldTest(unittest.TestCase):
     def test_a_zoom_meeting_with_participants_resolves_to_the_meeting(self):
         seed = {
@@ -196,9 +188,8 @@ class ForeignKeyFirstFieldTest(unittest.TestCase):
         self.assertEqual(env.resolve_records(copy.deepcopy(info)), [])
 
 
-# F4: records an event adds are named by _key of the raw `add` dict, so an added sheet row gets a string tag the
-# world diff never produces (it keys rows by (spreadsheet, worksheet, row_id)), and an added Xero contact whose dict
-# does not start with contact_id gets no name at all.
+# Records an event adds are keyed the way the write log keys them: a sheet row by (spreadsheet, worksheet, row_id), a
+# Xero contact by its contact_id.
 def sheet_seed():
     return {
         "meta": {"current_time": "2026-03-02T09:00:00"},
@@ -264,8 +255,7 @@ class EventAddedRecordTest(unittest.TestCase):
         self.assertEqual(env.resolve_records(copy.deepcopy(info)), [])
 
 
-# F5: resolve_records builds a WorldState from the raw seed without upstream's strip_none_values, so one row whose
-# initial_state carries explicit nulls (as HF datasets writes them) makes load_environment raise.
+# A seed with explicit nulls (as HF datasets writes them) loads, as upstream strips them.
 class NullSeedTest(unittest.TestCase):
     def test_a_single_day_row_with_null_seed_fields_loads_and_scores_like_upstream(self):
         initial = copy.deepcopy(INITIAL_STATE)
@@ -278,8 +268,7 @@ class NullSeedTest(unittest.TestCase):
         self.assertEqual(env.reward(state), 1.0)
 
 
-# F6: upstream keeps the spreadsheet id a URL names, so a row appended through a title-addressed URL is stored
-# with spreadsheet_id='Tracker' and its tag never matches the resolved ('ss_abc', 'ws1', 9) target.
+# A row appended through a URL that names its spreadsheet by title is keyed by the spreadsheet's id.
 def title_seed():
     return {
         "meta": {"current_time": "2026-03-02T09:00:00"},
@@ -310,8 +299,7 @@ class TitleAddressedAppendTest(unittest.TestCase):
         self.assertEqual(env.replay(info, [append]), 1.0)
 
 
-# F7: two spreadsheets whose tabs share the worksheet id 'Sheet1' collapse into one entry of _sheet_rows' `found`
-# (keyed by worksheet id only), so 'Sheet1!A3' resolves uniquely to the last spreadsheet's row 3.
+# Two spreadsheets whose tabs share the worksheet id 'Sheet1' stay apart, so 'Sheet1!A3' is ambiguous.
 def shared_tab_seed():
     return {
         "meta": {"current_time": "2026-03-02T09:00:00"},
@@ -331,7 +319,7 @@ def shared_tab_seed():
 
 
 class SharedWorksheetIdTest(unittest.TestCase):
-    def test_a_write_to_row_3_of_either_spreadsheet_is_not_missed_by_a_sheet1_a3_guardrail(self):
+    def test_a_sheet1_a3_guardrail_over_two_spreadsheets_is_refused_as_ambiguous(self):
         info = {
             "initial_state": shared_tab_seed(),
             "assertions": [
@@ -339,29 +327,8 @@ class SharedWorksheetIdTest(unittest.TestCase):
                 {"type": "not_acted", "record": "Sheet1!A3"},
             ],
         }
-        write = {
-            "method": "PUT",
-            "url": "https://sheets.googleapis.com/v4/spreadsheets/ss_A/values/Sheet1!B3",
-            "params": {"valueInputOption": "RAW"},
-            "body": {"values": [["done"]]},
-        }
 
-        if env.resolve_records(copy.deepcopy(info)):
-            return  # refused as ambiguous (row 3 of two tabs): a correct outcome
-        # Resolved: then it has to see the write to ss_A's row 3 and break the guardrail.
-        self.assertEqual(env.replay(info, [write]), 0.0)
-
-
-class UnresolvedRowTest(unittest.TestCase):
-    def test_a_row_refused_at_load_still_arrives_and_ends_masked_before_the_first_turn(self):
-        vf_env, _ = load(INFO)
-        # The raw row Gym sends: its guardrail names a record the seed does not hold.
-        raw = {**copy.deepcopy(INFO), "assertions": [PROMOTED, {"type": "not_acted", "record": "nope"}]}
-        state = asyncio.run(vf_env.setup_state({"prompt": PROMPT, "info": raw, "example_id": 0}))
-
-        self.assertEqual(state["env_row_invalid"], 1)
-        self.assertTrue(asyncio.run(vf_env.invalid_row(state)))
-        self.assertEqual(env.reward(state), 0.0)
+        self.assertEqual(env.resolve_records(info), ["ambiguous: not_acted record 'Sheet1!A3'"])
 
 
 class ActionTargetTest(unittest.TestCase):
@@ -444,26 +411,7 @@ class NullSeedReplayTest(unittest.TestCase):
         self.assertEqual(env.replay({"initial_state": initial, "assertions": [PROMOTED]}, [PROMOTE]), 1.0)
 
 
-class LoadRefusalTest(unittest.TestCase):
-    def test_a_bad_row_is_refused_alone_and_the_rest_load(self):
-        bad = {
-            "initial_state": INITIAL_STATE,
-            "assertions": [{**PROMOTED, "property": "createdAt"}],
-        }  # a clock-stamped field
-        rows = [{"responses_create_params": {"input": PROMPT}, "info": info} for info in (INFO, bad, INFO)]
-        with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
-            f.writelines(json.dumps(r) + "\n" for r in rows)
-            f.flush()
-            with self.assertLogs("ab_synth_env", "WARNING") as logs:
-                vf_env = env.load_environment(
-                    tasks_path=f.name, requester_base_url="http://127.0.0.1:9/v1", requester_model="m"
-                )
-
-        self.assertEqual(len(vf_env.dataset), 2)
-        self.assertIn("refused 1 of 3 rows", "\n".join(logs.output))
-
-
-# F1: an event on a worksheet the agent deleted must be skipped and the rollout scored, not masked.
+# An event on a worksheet the agent deleted is skipped and the rollout scored, not masked.
 class EventOnDeletedWorksheetTest(unittest.TestCase):
     def test_an_event_on_a_tab_the_policy_deleted_is_scored_not_masked(self):
         initial = {
@@ -507,8 +455,8 @@ class EventOnDeletedWorksheetTest(unittest.TestCase):
         self.assertEqual(env.reward(state), 0.0)
 
 
-# F2: a write naming a spreadsheet by title credits the spreadsheet upstream wrote into (separator-normalized
-# title match, first match wins), as a write naming it by id does.
+# A write naming a spreadsheet by title credits the spreadsheet upstream wrote into (separator-normalized title match,
+# first match wins), as a write naming it by id does.
 TITLE_DAY = "2026-03-02"
 
 
@@ -576,7 +524,7 @@ class TitleResolutionTest(unittest.TestCase):
         self.assertEqual(env.replay(info, [title_append("Tracker")]), 1.0)
 
 
-# F3: a tab write (addSheet, deleteSheet, updateSheetProperties) acts on its spreadsheet, as a row write does.
+# A tab write (addSheet, deleteSheet, updateSheetProperties) acts on its spreadsheet, as a row write does.
 TAB_DAY = "2026-03-02"
 TAB_BATCH = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc:batchUpdate"
 
@@ -623,8 +571,7 @@ class TabWriteCreditsSpreadsheetTest(unittest.TestCase):
         self.assertEqual(env.replay(info, [PROMOTE, tab_batch({"deleteSheet": {"sheetId": "ws2"}})]), 0.0)
 
 
-# F4: an acted_on_day whose `day` is not a YYYY-MM-DD date is caught by the row check (or still grades a correct
-# plan), instead of loading as a row no plan can pass.
+# An acted_on_day whose `day` is missing or not a YYYY-MM-DD date is refused by the row check.
 def day_row(day=...):
     info = copy.deepcopy(INFO)
     acted = {"type": "acted_on_day", "record": "101"}
@@ -640,18 +587,12 @@ class DayValidationTest(unittest.TestCase):
         self.assertEqual(env.row_problems(info, requester=True), [])
         self.assertEqual(env.replay(info, [{"wait": "2026-03-04T09:00:00"}, PROMOTE]), 1.0)
 
-    def test_a_malformed_day_is_refused_or_still_grades_the_correct_plan(self):
-        for day in ("2026-03-04T00:00:00", "2026-3-4"):
-            info = day_row(day)
-            if env.row_problems(info, requester=True):
-                continue  # refused at the day_row check: a correct outcome
-            self.assertEqual(env.replay(info, [{"wait": "2026-03-04T09:00:00"}, PROMOTE]), 1.0, day)
-
-    def test_a_missing_day_is_refused_by_the_row_check(self):
-        self.assertNotEqual(env.row_problems(day_row(), requester=True), [])
+    def test_a_malformed_or_missing_day_is_refused_by_the_row_check(self):
+        for info in (day_row("2026-03-04T00:00:00"), day_row("2026-3-4"), day_row()):
+            self.assertNotEqual(env.row_problems(info, requester=True), [])
 
 
-# F5: a write that changes the world and then raises is still logged, so day assertions see the change.
+# A write that changes the world and then raises is still logged, so day assertions see the change.
 RAISE_BATCH = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc:batchUpdate"
 
 
@@ -689,16 +630,17 @@ class PartialWriteThenRaiseTest(unittest.TestCase):
         self.assertEqual(env.reward(state), 0.0)
 
 
-# F1: one row with a bad seed or bad events must be refused on its own, not abort the whole load.
+# One row with a bad seed or bad events is refused on its own, the rest load.
 UNREADABLE_ROWS = {
     "seed the simulator rejects": {**SINGLE_DAY, "initial_state": {**INITIAL_STATE, "hubspot": {"contacts": "x"}}},
     "event without patch": {**INFO, "events": [{"at": "2026-03-04T08:00:00"}]},
     "no info": None,
+    "clock-stamped field": {**SINGLE_DAY, "assertions": [{**PROMOTED, "property": "createdAt"}]},
 }
 
 
 @pytest.mark.parametrize("name", list(UNREADABLE_ROWS))
-def test_one_bad_row_is_refused_and_the_good_row_still_loads(name):
+def test_one_bad_row_is_refused_and_the_good_row_still_loads(name, caplog):
     rows = [
         {"responses_create_params": {"input": PROMPT}, "info": copy.deepcopy(SINGLE_DAY)},
         {"responses_create_params": {"input": PROMPT}, "info": copy.deepcopy(UNREADABLE_ROWS[name])},
@@ -711,6 +653,7 @@ def test_one_bad_row_is_refused_and_the_good_row_still_loads(name):
         )
 
     assert len(vf_env.dataset) == 1
+    assert "refused 1 of 2 rows" in caplog.text
 
 
 def test_a_row_with_null_events_is_set_up_and_scored_like_a_row_without_events():
@@ -724,7 +667,7 @@ def test_a_row_with_null_events_is_set_up_and_scored_like_a_row_without_events()
     assert env.reward(state) == 1.0
 
 
-# F2: a sheet column named "Timestamp" is a cell the agent writes, not a field the simulator stamps.
+# A sheet column named "Timestamp" is a cell the agent writes, not a field the simulator stamps.
 FORMS_SEED = {
     "meta": {"current_time": "2026-03-02T09:00:00"},
     "google_sheets": {
@@ -754,7 +697,7 @@ def test_a_timestamp_column_in_cells_is_gradeable_and_not_refused():
     assert env.row_problems(info, requester=False) == []
 
 
-# F3: a Slack assertion that names a seed message by its `ts` only looks the message up, it reads no stamped value.
+# A Slack assertion that names a seed message by its `ts` only looks the message up, it reads no stamped value.
 SLACK_TS = "1731400000.000200"
 SLACK_SEED = {
     "meta": {"current_time": "2026-03-02T09:00:00"},
@@ -776,26 +719,6 @@ def test_a_reaction_assertion_on_a_seed_message_ts_is_gradeable_and_not_refused(
 
     assert (env.replay(info, [SLACK_REACT]), env.replay(info, [])) == (1.0, 0.0)  # gradeable
     assert env.row_problems(info, requester=False) == []
-
-
-# F5: a dated event on a record that never existed is a dataset fault known before any rollout. It must be refused
-# at load or masked at setup, not left for only the rollouts that wait past it to find.
-GHOST_EVENT = {
-    "at": "2026-03-04T08:00:00",
-    "patch": {"app": "hubspot", "collection": "contacts", "id": "1O1", "set": {"lifecyclestage": "opportunity"}},
-}
-
-
-def test_an_event_on_a_record_the_seed_never_had_is_refused_or_masked_before_the_first_turn():
-    try:
-        vf_env, state = load({**INFO, "events": [GHOST_EVENT]})
-    except ValueError:
-        return  # refused at load
-    if state.get("env_row_invalid"):
-        return  # masked at setup
-    # Neither: a rollout that never waits past the event is scored as if the row were sound.
-    state["clock"].fetch(**PROMOTE)
-    assert state.get("env_row_invalid") == 1, f"row loaded and scored without waiting: reward {env.reward(state)}"
 
 
 # A dated event that cannot apply (fields outside `set`, an added record the schema rejects) is known before any

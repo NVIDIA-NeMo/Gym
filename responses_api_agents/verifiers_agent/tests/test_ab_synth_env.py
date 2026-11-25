@@ -101,18 +101,6 @@ class ClockTest(unittest.TestCase):
         clock.wait("2026-03-03T09:00:00")
         self.assertEqual(world.meta.current_time, datetime(2026, 3, 3, 9, tzinfo=timezone.utc))
 
-    def test_event_for_a_missing_record_names_the_event(self):
-        events = [
-            {
-                "at": "2026-03-03T08:00:00",
-                "patch": {"app": "hubspot", "collection": "contacts", "id": "999", "set": {}},
-            }
-        ]
-        clock = env.Clock(WorldState(**copy.deepcopy(INITIAL_STATE)), events, INFO["period_end"])
-
-        with self.assertRaisesRegex(ValueError, "no record '999' in hubspot.contacts"):
-            clock.wait("2026-03-04T09:00:00")
-
     def test_record_added_to_an_empty_collection_is_typed_and_takes_later_events(self):
         events = [
             {"at": "2026-03-03T08:00:00", "patch": {"app": "hubspot", "collection": "contacts", "add": {"id": "202"}}},

@@ -1,7 +1,7 @@
 # Synthetic workflow tasks on the AutomationBench app simulator
 
 A training environment for synthetic SaaS workflow tasks. It runs on the AutomationBench app simulator (world state,
-API routes and assertion checks from `benchmarks/automationbench`). Tasks come from your own dataset; no benchmark
+API routes and assertion checks from `benchmarks/automationbench`). Tasks come from your own dataset, and no benchmark
 tasks are shipped or used. One environment serves three kinds of rows, chosen by keys in each row's `info`:
 
 | kind | `info` keys | what changes |
@@ -12,45 +12,42 @@ tasks are shipped or used. One environment serves three kinds of rows, chosen by
 
 ## Multi-day
 
-The `wait` tool moves the clock forward. Each dated event (an approval arrives, a ticket is reopened, a record
-changes) is applied when the clock passes its time, so the agent has to wait for the right day, read the world again
-and act then. `events` is `[{"at": iso time, "patch": {...}}]`: a patch sets fields on a record (`app`, `collection`,
-`id`, `set`, where `id` is the record's key as below) or adds one (`app`, `collection`, `add`). The `wait` reply gives the new time in the seed's zone (naive
-UTC for a naive seed). A multi-day row without the two wait texts, with a time that is not ISO 8601, or with an
-`acted_on_day` whose `day` is not YYYY-MM-DD is refused. A refused row is left out at load (each refusal is counted and
-logged, and the load fails only when no row is left) and, when it reaches a rollout anyway, masked as `env_row_invalid`.
+The `wait` tool moves the clock forward, and each dated event (an approval arrives, a ticket is reopened) is applied
+when the clock passes its time, so the agent has to wait for the right day, read the world again and act then.
+`events` is `[{"at": iso time, "patch": {...}}]`: a patch sets fields on a record (`app`, `collection`, `id`, `set`) or
+adds one (`app`, `collection`, `add`). The `wait` reply gives the new time in the seed's zone (naive UTC for a naive
+seed).
 
-Every `api_fetch` write that changes the world is logged with the simulated time and the records it added, changed
-or deleted (a failed write or a read-only POST such as a search changes nothing and is not an act). Two more
-assertion types grade when the agent acted:
+Every `api_fetch` write that changes the world is logged with the simulated time and the records it added, changed or
+deleted. A failed write or a read-only POST (a search) is not an act. Two more assertion types grade when the agent
+acted:
 
-- `acted_on_day` (`record`, `day`, optional `body_contains`): the first write that changed `record` happened on
-  `day` (YYYY-MM-DD, in the time zone of the seed's `meta.current_time`, UTC for a naive one). Acting early fails it.
+- `acted_on_day` (`record`, `day`, optional `body_contains`): the first write that changed `record` happened on `day`
+  (YYYY-MM-DD, in the zone of the seed's `meta.current_time`). Acting early fails it.
 - `not_acted` (`record`): no write changed `record`. It is a guardrail.
 
-A write is graded on the world, not on its URL, so a record named only in the body (a QuickBooks delete, a Slack
-channel) counts the same as one in the path. When a rollout starts, each `record` is resolved against the seed and the
-records its events add, to the record with that key (`id`, else `sid`, else the collection's primary key, such as Xero's
-`contact_id`), the Jira issue with that key (`OPS-1`), or the sheet row with that `row_id` or row id. Only a string that names no record is
-read as an A1 reference to rows of one tab: `B7`, `Sheet1!A7:C7` or `'Q4 2025'!B7` (any columns), or rows
-`Sheet1!A2:B5`. A row's number is its `row_id`, or its position in a tab of string row ids (the first row is 2), the
-way the simulator addresses it, and a single row past a named tab's end is the row an append adds. A row whose record
-names nothing, or more than one record (two collections, or a row number without a tab in a sheet with several tabs),
-cannot be graded: the environment logs the count of such rows at load, and a rollout of one ends before its first turn
-masked as `env_row_invalid`. Each rollout repeats the load checks on the row it receives (Gym sends the row's own
-`info`, which need not come from `tasks_path`), and a row that fails them, or whose setup raises, ends the same way:
-masked, never a server error. Apps that keep only an action log (Trello, Notion,
-Asana, ...) hold no records, so their writes cannot be graded with these two assertions.
+`record` names a record of the seed or one an event adds: by its key (`id`, else `sid`, else the collection's primary
+key such as Xero's `contact_id`), a Jira issue by its `key` (`OPS-1`), a sheet row by its `row_id` or `id`. A string
+that names no record is read as an A1 reference to rows of one tab (`B7`, `Sheet1!A7:C7`, `'Q4 2025'!B7`,
+`Sheet1!A2:B5`), where a row's number is its `row_id`, or its position in a tab of string row ids (the first row is 2).
+A write is graded on the records it changed, not on its URL. It also acts on a few parents, such as a calendar event's
+calendar, a Slack message's channel, a sheet row's spreadsheet and tab. A write an app keeps only in its action log acts
+on the records its params name, such as a Jira comment's issue or a Drive move's file and folders. Apps that keep only
+an action log and no records (Trello, Notion, Asana, ...) cannot be graded with these two assertions.
 
-A write changes the records it adds, edits or deletes, and only these parents: a calendar event's calendar, a Facebook
-post's page, a Slack message's channel, a sheet row's spreadsheet and tab. Writes an app keeps only in its action log
-name their record through the action's params: a Jira comment its issue, a Google Drive move, rename, copy or delete
-its file and the folders it adds to or leaves, a new Drive file its folder, a Pipefy card move or field update its card,
-an Airtable record create, update or comment its base. Records that only point at
-another (an opportunity's account, a ticket's requester) do not act on it. A row written through a URL that names its
-spreadsheet or tab by title (in any case, as the simulator reads titles) is filed under, and credits, the same
-spreadsheet and tab as one written by id: titles are mapped to ids by the simulator's own resolvers, so they match the
-way it reads them. A tab is keyed within its spreadsheet, and a write to a tab acts on its spreadsheet.
+## Refused and masked rows
+
+Load checks every row and leaves out the ones that cannot be graded, logging the count (it fails only when no row is
+left): a `record` that names nothing or more than one record, an `acted_on_day` `day` that is not YYYY-MM-DD, a
+multi-day row without its two wait texts or with a time that is not ISO 8601, a dated event that cannot apply to the
+seed (load runs the events in time order on a copy of it), and a world assertion on a field the simulator stamps from
+the wall clock (see Limitations). Each rollout repeats these checks on the row Gym sends it, so a refused row that still
+arrives ends before its first turn, masked as `env_row_invalid`, never a server error.
+
+An event on a record the agent (or the requester it asked) deleted is skipped and the rollout is scored. An event that
+still fails when it fires, or a requester that fails after `requester_max_tries`, ends the episode with
+`requester_failed` set. `config.yaml` lists both metrics in `mask_sample_metrics`, so `verifiers_agent` returns such a
+rollout with `mask_sample: true` and its reward is not counted.
 
 ## Multi-turn
 
@@ -63,18 +60,10 @@ When the agent ends a turn without tool calls, a requester model answers as the 
   reply) and reports back. The agent has to hand those steps over with every value they need.
 
 The requester is any OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`), called through Gym's
-HTTP client. `requester_body` fields are merged over the built-in sampling values, so a `max_tokens` or `temperature`
-there wins. An endpoint that needs a key gets it as a Bearer token, read from the environment variable named by
-`requester_api_key_env` or from the file at `requester_api_key_file`. The requester sees only the visible
-conversation, never reasoning or tool traffic. The environment refuses to load multi-turn rows when
-`requester_base_url` or `requester_model` is unset. Each try ends after `requester_timeout_s` (default 300). A requester that still fails after
-`requester_max_tries`, or keeps calling tools after its tool budget, ends the episode and sets the `requester_failed`
-metric. Load runs each row's dated events in time order on a copy of its seed and refuses the row when one cannot
-apply (a missing record, a field or an added record the schema rejects). An event that still fails when it fires ends
-the episode the same way, since it is a dataset failure and not the agent's. An event on a record that existed and is gone (the agent, or the requester it asked,
-deleted it) is skipped instead, and the rollout is scored. The agent config in `config.yaml` lists
-it in `mask_sample_metrics`, so `verifiers_agent` returns that rollout with `mask_sample: true`
-(`failure_kind: verifiers_agent:requester_failed`) and the reward is not counted as a measurement.
+HTTP client, and sees only the visible conversation, never reasoning or tool traffic. `requester_body` fields are
+merged over the built-in sampling values. A key, if the endpoint needs one, is read from the environment variable named
+by `requester_api_key_env` or the file at `requester_api_key_file` and sent as a Bearer token. Each try ends after
+`requester_timeout_s` (default 300). Multi-turn rows do not load without `requester_base_url` and `requester_model`.
 
 ## Reward and metrics
 
@@ -130,7 +119,7 @@ gym eval run --no-serve --config environments/ab_synth/config.yaml --model-type 
 ## Tests
 
 The tests live with the agent that runs this environment, in
-`responses_api_agents/verifiers_agent/tests/test_ab_synth_env.py`:
+`responses_api_agents/verifiers_agent/tests/test_ab_synth_env.py` and `test_ab_synth_records.py`:
 
 ```bash
 gym env test +entrypoint=responses_api_agents/verifiers_agent

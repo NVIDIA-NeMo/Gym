@@ -1,32 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Synthetic workflow tasks on the AutomationBench app simulator: single-day, multi-day and multi-turn.
+"""Synthetic workflow tasks on the AutomationBench app simulator: single-day, multi-day and multi-turn rows.
 
-Tasks run against the AutomationBench app simulator (its world state, API routes and assertion checks). They come from
-the dataset, not from the benchmark. Each row turns features on through keys in its `info`:
-
-- Single-day: `initial_state` and `assertions` only.
-- Multi-day (`period_end`, `events`, `wait_tool_description`, `wait_until_description`): a `wait` tool moves a
-  per-rollout clock forward and applies the dated events in time order. Successful writes are logged with the
-  simulated time and the records they added, changed or deleted, so two more assertion types can grade when the
-  agent acted: `acted_on_day` (`record`, `day`, optional `body_contains`: the first write that changed `record`
-  happened on `day`) and `not_acted` (`record`: no write changed it, a guardrail). Each `record` is resolved to one
-  record of the seed (`resolve_records`), at load and again in each rollout, and a row whose record names nothing or
-  several is refused.
-- Multi-turn (`user_card`): when the agent ends a turn without tool calls, a simulated requester answers from its
-  private notes. The requester is an OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`) that
-  sees only the visible conversation. It answers at most `max_user_turns` times and replies DONE when it has nothing
-  to add.
-- Requester-owned apps (`requester_services`): those apps leave the agent's connected services, and the requester
-  operates them itself with `api_search` and `api_fetch` when the agent asks, then reports back.
-
-The reward is the guardrail-gated share of objectives over the world and day assertions. With
-`unavailable_call_break`, a call to a tool the agent was not given, or to a service not connected for it, also breaks
-a guardrail (reward 0). A requester call that still fails after `requester_max_tries` ends the episode and sets the
-`requester_failed` metric, so training can mask the rollout instead of learning from it.
-
-The dataset owns all text the policy reads: the `wait` tool's text comes from each row, and the requester's replies
-come from the requester model.
+Keys in each row's `info` turn on a `wait` tool with dated events and day assertions (`period_end`, `events`), a
+simulated requester (`user_card`) and requester-owned apps (`requester_services`). The reward is the guardrail-gated
+share of objectives. Rows that cannot be graded are refused at load and masked in a rollout. See README.md.
+The dataset owns all text the policy reads: the `wait` tool's text comes from each row.
 """
 
 import asyncio
@@ -65,11 +44,7 @@ STAMPED_FIELDS = {
     "sent_at", "sent_date_time", "timestamp", "current_time",
 }  # fmt: skip
 FIELD_KEYS = {"field", "property"}  # not a sheet `column`: cells hold what the agent writes, nothing is stamped
-VALUE_MAPS = {
-    "cells",
-    "cell_contains",
-    "fields",
-}  # their keys are column names (a Google Forms "Timestamp"), not fields
+VALUE_MAPS = {"cells", "cell_contains", "fields"}  # keyed by column names (a Google Forms "Timestamp"), not fields
 REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
 # An A1 reference to sheet rows: "Tab!B7", "'Q4 2025'!A7:C7", "B7", a bare "7", or rows "2:5".
 ROW_REF = re.compile(r"(?:'?(?P<tab>.+?)'?!)?[A-Za-z]{0,3}(?P<first>\d+)(?::[A-Za-z]{0,3}(?P<last>\d+))?")
@@ -177,10 +152,8 @@ def _get(msg, key):
 
 
 def _key(app: str, collection: str, record, sheets=None):
-    """A record's key in its collection: `id`, else `sid` (Twilio), else the collection's primary key (Xero). A worksheet's
-    key is (spreadsheet id, id), a sheet row's (spreadsheet id, worksheet id, row_id). A spreadsheet or tab that a write
-    named by its title is mapped to its id by the simulator's own resolvers on `sheets` (the world's google_sheets), so
-    the key cannot drift from how the simulator reads titles and an appended row never takes another's key."""
+    """A record's key: `id`, else `sid`, else the collection's primary key. A worksheet is keyed (spreadsheet, id), a
+    sheet row (spreadsheet, worksheet, row_id), with titles mapped to ids by the simulator's own resolvers (`sheets`)."""
     if (app, collection) == ("google_sheets", "worksheets"):
         return (_get(record, "spreadsheet_id"), str(_get(record, "id")))
     if (app, collection) == ("google_sheets", "rows"):
@@ -231,11 +204,6 @@ def _actions(world: dict) -> dict:
     }
 
 
-def _known(records: dict) -> set:
-    """(app, collection, name) for every record, by its key and by its `id`: the names a dated event's `id` can use."""
-    return {(a, c, n) for (a, c, k), rs in records.items() for r in rs for n in (k, str(r.get("id")))}
-
-
 def _names(world: dict, events: list[dict], sheets=None) -> dict:
     """Every name a record answers to (its key, its alias, a sheet row's row_id and id) -> the tags of the records with
     it, over the seed and the records its events add."""
@@ -259,10 +227,8 @@ def _names(world: dict, events: list[dict], sheets=None) -> dict:
 
 
 def _sheet_rows(world: dict, ref, sheets) -> dict:
-    """The rows an A1 reference names, by worksheet. A row is the one with that row_id, else, in a tab of string row
-    ids, the one at that position (the first row is 2), as upstream addresses them. A single row past a tab's rows is
-    the row an append there would add. Without a tab only rows that exist count. A tab title resolves as the simulator
-    resolves it (`sheets`, the world's google_sheets)."""
+    """The rows an A1 reference names, by worksheet: by row_id, or by position in a tab of string row ids (the first row
+    is 2), as upstream addresses them. A single row past a named tab's end is the row an append there would add."""
     tabs = world.get("google_sheets") or {}
     first, last = int(ref["first"]), int(ref["last"] or ref["first"])
     found = {}
@@ -331,12 +297,8 @@ def row_problems(info: dict, *, requester: bool) -> list[str]:
 
 
 def resolve_records(info: dict) -> list[str]:
-    """Resolve each acted_on_day / not_acted `record` to the records it names, kept as the assertion's `targets`.
-
-    A record string names the record with that key or alias (or the sheet row with that row_id), in the seed or added
-    by an event. Only a string no record answers to is read as an A1 reference to sheet rows of one tab. Returns one
-    problem per record that names nothing or more than one record (two collections, or rows of two tabs), and one for the
-    first dated event that cannot apply."""
+    """Resolve each day assertion's `record` (a key or alias, else an A1 reference) into its `targets`. Returns a problem
+    per record that names nothing or several records, and one for the first dated event that cannot apply."""
     seed = WorldState(**strip_none_values(info["initial_state"]))
     world, sheets = seed.model_dump(mode="json"), seed.google_sheets
     names, problems = _names(world, info.get("events") or [], sheets), []
@@ -377,8 +339,7 @@ def apply_patch(world: WorldState, patch: dict) -> None:
     app = getattr(world, patch["app"])
     collection = getattr(app, patch["collection"])
     if "add" in patch:
-        # The record type comes from the collection's declared schema (list[Contact] -> Contact), so a record added
-        # to an empty collection is the same typed object as one loaded with the world.
+        # Typed from the collection's declared schema, so a record added to an empty collection matches loaded ones.
         (model,) = typing.get_args(type(app).model_fields[patch["collection"]].annotation)
         add = copy.deepcopy(patch["add"])
         collection.append(model.model_validate(add) if hasattr(model, "model_validate") else add)
@@ -406,9 +367,6 @@ class Clock:
         self.log: list[dict] = []
         # acted_on_day reads the day in the seed's own time zone (UTC for a naive seed), while the clock runs in UTC.
         self.zone = world.meta.current_time.tzinfo or timezone.utc
-        # Records that existed at the seed or after an event, so an event on one that is gone now can be told from an
-        # event on a record that never existed.
-        self.known = _known(_records(world.model_dump(mode="json"), world.google_sheets))
 
     def now(self) -> datetime:
         return _time(self.world.meta.current_time.isoformat())
@@ -423,14 +381,11 @@ class Clock:
             try:
                 apply_patch(self.world, patch)
             except MissingRecord:
-                # The record existed and is gone: the agent, or the requester it asked, deleted it by some route. The
-                # event has nothing left to change and the rollout is scored. An event on a record that never existed
-                # is a dataset fault and still ends the rollout unscored.
-                key = (patch["app"], patch["collection"], str(patch["id"]))
-                if key not in self.known:
-                    raise
-                logger.info("ab_synth: event skipped, %s.%s %s was deleted", *key)
-            self.known |= _known(_records(self.world.model_dump(mode="json"), self.world.google_sheets))
+                # Every event applies to the seed (resolve_records runs them at load and at setup), so a record it
+                # cannot find now was deleted in this rollout, by the agent or the requester it asked: skip the event.
+                logger.info(
+                    "ab_synth: event skipped, %s.%s %s was deleted", patch["app"], patch["collection"], patch["id"]
+                )
         # Keep the seed's awareness: upstream date queries read a naive time as host-local time.
         aware = self.world.meta.current_time.tzinfo is not None
         self.world.meta.current_time = target.replace(tzinfo=timezone.utc) if aware else target
@@ -525,12 +480,8 @@ def day_check(log: list[dict], assertion: dict) -> bool:
 
 
 def headline(initial_state: dict, world: WorldState, log: list[dict], assertions: list[dict]) -> float:
-    """Guardrail-gated share of objectives over world and day assertions.
-
-    Same split as AutomationBench's headline: an assertion with `scored: false` or `excluded: true` is skipped, one
-    already true before the agent acts is a guardrail unless `excluded: false` forces it to score. Every `not_acted`
-    is a guardrail. A broken guardrail scores the task 0.
-    """
+    """Guardrail-gated share of objectives over world and day assertions, split as AutomationBench's headline splits
+    them. Every `not_acted` is a guardrail, and a broken guardrail scores the task 0."""
     initial = WorldState(**strip_none_values(initial_state))
     passed = total = 0
     for a in assertions:
@@ -581,10 +532,8 @@ def stamped_fields(assertion: dict) -> list[str]:
 
 
 def replay(info: dict, calls: list[dict]) -> float:
-    """Score a scripted plan against a task: each call is {"wait": iso time} or {"method", "url", "params", "body"}.
-
-    Useful to check that a task is solvable (a reference plan scores 1) before training on it.
-    """
+    """Score a scripted plan, each call {"wait": iso time} or {"method", "url", "params", "body"}, to check that a task
+    is solvable before training on it."""
     info = copy.deepcopy(info)
     if problems := resolve_records(info):
         raise ValueError(f"day-assertion records cannot be resolved: {problems}")
@@ -639,10 +588,8 @@ def own_records(world: WorldState, services: list[str], budget: int = 4000) -> s
 
 
 def reward(state, **kwargs) -> float:
-    """The headline over world and day assertions, 0 after a broken unavailable-call guardrail.
-
-    Synchronous, so verifiers_agent watches it: a row whose assertions make it raise is masked as a verifier error,
-    not scored 0."""
+    """The headline, 0 after a broken unavailable-call guardrail. Synchronous, so verifiers_agent masks a raise as a
+    verifier error instead of scoring it 0."""
     if state.get("violation") or state.get("env_row_invalid"):
         return 0.0
     return headline(state["initial_state"], state["world"], state["clock"].log, state["info"]["assertions"])
@@ -690,16 +637,11 @@ def load_environment(
     unavailable_call_break: bool = False,
     **kwargs,
 ):
-    """Build the environment over the Gym rows in `tasks_path` (`responses_create_params.input` and `info`).
+    """Build the environment over the Gym rows in `tasks_path`.
 
-    `requester_base_url` and `requester_model` name the OpenAI-compatible chat endpoint that plays the requester on
-    multi-turn rows (`user_card` or `requester_services`). Rows without those keys never call it. `requester_body` is
-    merged into every requester request after the built-in sampling values, so its keys win (for example
-    `{"chat_template_kwargs": {"thinking": false}, "max_tokens": 4096}`). An API key, if the endpoint needs one, is read
-    from the environment variable named by `requester_api_key_env` or from the file at `requester_api_key_file` and
-    sent as a Bearer token. Each requester try ends after `requester_timeout_s`. After `requester_max_tries` failed
-    tries the episode ends with `requester_failed` set.
-    """
+    `requester_base_url` and `requester_model` name the OpenAI-compatible endpoint that plays the requester on
+    multi-turn rows. `requester_body` is merged over the built-in sampling values. A key is read from the variable named
+    by `requester_api_key_env` or the file `requester_api_key_file` and sent as a Bearer token."""
     if not (0 < requester_timeout_s < math.inf):
         raise ValueError(f"requester_timeout_s must be positive and finite, got {requester_timeout_s!r}")
     if requester_max_tries < 1:
@@ -717,9 +659,8 @@ def load_environment(
 
     class ABSynthEnv(AutomationBenchEnv):
         async def setup_state(self, state, **setup_kwargs):
-            # Gym hands each rollout the row's own info (any row, not only the dataset's), so it is checked and its
-            # records resolved here. A row that fails, or a setup that raises, ends before the first turn, masked as
-            # env_row_invalid: never a server error.
+            # Gym hands each rollout the row's own info, not the loaded dataset's, so the load checks run again here. A
+            # row that fails them, or a setup that raises, is masked as env_row_invalid, never a server error.
             try:
                 state = await super().setup_state(state, **setup_kwargs)
                 info = state["info"]
@@ -811,12 +752,11 @@ def load_environment(
             if not (info.get("user_card") or info.get("requester_services")):
                 return True
             if state.get("requester_step") == len(state["trajectory"]):
-                # No policy step since the requester's last reply (the next prompt ran past the context, so the loop
-                # added none): the requester already answered this turn, and an acting one would repeat its writes.
+                # No policy step since the requester's last reply (the prompt ran past the context): answering again
+                # would make an acting requester repeat its writes.
                 return True
             if not _text(_get(state["trajectory"][-1]["completion"][-1], "content")):
-                # A turn with neither text nor tool call ends the episode: a reply to it would make the next model
-                # request invalid (an assistant message with no content and no tool calls).
+                # An empty turn ends the episode: a reply to it would make the next model request invalid.
                 state["empty_turn"] = 1
                 return True
             if state.get("user_turns", 0) >= max_user_turns:
@@ -848,10 +788,8 @@ def load_environment(
             return msgs
 
         async def _chat(self, messages: list[dict], **body) -> dict:
-            """One requester call through Gym's shared aiohttp client, raising RequesterUnavailable after the last try.
-            This loop owns the retries: each try (request and body read) ends after `requester_timeout_s`, so a refused
-            or stalled requester cannot hang the rollout. A reply cut at max_tokens or with neither text nor tool calls
-            counts as a failed try."""
+            """One requester call through Gym's aiohttp client. Each try ends after `requester_timeout_s` so a stalled
+            requester cannot hang the rollout. A reply cut at max_tokens or empty is a failed try."""
             from nemo_gym.client import request
 
             url = requester_base_url.rstrip("/") + "/chat/completions"
@@ -937,8 +875,7 @@ def load_environment(
 
     with open(tasks_path) as f:
         rows = [json.loads(line) for line in f if line.strip()]
-    # Each row is checked and its day-assertion records resolved here, the same checks every rollout's setup_state
-    # repeats. A row that fails is refused (counted and logged) so one bad row does not stop the rest; a multi-turn row
+    # A row that fails its checks is refused and counted, so one bad row does not stop the rest. A multi-turn row
     # without a configured requester is a configuration error and stops the load.
     requester = bool(requester_base_url and requester_model)
     refused = {}
