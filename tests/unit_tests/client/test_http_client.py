@@ -702,6 +702,30 @@ class TestHTTPClient:
         assert restored_error.headers.getall("retry-after") == ["10", "20"]
         assert restored_error.headers.getall("SET-COOKIE") == ["session=abc", "preferences=dark"]
 
+    async def test_a_raised_error_keeps_no_run_token_from_its_request(self) -> None:
+        """An error's repr shows its request's headers, and an error can reach a log or a model."""
+        headers = CIMultiDictProxy(
+            CIMultiDict([("x-request-id", "request-123"), ("X-NeMo-Gym-Run-Token", "the-token")])
+        )
+        request_info = RequestInfo(
+            url=URL("http://resources-server.test/verify"),
+            method="POST",
+            headers=headers,
+            real_url=URL("http://resources-server.test/verify"),
+        )
+        response = MagicMock(ok=False)
+        response.content.read = AsyncMock(return_value=b"{}")
+        response.request_info = request_info
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=request_info, history=(), status=500, message="failed", headers=None
+        )
+
+        with raises(ClientResponseError) as raised:
+            await raise_for_status(response)
+
+        assert dict(raised.value.request_info.headers) == {"x-request-id": "request-123"}
+        assert "the-token" not in repr(raised.value)
+
     async def test_raise_for_status_accepts_prefetched_content(self) -> None:
         request_info = RequestInfo(
             url=URL("http://judge.test/v1/responses"),

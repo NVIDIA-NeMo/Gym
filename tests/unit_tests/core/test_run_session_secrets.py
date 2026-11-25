@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from nemo_gym.core.run_session_secrets import RUN_SESSION_SECRET_ENV_PREFIX, without_run_session_secrets
+from nemo_gym.core.run_token import RUN_TOKEN_ENV
 
 
 def test_without_run_session_secrets_drops_only_their_variables() -> None:
@@ -17,3 +18,9 @@ def test_without_run_session_secrets_drops_only_their_variables() -> None:
     }
     # A copy: the mapping it reads keeps them.
     assert environ[RUN_SESSION_SECRET_ENV_PREFIX + "0123456789ABCDEF"] == "secret"
+
+
+def test_without_run_session_secrets_drops_the_runs_token() -> None:
+    environ = {"PATH": "/usr/bin", RUN_TOKEN_ENV: "the-token", RUN_TOKEN_ENV + "_NOT": "kept"}
+
+    assert without_run_session_secrets(environ) == {"PATH": "/usr/bin", RUN_TOKEN_ENV + "_NOT": "kept"}

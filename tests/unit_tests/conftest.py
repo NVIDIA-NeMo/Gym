@@ -4,11 +4,13 @@
 """Session hygiene for the core unit tests."""
 
 import logging
+import os
 
 import pytest
 
 import nemo_gym.artifacts.exporters as exporters_module
 from nemo_gym.config.global_config import reset_global_config_dict
+from nemo_gym.core.run_token import RUN_TOKEN_DIR_ENV, RUN_TOKEN_ENV
 from tests.unit_tests.data.tasks.harbor.harbor_registry_fakes import FakeRegistryClient
 
 
@@ -52,6 +54,28 @@ def fresh_global_config():
     reset_global_config_dict()
     yield
     reset_global_config_dict()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def run_token_files_of_the_session(tmp_path_factory: pytest.TempPathFactory):
+    """A supervisor that a test starts writes the run's token file (``nemo_gym.core.run_token``) into a directory of
+    the session's, never into the user's cache."""
+    previous = os.environ.get(RUN_TOKEN_DIR_ENV)
+    os.environ[RUN_TOKEN_DIR_ENV] = str(tmp_path_factory.mktemp("run-tokens"))
+    yield
+    if previous is None:
+        os.environ.pop(RUN_TOKEN_DIR_ENV, None)
+    else:
+        os.environ[RUN_TOKEN_DIR_ENV] = previous
+
+
+@pytest.fixture(autouse=True)
+def fresh_run_token():
+    """A supervisor that a test starts gives the process a run token, which every later ``ServerClient`` call would
+    send, and a test may not shut the supervisor down. Every test starts and ends without one."""
+    os.environ.pop(RUN_TOKEN_ENV, None)
+    yield
+    os.environ.pop(RUN_TOKEN_ENV, None)
 
 
 @pytest.fixture(autouse=True)

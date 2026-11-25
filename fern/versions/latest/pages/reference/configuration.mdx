@@ -470,6 +470,27 @@ wandb_api_key: your-wandb-key
 
 Masking follows static config references to their source values, including shared header mappings and URL passwords, while keeping ordinary headers and unrelated unresolved expressions intact. It inspects supported `oc.env`, `oc.select` and static-input `oc.decode` expressions without evaluating resolvers. Dynamic references, custom resolvers and runtime-backed decoding such as `oc.decode` of an environment value cannot be inspected safely, so the route refuses to serve those credential configs. Use static references or the supported expressions for credential values, and static references for header mappings.
 
+### The Run's Token on Orchestration Routes
+
+**`require_run_token`** — Whether every Gym server answers its orchestration routes only for callers that send the run's token.
+
+- **Default:** `false`. The launcher (`gym env start`, or anything that starts servers through it) still makes one random token per run. Every server it starts gets the token through the `NEMO_GYM_RUN_TOKEN` environment variable, and Gym's server client sends it in the `X-NeMo-Gym-Run-Token` header with every call to another server. Nothing checks it.
+- **Why:** code in a sandbox can often reach the servers over the network, and a caller's address does not tell it apart from the run's own servers: a provider's port forwarder can make sandbox traffic arrive from loopback.
+- **Routes it covers:**
+  - Agent servers: `/run`, `/aggregate_metrics`, `/v1/agent_sessions` (with `/close` and `/capabilities`), and `/rollouts/{rollout_id}/stop`.
+  - Resources servers: `/seed_session`, `/close_session`, `/verify`, `/aggregate_metrics`, and `/reverify_mode`.
+  - Environment servers: `/run` and `/aggregate_metrics`.
+
+  A call without the token gets HTTP 401. Routes that code in a sandbox calls with a credential of its own stay open: tool routes (session cookie), `/mcp` (MCP session token), an Environment Server's tool routes (episode token), model inference, an agent's own routes and health checks. A server adds routes of its own through `run_token_routes()`. A server class whose routes code in a sandbox can reach can require the token in every run with `requires_run_token = True`.
+- **Clients in other processes:** on the launcher's host, a client that loads its config from the head server, such as `gym eval` started in another terminal, reads the token from a file under `~/.cache/nemo-gym/run-tokens/` (or the directory `NEMO_GYM_RUN_TOKEN_DIR` names) that only the launcher's user can read. On another host, set `NEMO_GYM_RUN_TOKEN` in the client's environment, or set it before `gym env start` to give the run a token of your choice. An HTTP client other than Gym's sends the header itself.
+- **At startup:** with `require_run_token: true`, a server whose process has no token fails to start. The launcher refuses a reused venv (`skip_venv_if_present`) whose Gym does not send the token.
+
+The token never enters the config, so the head server never serves it. Docker, OpenSandbox, OpenShell, bwrap and Enroot sandboxes do not get the server's environment. The local and Apptainer providers leave the variable out of the environment they pass.
+
+<Warning>
+Code that the local or Apptainer provider runs shares the server's user, and its process table too unless Apptainer is started with `--containall`. So it can read the token from `/proc` or from the token file: those providers do not keep the token from sandboxed code.
+</Warning>
+
 ### Multi-Node Configuration
 
 **`use_absolute_ip`** — Controls the default host servers bind to.

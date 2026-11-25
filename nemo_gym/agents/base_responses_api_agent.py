@@ -928,6 +928,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         accesses.update((access.name, access) for access in request.tool_accesses)
         return list(accesses.values())
 
+    def run_token_routes(self) -> frozenset[str]:
+        """The run, agent session and stop routes, which only the run's own servers and clients call (``SimpleServer``).
+
+        ``/v1/responses`` and an agent's own routes are not among them: code in a sandbox may call them.
+        """
+        return super().run_token_routes() | {
+            "/run",
+            "/aggregate_metrics",
+            "/v1/agent_sessions",
+            "/v1/agent_sessions/close",
+            "/v1/agent_sessions/capabilities",
+            "/rollouts/{rollout_id}/stop",
+        }
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI(lifespan=self._drain_sessions_on_shutdown)
 

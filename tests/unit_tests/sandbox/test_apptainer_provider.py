@@ -174,6 +174,12 @@ def test_apptainer_subprocess_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "NEMO_GYM_RUN_SESSION_SECRET_0123456789ABCDEF" not in env
 
 
+def test_apptainer_subprocess_env_leaves_the_runs_token_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEMO_GYM_RUN_TOKEN", "the-token")
+
+    assert "NEMO_GYM_RUN_TOKEN" not in apptainer_provider._apptainer_subprocess_env(None)
+
+
 def test_coerce_config() -> None:
     coerce = apptainer_provider._coerce_config
     cls = apptainer_provider.ApptainerExecConfig
