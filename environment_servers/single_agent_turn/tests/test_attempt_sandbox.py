@@ -13,7 +13,6 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ValidationError
 
 from environment_servers.single_agent_turn.app import (
-    AttemptSandboxConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
@@ -28,7 +27,12 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, OwnedSandboxes, SingleAgentTurnResponse
+from nemo_gym.server_runtime import (
+    NG_SANDBOX_ACCESS_KEY,
+    AttemptSandboxConfig,
+    OwnedSandboxes,
+    SingleAgentTurnResponse,
+)
 from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
 
