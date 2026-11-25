@@ -3,7 +3,6 @@ config_paths:
   - responses_api_agents/synclaw_agent/configs/synclaw_agent.yaml
 
 synclaw_agent:
-  _inherit_from: synclaw_agent
   responses_api_agents:
     synclaw_agent:
       resources_server:
