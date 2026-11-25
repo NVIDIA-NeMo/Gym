@@ -3,12 +3,13 @@
 """The Resources Server's side of a tool sidecar: start its tool host in the group, and read its tool state back.
 
 A Resources Server opts in by listing :class:`ToolSidecarResources` first among its bases and using a config that
-derives from :class:`ToolSidecarResourcesConfig`. With ``tool_sidecar`` set, it serves two more routes, which the
-Environment Server calls with operate-scope access to the attempt's group:
+derives from :class:`ToolSidecarResourcesConfig`. With ``tool_sidecar`` set:
 
-- ``/tool_sidecar/prepare`` installs a private Python runtime in the sidecar if the image lacks it, unpacks this
-  server's ``nemo_gym`` sources and its own package there, starts the tool host (``tool_sidecar_host.py``), and seeds
-  the episode's session in it with the seed this server got. The reply names the tool host's session cookies.
+- its seed declares the sidecar in ``sandbox_group``, and the Environment Server starts it with the attempt's group;
+- ``/prepare_sandbox`` installs a private Python runtime in the sidecar if the image lacks it, unpacks this server's
+  ``nemo_gym`` sources and its own package there, starts the tool host (``tool_sidecar_host.py``), and seeds the
+  episode's session in it with the seed this server got. The tool host signs sessions with this server's key, so the
+  Resources session's cookies name the same session there;
 - ``/tool_sidecar/collect`` reads the session's tool state from the tool host (:meth:`export_tool_state` there) and
   hands it to :meth:`import_tool_state` here, so ``/verify`` grades the state the agent's tool calls left.
 
@@ -34,7 +35,7 @@ from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import JsonValue, model_validator
+from pydantic import BaseModel, JsonValue, PrivateAttr, model_validator
 
 import nemo_gym
 from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
@@ -42,16 +43,14 @@ from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.environment.tool_sidecar_host import STATE_PATH
 from nemo_gym.sandbox.api import AsyncSandboxSidecar
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
+from nemo_gym.server_runtime.attempt_sandbox import ResourcesPrepareSandboxRequest, SandboxGroupSpec
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig, ResourcesSeedSessionRequest
 from nemo_gym.server_runtime.sandbox_borrow import borrow
 from nemo_gym.server_runtime.tool_sidecar import (
     TOOL_SIDECAR_COLLECT_PATH,
-    TOOL_SIDECAR_PREPARE_PATH,
     ToolSidecarCollectRequest,
     ToolSidecarCollectResponse,
     ToolSidecarConfig,
-    ToolSidecarPrepareRequest,
-    ToolSidecarPrepareResponse,
 )
 
 
@@ -116,6 +115,11 @@ class ToolSidecarResourcesConfig(BaseResourcesServerConfig):
                 raise ValueError(
                     f"tool_sidecar would copy {secrets} into a sidecar that code in the agent container can read; "
                     "keep credentials out of a config whose tools run in a sidecar"
+                )
+            if self.mcp_bearer_token:
+                raise ValueError(
+                    "tool_sidecar needs sessions signed with the server's public key, which the tool host shares; "
+                    "mcp_bearer_token signs them with a secret made for the run"
                 )
         return self
 
@@ -187,7 +191,7 @@ def _write_private(content: bytes, suffix: str) -> Path:
     return target
 
 
-class ToolSidecarResources:
+class ToolSidecarResources(BaseModel):
     """Serve this Resources Server's tools from a sidecar of the attempt's group, when its config sets
     ``tool_sidecar``. List it before the Resources Server class among the bases.
 
@@ -200,6 +204,16 @@ class ToolSidecarResources:
 
     tool_sidecar_requirements: ClassVar[tuple[str, ...]] = ()
     tool_sidecar_sources: ClassVar[tuple[str, ...]] = ()
+    # The seed each session's tool host is seeded with at /prepare_sandbox, kept from /seed_session until then.
+    _tool_sidecar_seeds: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        if self.config.tool_sidecar is not None and self.session_secret != self.get_session_middleware_key():  # type: ignore[attr-defined]
+            raise ValueError(
+                f"{type(self).__name__} signs sessions with a secret the tool host does not share, so its tools "
+                "cannot run in a sidecar"
+            )
 
     def export_tool_state(self, session_id: str) -> JsonValue:
         """In the sidecar: the session's tool state that grading reads, as JSON. None when the tools keep none."""
@@ -212,23 +226,40 @@ class ToolSidecarResources:
     def register_protocol_routes(self, app: FastAPI) -> None:
         super().register_protocol_routes(app)  # type: ignore[misc]
         if self.config.tool_sidecar is not None:  # type: ignore[attr-defined]
-            app.post(TOOL_SIDECAR_PREPARE_PATH)(self.prepare_tool_sidecar)
             app.post(TOOL_SIDECAR_COLLECT_PATH)(self.collect_tool_sidecar)
 
-    async def prepare_tool_sidecar(self, body: ToolSidecarPrepareRequest) -> ToolSidecarPrepareResponse:
+    def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
+        """The attempt's group holds the tool sidecar; the seed is kept for the tool host's own seed."""
+        config = self.config.tool_sidecar  # type: ignore[attr-defined]
+        if config is None:
+            return super().sandbox_group(body)  # type: ignore[misc]
+        self._tool_sidecar_seeds[body.resources_session_id] = body.model_dump(mode="json")
+        return SandboxGroupSpec(sidecars=[config.group_sidecar()])
+
+    def _prepares_sandbox(self) -> bool:
+        # Only a server whose tools run in a sidecar prepares the group: with them in process, its seed declares none.
+        overridden = type(self).prepare_sandbox is not ToolSidecarResources.prepare_sandbox
+        return self.config.tool_sidecar is not None or overridden  # type: ignore[attr-defined]
+
+    async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
         """Start the tool host in the group's sidecar unless it runs, and seed the episode's session in it."""
-        config = self._tool_sidecar_config()
+        config = self.config.tool_sidecar  # type: ignore[attr-defined]
+        if config is None:
+            return
+        seed = self._tool_sidecar_seeds.get(body.resources_session_id)
+        if seed is None:
+            raise RuntimeError(f"no seed of {body.resources_session_id!r} to seed its tool host with")
         python = self.tool_host_runtime().python
         sandbox = await borrow(body.sandbox_access)
         try:
             sidecar = sandbox.sidecar(config.name)
             await self._start_tool_host(sidecar, sandbox.provider_name, config)
-            reply = await _call(sidecar, python, config.port, "POST", "/seed_session", body.seed, cookies={})
+            reply = await _call(sidecar, python, config.port, "POST", "/seed_session", seed, cookies={})
         finally:
             await sandbox.disconnect()
         if reply["status"] != 200:
             raise RuntimeError(f"The tool host refused the seed with HTTP {reply['status']}: {reply['body'][:2000]}")
-        return ToolSidecarPrepareResponse(cookies=reply["cookies"])
+        self._tool_sidecar_seeds.pop(body.resources_session_id, None)
 
     async def collect_tool_sidecar(
         self, request: Request, body: ToolSidecarCollectRequest
@@ -239,7 +270,7 @@ class ToolSidecarResources:
         sandbox = await borrow(body.sandbox_access)
         try:
             reply = await _call(
-                sandbox.sidecar(config.name), python, config.port, "POST", STATE_PATH, {}, cookies=body.cookies
+                sandbox.sidecar(config.name), python, config.port, "POST", STATE_PATH, {}, cookies=request.cookies
             )
         finally:
             await sandbox.disconnect()

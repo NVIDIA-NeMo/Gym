@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
+from aiohttp import ClientConnectionError
 from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServer
@@ -16,7 +17,11 @@ from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, DirectHTTPToolAccess
 from tests.helpers.single_agent_turn import _request, _Response
 
 
-TOOL_COOKIES = {"session": "tool-host-cookie"}
+# The Resources seed's reply: it declares the tool sidecar in the attempt's group, and prepares it.
+SEED_REPLY = {
+    "resources_session_id": "resources-session",
+    "sandbox_group": {"sidecars": [{"name": "tools", "image": "tools:1"}], "prepare": True},
+}
 
 
 class _SidecarProvider(_Provider):
@@ -56,8 +61,9 @@ def _sidecar_server(
         client.global_config_dict,
         {"resources": {"resources_servers": {"test": {"tool_sidecar": tool_sidecar or {"image": "tools:1"}}}}},
     )
-    # The prepare reply after the Resources seed, and the collect reply before /verify.
-    client.responses.insert(1, _Response({"cookies": TOOL_COOKIES}))
+    client.responses[0] = _Response(SEED_REPLY)
+    # The prepare reply after the group starts, and the collect reply before /verify.
+    client.responses.insert(1, _Response({"resources_session_id": "resources-session"}))
     client.responses.insert(5, _Response({"imported": True}))
     return server, client
 
@@ -74,16 +80,15 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
 
     assert result.failure is None, result.failure
     assert result.result.reward == 1.0
-    # One group: the agent container, model only, and the tool sidecar, which reaches no host.
+    # One group: the agent container, model only, and the tool sidecar the seed declared.
     assert list(provider.boxes) == ["sb-1"]
     spec = provider.boxes["sb-1"]["spec"]
     assert spec.provider_options["network_policy"] == {"rule": "model_only", "allow": ["10.0.0.5"]}
     [sidecar] = spec.sidecars
     assert (sidecar.name, sidecar.image) == ("tools", "tools:1")
-    assert sidecar.provider_options == {"network_policy": {"rule": "no_network", "allow": []}}
     assert _paths(client) == [
         "/seed_session",
-        "/tool_sidecar/prepare",
+        "/prepare_sandbox",
         "/v1/agent_sessions",
         "/ng-rollout/rollout-a2/v1/responses",
         "/v1/agent_sessions/close",
@@ -92,20 +97,18 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
         "/close_session",
     ]
     calls = {path: kwargs for _, path, kwargs in client.calls}
-    # The Resources Server prepares the sidecar with the seed it got and access to the group.
-    prepare = calls["/tool_sidecar/prepare"]["json"]
-    assert prepare["seed"] == calls["/seed_session"]["json"]
+    # The Resources Server prepares the sidecar through access to the group.
+    prepare = calls["/prepare_sandbox"]["json"]
     assert SandboxAccess.model_validate(prepare["sandbox_access"]).connection.descriptor["sandbox_id"] == "sb-1"
     # The agent container reaches the tool host before the agent is seeded.
     assert provider.commands and "http://tools:8000/_tool_sidecar/ready" in provider.commands[0]
-    # The agent's only tool grant is the sidecar, with the tool host's cookies, not the Resources host.
+    # The agent's only tool grant is the sidecar, with the Resources session's cookies, not the Resources host.
     seed = AgentSeedSessionRequest.model_validate(calls["/v1/agent_sessions"]["json"])
     [grant] = seed.tool_accesses
     assert isinstance(grant, DirectHTTPToolAccess)
-    assert (str(grant.base_url).rstrip("/"), dict(grant.cookies)) == ("http://tools:8000", TOOL_COOKIES)
-    # The state the tool calls left is copied out of the sidecar before /verify grades, with the same cookies.
+    assert (str(grant.base_url).rstrip("/"), dict(grant.cookies)) == ("http://tools:8000", {"session": "cookie-value"})
+    # The state the tool calls left is copied out of the same group before /verify grades it.
     collect = calls["/tool_sidecar/collect"]["json"]
-    assert collect["cookies"] == TOOL_COOKIES
     assert collect["sandbox_access"] == calls["/verify"]["json"][NG_SANDBOX_ACCESS_KEY]
     assert provider.running() == []
 
@@ -113,7 +116,7 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
 @pytest.mark.parametrize(
     ("failure", "probe_exit", "message"),
     [
-        (ConnectionResetError("resources went away"), 0, "resources went away"),
+        (ClientConnectionError("resources went away"), 0, "resources went away"),
         (None, 7, "cannot reach the tool sidecar"),
     ],
 )
@@ -138,7 +141,7 @@ async def test_a_tool_sidecar_that_is_not_ready_fails_the_attempt_for_a_retry_be
 async def test_tool_state_that_cannot_be_collected_is_never_graded() -> None:
     provider = _SidecarProvider()
     server, client = _sidecar_server(provider)
-    client.responses[5] = ConnectionResetError("sidecar went away")
+    client.responses[5] = ClientConnectionError("sidecar went away")
 
     result = await server.run_request(_request())
 
@@ -148,17 +151,18 @@ async def test_tool_state_that_cannot_be_collected_is_never_graded() -> None:
     assert provider.running() == []
 
 
-async def test_a_sandbox_the_resources_seed_lends_has_no_tool_sidecar() -> None:
+async def test_a_seed_that_does_not_declare_the_tool_sidecar_fails_for_good() -> None:
     provider = _SidecarProvider()
     server, client = _sidecar_server(provider)
-    lent = {"connection": {"kind": "direct", "provider_config_ref": "task", "descriptor": {"id": "t"}}, "workdir": "/"}
-    client.responses[0] = _Response({"resources_session_id": "resources-session", "sandbox_access": lent})
+    client.responses[0] = _Response({"resources_session_id": "resources-session"})
+    client.responses.pop(1)
 
     result = await server.run_request(_request())
 
     assert (result.failure.stage, result.failure.terminal) == ("seed", True)
-    assert "has no tool sidecar" in result.failure.failure_reason
-    assert provider.boxes == {}
+    assert "did not declare" in result.failure.failure_reason
+    assert "/v1/agent_sessions" not in _paths(client)
+    assert provider.running() == []
 
 
 def test_a_pairing_that_cannot_start_or_grant_the_tool_sidecar_is_refused_at_startup() -> None:
@@ -168,6 +172,10 @@ def test_a_pairing_that_cannot_start_or_grant_the_tool_sidecar_is_refused_at_sta
 
     server, _ = _sidecar_server(_SidecarProvider(), sandbox_provider=None, sandbox_config=None)
     with pytest.raises(ValueError, match="only with sandbox_provider and sandbox_config set"):
+        server._check_tool_sidecar()
+
+    server, _ = _sidecar_server(_SidecarProvider(), sandbox_opt_out={"task": True})
+    with pytest.raises(ValueError, match="no task sandbox opt-out"):
         server._check_tool_sidecar()
 
 

@@ -41,22 +41,25 @@ class _OpenEgressOnly(_SidecarProvider):
     capabilities = SandboxCapabilities(network_rules=frozenset({"inherit"}))
 
 
-def test_a_tool_sidecar_reaches_no_host_unless_it_names_one() -> None:
-    closed = ToolSidecarConfig(image="python:3.13-slim").sidecar_spec(_SidecarProvider())
-    assert (closed.name, closed.image) == ("tools", "python:3.13-slim")
-    assert closed.provider_options == {"network_policy": {"rule": "no_network", "allow": []}}
-    assert (closed.resources.cpu, closed.resources.memory_mib) == (1, 2048)
+def test_the_seed_declares_the_tool_sidecar_and_the_agent_reaches_it_by_its_name() -> None:
+    closed = ToolSidecarConfig(image="python:3.13-slim")
+    sidecar = closed.group_sidecar()
+    assert (sidecar.name, sidecar.image, sidecar.resources) == (
+        "tools",
+        "python:3.13-slim",
+        {"cpu": 1, "memory_mib": 2048},
+    )
+    assert (closed.url, closed.network_rule) == ("http://tools:8000", "no_network")
 
-    search = ToolSidecarConfig(image="search:1", name="search", egress_hosts=["api.example.com"])
-    spec = search.sidecar_spec(_SidecarProvider())
-    assert spec.provider_options == {"network_policy": {"rule": "hosts_only", "allow": ["api.example.com"]}}
-    assert search.url == "http://search:8000"
+    search = ToolSidecarConfig(image="search:1", name="search", port=9000, egress_hosts=["api.example.com"])
+    assert (search.url, search.network_rule) == ("http://search:9000", "hosts_only")
 
 
 def test_a_provider_that_runs_no_sidecar_or_cannot_close_its_egress_is_refused() -> None:
     config = ToolSidecarConfig(image="python:3.13-slim")
+    config.check_provider(_SidecarProvider())
     with pytest.raises(ValueError, match="runs no sidecars"):
-        config.sidecar_spec(_NoSidecars())
+        config.check_provider(_NoSidecars())
     with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
         config.check_provider(_OpenEgressOnly())
 

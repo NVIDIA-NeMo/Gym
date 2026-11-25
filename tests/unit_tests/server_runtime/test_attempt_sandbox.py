@@ -217,6 +217,11 @@ class _SidecarProvider(_Provider):
     ) -> None:
         pass
 
+    async def upload_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: Path, target_path: str
+    ) -> None:
+        pass
+
 
 class _TaskInput(BaseModel):
     value: str = "task"

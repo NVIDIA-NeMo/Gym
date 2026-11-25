@@ -98,7 +98,9 @@ class SimpleWeatherResourcesServer(ToolSidecarResources, SimpleWeatherVerifier, 
             identity = self._episode_by_session.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
-        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+        return ResourcesSeedSessionResponse(
+            resources_session_id=resources_session_id, sandbox_group=self.declared_sandbox_group(body)
+        )
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         # Sessions are keyed by resources_session_id, not the cookie's session id, so the body names the session.

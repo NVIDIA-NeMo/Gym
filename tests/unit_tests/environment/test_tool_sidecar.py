@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.environment import tool_sidecar
@@ -36,8 +36,8 @@ from nemo_gym.environment.tool_sidecar_host import build_app
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxStatus
+from nemo_gym.server_runtime.attempt_sandbox import ResourcesPrepareSandboxRequest
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.server_runtime.tool_sidecar import ToolSidecarCollectRequest, ToolSidecarPrepareRequest
 from tests.unit_tests.environment.fixtures.tool_server.app import LedgerConfig, LedgerResourcesServer
 
 
@@ -259,35 +259,60 @@ def _access() -> SandboxAccess:
 needs_setsid = pytest.mark.skipif(shutil.which("setsid") is None, reason="the tool host starts detached with setsid")
 
 
+def _verify_body() -> dict[str, Any]:
+    return {
+        "responses_create_params": {"input": "pay twice"},
+        "response": {
+            "id": "response",
+            "created_at": 0,
+            "model": "model",
+            "object": "response",
+            "output": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "tools": [],
+        },
+    }
+
+
 @needs_setsid
 async def test_the_tool_state_the_agents_calls_leave_in_the_sidecar_is_what_the_host_grades(
     local_sidecar: Any,
 ) -> None:
     port = _free_port()
     server = _server(_config(port))
-    # The Resources host's own session, seeded as usual: it never sees a tool call.
-    await server.initialize_session_state(SESSION, server.seed_request_model(opening="hi"))
+    with TestClient(server.setup_webserver()) as host:
+        # The Resources seed declares the tool sidecar in the attempt's group, and that it prepares it.
+        seeded = host.post("/seed_session", json=_seed()).json()
+        assert seeded["sandbox_group"]["sidecars"] == [
+            {"name": "tools", "image": "python:3.13-slim", "env": {}, "resources": {"cpu": 1, "memory_mib": 2048}}
+        ]
+        assert seeded["sandbox_group"]["prepare"] is True
+        cookies = dict(host.cookies)
 
-    prepared = await server.prepare_tool_sidecar(ToolSidecarPrepareRequest(seed=_seed(), sandbox_access=_access()))
+        await server.prepare_sandbox(
+            ResourcesPrepareSandboxRequest(resources_session_id=SESSION, sandbox_access=_access())
+        )
 
-    # The agent's tool calls go to the tool host, with the cookies the prepare reply names.
-    async with aiohttp.ClientSession(cookies=prepared.cookies) as agent:
-        for value in (5, 7):
-            async with agent.post(f"http://127.0.0.1:{port}/pay", json={"value": value}) as reply:
-                assert reply.status == 200
-    assert server._ledgers[SESSION] == ["opening:hi"]
+        # The agent's tool calls go to the tool host with the Resources session's cookies, which it reads as its own.
+        async with aiohttp.ClientSession(cookies=cookies) as agent:
+            for value in (5, 7):
+                async with agent.post(f"http://127.0.0.1:{port}/pay", json={"value": value}) as reply:
+                    assert (reply.status, await reply.text()) == (200, f"pay #{1 if value == 5 else 2}")
+        assert server._ledgers[SESSION] == ["opening:hi"]
+        # Before the copy, the Resources host would grade an untouched ledger.
+        assert host.post(
+            "/tool_sidecar/collect", json={"sandbox_access": _access().model_dump(mode="json")}
+        ).json() == {"imported": True}
+        assert server._ledgers[SESSION] == ["opening:hi", "pay:5", "pay:7"]
+        assert host.post("/verify", json=_verify_body()).json()["reward"] == 1.0
 
-    request = SimpleNamespace(session={SESSION_ID_KEY: SESSION})
-    collected = await server.collect_tool_sidecar(
-        request,  # type: ignore[arg-type]
-        ToolSidecarCollectRequest(sandbox_access=_access(), cookies=prepared.cookies),
-    )
-
-    assert collected.imported is True
-    assert server._ledgers[SESSION] == ["opening:hi", "pay:5", "pay:7"]
     # A second prepare of the same group finds the tool host answering and starts no second one.
     starts = [argv for argv in local_sidecar.provider.exec_argvs if "setsid nohup" in " ".join(argv)]
-    await server.prepare_tool_sidecar(ToolSidecarPrepareRequest(seed=_seed(), sandbox_access=_access()))
+    server.sandbox_group(ResourcesSeedSessionRequest.model_validate(_seed()))
+    await server.prepare_sandbox(
+        ResourcesPrepareSandboxRequest(resources_session_id=SESSION, sandbox_access=_access())
+    )
     assert [argv for argv in local_sidecar.provider.exec_argvs if "setsid nohup" in " ".join(argv)] == starts
     assert len(starts) == 1
 
@@ -301,26 +326,42 @@ async def test_a_tool_host_that_exits_fails_the_prepare_with_its_log(
     monkeypatch.setattr(
         LedgerResourcesServer, "tool_host_spec", lambda self: spec() | {"class": "MissingResourcesServer"}
     )
+    server.sandbox_group(ResourcesSeedSessionRequest.model_validate(_seed()))
 
     with pytest.raises(RuntimeError, match=r"(?s)tool host exited.*MissingResourcesServer"):
-        await server.prepare_tool_sidecar(ToolSidecarPrepareRequest(seed=_seed(), sandbox_access=_access()))
+        await server.prepare_sandbox(
+            ResourcesPrepareSandboxRequest(resources_session_id=SESSION, sandbox_access=_access())
+        )
 
 
 @needs_setsid
 async def test_a_seed_the_tool_host_refuses_fails_the_prepare(local_sidecar: Any) -> None:
     server = _server(_config(_free_port()))
-    seed = _seed() | {"task_data": {"opening": ["not", "a", "string"]}}
+    server.sandbox_group(ResourcesSeedSessionRequest.model_validate(_seed() | {"task_data": {"opening": ["no"]}}))
 
     with pytest.raises(RuntimeError, match="refused the seed with HTTP 422"):
-        await server.prepare_tool_sidecar(ToolSidecarPrepareRequest(seed=seed, sandbox_access=_access()))
+        await server.prepare_sandbox(
+            ResourcesPrepareSandboxRequest(resources_session_id=SESSION, sandbox_access=_access())
+        )
 
 
-async def test_a_server_whose_tools_run_in_process_serves_no_sidecar_routes() -> None:
+async def test_a_prepare_without_a_seed_fails_and_one_without_a_tool_sidecar_does_nothing() -> None:
+    request = ResourcesPrepareSandboxRequest(resources_session_id=SESSION, sandbox_access=_access())
+    with pytest.raises(RuntimeError, match="no seed of"):
+        await _server(_config()).prepare_sandbox(request)
+    assert await _server(_config().model_copy(update={"tool_sidecar": None})).prepare_sandbox(request) is None
+
+
+async def test_a_server_whose_tools_run_in_process_declares_no_group_and_serves_no_sidecar_routes() -> None:
     server = _server(_config().model_copy(update={"tool_sidecar": None}))
-    paths = {getattr(route, "path", None) for route in server.setup_webserver().router.routes}
+    app = server.setup_webserver()
+    paths = {getattr(route, "path", None) for route in app.router.routes}
 
-    assert "/tool_sidecar/prepare" not in paths
+    with TestClient(app) as host:
+        assert "sandbox_group" not in host.post("/seed_session", json=_seed()).json()
+    assert "/prepare_sandbox" not in paths
+
     assert "/tool_sidecar/collect" not in paths
-    assert {"/tool_sidecar/prepare", "/tool_sidecar/collect"} <= {
+    assert "/tool_sidecar/collect" in {
         getattr(route, "path", None) for route in _server(_config()).setup_webserver().router.routes
     }
