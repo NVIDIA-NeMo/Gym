@@ -215,7 +215,7 @@ time.sleep(60)
                 ready.set()
             await asyncio.wait_for(ready.wait(), 3)
             pool = Path(bound["native_pool_evidence"])
-            pool.mkdir()
+            pool.mkdir(exist_ok=True)
             write_json(pool / "reset.json", {"layout_id": layout})
             (pool / "sensors.mp4").write_bytes(bytes([layout]))
             (self.directory / "native").mkdir()
@@ -241,6 +241,13 @@ time.sleep(60)
                     for idx, case in enumerate((CASE, second))
                 )
             )
+            # Re-acquiring a finished case's slot must succeed on retry / repeat.
+            retry_req = _episode_request(CASE, 2)
+            retry_result = await server.run(
+                retry_req,
+                CleanupContext(episode_id=retry_req.episode_id, cleanup_timeout_seconds=10.0),
+            )
+            assert retry_result.result["native_score"] == 0
             process = server._pool.process
             temporary = Path(server._pool.directory.name)
         assert process.returncode is not None
@@ -341,7 +348,7 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(
     assert result["layout_sha256"] == digest
     assert result["simulator"] == ("isaacsim_physx" if backend == "isaacsim" else "isaaclab3_newton")
     assert result["reward"] == float(fault == "success")
-    if fault in ("unscored", "unclean", "deadline", "wrong_backend"):
+    if fault in ("unscored", "unclean", "wrong_backend"):
         assert result["mask_sample"] is True
         assert result["native_score"] is None
         assert result.get("ng_verifier_invocations", []) == []
@@ -350,7 +357,6 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(
             == {
                 "unscored": ENVIRONMENT_SERVER_FAILED,
                 "unclean": HARNESS_TERMINATION_UNCONFIRMED,
-                "deadline": AGENT_TIMEOUT,
                 "wrong_backend": ENVIRONMENT_SERVER_FAILED,
             }[fault]
         )
@@ -358,7 +364,14 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(
             assert all(HORIZON_AUDIT not in command for command in commands)
         return
     assert result["mask_sample"] is False
-    assert result["failure_kind"] == (None if fault == "success" else AGENT_LIMIT)
+    assert (
+        result["failure_kind"]
+        == {
+            "success": None,
+            "decision_budget": AGENT_LIMIT,
+            "deadline": AGENT_TIMEOUT,
+        }[fault]
+    )
     assert result["native_score"] == (1 if fault == "success" else 0.3)
     assert result["extended_score"] == (1 if fault == "success" else 0.4)
     assert Path(result["video_path"]).is_file()
@@ -545,6 +558,9 @@ def test_native_pool_shared_startup_gate_verifies_head_rgb(tmp_path: Path, monke
     bad_launcher = tmp_path / "bad_pool.py"
     bad_launcher.write_text(launcher.read_text().replace("initial-ready", "black-frame"))
     (gate / "release").write_text("go\n")
+    # Reuse a log that already contains a stale ready line from a prior pool.
+    stale_log = tmp_path / "stale-pool.log"
+    stale_log.write_text("[head_rgb] initial-ready slots=[0]\n")
 
     async def run_bad():
         pool = NativePool()
@@ -555,13 +571,33 @@ def test_native_pool_shared_startup_gate_verifies_head_rgb(tmp_path: Path, monke
                     bad_launcher,
                     {"c0": {}},
                     {},
-                    tmp_path / "bad-pool.log",
+                    stale_log,
                     10,
                 )
         finally:
             await pool.close(5)
 
     asyncio.run(run_bad())
+
+    # Startup gate timeout must raise RuntimeError (evaluation-side), not bare TimeoutError.
+    (gate / "release").unlink()
+
+    async def run_gate_timeout():
+        pool = NativePool()
+        try:
+            with pytest.raises(RuntimeError, match="timed out waiting for the shared startup gate"):
+                await pool.start(
+                    Path(sys.executable),
+                    launcher,
+                    {"c0": {}},
+                    {},
+                    tmp_path / "timeout-pool.log",
+                    0.5,
+                )
+        finally:
+            await pool.close(5)
+
+    asyncio.run(run_gate_timeout())
 
 
 def test_opencode_relay_normalizes_input_images_and_expands_sse_over_aiohttp() -> None:

@@ -58,6 +58,7 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 LOGGER = logging.getLogger(__name__)
 POLICY_FAILURE_KINDS = {
     "policy_failure.decision_budget": AGENT_LIMIT,
+    "policy_failure.deadline": AGENT_TIMEOUT,
     "policy_failure.context": MODEL_CONTEXT_LIMIT,
     "policy_failure.no_progress": AGENT_INVALID_OUTPUT,
 }
@@ -126,6 +127,7 @@ class RoboDojoEnvironmentServer(
     _gpu: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     _pool_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     _pool: NativePool | None = PrivateAttr(default=None)
+    _active_pool_cases: set[str] = PrivateAttr(default_factory=set)
     _cleanup_unconfirmed: bool = PrivateAttr(default=False)
     _relays: dict[str, str] = PrivateAttr(default_factory=dict)
     _relay_mounted: bool = PrivateAttr(default=False)
@@ -180,13 +182,19 @@ class RoboDojoEnvironmentServer(
                         config.pool_startup_seconds,
                     )
                 except BaseException:
-                    self._cleanup_unconfirmed = True
-                    await pool.close(config.cleanup_timeout_seconds)
+                    try:
+                        await pool.close(config.cleanup_timeout_seconds)
+                    except BaseException:
+                        self._cleanup_unconfirmed = True
+                        raise
                     raise
                 self._pool = pool
             if case_id not in self._pool.seats:
-                raise ValueError("This RoboDojo pool case has already been claimed")
-            seat = self._pool.seats.pop(case_id)
+                raise ValueError("This case is missing from the started RoboDojo pool")
+            if case_id in self._active_pool_cases:
+                raise ValueError("This RoboDojo pool case is already running")
+            self._active_pool_cases.add(case_id)
+            seat = self._pool.seats[case_id]
         runner.pool_evidence = Path(seat["native_pool_evidence"]).resolve()
         return {**seat, "model": bound["model"]}
 
@@ -252,6 +260,7 @@ class RoboDojoEnvironmentServer(
         failure_kind = None
         failure_reason = None
         relay_id: str | None = None
+        claimed_pool_case: str | None = None
         if self._relay_mounted:
             relay_id = secrets.token_urlsafe(18)
             self._relays[relay_id] = model_url
@@ -266,6 +275,7 @@ class RoboDojoEnvironmentServer(
                         raise CleanupUnconfirmed("An earlier episode did not release the GPU")
                     if config.pool_cases is not None:
                         bound = await self._pool_slot(task_input.case_id, bound, binding, runner)
+                        claimed_pool_case = task_input.case_id
                     outcome, scores = await runner.run(bound)
                 except CleanupUnconfirmed as error:
                     self._cleanup_unconfirmed = True
@@ -274,7 +284,8 @@ class RoboDojoEnvironmentServer(
                     self._cleanup_unconfirmed = True
                     raise
                 except TimeoutError:
-                    failure_kind, failure_reason = AGENT_TIMEOUT, "RoboDojo supervisor exceeded its episode deadline"
+                    failure_kind = ENVIRONMENT_SERVER_FAILED
+                    failure_reason = "RoboDojo supervisor exceeded its episode deadline"
                 except (EpisodeError, OSError, RuntimeError, ValueError, KeyError) as error:
                     failure_kind = ENVIRONMENT_SERVER_FAILED
                     failure_reason = f"{type(error).__name__}: RoboDojo native measurement failed"
@@ -286,17 +297,16 @@ class RoboDojoEnvironmentServer(
                     ):
                         failure_kind = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure_reason = "Native horizon does not match the frozen case"
-                    elif outcome == "policy_failure.deadline":
-                        failure_kind = AGENT_TIMEOUT
-                        failure_reason = "The episode deadline expired without verified model-side attribution"
         finally:
+            if claimed_pool_case is not None:
+                self._active_pool_cases.discard(claimed_pool_case)
             if relay_id is not None:
                 self._relays.pop(relay_id, None)
         if config.evidence_export_root is not None:
             try:
                 directory = await asyncio.to_thread(runner.export_evidence, config.evidence_export_root)
                 common["evidence_dir"] = str(directory)
-            except OSError:
+            except (OSError, ValueError, KeyError):
                 LOGGER.warning("Could not export RoboDojo evidence from %s", directory, exc_info=True)
         video = directory / "native" / "evaluation" / "sensors.mp4"
         trajectory = directory / "native" / "actor" / "transcript.jsonl"
