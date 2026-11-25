@@ -56,7 +56,14 @@ gym dataset collate \
 
 Math-Verify parses the model's answer with SymPy, so the verifier grades in a sandbox. When the Environment Server
 lends one to `/verify` (`sandbox_opt_out.verifier: false`, as in `benchmarks/aime25/config.yaml`), the Math-Verify
-check runs there instead of in this server:
+check runs there instead of in this server.
+
+AIME opts only the task out (`sandbox_opt_out: {task: true, verifier: false}`): the agent loop runs in the Agent
+Server, and the Environment Server starts a sandbox with no network just before `/verify`. Docker, E2B, and
+OpenSandbox with `networking.enforces_network_policy: true` can apply `no_network`; Enroot applies only `inherit`, so
+such a config refuses to start on it.
+
+How the check runs in the lent sandbox:
 
 - `library_check.py` holds the check. It imports only the standard library and Math-Verify, so the same file runs in
   this server and, uploaded, in the lent sandbox.
