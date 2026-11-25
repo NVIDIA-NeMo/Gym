@@ -50,6 +50,7 @@ from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
 from nemo_gym.core.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.run_token import RUN_TOKEN_HEADER
 from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
@@ -915,7 +916,12 @@ Response content: {content}""")
             e.request_info = _PickleSafeRequestInfo(
                 url=str(request_info.url),
                 method=request_info.method,
-                headers=CIMultiDict(request_info.headers),
+                # The error's repr shows these headers, and an error can reach a log or a model: not the run's token.
+                headers=CIMultiDict(
+                    (name, value)
+                    for name, value in request_info.headers.items()
+                    if name.lower() != RUN_TOKEN_HEADER.lower()
+                ),
                 real_url=str(request_info.real_url),
             )
             e.history = ()

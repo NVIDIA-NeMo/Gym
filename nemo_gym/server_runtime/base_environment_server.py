@@ -327,6 +327,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         )
         self._running_cleanups = {}
 
+    def run_token_routes(self) -> frozenset[str]:
+        """``/run`` and ``/aggregate_metrics``, which only the run's own clients call (``SimpleServer``).
+
+        The tool routes are not among them: an agent's harness calls them with its episode token.
+        """
+        return super().run_token_routes() | {"/run", "/aggregate_metrics"}
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         self.setup_environment_checkpoint(app)

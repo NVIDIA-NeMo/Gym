@@ -29,6 +29,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlsplit
 
@@ -54,6 +55,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.model_call_sampling import model_sampling_context
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.run_token import RUN_TOKEN_ENV, RUN_TOKEN_HEADER, write_run_token_file
 
 
 @mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
@@ -505,3 +507,83 @@ class TestServerClient:
 
         sent = orjson.loads(aiohttp_client_request_mock.call_args.kwargs["data"])
         assert sent["input"][0]["content"][0]["logprobs"] == logprobs
+
+    async def test_every_call_to_another_server_carries_the_runs_token(self, monkeypatch: MonkeyPatch) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=11000),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+        request_mock = AsyncMock(return_value="ok")
+        monkeypatch.setattr(
+            "nemo_gym.client.http_client.get_global_aiohttp_client",
+            MagicMock(return_value=MagicMock(request=request_mock)),
+        )
+
+        monkeypatch.setenv(RUN_TOKEN_ENV, "the-token")
+        await server_client.post(server_name="my_server", url_path="/verify", json={}, headers={"x-existing": "value"})
+        await server_client.get(server_name="my_server", url_path="/reverify_mode")
+        monkeypatch.delenv(RUN_TOKEN_ENV)
+        await server_client.post(server_name="my_server", url_path="/verify", json={})
+
+        with_token, get_with_token, without_token = request_mock.await_args_list
+        assert with_token.kwargs["headers"] == {"x-existing": "value", RUN_TOKEN_HEADER: "the-token"}
+        assert get_with_token.kwargs["headers"] == {RUN_TOKEN_HEADER: "the-token"}
+        # Outside a run there is nothing to send.
+        assert RUN_TOKEN_HEADER not in (without_token.kwargs.get("headers") or {})
+
+    def test_a_process_the_launcher_did_not_start_reads_the_runs_token_from_its_file(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        monkeypatch.delenv(RUN_TOKEN_ENV, raising=False)
+        # The launcher binds every address; a client of this host reaches it on loopback.
+        write_run_token_file("127.0.0.1", 11000, "the-token")
+        global_config_dict = DictConfig({"head_server": {"host": "0.0.0.0", "port": 11000}})
+        monkeypatch.setattr(
+            nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value=global_config_dict)
+        )
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        response = MagicMock(content=b'"remote_server: {host: remote, port: 1234}"')
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", MagicMock(return_value=response))
+
+        ServerClient.load_from_global_config()
+
+        assert os.environ[RUN_TOKEN_ENV] == "the-token"
+        # A token set in the environment wins over the file.
+        monkeypatch.setenv(RUN_TOKEN_ENV, "set-by-the-user")
+        ServerClient.load_from_global_config()
+        assert os.environ[RUN_TOKEN_ENV] == "set-by-the-user"
+
+    def test_a_head_server_without_a_token_file_gives_no_token(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        monkeypatch.delenv(RUN_TOKEN_ENV, raising=False)
+        write_run_token_file("127.0.0.1", 11000, "another-run")
+        global_config_dict = DictConfig({"head_server": {"host": "10.0.0.5", "port": 11000}})
+        monkeypatch.setattr(
+            nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value=global_config_dict)
+        )
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        response = MagicMock(content=b'"remote_server: {host: remote, port: 1234}"')
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", MagicMock(return_value=response))
+
+        ServerClient.load_from_global_config()
+
+        assert RUN_TOKEN_ENV not in os.environ
+
+    def test_a_process_the_launcher_started_takes_its_token_from_its_environment_alone(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        monkeypatch.delenv(RUN_TOKEN_ENV, raising=False)
+        write_run_token_file("127.0.0.1", 0, "a-file-it-does-not-read")
+        global_config_dict = DictConfig({"head_server": {"host": "127.0.0.1", "port": 0}})
+        monkeypatch.setattr(
+            nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value=global_config_dict)
+        )
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "head_server: {host: 127.0.0.1, port: 0}")
+
+        ServerClient.load_from_global_config()
+
+        assert RUN_TOKEN_ENV not in os.environ

@@ -36,7 +36,7 @@ from devtools import pprint
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.client.server_client import ServerClient, ServerStatus
+from nemo_gym.client.server_client import ServerClient, ServerStatus, _connectable_client_host
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
@@ -61,8 +61,16 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
+from nemo_gym.core.run_token import (
+    RUN_TOKEN_ENV,
+    mint_run_token,
+    remove_run_token_file,
+    run_token,
+    write_run_token_file,
+)
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
+from nemo_gym.server_runtime.request_handling.run_token import RunTokenConfig
 from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.server_runtime.supervisor.server_venv import (
     _is_complete_venv,
@@ -511,10 +519,41 @@ def _project_root(dir_path: Path) -> Path | None:
 def _reads_config_dict_file(server: _ConfiguredServer, global_config_dict: DictConfig) -> bool:
     """Whether the Gym a server imports reads the config from the file `NEMO_GYM_CONFIG_DICT_FILE` names.
 
-    A venv set up in this run holds this process's Gym, which does. A complete venv that `skip_venv_if_present`
-    reuses is not set up again and can hold a Gym that reads only `NEMO_GYM_CONFIG_DICT`, so its own interpreter is
-    asked, from the directory and with the import path the server starts with. Nothing is installed or written in
-    the venv. An interpreter that cannot answer counts as one whose Gym does not read the file.
+    The name of the file's variable arrived in Gym together with the code that reads the file.
+    """
+    return _server_gym_imports(
+        server, global_config_dict, "from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME"
+    )
+
+
+def _sends_the_run_token(server: _ConfiguredServer, global_config_dict: DictConfig) -> bool:
+    """Whether the Gym a server imports sends the run's token with its calls (`nemo_gym.core.run_token`)."""
+    return _server_gym_imports(server, global_config_dict, "from nemo_gym.core.run_token import RUN_TOKEN_HEADER")
+
+
+def _refuse_servers_that_cannot_send_the_run_token(
+    configured_servers: list[_ConfiguredServer], global_config_dict: DictConfig
+) -> None:
+    """With `require_run_token`, refuse a run in which a server's Gym does not send the run's token: the other
+    servers would refuse its calls to their orchestration routes."""
+    unable = [
+        server.top_level_path for server in configured_servers if not _sends_the_run_token(server, global_config_dict)
+    ]
+    if unable:
+        raise ConfigError(
+            f"require_run_token is set, but the reused venv of these servers holds a Gym that does not send the run's "
+            f"token: {', '.join(unable)}. Upgrade nemo-gym in those venvs, or have them set up again with "
+            f"`++{SKIP_VENV_IF_PRESENT_KEY_NAME}=false`."
+        )
+
+
+def _server_gym_imports(server: _ConfiguredServer, global_config_dict: DictConfig, statement: str) -> bool:
+    """Whether the Gym a server imports runs ``statement``, an import that only a Gym with a feature can run.
+
+    A venv set up in this run holds this process's Gym, which can. A complete venv that `skip_venv_if_present`
+    reuses is not set up again and can hold an older Gym, so its own interpreter is asked, from the directory and
+    with the import path the server starts with. Nothing is installed or written in the venv. An interpreter that
+    cannot answer counts as one whose Gym cannot.
 
     A server inside this checkout is not asked: its launch puts the checkout before the venv's packages on the
     import path, so it imports this process's Gym whatever Gym its venv holds.
@@ -531,13 +570,11 @@ def _reads_config_dict_file(server: _ConfiguredServer, global_config_dict: DictC
     # `PARENT_DIR` keeps the path Gym was imported from, which can go through a symlink.
     if not reused or (project_root is not None and project_root.resolve() == PARENT_DIR.resolve()):
         return True
-    # The name of the file's variable arrived in Gym together with the code that reads the file.
-    import_file_variable = "from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME"
     # From the server's directory, like its launch: `python -c` imports from the working directory first.
     # `-B` writes no bytecode beside the modules it imports.
     asked = run_command(
         f"cd {shlex.quote(str(server.dir_path))} && {shlex.quote(str(venv_path / 'bin' / 'python'))} "
-        f"-B -c {shlex.quote(import_file_variable)} > /dev/null 2>&1",
+        f"-B -c {shlex.quote(statement)} > /dev/null 2>&1",
         server.dir_path,
         server_name=server.top_level_path,
         project_root=project_root,
@@ -686,6 +723,46 @@ def _startup_outcome(error: BaseException) -> str:
     return "failed"
 
 
+class _RunToken(NamedTuple):
+    """The run's token, and the file that holds it for the other processes of this user on this host."""
+
+    token: str
+    # Whether this run made the token, rather than finding one set for it.
+    minted: bool
+    # The address clients reach the head server at, which names the token's file; None when no file was written.
+    head_server_address: Optional[tuple[str, int]]
+
+    @classmethod
+    def start(cls, head_server_config: Optional[DictConfig]) -> "_RunToken":
+        """Give this process the run's token unless it has one (`mint_run_token`), so every server it starts inherits
+        it, and write the token's file for the address clients reach the head server at."""
+        minted = mint_run_token()
+        token = run_token()
+        host, port = (head_server_config or {}).get("host"), (head_server_config or {}).get("port")
+        if host is None or port is None:
+            return cls(token, minted, None)
+        address = (_connectable_client_host(str(host)), int(port))
+        try:
+            write_run_token_file(*address, token)
+        except OSError as error:
+            # The file only spares clients on this host from setting the token; the run's servers do not need it.
+            print(
+                f"Could not write the run's token file ({error}). A client that this launcher does not start, "
+                f"such as `gym eval` in another shell, needs {RUN_TOKEN_ENV} set to the run's token if the run "
+                "requires it."
+            )
+            return cls(token, minted, None)
+        return cls(token, minted, address)
+
+    def end(self) -> None:
+        """Remove the token's file, and the token when this run made it, so that the next run in this process makes
+        its own."""
+        if self.head_server_address is not None:
+            remove_run_token_file(*self.head_server_address, self.token)
+        if self.minted and os.environ.get(RUN_TOKEN_ENV) == self.token:
+            del os.environ[RUN_TOKEN_ENV]
+
+
 class ServerSupervisor:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
@@ -705,6 +782,8 @@ class ServerSupervisor:  # pragma: no cover
     _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
     # The file that holds a config too long for an environment variable, until shutdown.
     _config_dict_file: Path | None = None
+    # The run's token and its file, from the start of the servers until shutdown.
+    _run_token: Optional["_RunToken"] = None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -814,6 +893,11 @@ class ServerSupervisor:  # pragma: no cover
         config_dict_env = self._config_dict_env(
             OmegaConf.to_yaml(global_config_dict), configured_servers, global_config_dict
         )
+
+        # Before the head server and the servers start, so that each server inherits the run's token.
+        self._run_token = _RunToken.start(global_config_dict.get(HEAD_SERVER_KEY_NAME))
+        if RunTokenConfig.model_validate(global_config_dict).require_run_token:
+            _refuse_servers_that_cannot_send_the_run_token(configured_servers, global_config_dict)
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
@@ -1249,6 +1333,11 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
 
         self._head_server = None
         self._head_server_thread = None
+
+        # Last, once no server is left to call: a call this process still makes until then carries the token.
+        if self._run_token is not None:
+            self._run_token.end()
+            self._run_token = None
 
         print("NeMo Gym finished!")
 

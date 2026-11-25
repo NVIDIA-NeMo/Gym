@@ -53,6 +53,7 @@ from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.core.run_token import RUN_TOKEN_ENV
 from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.server_runtime.base_server import (
     RUN_SESSION_SECRET_ENV_PREFIX,
@@ -1480,6 +1481,16 @@ class TestRunWebserverProxyKwargs:
 
         TestSimpleServer.run_webserver()
         return captured
+
+    def test_a_run_that_requires_its_token_sets_up_the_check_before_serving(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delenv(RUN_TOKEN_ENV, raising=False)
+        with raises(RuntimeError, match="my_server requires the run's token, but its process has none"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"require_run_token": True}, num_workers=None)
+
+        monkeypatch.setenv(RUN_TOKEN_ENV, "the-token")
+        assert self._capture_uvicorn_kwargs(monkeypatch, {"require_run_token": True}, num_workers=None)
+        monkeypatch.delenv(RUN_TOKEN_ENV)
+        assert self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=None)
 
     @mark.parametrize(
         ("config_dict", "num_workers", "uses_reuse_port"),

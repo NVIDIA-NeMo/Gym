@@ -69,6 +69,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.correlation import CorrelationPathError, parse_path
 from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.run_session_secrets import RUN_SESSION_SECRET_ENV_PREFIX
+from nemo_gym.core.run_token import RUN_TOKEN_ENV, RUN_TOKEN_HEADER, run_token
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.ray_support import (
     _connect_server_to_ray,
@@ -84,6 +85,7 @@ from nemo_gym.server_runtime.request_handling.exception_handling import Exceptio
 from nemo_gym.server_runtime.request_handling.request_context import (
     install_request_context_isolation,
 )
+from nemo_gym.server_runtime.request_handling.run_token import RunTokenConfig, require_run_token_on_routes
 from nemo_gym.server_runtime.request_handling.session_id import SessionIDMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import (
     SESSION_SOCKET_DIR_ENV,
@@ -330,6 +332,9 @@ class SimpleServer(BaseServer):
     # public key get_session_middleware_key() derives from the server's class and name: for a server whose routes code
     # it does not trust can call, such as code in a sandbox it lends. mcp_bearer_token turns it on as well.
     signs_sessions_with_run_secret: ClassVar[bool] = False
+    # Answer run_token_routes() only for callers that send the run's token in every run, as `require_run_token: true`
+    # in the global config makes every server do: for a server whose routes code in a sandbox can reach.
+    requires_run_token: ClassVar[bool] = False
 
     def owned_session_routing(self) -> dict[str, Any]:
         """Arguments to ``install_session_routing``: where requests name their session, and how long ownership lasts.
@@ -337,6 +342,44 @@ class SimpleServer(BaseServer):
         A server that sets ``routes_sessions_to_owner`` implements it.
         """
         raise NotImplementedError(f"{type(self).__name__} routes sessions but does not say how they are named")
+
+    def run_token_routes(self) -> frozenset[str]:
+        """The paths of this server's routes that only the run's own servers and clients call, such as ``/verify``.
+
+        When the run requires its token (``require_run_token``) or the class does (``requires_run_token``), these
+        routes answer only callers that send it, as ``ServerClient`` does (``nemo_gym.core.run_token``). Routes that
+        code in a sandbox calls with a credential of its own, such as tool routes, ``/mcp`` and model inference, are
+        not among them. A server adds routes of its own with ``super().run_token_routes() | {...}``.
+        """
+        return frozenset()
+
+    def run_token_refusal(self) -> Response:
+        """The answer to a call of a route in ``run_token_routes()`` without the run's token: HTTP 401.
+
+        A server whose routes code in a sandbox can reach may answer as for a route that does not exist instead.
+        """
+        return JSONResponse(
+            status_code=401, content={"detail": f"This route needs the run's token ({RUN_TOKEN_HEADER})"}
+        )
+
+    def setup_run_token_check(self, app: FastAPI, global_config_dict: Any) -> list[str]:
+        """Require the run's token on ``run_token_routes()`` when the run or the class asks for it, and return the
+        paths it now requires it on. ``run_webserver`` calls it once the app's routes are all in place.
+
+        Raises when the token is required but this process has none, so a misconfigured server fails at startup
+        rather than refusing every caller.
+        """
+        required = (getattr(type(self), "requires_run_token", False) is True) or RunTokenConfig.model_validate(
+            global_config_dict
+        ).require_run_token
+        if not required:
+            return []
+        if run_token() is None:
+            raise RuntimeError(
+                f"{self.config.name} requires the run's token, but its process has none: start it with Gym's launcher "
+                f"(gym env start), which makes one, or set {RUN_TOKEN_ENV} to the run's token"
+            )
+        return require_run_token_on_routes(app, self.run_token_routes(), self.run_token_refusal)
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -645,6 +688,8 @@ repr(e): {repr(e)}"""
             mcp_token_routing = dict(
                 mcp_token_header=session_token_header(server), mcp_token_serializer=session_token_serializer(server)
             )
+        # After MCP exposure, which replaces the seed and verify routes with its own.
+        server.setup_run_token_check(app, global_config_dict)
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()

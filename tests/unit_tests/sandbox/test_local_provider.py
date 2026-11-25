@@ -220,6 +220,19 @@ async def test_exec_leaves_run_session_secrets_out_of_the_command_env(
     await provider.close(handle)
 
 
+async def test_exec_leaves_the_runs_token_out_of_the_command_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_RUN_TOKEN", "the-token")
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec())
+
+    result = await provider.exec(handle, "echo ${NEMO_GYM_RUN_TOKEN:-unset}")
+
+    assert result.return_code == 0 and result.stdout.split() == ["unset"]
+    await provider.close(handle)
+
+
 async def test_command_failure_is_reported_not_raised(tmp_path: Path) -> None:
     provider = LocalProvider(workspace_root=str(tmp_path))
     handle = await provider.create(SandboxSpec())

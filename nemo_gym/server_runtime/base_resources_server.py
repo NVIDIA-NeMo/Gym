@@ -950,6 +950,19 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.get("/reverify_mode")(self.get_reverify_mode)
         return app
 
+    def run_token_routes(self) -> frozenset[str]:
+        """The episode and run routes, which only the run's own servers and clients call (``SimpleServer``).
+
+        Tool routes are not among them: an agent may hand code in a sandbox a session's cookie to call them with.
+        """
+        return super().run_token_routes() | {
+            "/seed_session",
+            "/close_session",
+            "/verify",
+            "/aggregate_metrics",
+            "/reverify_mode",
+        }
+
     def register_protocol_routes(self, app: FastAPI) -> None:
         """Register the episode routes ``/seed_session``, ``/close_session`` and ``/verify``."""
         if type(self).seed_session is SimpleResourcesServer.seed_session:

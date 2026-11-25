@@ -17,7 +17,7 @@
 import json
 import logging
 from importlib import import_module
-from os import getenv
+from os import environ, getenv
 from typing import Any, Literal, Optional, Union, Unpack
 
 import requests
@@ -59,6 +59,7 @@ from nemo_gym.core.model_call_sampling import (
     model_sampling_path_segment,
     with_model_sampling_segment,
 )
+from nemo_gym.core.run_token import RUN_TOKEN_ENV, RUN_TOKEN_HEADER, read_run_token_file, run_token
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.utils.server_process import (
@@ -188,6 +189,13 @@ class ServerClient(BaseModel):
         global_config_dict_yaml = response.content.decode()
         global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
 
+        # The launcher did not start this process, so its environment holds no run token unless the user set one. The
+        # launcher keeps the token in a file that only its user can read on its host (nemo_gym.core.run_token).
+        if run_token() is None:
+            token = read_run_token_file(head_server_host, head_server_config.port)
+            if token is not None:
+                environ[RUN_TOKEN_ENV] = token
+
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     async def request(
@@ -255,6 +263,11 @@ class ServerClient(BaseModel):
             # a model call, and a call to an agent (such as an agent's call to its own /v1/responses), whose model
             # calls then carry it too.
             url_path = with_model_sampling_segment(url_path, current_model_sampling_segment())
+
+        token = run_token()
+        if token is not None:
+            # A server of the run may answer its orchestration routes only for callers that send the run's token.
+            kwargs["headers"] = {**(kwargs.get("headers") or {}), RUN_TOKEN_HEADER: token}
 
         return await request(
             method=method,
