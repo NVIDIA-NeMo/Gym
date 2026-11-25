@@ -86,7 +86,6 @@ def test_legacy_search_class_uses_the_shared_implementation():
         ({"tavily_api_key": None}, "tavily_api_key is required"),
         ({"tool_profile": "builtin"}, "tavily_api_key requires tool_profile=tavily_search"),
         ({"sandbox_provider": "runtime"}, "sandbox_provider requires tool_profile=builtin"),
-        ({"sandboxed": True}, "tool_profile=tavily_search runs in process and cannot use sandboxed=true"),
     ],
 )
 def test_tool_profile_rejects_incompatible_configuration(overrides, message):

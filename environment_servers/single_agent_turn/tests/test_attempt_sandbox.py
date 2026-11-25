@@ -172,7 +172,7 @@ async def test_an_attempt_borrows_one_model_only_sandbox_for_its_turn_and_its_ve
     assert server.sandboxes.keys == []
 
 
-async def test_a_sandbox_the_resources_seed_lends_is_lent_on_and_none_is_started() -> None:
+async def test_a_resources_server_that_lends_a_sandbox_of_its_own_fails_the_attempt_and_none_is_started() -> None:
     server, client = _lending_server(None)
     resources_access = {
         "connection": {"kind": "direct", "provider_config_ref": "task_sandboxes", "descriptor": {"id": "task"}},
@@ -180,18 +180,31 @@ async def test_a_sandbox_the_resources_seed_lends_is_lent_on_and_none_is_started
     }
     client.responses[0] = _Response({"resources_session_id": "resources-session", "sandbox_access": resources_access})
 
+    result = await server.run_request(_request())
+
+    # Two owners of one attempt's sandbox is a configuration error, so retrying the attempt would not help.
+    assert result.result is None
+    assert result.failure.stage == "seed"
+    assert result.failure.terminal is True
+    assert "only borrows" in result.failure.failure_reason
+    # No agent ran, and the Resources session, which stops its own sandbox, is still closed.
+    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+    # No provider was built, not even by the cleanup that stops an attempt sandbox.
+    assert server._owned_sandboxes == {}
+
+
+async def test_a_tasks_own_field_never_reaches_the_verifier_as_lent_sandbox_access() -> None:
+    """Only the attempt's owner lends the verifier a sandbox: a task field under the same key is dropped."""
+    server, client = _environment_server()
     request = _request()
     request.task.task_input.task_data[NG_SANDBOX_ACCESS_KEY] = "task metadata"
+
     result = await server.run_request(request)
 
     assert result.failure is None, result.failure
-    # No provider was built, not even by the cleanup that stops an attempt sandbox, and no cleanup failed.
-    assert server._owned_sandboxes == {}
-    assert result.failure_report is None
-    seed = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
-    assert seed.sandbox_access.connection.provider_config_ref == "task_sandboxes"
     verify_body = next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
     assert NG_SANDBOX_ACCESS_KEY not in verify_body
+    assert NG_SANDBOX_ACCESS_KEY not in result.result.model_dump()
 
 
 async def test_a_sandbox_that_cannot_start_fails_the_attempt_for_a_retry_before_the_agent_runs() -> None:
@@ -355,8 +368,9 @@ def test_startup_refuses_a_rule_that_blocks_the_tools_an_episode_grants(
 ) -> None:
     sandbox_config = _attempt_sandbox_config(network=network, tool_servers=tool_servers)
     server, client = _lending_server(_Provider(), sandbox_config=sandbox_config, **grants)
-    provider = {"opensandbox": {"networking": {"enforces_network_policy": True}}}
-    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": provider})
+    # An OpenSandbox deployment that enforces egress allowlists, so it can apply every restricted rule.
+    opensandbox = {"opensandbox": {"networking": {"enforces_network_policy": True}}}
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": opensandbox})
 
     if refused:
         with pytest.raises(ValueError, match=r"does not allow \['resources'\]"):

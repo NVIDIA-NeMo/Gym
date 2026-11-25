@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A borrower uses a lent sandbox: it works in it as the access says, cannot stop it, and releases its client."""
 
+import copy
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -11,6 +12,7 @@ import pytest
 from nemo_gym.agents.utils.sandbox_session import SandboxSession
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import SandboxPty
+from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.server_runtime import sandbox_borrow as borrow_module
 from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
@@ -277,3 +279,35 @@ async def test_a_background_service_command_runs_as_the_lent_user(provider) -> N
     await sandbox.exec("serve", preserve_background_services=True)
 
     assert provider.commands[-1]["user"] == "agent"
+
+
+async def test_a_resources_server_grades_in_a_sandbox_it_never_started(provider, monkeypatch) -> None:
+    # The Environment Server owns the attempt's sandbox. The Resources Server's process finds the provider by the
+    # block name the access carries, in its own copy of the merged config, and leaves the sandbox to its owner.
+    monkeypatch.setattr(borrow_module, "resolve_provider_config", resolve_provider_config)
+    clients_from: list[dict[str, Any]] = []
+    new_client = borrow_module.create_provider
+
+    def create(config: dict[str, Any]) -> _RecordingProvider:
+        clients_from.append(config)
+        return new_client(config)
+
+    monkeypatch.setattr(borrow_module, "create_provider", create)
+    environment = OwnedSandboxes(
+        provider, state_dir=None, server_name="environment", provider_config_ref="attempt_sandbox"
+    )
+    await environment.create("attempt", SandboxSpec(image="image", ttl_s=60))
+    access = await environment.access("attempt", workdir="/task")
+    resources_config = {"attempt_sandbox": {"fake": {"region": "a"}, "default_metadata": {"team": "gym"}}}
+
+    async with await borrow(access, named_configs=copy.deepcopy(resources_config)) as grader:
+        await grader.exec("pytest tests/")
+        with pytest.raises(BorrowedSandboxError):
+            await grader.stop()
+
+    assert clients_from == [{"fake": {"region": "a"}}]
+    assert provider.commands[-1]["command"] == "pytest tests/"
+    assert provider.commands[-1]["cwd"] == "/task"
+    assert environment.get("attempt") is not None
+    await environment.stop("attempt")
+    assert [box["state"] for box in provider.boxes.values()] == ["stopped"]

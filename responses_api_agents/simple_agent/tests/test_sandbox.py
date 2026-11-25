@@ -190,7 +190,7 @@ async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(repli
         in_process_calls = list(seen)
         seen.clear()
 
-        sandboxed = SimpleAgent(config=_config(sandboxed=True), server_client=_client(port))
+        sandboxed = SimpleAgent(config=_config(), server_client=_client(port))
         loop = _LoopInProcess()
         state = SimpleAgentSessionState(
             request=_seed(sandbox_access=ACCESS),
@@ -215,9 +215,8 @@ async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(repli
     assert [call.response_id for call in trajectory.model_calls] == [
         call.response_id for call in expected_trajectory.model_calls
     ]
-    # The sandbox runs the loop in process there, with the agent's own settings otherwise.
+    # The sandbox runs the loop in process there, with the agent's own settings.
     (payload,) = loop.payloads
-    assert payload["config"]["sandboxed"] is False
     assert payload["config"]["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
     # Only the settings the loop reads are staged in the sandbox.
     assert set(payload["config"]) == {
@@ -227,7 +226,6 @@ async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(repli
         "entrypoint",
         "model_server",
         "max_model_retries",
-        "sandboxed",
     }
     assert payload["model_server"] == {"host": "127.0.0.1", "port": port}
     assert payload["body"] == {"input": "Which option?", "temperature": 0.2, "metadata": {"task": "quiz"}}
@@ -357,24 +355,37 @@ def test_the_runtime_holds_every_distribution_the_loop_imports() -> None:
     assert imported <= covered, sorted(imported - covered)
 
 
-def test_a_sandboxed_agent_refuses_a_seed_that_lends_no_sandbox() -> None:
-    agent = SimpleAgent(config=_config(sandboxed=True), server_client=_client(1))
-
-    detail = check_agent_seed_rejected(agent.setup_webserver(), _seed())
-
-    assert "lends none" in detail
-
-
-def test_an_in_process_agent_still_refuses_a_lent_sandbox() -> None:
+async def test_the_seed_decides_where_the_loop_runs(installed_runtime, monkeypatch) -> None:
+    """A seed that lends a sandbox runs the loop in it; one that lends none runs it in process. No agent setting
+    chooses: the environment that lends the sandbox does."""
     agent = SimpleAgent(config=_config(), server_client=_client(1))
+    sandbox = _FakeSandbox()
+    borrowed: list[SandboxAccess] = []
 
-    detail = check_agent_seed_rejected(agent.setup_webserver(), _seed(sandbox_access=ACCESS))
+    async def borrow(access: SandboxAccess) -> _FakeSandbox:
+        borrowed.append(access)
+        return sandbox
 
-    assert "sandboxed: true" in detail
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.borrow", borrow)
+    monkeypatch.setattr(
+        "responses_api_agents.simple_agent.app.sandbox_server_url",
+        lambda name, require_reachable: "http://10.0.0.5:8000",
+    )
+
+    in_process = await agent._seed_agent_session_state(_seed())
+    assert in_process.sandbox_loop is None
+    assert borrowed == []
+
+    lent = await agent._seed_agent_session_state(_seed(sandbox_access=ACCESS))
+    assert borrowed == [ACCESS]
+    assert lent.sandbox_loop is not None
+    assert lent.model_server_endpoint == ("10.0.0.5", 8000)
+    # The loop's runtime was installed in the borrowed sandbox and its runner checked there.
+    assert sandbox.commands[-1].endswith(f"{sandbox_module.runner_path()} --check")
 
 
-async def test_a_sandboxed_agent_whose_model_server_the_sandbox_cannot_reach_is_refused(monkeypatch) -> None:
-    agent = SimpleAgent(config=_config(sandboxed=True), server_client=_client(1))
+async def test_an_agent_whose_model_server_the_sandbox_cannot_reach_is_refused(monkeypatch) -> None:
+    agent = SimpleAgent(config=_config(), server_client=_client(1))
     monkeypatch.setattr(
         "responses_api_agents.simple_agent.app.sandbox_server_url",
         lambda name, require_reachable: (_ for _ in ()).throw(ValueError("loopback address 127.0.0.1")),
@@ -384,12 +395,14 @@ async def test_a_sandboxed_agent_whose_model_server_the_sandbox_cannot_reach_is_
         await agent._seed_agent_session_state(_seed(sandbox_access=ACCESS))
 
 
-async def test_a_sandboxed_agent_never_runs_its_loop_in_process() -> None:
-    agent = SimpleAgent(config=_config(sandboxed=True), server_client=_client(1))
+async def test_a_session_lent_a_sandbox_never_runs_its_loop_in_process() -> None:
+    agent = SimpleAgent(config=_config(), server_client=_client(1))
+    # As a restore would rebuild it: lent a sandbox, but with no loop in it.
+    state = SimpleAgentSessionState(request=_seed(sandbox_access=ACCESS), tool_access=None, resources_cookies=None)
 
-    with pytest.raises(RuntimeError, match="only in the sandbox"):
-        await agent._create_episode(
-            NeMoGymResponseCreateParamsNonStreaming(input="hi"), model_url_path=MODEL_PATH, in_session=True
+    with pytest.raises(RuntimeError, match="only in that sandbox"):
+        await agent._create_session_episode(
+            state, NeMoGymResponseCreateParamsNonStreaming(input="hi"), **_loop_arguments()
         )
     # A loop in a borrowed sandbox is never checkpointed: its episode starts over after a crash.
     assert agent._seed_must_restart(_seed(sandbox_access=ACCESS)) is True
@@ -448,8 +461,8 @@ class _ClosingLoop:
         self.closed += 1
 
 
-async def test_retiring_a_sandboxed_session_stops_its_loop_and_releases_the_sandbox() -> None:
-    agent = SimpleAgent(config=_config(sandboxed=True), server_client=_client(1))
+async def test_retiring_a_session_lent_a_sandbox_stops_its_loop_and_releases_the_sandbox() -> None:
+    agent = SimpleAgent(config=_config(), server_client=_client(1))
     loop = _ClosingLoop()
     state = SimpleAgentSessionState(
         request=_seed(sandbox_access=ACCESS),
@@ -466,8 +479,8 @@ async def test_retiring_a_sandboxed_session_stops_its_loop_and_releases_the_sand
     assert "agent-session" not in agent._session_records
 
 
-async def test_a_sandboxed_agent_refuses_a_tool_grant_the_sandbox_cannot_reach(monkeypatch) -> None:
-    agent = SimpleAgent(config=_config(sandboxed=True), server_client=_client(1))
+async def test_an_agent_refuses_a_tool_grant_the_sandbox_cannot_reach(monkeypatch) -> None:
+    agent = SimpleAgent(config=_config(), server_client=_client(1))
     monkeypatch.setattr(
         "responses_api_agents.simple_agent.app.sandbox_server_url", lambda name, require_reachable: "http://10.0.0.5:1"
     )
@@ -477,12 +490,12 @@ async def test_a_sandboxed_agent_refuses_a_tool_grant_the_sandbox_cannot_reach(m
         await agent._seed_agent_session_state(_seed(sandbox_access=ACCESS, tool_accesses=[grant]))
 
 
-def test_sandbox_mode_refuses_a_subclass_that_changes_the_agent_loop() -> None:
+def test_a_subclass_that_changes_the_agent_loop_refuses_a_lent_sandbox() -> None:
     class _OwnLoop(SimpleAgent):
         async def _create_episode(self, body, **kwargs):  # noqa: ANN001, ANN003, ANN202
             raise AssertionError("not reached")
 
-    agent = _OwnLoop(config=_config(sandboxed=True), server_client=_client(1))
+    agent = _OwnLoop(config=_config(), server_client=_client(1))
 
     detail = check_agent_seed_rejected(agent.setup_webserver(), _seed(sandbox_access=ACCESS))
 
