@@ -49,7 +49,7 @@ class ReviewPoolDispatchTests(unittest.TestCase):
         self.assertFalse(parent["gym-review-pools"]["allow_failure"])
         self.assertFalse(child[".gym-review-pools"]["allow_failure"])
         script = child[".gym-review-pools"]["script"]
-        adapter = next(shlex.split(line) for line in script if "gitlab_review_pools.py" in line)
+        adapter = next(shlex.split(line, comments=True) for line in script if "gitlab_review_pools.py" in line)
         self.assertIn("--require-codeowners", adapter)
         self.assertEqual(adapter[adapter.index("--codeowners-fallback") + 1], "@nvidia-nemo/gym_maintainers")
         pin = re.search(r"fetch --depth=1 origin ([0-9a-f]{40})", "\n".join(script))
