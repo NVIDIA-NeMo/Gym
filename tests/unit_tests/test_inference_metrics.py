@@ -115,6 +115,37 @@ def test_mooncake_eviction_counters_rates_and_resets(tier, metric):
     assert InferenceMetricsCollector(config(metrics=[])).parse("mooncake", payload(100), 10) == {}
 
 
+@pytest.mark.parametrize("metric", ["lock_wait", "lock_hold", "duration"])
+def test_mooncake_eviction_timing_means_use_recent_passes(metric):
+    collector = InferenceMetricsCollector(config())
+    name = f"master_mem_eviction_{metric}_ms"
+    prefix = f"mooncake/total/mem_eviction_{metric}_ms"
+
+    def payload(total, count):
+        return (
+            f'# TYPE {name} histogram\n{name}_bucket{{le="+Inf"}} {count}\n{name}_sum {total}\n{name}_count {count}\n'
+        )
+
+    assert f"{prefix}_mean" not in collector.parse("mooncake", payload(100, 10), 10)
+    result = collector.parse("mooncake", payload(160, 12), 12)
+    assert result[f"{prefix}_mean"] == 30  # 60 ms across two new eviction passes
+    assert result[f"{prefix}_sum_per_second"] == 30
+    assert result[f"{prefix}_count_per_second"] == 1
+    assert f"{prefix}_mean" not in collector.parse("mooncake", payload(5, 1), 14)
+    assert collector.parse("replica0", payload(160, 12), 12) == {}
+
+
+@pytest.mark.parametrize("metric", ["mem_eviction_scanned", "mem_eviction_lock_acquisitions"])
+def test_mooncake_eviction_work_rates(metric):
+    collector = InferenceMetricsCollector(config())
+    payload = f"# TYPE master_{metric}_total counter\nmaster_{metric}_total {{value}}\n"
+    collector.parse("mooncake", payload.format(value=100), 10)
+    assert collector.parse("mooncake", payload.format(value=140), 12) == {
+        f"mooncake/total/{metric}_total": 140,
+        f"mooncake/total/{metric}_per_second": 20,
+    }
+
+
 def test_mooncake_eviction_diagnostics_preserve_reasons_and_exclude_segments():
     payload = """# TYPE master_eviction_memory_bytes gauge
 master_eviction_memory_bytes 1000
@@ -129,6 +160,8 @@ master_offload_pending_bytes 400
 master_offload_pending_objects 2
 # TYPE master_offload_oldest_age_seconds gauge
 master_offload_oldest_age_seconds 5
+# TYPE master_mem_eviction_backoff_ms gauge
+master_mem_eviction_backoff_ms 250
 # TYPE segment_evicted_size_bytes counter
 segment_evicted_size_bytes{segment="worker0"} 999
 """
@@ -141,6 +174,7 @@ segment_evicted_size_bytes{segment="worker0"} 999
         "mooncake/total/offload_pending_bytes": 400,
         "mooncake/total/offload_pending_objects": 2,
         "mooncake/total/offload_oldest_age_seconds": 5,
+        "mooncake/total/mem_eviction_backoff_ms": 250,
     }
 
 

@@ -84,12 +84,18 @@ MOONCAKE_EVICTION_GAUGES = {
     "master_offload_pending_bytes",
     "master_offload_pending_objects",
     "master_offload_oldest_age_seconds",
+    "master_mem_eviction_backoff_ms",
 }
 # Family names omit `_total`, including counters whose native names lack it.
 MOONCAKE_EVICTION_COUNTERS = {
     f"master_{metric}{tier}"
     for metric in ("successful_evictions", "attempted_evictions", "evicted_key_count", "evicted_size_bytes")
     for tier in ("", "_mem", "_nof")
+} | {"master_mem_eviction_scanned", "master_mem_eviction_lock_acquisitions"}
+MOONCAKE_EVICTION_HISTOGRAMS = {
+    "master_mem_eviction_lock_wait_ms",
+    "master_mem_eviction_lock_hold_ms",
+    "master_mem_eviction_duration_ms",
 }
 # These SGLang gauges describe ratios or averages, not additive quantities.
 SGLANG_MEAN_GAUGES = {
@@ -190,6 +196,7 @@ class InferenceMetricsCollector:
                 is_mooncake_master = replica == "mooncake" and (
                     (family.type == "gauge" and sample.name in MOONCAKE_STORAGE_GAUGES | MOONCAKE_EVICTION_GAUGES)
                     or (family.type == "counter" and family.name.removesuffix("_total") in MOONCAKE_EVICTION_COUNTERS)
+                    or (family.type == "histogram" and family.name in MOONCAKE_EVICTION_HISTOGRAMS)
                 )
                 if (
                     (not sample.name.startswith(("vllm:", "sglang:", "vllm_router_")) and not is_mooncake_master)
@@ -252,6 +259,12 @@ class InferenceMetricsCollector:
         if self.config.cache_inventory:
             self.cache_layouts[replica] = cache_layout
         self.add_derived_metrics(result, f"vllm/{replica}/")
+        for metric in MOONCAKE_EVICTION_HISTOGRAMS:
+            prefix = f"mooncake/total/{metric.removeprefix('master_')}"
+            total = result.get(f"{prefix}_sum_per_second")
+            count = result.get(f"{prefix}_count_per_second")
+            if total is not None and count is not None and count > 0:
+                result[f"{prefix}_mean"] = total / count
         allocated = result.get("mooncake/total/allocated_bytes")
         capacity = result.get("mooncake/total/total_capacity_bytes")
         if allocated is not None and allocated >= 0 and capacity is not None and capacity > 0:
