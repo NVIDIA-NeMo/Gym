@@ -1007,6 +1007,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, PiSandboxSession) else None
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Stop Pi-owned work before verification, retaining the borrowed sandbox."""
         assert isinstance(state, PiSandboxSession)
@@ -1466,8 +1469,13 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "pi_version": self.config.pi_version,
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"graded_agent_error": graded_error[:500]} if graded_error is not None else {}),
-                # Stirrup's timeout report: the deadline stopped a run that had neither ended nor submitted.
-                **({"stop_reason": "wall_time"} if cleanup["timed_out"] and _was_still_working(events) else {}),
+                # Stirrup's timeout report: the deadline stopped a run that had neither ended nor submitted. A run
+                # a rollout stop ended (POST /rollouts/{rollout_id}/stop) says so in ng_rollout_stop instead.
+                **(
+                    {"stop_reason": "wall_time"}
+                    if cleanup["timed_out"] and not state.session.expired and _was_still_working(events)
+                    else {}
+                ),
             },
         )
         conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
@@ -1488,7 +1496,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
             )
-        if graded_error is not None or (incomplete and not error):
+        # A run a rollout stop ended is marked; one stopped because its task had ended answers as completed.
+        response = self.report_rollout_stop(response, state.session)
+        if graded_error is not None or (response.status == "incomplete" and not error):
             for record in state.observations.records:
                 if isinstance(record, AgentInvocation):
                     record.status = status if graded_error is not None else "incomplete"

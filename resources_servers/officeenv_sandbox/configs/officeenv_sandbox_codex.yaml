@@ -1,0 +1,54 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for Codex CLI, on rows whose apps are
+# commands (`cli`: sandbox/prepare_rows.py --exposure cli). Codex borrows each episode's sandbox and runs `codex exec`
+# there; the model reaches the apps through their commands and moves files with the file API, all in Codex's shell,
+# so the episode grants no MCP tools. Codex starts its shell without the sandbox's environment: the commands, and the
+# workspace guide, take the API's URL and token from /etc/company-api.env instead. Compose and run as
+# configs/officeenv_sandbox.yaml shows, with this config and `--agent officeenv_sandbox_codex_agent`. Codex installs
+# Node and its own package in each sandbox at session start (from nodejs.org and npm), so its sandboxes need the
+# internet, or an image with both installed.
+#
+# For rows in the `tools` exposure, set resources_tool_transports: [mcp]
+# (++officeenv_sandbox_codex_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transports=[mcp]);
+# Codex's server names the tools as Codex lists them, and one tool name,
+# google_workspace_admin_list_licenses_for_product_and_sku, is then longer than the 64 characters a function name may
+# have.
+config_paths:
+  - resources_servers/officeenv_sandbox/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The episodes' server under Codex's own name, naming the MCP tools as Codex lists them, as
+# configs/officeenv_sandbox.yaml explains for Pi.
+officeenv_sandbox_codex_resources_server:
+  _inherit_from: officeenv_sandbox_resources_server
+  resources_servers:
+    officeenv_sandbox:
+      verified: false
+      sandbox_config:
+        # How Codex names the MCP tools (`mcp__<mcp_server_name>__<tool>`), for the workspace guide of rows that take
+        # them over MCP
+        mcp_tool_prefix: mcp__company__
+
+# Gym's Codex CLI (responses_api_agents/codex_agent), under this config's own name.
+officeenv_sandbox_codex_agent:
+  _inherit_from: codex_agent
+  responses_api_agents:
+    codex_agent:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
+      timeout: 1800
+
+officeenv_sandbox_codex_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
+      resources_server:
+        name: officeenv_sandbox_codex_resources_server
+      agent_server:
+        name: officeenv_sandbox_codex_agent
+      resources_tool_transports: []
+      # No more episodes than Codex runs at once (`concurrency`), as configs/officeenv_sandbox.yaml explains for Pi.
+      max_concurrent_episodes: ${officeenv_sandbox_codex_agent.responses_api_agents.codex_agent.concurrency}
+      queue_timeout_seconds: 86400

@@ -5,9 +5,12 @@
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Literal
+
+import anyio
+from fastapi import HTTPException
 
 from nemo_gym.client.server_client import get_server_url
 from nemo_gym.config.global_config import get_global_config_dict
@@ -45,6 +48,17 @@ class LentSandboxes:
     that grading and cleanup take. A sandbox from a failed seed whose stop also fails is kept apart from the lent
     ones, and the session's next lend, its release or the shutdown tries the stop again.
 
+    A lend may give the sandbox its own image, more environment variables and a setup to run against it before it is
+    lent, such as linking a task's commands. A lend cancelled while its sandbox starts lends nothing and stops the
+    sandbox it began. Without ``start_timeout_s`` the cancel cuts the start, as it cuts any await, and a create cut
+    in flight can leave a sandbox whose id the provider never returned, which nothing here could stop. With
+    ``start_timeout_s``, the start runs to its end once begun, within that many seconds, even while the request
+    that asked for it is being cancelled, and a start the limit cuts before the provider returned the sandbox's id
+    is logged at ERROR with the session, the task, the provider, the image and the labels. A provider that deletes
+    the sandbox of a create its caller gave up on, as OpenSandbox's does, stops the sandbox the create may have
+    left; with any other, a reaper can find it by those. Once :meth:`release_all` has begun, no lend starts a
+    sandbox.
+
     With ``network_access="model_only"``, each sandbox is created with an egress rule that allows only the host of
     ``model_server``, the model server that a harness in the sandbox calls. ``model_and_tools`` also allows the hosts
     of ``tool_servers``, the servers whose tools the harness calls over MCP, such as this resources server. Every port
@@ -62,6 +76,7 @@ class LentSandboxes:
         network_access: LentSandboxNetworkAccess = "inherit",
         model_server: str | None = None,
         tool_servers: Sequence[str] = (),
+        start_timeout_s: float | None = None,
     ) -> None:
         if network_access != "inherit":
             if not model_server:
@@ -83,9 +98,13 @@ class LentSandboxes:
         self._network_access = network_access
         self._model_server = model_server
         self._tool_servers = tuple(tool_servers)
+        self._start_timeout_s = start_timeout_s
         self._sandboxes: dict[str, AsyncSandbox] = {}
         # Sandboxes of failed seeds whose stop failed too. They are never lent; a later stop of each is retried.
         self._failed_seed_sandboxes: dict[str, AsyncSandbox] = {}
+        # The sessions whose sandbox is starting, each with an event set once its lend has lent or stopped it.
+        self._starting: dict[str, asyncio.Event] = {}
+        self._releasing_all = False
 
     def get(self, resources_session_id: str) -> AsyncSandbox | None:
         """Return the sandbox lent for ``resources_session_id``, or ``None``."""
@@ -97,40 +116,78 @@ class LentSandboxes:
         task_id: TaskId,
         *,
         files: Mapping[str, str | bytes] | None = None,
+        image: str | None = None,
+        env: Mapping[str, str] | None = None,
+        setup: Callable[[AsyncSandbox], Awaitable[None]] | None = None,
     ) -> SandboxAccess:
         """Return the access a harness needs to the session's sandbox, and start the sandbox on the first call.
 
-        ``files`` maps absolute paths in the sandbox to their contents; it can be empty. A repeated call, as for a
-        repeated seed, returns the same sandbox. If the new sandbox cannot start, receive its files or be described,
-        it is stopped and the error is raised. If that stop fails too, the sandbox is kept for a later stop: the
-        session's next lend stops it before it starts another one, and a failed stop there fails the lend.
+        ``files`` maps absolute paths in the sandbox to their contents; it can be empty. ``image`` replaces the
+        configured image for this sandbox, ``env`` adds environment variables to the configured ones, and ``setup`` runs
+        against the started sandbox, its files delivered, before it is lent. A repeated call, as for a repeated seed,
+        returns the same sandbox. If the new sandbox cannot start, receive its files, be set up or be described (within
+        ``start_timeout_s``, if set), or the lend is cancelled meanwhile, it is stopped and the error is raised. If that
+        stop fails too, the sandbox is kept for a later stop: the session's next lend stops it before it starts another
+        one, and a failed stop there fails the lend. Once :meth:`release_all` has begun, a lend starts nothing and
+        answers 503, which a caller may retry against another server.
         """
         sandbox = self._sandboxes.get(resources_session_id)
         if sandbox is not None:
             return await self._access(sandbox)
+        self._refuse_after_release_all()
         await self._stop_failed_seed_sandbox(resources_session_id)
         named_configs = get_global_config_dict()
         spec = self._config.spec(
             self._provider,
-            image=self._image,
+            image=image or self._image,
             workdir=self._workdir,
             metadata={"task_id": task_id.task_id[:_LABEL_LIMIT]},
             files=files,
             named_configs=named_configs,
         )
+        if env:
+            spec = replace(spec, env={**spec.env, **env})
         provider_config = resolve_provider_config(self._provider, named_configs)
         if self._network_access != "inherit":
             spec = replace(
                 spec,
                 provider_options={**spec.provider_options, "network_policy": self._restricted_policy(provider_config)},
             )
+        # Checked again after the awaits above, and from here to the start nothing awaits, so release_all either sees
+        # this start or comes before it.
+        self._refuse_after_release_all()
         sandbox = AsyncSandbox(provider_config)
+        started = self._starting[resources_session_id] = asyncio.Event()
+        start_limit: anyio.CancelScope | None = None
         try:
-            # start() stops the sandbox itself when delivering the files fails, shielded like every stop. A failure
-            # after it is stopped here, and a stop after one that finished does nothing.
-            await sandbox.start(spec)
-            access = await self._access(sandbox)
-        except BaseException:
+            # start() and start_with_setup() stop the sandbox themselves, shielded like every stop, when delivering its
+            # files or its setup fails.
+            if self._start_timeout_s is None:  # a cancel cuts the start (the class docstring)
+                await (sandbox.start(spec) if setup is None else sandbox.start_with_setup(spec, setup))
+                access = await self._access(sandbox)
+            else:  # the start runs to its end once begun (the class docstring)
+                with anyio.CancelScope(shield=True), anyio.fail_after(self._start_timeout_s) as start_limit:
+                    await (sandbox.start(spec) if setup is None else sandbox.start_with_setup(spec, setup))
+                    access = await self._access(sandbox)
+                await anyio.lowlevel.checkpoint()  # a lend cancelled meanwhile lends nothing
+            self._refuse_after_release_all()  # release_all began during the start: it would not stop this sandbox
+        except BaseException as error:
+            if start_limit is not None and start_limit.cancel_called and sandbox.sandbox_id is None:
+                # The limit cut the provider's create in flight: the stop below cannot reach what it created.
+                LOGGER.error(
+                    "The sandbox of resources session %s (task %s of taskset %s) did not start within "
+                    "start_timeout_s (%s s), and the %s provider's create was cut before it returned the sandbox's "
+                    "id, so the stop here cannot reach a sandbox it created: a provider that deletes the sandbox of "
+                    "a create its caller gave up on (OpenSandbox) stops it, and with any other a reaper must find "
+                    "it, by image %s and labels %s",
+                    resources_session_id,
+                    task_id.task_id,
+                    task_id.taskset,
+                    self._start_timeout_s,
+                    next(iter(provider_config)),
+                    spec.image,
+                    spec.metadata,
+                )
             try:
                 await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             except Exception:
@@ -140,9 +197,23 @@ class LentSandboxes:
                     resources_session_id,
                 )
                 self._failed_seed_sandboxes[resources_session_id] = sandbox
+            else:
+                if isinstance(error, anyio.get_cancelled_exc_class()) and sandbox.sandbox_id is not None:
+                    LOGGER.info(
+                        "Stopped sandbox %s of resources session %s: its seed was cancelled while it started",
+                        sandbox.sandbox_id,
+                        resources_session_id,
+                    )
             raise
+        finally:
+            del self._starting[resources_session_id]
+            started.set()
         self._sandboxes[resources_session_id] = sandbox
         return access
+
+    def _refuse_after_release_all(self) -> None:
+        if self._releasing_all:  # release_all would not find the sandbox
+            raise HTTPException(status_code=503, detail="The server is shutting down and lends no more sandboxes")
 
     async def release(self, resources_session_id: str) -> None:
         """Stop the session's sandbox; safe to repeat. A failed stop raises and keeps it, so a close can retry.
@@ -156,8 +227,17 @@ class LentSandboxes:
         await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
         self._sandboxes.pop(resources_session_id, None)
 
-    async def release_all(self) -> None:
-        """Stop every sandbox still lent, as at server shutdown. A failed stop is logged and the rest go on."""
+    async def release_all(self, *, timeout_s: float | None = None) -> dict[str, list[str]]:
+        """Stop every sandbox, as at server shutdown: the lent ones, those failed seeds left, and those still starting
+        once their lends stop them. The lent ones stop at once, without waiting for a start in flight. From now on no
+        lend starts a sandbox. A failed stop is logged and the rest go on.
+
+        With ``timeout_s``, the time the server has to exit, the stops still running then are cut. Returns the
+        sessions whose sandbox may outlive the process, by kind, and logs them for a reaper: ``lent`` (a stop that
+        failed or was cut), ``failed_seeds`` (a failed seed's sandbox whose stop failed again) and ``starting`` (a start
+        still in flight: its lend stops the sandbox once the provider returns it, if the process is still running).
+        """
+        self._releasing_all = True
         stopping = asyncio.Semaphore(SHUTDOWN_STOP_CONCURRENCY)
 
         async def release(resources_session_id: str) -> None:
@@ -167,8 +247,40 @@ class LentSandboxes:
                 except Exception:
                     LOGGER.exception("Failed to stop the sandbox lent for resources session %s", resources_session_id)
 
-        sessions = dict.fromkeys([*self._sandboxes, *self._failed_seed_sandboxes])
-        await asyncio.gather(*(release(resources_session_id) for resources_session_id in sessions))
+        async def release_once_started(resources_session_id: str, started: asyncio.Event) -> None:
+            # A lend still starting stops its own sandbox once its start returns (it sees release_all). If that stop
+            # fails, the sandbox is kept among the failed seeds, and this stops it again.
+            await started.wait()
+            await release(resources_session_id)
+
+        async def release_all() -> None:
+            # The lent sandboxes stop at once, beside the waits for the lends still starting: a slow start must not
+            # hold their stops past the time limit.
+            sessions = dict.fromkeys([*self._sandboxes, *self._failed_seed_sandboxes])
+            await asyncio.gather(
+                *(release(resources_session_id) for resources_session_id in sessions),
+                *(release_once_started(session, started) for session, started in list(self._starting.items())),
+            )
+
+        try:
+            await asyncio.wait_for(release_all(), timeout_s)
+        except TimeoutError:
+            pass
+        left = {
+            "lent": sorted(self._sandboxes),
+            "failed_seeds": sorted(self._failed_seed_sandboxes),
+            "starting": sorted(self._starting),
+        }
+        if any(left.values()):
+            LOGGER.error(
+                "%d lent sandboxes may still run after the release of all of them; a reaper must stop them. "
+                "Resources sessions with a lent sandbox: %s. Failed seeds: %s. Starting: %s",
+                sum(len(sessions) for sessions in left.values()),
+                left["lent"],
+                left["failed_seeds"],
+                left["starting"],
+            )
+        return left
 
     async def _stop_failed_seed_sandbox(self, resources_session_id: str) -> None:
         """Stop the sandbox a failed seed of the session left running, if any. A failed stop raises and keeps it."""

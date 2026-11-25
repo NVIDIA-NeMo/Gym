@@ -1,0 +1,39 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for OpenClaw, on rows whose apps are
+# commands (`cli`: sandbox/prepare_rows.py --exposure cli). OpenClaw borrows each episode's sandbox, and these episodes
+# grant it no MCP tools. Compose and run as configs/officeenv_sandbox.yaml shows, with this config and
+# `--agent officeenv_sandbox_openclaw_agent`. OpenClaw installs Node and its own package in each sandbox at session
+# start (from nodejs.org and npm), so its sandboxes need the internet.
+config_paths:
+  - resources_servers/officeenv_sandbox/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The episodes' server under OpenClaw's own name, as configs/officeenv_sandbox.yaml explains for Pi.
+officeenv_sandbox_openclaw_resources_server:
+  _inherit_from: officeenv_sandbox_resources_server
+
+# Gym's OpenClaw (responses_api_agents/openclaw_agent), under this config's own name.
+officeenv_sandbox_openclaw_agent:
+  _inherit_from: openclaw_agent
+  responses_api_agents:
+    openclaw_agent:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
+      timeout: 1800
+      # OpenClaw's default, set here for the admission cap below to follow.
+      concurrency: 32
+
+officeenv_sandbox_openclaw_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      # Only on 127.0.0.1, also under an explicit default_host (NeMo RL sets one): no sandbox calls this server.
+      host: 127.0.0.1
+      resources_server:
+        name: officeenv_sandbox_openclaw_resources_server
+      agent_server:
+        name: officeenv_sandbox_openclaw_agent
+      resources_tool_transports: []
+      # No more episodes than OpenClaw runs at once, as configs/officeenv_sandbox.yaml explains for Pi.
+      max_concurrent_episodes: ${officeenv_sandbox_openclaw_agent.responses_api_agents.openclaw_agent.concurrency}
+      queue_timeout_seconds: 86400
