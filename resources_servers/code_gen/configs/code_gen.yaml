@@ -83,8 +83,9 @@ code_gen_environment_server:
         workdir: /tmp
         network: model_only
         model_server: policy_model
-        # Above the longest attempt plus cleanup; the provider reclaims a sandbox this server could not stop.
-        ttl_s: 21600
+        # Above the default episode timeout plus the cleanup timeout; the provider reclaims a sandbox this server
+        # could not stop.
+        ttl_s: 25200
         # The same limits as code_gen's own verification sandbox.
         resources:
           cpu: 1

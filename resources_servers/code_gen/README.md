@@ -18,10 +18,39 @@ The dataset is in preparation and the example data can be found in `data/example
 - Failed test cases result in a reward of 0.0 with detailed error information
 
 ### Test execution
-Every candidate runs in a fresh provider sandbox using the LiveCodeBench harness: a per-test
+Every candidate runs in a sandbox using the LiveCodeBench harness: a per-test
 alarm of `unit_test_timeout_secs`, an overall deadline of
 `(unit_test_timeout_secs + 1) * num_tests + 5` seconds, 4 GiB `RLIMIT_DATA` and
 `RLIMIT_STACK`, and disabled destructive builtins. The stack limit cannot exceed the provider's hard limit.
+
+### One sandbox per attempt
+The shipped pairing (`code_gen_environment_server`) runs each attempt in one sandbox that the Environment Server
+owns. The model calls no tools, so the sandbox reaches only the model server (`network: model_only`).
+
+| Step | Where it runs |
+|---|---|
+| Simple Agent's loop | In the attempt's sandbox, started from `CODE_GEN_SANDBOX_IMAGE`. |
+| Unit tests (`/verify`) | In the same sandbox, after the agent closes. code_gen borrows it from the `ng_sandbox_access` field of the `/verify` body, uploads the runner and harness into a fresh directory, runs them, and releases its client. |
+| Stop | The Environment Server stops the sandbox after the episode. code_gen never stops it. |
+
+A caller that lends no sandbox to `/verify`, such as a re-verification, gets a fresh sandbox from code_gen's own
+`sandbox_provider` and `sandbox_config`, as before. A sandbox that cannot be borrowed or runs no tests masks the
+sample as below; the tests never run on the server's host.
+
+`model_only` needs a provider that applies egress rules, such as OpenSandbox with
+`networking.enforces_network_policy: true`. Docker and Enroot refuse it at startup. For a trusted local setup,
+override the Environment Server's rule explicitly:
+
+```yaml
+code_gen_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      sandbox_config:
+        network: inherit
+        model_server: null
+```
+
+Grading keeps the egress rule the sandbox started with: providers cannot change a running sandbox's egress yet.
 
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)
