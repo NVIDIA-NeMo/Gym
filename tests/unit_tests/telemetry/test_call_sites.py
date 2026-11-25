@@ -1065,6 +1065,31 @@ def test_dispatch_span_carries_the_attempt_index(recorded_spans, row, expected_a
     assert span.attributes["nemo.gym.rollout.attempt.index"] == expected_attempt
 
 
+async def test_a_resumed_rollout_dispatches_as_the_attempt_the_store_reserved(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry
+):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
+
+    replies = [FakeResponse(500, {}), FakeResponse(200, {"response": {}, "reward": 1.0})]
+    install_fake_server_client(
+        monkeypatch, AsyncMock(side_effect=lambda *a, **k: replies.pop(0)), agent_names=("alpha",)
+    )
+    config = _collection_config(tmp_path, _write_rollout_input(tmp_path, 1))
+    config.route_failures_to_sidecar = True
+    with pytest.raises(IncompleteEvaluationError):
+        await RolloutCollectionHelper().run_from_config(config)
+    config.resume_from_cache = True
+    await RolloutCollectionHelper().run_from_config(config)
+
+    assert replies == []
+    dispatches = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert [d.attributes["nemo.gym.rollout.attempt.index"] for d in dispatches] == [0, 1]
+
+
 @pytest.mark.parametrize("span_groups", ["all", "none"], ids=["traces-off-metrics-on", "telemetry-off"])
 async def test_run_context_is_not_read_while_traces_are_off(
     tmp_path, monkeypatch, recorded_spans, driver_telemetry, span_groups
