@@ -19,13 +19,6 @@ opencode_agent:
       # OpenCode run that died (its own command killed it, or the kernel's OOM kill picked it) while its sandbox
       # still runs, instead of retrying it. A setup failure or a model endpoint failure is still retried.
       verify_after_agent_error: true
-      # A step limit high enough that the run limit above is the bound; a comparison of harnesses on these tasks sets
-      # the same number for each (`++tb4_max_steps=1000` for terminal_bench_4/miniswe). From that step on OpenCode 1
-      # asks for a text answer and still offers the tools, so it does not stop a model that keeps calling them.
-      opencode_config:
-        agent:
-          build:
-            steps: 1000
 
 harbor_environment_server:
   environment_servers:
