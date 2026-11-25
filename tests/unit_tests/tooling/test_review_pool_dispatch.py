@@ -4,6 +4,8 @@
 
 import importlib.util
 import json
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -39,11 +41,26 @@ def event(iid: object = 1355) -> dict:
 class ReviewPoolDispatchTests(unittest.TestCase):
     """Exercise the boundary between untrusted webhooks and child CI config."""
 
-    def test_invalid_payload_cannot_create_child_and_failure_is_advisory(self) -> None:
+    def test_review_pool_jobs_block_on_failure_and_require_code_owners(self) -> None:
+        """Every review-pool job blocks, and the child runs the pinned adapter in enforcing mode."""
+        parent = yaml.safe_load((ROOT / ".gitlab/ci/review-pools.yml").read_text())
+        child = yaml.safe_load((ROOT / ".gitlab/ci/review-pools-run.yml").read_text())
+        self.assertFalse(parent["gym-review-pools-prepare"]["allow_failure"])
+        self.assertFalse(parent["gym-review-pools"]["allow_failure"])
+        self.assertFalse(child[".gym-review-pools"]["allow_failure"])
+        script = child[".gym-review-pools"]["script"]
+        adapter = next(shlex.split(line, comments=True) for line in script if "gitlab_review_pools.py" in line)
+        self.assertIn("--require-codeowners", adapter)
+        self.assertEqual(adapter[adapter.index("--codeowners-fallback") + 1], "@nvidia-nemo/gym_maintainers")
+        pin = re.search(r"fetch --depth=1 origin ([0-9a-f]{40})", "\n".join(script))
+        self.assertIsNotNone(pin, "child job must fetch the adapter by full commit SHA")
+        readme = (ROOT / ".gitlab/ci/README.md").read_text()
+        self.assertIn(
+            f"The GitLab adapter is pinned to\n`{pin.group(1)}`", readme, "README pin differs from the job pin"
+        )
+
+    def test_invalid_payload_cannot_create_child(self) -> None:
         """Reject malformed payloads without producing runnable child configuration."""
-        config = yaml.safe_load((ROOT / ".gitlab/ci/review-pools.yml").read_text())
-        self.assertTrue(config["gym-review-pools-prepare"]["allow_failure"])
-        self.assertTrue(config["gym-review-pools"]["allow_failure"])
         with tempfile.TemporaryDirectory() as directory:
             payload = Path(directory) / "event.json"
             output = Path(directory) / "child.json"

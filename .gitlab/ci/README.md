@@ -32,11 +32,11 @@ Focused validation runs with:
 uv run pytest tests/unit_tests/tooling/test_collect_downstream_junit.py
 ```
 
-## Advisory review pools
+## Review pools
 
-Today MR webhooks run the shared adapter on protected `nv-internal-main` and
-create optional approval rules with zero required approvals. These rules expose
-eligible approvers; they do not assign the MR's Reviewers field.
+MR webhooks run the shared adapter on protected `nv-internal-main`. It creates
+optional approval rules with zero required approvals for `# suggest:` lines and
+required approval rules for enforced `.github/CODEOWNERS` lines (see below).
 
 From deployment of this configuration, a lightweight preparation job will validate
 `TRIGGER_PAYLOAD` and generate a child pipeline. Each child will lock only
@@ -52,17 +52,18 @@ flowchart LR
   Lock --> Adapter[Pinned shared adapter]
   Rules[GitHub suggestion rules and team membership] --> Adapter
   Adapter --> Pools[Optional GitLab approval pools]
+  Adapter --> Required[Required code-owner pools]
 ```
 
-The GitLab adapter pin will move to
-`f6e8ed5837b263566534bf0dff0d83a7c653ca8b`
-([FW-CI-templates PR 631](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/631)).
-The adapter will skip mapped users without active Developer-or-higher project
-membership and report them in `warnings`. Missing identity mappings, empty pools,
-and attempts to replace required approval rules will still block writes. The MR
-author is excluded. The adapter will always reconcile the optional approval pools.
-When the MR has no reviewers, the adapter will additionally assign eligible pool
-members as reviewers. If reviewers already exist, their list will stay unchanged.
+The GitLab adapter is pinned to
+`a68e16c7f2f63f23029dae224c4b3068b8663b71`
+([FW-CI-templates PR 632](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/632),
+which adds `--require-codeowners`). The adapter skips mapped users without active
+Developer-or-higher project membership and reports them in `warnings`. It manages
+only the rules it names (`github-review-pool:` and `github-codeowners:`) and never
+touches other required rules. The MR author is excluded. The adapter always
+reconciles the optional approval pools. When the MR has no reviewers, it also
+assigns eligible pool members as reviewers; an existing reviewer list stays unchanged.
 The adapter rechecks the reviewer list immediately before assignment and checks
 the current MR state and head before writes. GitLab has no atomic assign-if-empty
 operation, so a manual assignment in the remaining read/write window can race.
@@ -80,7 +81,7 @@ Both credentials are protected, masked, hidden, raw CI variables scoped to the
 | Variable | Purpose |
 | --- | --- |
 | `GH_SSO_MANAGMENT_PAT` | Read audited SSO identities, GitHub rules, and team membership. |
-| `GITLAB_REVIEW_POOLS_TOKEN` | Read project members and manage optional MR approval rules. |
+| `GITLAB_REVIEW_POOLS_TOKEN` | Read project members and manage the adapter's optional and required MR approval rules. |
 
 The protected environment permits dedicated project bot `160783`, which owns
 trigger `3236`. Webhook `283184` sends merge request events to that trigger on
@@ -88,13 +89,31 @@ protected `nv-internal-main`. The child inherits the triggering identity and rea
 the project variables in its own `review-pools` environment; the bridge forwards
 neither pipeline nor YAML variables. CPU CI continues to select MR pipelines only.
 
-Failures remain advisory through `allow_failure: true`; inspect the child job
-status and trace rather than relying on the parent pipeline's success status.
-
 GitLab switches to MR-local approval rules when the first optional pool is
 created. Future project-level regular or any-approver rules will not automatically
 apply to those MRs. Before introducing or changing project approval requirements,
 maintainers must migrate rules on existing MRs as part of that policy change.
+
+## Required code-owner pools
+
+The same child job runs the adapter with `--require-codeowners`, so enforced
+`.github/CODEOWNERS` lines on GitHub `main` also gate GitLab MRs: for each changed
+file the last matching enforced line wins, and each distinct owner set becomes a
+`github-codeowners: <owners>` approval rule requiring one approval from the live
+members of those GitHub teams. `--codeowners-fallback @nvidia-nemo/gym_maintainers`
+keeps the MR gated by the maintainers when an identity or eligibility problem
+prevents resolving the exact pools; the job then fails with the problems listed and
+converges on a later run. All three review-pool jobs use `allow_failure: false`
+so a failed reconciliation is visible in the trigger pipeline.
+
+Limitations: the rules are MR-local, so the MR author and Maintainers can edit them
+and no webhook reports that edit; the adapter restores them on the next MR update.
+The rules exist only after the adapter has run: if the trigger pipeline fails before
+the adapter writes (package install, adapter fetch, expired credentials, provider
+outage), the MR has no required rule and only the red trigger pipeline shows it.
+A project-level backstop rule is not configured today.
+Keep "Prevent editing approval rules in merge requests" disabled on the project:
+that setting also removes the adapter's permission to manage MR approval rules.
 
 Validate the dispatcher tests, shared adapter tests, pre-commit hooks, and expanded
 parent/child configurations with GitLab CI lint. After deployment, trigger two
