@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The step loop (max_episode_steps): the agent driven one step per activation, ending on the task state."""
 
+import logging
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ from aiohttp import ClientConnectionError, ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict
 
+import environment_servers.single_agent_turn.app as single_agent_turn_app
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
@@ -536,6 +538,25 @@ def test_a_simple_agent_that_runs_its_tools_is_driven_whatever_its_max_steps(age
     server, _ = _server([], agent=agent)
 
     assert server.config.max_episode_steps == 5
+
+
+@pytest.mark.parametrize(("agent", "warned"), [({}, False), ({"max_steps": None}, False), ({"max_steps": 150}, True)])
+def test_a_max_steps_the_step_loop_does_not_use_is_named_at_startup(
+    agent: dict, warned: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An override that raises the agent's own limit, as OfficeEnv's README once said to, loads but bounds nothing.
+    with caplog.at_level(logging.WARNING, logger=single_agent_turn_app.__name__):
+        _server([], agent=agent)
+
+    warnings = [record.getMessage() for record in caplog.records if "max_steps" in record.getMessage()]
+    assert warnings == (
+        [
+            "Environment Server 'environment' drives 'agent' one step per activation, so its max_steps (150) is not used: "
+            "max_episode_steps (5) bounds the episode"
+        ]
+        if warned
+        else []
+    )
 
 
 @pytest.mark.parametrize(

@@ -441,6 +441,24 @@ def test_an_environment_server_episode_runs_under_its_resources_session_id(
     assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
 
 
+@pytest.mark.parametrize("stale", [False, True])
+def test_an_episode_seed_reports_the_tool_drift_of_its_rows_tools(client: TestClient, stale: bool) -> None:
+    # The seed carries the task's responses_create_params, as a seed of the whole row does, so a row whose tools
+    # differ from the ones the server serves is still flagged.
+    params = gym_row(SPEC, PROMPT)["responses_create_params"]
+    tools = [dict(tool) for tool in params["tools"]]
+    if stale:
+        tools[0]["description"] = "An old description of the tool"
+    seed = seed_request().model_copy(update={"responses_create_params": {**params, "tools": tools}})
+    seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+    assert seeded.status_code == 200, seeded.text
+
+    verified = client.post("/verify", json=environment_verify_body(seed), cookies=seeded.cookies)
+
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["tool_drift"] == (1.0 if stale else 0.0)
+
+
 def test_a_seed_binds_its_id_to_one_episode_and_close_releases_an_unverified_world(
     client: TestClient, server: OfficeEnvResourcesServer
 ) -> None:
