@@ -31,6 +31,7 @@ reply it belongs to, which an obstacle's decision needs.
 """
 
 import asyncio
+import hashlib
 import json
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
@@ -93,6 +94,7 @@ from nemo_gym.core import (
     verifier_invocation_context,
 )
 from nemo_gym.data import materialize_task
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.metrics import add_perf_metrics, compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     AgentContext,
@@ -491,12 +493,16 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
             raise ValueError(f"Invalid episode attempt: {attempt!r}")
-        capture_key = (
-            maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-        )
+        capture_key = maybe_rollout_id_from_run_body(row)
+        if capture_key is not None:
+            episode_id, task = EpisodeId.from_capture_key(capture_key), materialize_task(row, taskset=task_source)
+        elif TASK_INDEX_KEY_NAME in row or ROLLOUT_INDEX_KEY_NAME in row:
+            raise ValueError(f"A row with {TASK_INDEX_KEY_NAME} or {ROLLOUT_INDEX_KEY_NAME} needs both")
+        else:
+            episode_id, task = _direct_call_identity(row, task_source, attempt)
         return SingleAgentTurnRequest(
-            episode_id=EpisodeId.from_capture_key(capture_key),
-            task=materialize_task(row, taskset=task_source),
+            episode_id=episode_id,
+            task=task,
             model_sampling=model_sampling_from_run_body(row),
             skip_token_capture=skips_token_capture(row),
         )
@@ -556,6 +562,18 @@ def _agent_context(request: SingleAgentTurnRequest, session: TurnSession) -> Age
             terminal=True,
         )
     return AgentContext(values={**task.values, **harness}, artifacts=task.artifacts)
+
+
+def _direct_call_identity(row: dict[str, Any], taskset: str, attempt: int) -> tuple[EpisodeId, dict[str, Any]]:
+    """The identities of a flat row posted straight to ``/run`` with no rollout id and neither collector index, as
+    the relay accepted one: each call is an episode of its own, and a row without a task id field is named by its
+    content, so the same row posted again is the same task."""
+    # The index only satisfies materialize_task; the id it gives is replaced below when the row names no task.
+    task = materialize_task(row, taskset=taskset, task_index=0)
+    if not any(row.get(key) is not None for key in TASK_ID_FIELDS):
+        content = json.dumps(task["task_input"], sort_keys=True, ensure_ascii=False).encode()
+        task["task_id"]["task_id"] = f"direct-{hashlib.sha256(content).hexdigest()[:16]}"
+    return EpisodeId(rollout_id=f"direct-{uuid4().hex}", attempt=attempt), task
 
 
 def _row_setup_failure(error: ValueError) -> NgFailureEvent:

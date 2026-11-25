@@ -381,3 +381,12 @@ def test_validate_rows_refuses_a_row_tool_no_episode_can_serve(
     )
     with pytest.raises(SystemExit, match=f"rows.jsonl:2: .*{message[:20]}"):
         validate_file(path, agent="")
+
+
+def test_validate_rows_reserves_mcp_only_for_a_server_that_mounts_it(tmp_path: Path) -> None:
+    # The shipped config serves tools over direct HTTP only, where a tool can be named mcp.
+    path = tmp_path / "rows.jsonl"
+    path.write_bytes(_line(_row("r1", "s1", ("user", "ls"), tools=[TOOL | {"name": "mcp"}])))
+    assert validate_file(path, agent="")["rows"] == 1
+    with pytest.raises(SystemExit, match=r"rows.jsonl:1: tools named like the agent_arena server's routes: \['mcp'\]"):
+        validate_file(path, agent="", mcp=True)

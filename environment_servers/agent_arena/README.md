@@ -19,7 +19,7 @@ the episode's tools.
    carry, parameters that are not an object schema, or the name of one of this server's routes) fails the episode
    here, before the seed: terminal, with stage `seed` and the cause in the failure reason.
    [`validate_rows.py`](../../resources_servers/agentic_turn_simulation/scripts/validate_rows.py) checks rows for this
-   before a run.
+   before a run (with `--mcp` when `tool_transports` include `mcp`, which mounts the `/mcp` route).
 3. **Seed** an agent session with that grant and the row's harness in its `agent_context` (`TurnHarnessContext`: the
    stop tools, the tool-call protocol and the tool names), and **invoke** the agent with the row's
    `responses_create_params` as they are. A task row's own `agent_context` goes with it, and the agent validates it:

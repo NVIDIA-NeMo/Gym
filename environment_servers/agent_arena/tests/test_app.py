@@ -37,6 +37,7 @@ from nemo_gym.server_runtime import (
     TOOL_ERROR_HEADER,
     SimpleServer,
     SingleAgentTurnRequest,
+    SingleAgentTurnResponse,
     SingleAgentTurnTaskInput,
     ToolCallRecord,
 )
@@ -47,7 +48,7 @@ from resources_servers.agentic_turn_simulation.schemas import (
     AgenticTurnSimulationVerifyRequest,
     SimulateToolCallRequest,
 )
-from resources_servers.agentic_turn_simulation.scripts.validate_rows import SERVER_ROUTE_NAMES
+from resources_servers.agentic_turn_simulation.scripts.validate_rows import MCP_ROUTE_NAME, SERVER_ROUTE_NAMES
 from resources_servers.agentic_turn_simulation.tests.support import VERDICT, chat, http, judge_reply, make_server, req
 
 
@@ -411,13 +412,14 @@ class TestEpisode:
         assert world.calls == [] and server._open_episodes == {}
 
     def test_validate_rows_refuses_the_servers_route_names(self) -> None:
-        # scripts/validate_rows.py checks a row's tools against these names before any episode runs.
-        names = set()
-        for transports in (["direct_http"], ["direct_http", "mcp"]):
-            server = _server(config={"tool_transports": transports})
+        # scripts/validate_rows.py checks a row's tools against these names before any episode runs; mcp only with --mcp.
+        names = {}
+        for transports in (("direct_http",), ("direct_http", "mcp")):
+            server = _server(config={"tool_transports": list(transports)})
             server.setup_webserver()
-            names |= server._reserved_tool_names
-        assert names == SERVER_ROUTE_NAMES
+            names[transports] = server._reserved_tool_names
+        assert names[("direct_http",)] == SERVER_ROUTE_NAMES
+        assert names[("direct_http", "mcp")] == SERVER_ROUTE_NAMES | {MCP_ROUTE_NAME}
 
     @pytest.mark.parametrize(
         "judge_error",
@@ -767,6 +769,40 @@ class TestFlatRows:
         result = await server.run_legacy(self._row())
         assert (result["_ng_failure_stage"], result["_ng_failure_terminal"]) == ("agent", False)
         assert result["agent_ref"] == {"name": AGENT} and "reward" not in result
+
+    async def test_a_direct_call_without_collector_indices_runs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The shipped example row as a caller posts it to /run, without rollout collection's indices or a rollout id:
+        # each call is an episode of its own, and the row's content names its task.
+        example = Path(__file__).parents[3] / "resources_servers/agentic_turn_simulation/data/example.jsonl"
+        row = json.loads(example.read_text().splitlines()[0])
+        # The row's agent_ref names the shipped config's agent instance; this test's servers take that name.
+        monkeypatch.setitem(globals(), "AGENT", row["agent_ref"]["name"])
+        server = _server()
+        world = _world(server, calls=(), judge=[judge_reply(VERDICT), judge_reply(VERDICT)])
+        requests = []
+        run_request = AgentArenaEnvironmentServer.run_request
+
+        async def spy(self: AgentArenaEnvironmentServer, request: SingleAgentTurnRequest) -> SingleAgentTurnResponse:
+            requests.append(request)
+            return await run_request(self, request)
+
+        monkeypatch.setattr(AgentArenaEnvironmentServer, "run_request", spy)
+        async with _client(world.app) as client:
+            replies = [await client.post("/run", json=row) for _ in range(2)]
+        assert [reply.status_code for reply in replies] == [200, 200], replies[0].text
+        assert all("reward" in reply.json() for reply in replies)
+        first, second = requests
+        assert first.episode_id.rollout_id.startswith("direct-") and first.episode_id.attempt == 0
+        assert first.episode_id != second.episode_id
+        assert first.task.task_id == second.task.task_id and first.task.task_id.task_id.startswith("direct-")
+
+    async def test_a_row_with_one_collector_index_is_a_terminal_422(self) -> None:
+        server = _server()
+        row = {key: value for key, value in self._row().items() if key != "_ng_rollout_index"}
+        async with _client(server.setup_webserver()) as client:
+            reply = await client.post("/run", json=row)
+        assert reply.status_code == 422 and "needs both" in reply.text
+        server.server_client.post.assert_not_awaited()
 
     @pytest.mark.parametrize(
         ("change", "detail"),
