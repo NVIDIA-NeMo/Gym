@@ -102,8 +102,10 @@ class _Client(ServerClient):
     """The resources server and an agent whose run goes on until a stop ends it (or ends alone).
 
     The task has ended from the waiting read numbered ``ends_at_read`` on; ``waiting_reply`` answers the waiting reads
-    instead. The stop answers ``stop_status``, and ends the run unless ``stop_ends_run`` is false; with
-    ``release_ends_run`` the release ends it. ``events`` keeps the order of the calls and of the activation's answer.
+    instead, and ``first_reply`` the first read, made before the run. The stop answers ``stop_status`` (with
+    ``stopped: stop_stopped``) after ``stop_delay`` seconds, and ends the run unless ``stop_ends_run`` is false; with
+    ``release_ends_run`` the release ends it. ``events`` keeps the order of the calls and of the activation's answer,
+    ``control`` the calls sent over the reserved control pool, and ``verified`` the bodies ``/verify`` got.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -117,14 +119,21 @@ class _Client(ServerClient):
     stop_ends_run: bool = True
     release_ends_run: bool = False
     waiting_reply: Any = None
+    first_reply: Any = None
+    stop_stopped: bool = True
+    stop_delay: float = 0.0
     run_ended: Any = None
     read_times: list[float] = []
+    control: list[str] = []
+    verified: list[dict[str, Any]] = []
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response | _ErrorResponse:
         body = kwargs.get("json")
         if isinstance(body, BaseModel):
             body = body.model_dump(mode="json")
         self.events.append(f"POST {url_path}")
+        if kwargs.get("_control"):
+            self.control.append(f"POST {url_path}")
         if url_path == "/seed_session":
             return _Response({"resources_session_id": body["resources_session_id"]}, {"resources": "seeded"})
         if url_path == "/v1/agent_sessions":
@@ -136,13 +145,16 @@ class _Client(ServerClient):
             return _Response(_reply())
         if url_path == STOP_PATH:
             self.stops.append(body)
+            if self.stop_delay:
+                await asyncio.sleep(self.stop_delay)
+                self.events.append("stop answered")
             if self.stop_status != 200:
                 if self.stop_status == 404:
                     self.run_ended.set()
                 return _ErrorResponse(self.stop_status, b'{"detail": "no"}')
             if self.stop_ends_run:
                 self.run_ended.set()
-            return _Response({"rollout_id": "rollout-a2", "stopped": True})
+            return _Response({"rollout_id": "rollout-a2", "stopped": self.stop_stopped})
         if url_path == RESOURCES_TASK_STATE_RELEASE_PATH:
             assert kwargs.get("cookies") == {"resources": "seeded"}
             if self.release_ends_run:
@@ -151,6 +163,7 @@ class _Client(ServerClient):
         if url_path == "/v1/agent_sessions/close":
             return _Response({"agent_session_id": body["agent_session_id"]})
         if url_path == "/verify":
+            self.verified.append(body)
             return _Response({**body, "reward": 1.0})
         if url_path == "/close_session":
             return _Response({"resources_session_id": body["resources_session_id"]})
@@ -164,7 +177,7 @@ class _Client(ServerClient):
         self.read_times.append(asyncio.get_running_loop().time())
         self.events.append(f"GET {url_path} {'wait' if 'wait_s' in params else 'watch'}")
         if "wait_s" not in params:
-            return _Response({"task_ended": False})
+            return self.first_reply or _Response({"task_ended": False})
         if self.waiting_reply is not None:
             return self.waiting_reply
         waiting_reads = sum(1 for read in self.reads if "wait_s" in read)
@@ -188,6 +201,8 @@ def _server(agent_type: str = "codex_agent", **client_fields: Any) -> tuple[Sing
         reads=[],
         stops=[],
         read_times=[],
+        control=[],
+        verified=[],
         run_ended=asyncio.Event(),
         **client_fields,
     )
@@ -208,6 +223,18 @@ def _server(agent_type: str = "codex_agent", **client_fields: Any) -> tuple[Sing
 @pytest.fixture(autouse=True)
 def _fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(single_agent_turn_app, "TASK_STATE_POLL_SECONDS", 0.01)
+
+
+class _TimedEvents(list):
+    """The events, with the time each was first seen."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.times: dict[str, float] = {}
+
+    def append(self, event: str) -> None:
+        self.times.setdefault(event, asyncio.get_running_loop().time())
+        super().append(event)
 
 
 def _index(events: list[str], event: str) -> int:
@@ -233,6 +260,34 @@ async def test_the_run_is_stopped_once_its_task_has_ended_and_the_call_released_
     assert stop < answered < release
     assert client.events.count(f"POST {RESOURCES_TASK_STATE_RELEASE_PATH}") == 1
     assert client.events[-3:] == ["POST /v1/agent_sessions/close", "POST /verify", "POST /close_session"]
+    # The stop and the release never wait for a connection that the running activation holds.
+    assert client.control == [f"POST {STOP_PATH}", f"POST {RESOURCES_TASK_STATE_RELEASE_PATH}"]
+    assert "ng_task_end_stop" not in client.verified[0]["response"]["metadata"]
+
+
+@pytest.mark.parametrize(
+    "first_reply",
+    [_Response({"task_ended": True}), _ErrorResponse(404, SESSION_LOST_BODY)],
+    ids=["task_ended", "session_lost"],
+)
+async def test_a_task_over_before_the_run_starts_no_run_and_goes_on_to_verification(first_reply: Any) -> None:
+    server, client = _server(first_reply=first_reply)
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None
+    assert client.reads == [WATCH]
+    assert f"POST {ACTIVATION_PATH}" not in client.events
+    assert client.stops == []
+    assert client.events[-4:] == [
+        f"POST {RESOURCES_TASK_STATE_RELEASE_PATH}",
+        "POST /v1/agent_sessions/close",
+        "POST /verify",
+        "POST /close_session",
+    ]
+    response = client.verified[0]["response"]
+    assert (response["output"], response["status"]) == ([], "completed")
+    assert response["metadata"] == {"ng_termination_reason": "task_ended_before_run"}
 
 
 async def test_a_run_that_ends_before_its_task_is_not_stopped_and_the_watch_is_released() -> None:
@@ -271,13 +326,18 @@ async def test_a_failed_watching_read_fails_the_episode_and_releases_the_session
     assert "POST /verify" not in client.events
 
 
-async def test_a_failed_stop_fails_the_episode_and_releases_the_call() -> None:
-    server, client = _server(stop_status=502)
+@pytest.mark.parametrize(
+    ("status", "terminal"),
+    # 501: the sandbox's provider cannot stop a running harness, so every attempt would fail the same way.
+    [(500, False), (501, True), (502, False)],
+)
+async def test_a_failed_stop_fails_the_episode_and_releases_the_call(status: int, terminal: bool) -> None:
+    server, client = _server(stop_status=status)
 
     result = await server.run_request(_request())
 
     assert result.result is None
-    assert result.failure.stage == "agent"
+    assert (result.failure.stage, result.failure.terminal) == ("agent", terminal)
     assert "activation answered" not in client.events
     assert client.events.count(f"POST {RESOURCES_TASK_STATE_RELEASE_PATH}") == 1
     assert "POST /verify" not in client.events
@@ -306,6 +366,33 @@ async def test_the_call_is_released_after_the_stop_bound_when_the_run_goes_on(mo
         client.events, "activation answered"
     )
     assert client.events.count(f"POST {RESOURCES_TASK_STATE_RELEASE_PATH}") == 1
+    # The run may have gone on after its task ended, and its reply says so.
+    assert client.verified[0]["response"]["metadata"]["ng_task_end_stop"] == "unconfirmed"
+
+
+async def test_the_stop_bound_counts_from_the_time_the_stop_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A stop that answers only after the bound leaves no more time to wait for the run.
+    monkeypatch.setattr(single_agent_turn_app, "RUN_STOP_WAIT_SECONDS", 0.05)
+    server, client = _server(stop_ends_run=False, release_ends_run=True, stop_delay=0.2)
+    events = _TimedEvents()
+    object.__setattr__(client, "events", events)
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None
+    assert events.times[f"POST {RESOURCES_TASK_STATE_RELEASE_PATH}"] - events.times["stop answered"] < 0.03
+
+
+async def test_a_run_the_stop_did_not_stop_is_still_waited_for_before_the_release() -> None:
+    # stopped: false, such as for a run a stop already ends: the call stays held until the activation answers.
+    server, client = _server(stop_stopped=False)
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None
+    assert _index(client.events, "activation answered") < _index(
+        client.events, f"POST {RESOURCES_TASK_STATE_RELEASE_PATH}"
+    )
 
 
 async def test_a_server_that_answers_at_once_is_read_no_sooner_than_the_poll_interval(
