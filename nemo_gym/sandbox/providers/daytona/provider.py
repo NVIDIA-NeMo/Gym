@@ -22,9 +22,10 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, ClassVar
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
@@ -646,6 +647,9 @@ class DaytonaBatchConfig(DaytonaConfigBase):
 
 class DaytonaProvider:
     """Provider backed by the Daytona Python SDK."""
+
+    # connect() takes a bare sandbox id, not a serialized descriptor, so no other process can borrow a sandbox.
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="never")
 
     name = "daytona"
 
