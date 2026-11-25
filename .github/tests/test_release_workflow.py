@@ -155,7 +155,6 @@ class ReleaseGuards(unittest.TestCase):
 class ReleaseCommitGuards(unittest.TestCase):
     """Run the real source validation steps against local GitHub API fixtures."""
 
-    main_sha = "1" * 40
     target_sha = "2" * 40
     candidate = "3" * 40
     api = """
@@ -163,7 +162,6 @@ gh() {
   [[ $1 == api && $3 == --jq && $# == 4 ]] || return 1
   case "$2" in
     "repos/$GITHUB_REPOSITORY/branches/$TARGET_BRANCH") reply=$BRANCH_REPLY ;;
-    "repos/$GITHUB_REPOSITORY/commits/release%2Fcutoff") reply=$COMMIT_REPLY ;;
     "repos/$GITHUB_REPOSITORY/compare/$EXPECTED_COMPARE") reply=$COMPARE_REPLY ;;
     *) return 1 ;;
   esac
@@ -176,14 +174,10 @@ gh() {
         """Execute a workflow step, returning its exit status and Actions outputs."""
         env = dict(
             os.environ,
-            GITHUB_REF="refs/heads/main",
-            GITHUB_SHA=self.main_sha,
             GITHUB_REPOSITORY="NVIDIA-NeMo/Gym",
             RELEASE_REF=self.candidate,
             TARGET_BRANCH="r0.7.0",
-            FREEZE_COMMIT="release/cutoff",
             BRANCH_REPLY=json.dumps({"protected": True, "commit": {"sha": self.target_sha}}),
-            COMMIT_REPLY=json.dumps({"sha": self.candidate}),
             COMPARE_REPLY=json.dumps({"status": "ahead"}),
             EXPECTED_COMPARE=f"{self.candidate}...{self.target_sha}",
         )
@@ -219,27 +213,11 @@ gh() {
             with self.subTest(branch=branch):
                 self.assertNotEqual(self.run_step(step, TARGET_BRANCH=branch)[0], 0)
 
-    def test_freeze_pins_verified_sha(self):
-        """Default main resolves to the dispatch commit and other refs require ancestry."""
-        job = FREEZE_JOBS["resolve-freeze-commit"]
-        step = job["steps"][0]
-        freeze = FREEZE_JOBS["code-freeze"]
-        self.assertEqual(freeze["needs"], "resolve-freeze-commit")
-        self.assertEqual(freeze["with"]["freeze-commit"], "${{ needs.resolve-freeze-commit.outputs.sha }}")
-        for ref in ("", "main"):
-            self.assertEqual(self.run_step(step, FREEZE_COMMIT=ref), (0, f"sha={self.main_sha}\n"))
-        expected = {"EXPECTED_COMPARE": f"{self.candidate}...{self.main_sha}"}
-        self.assertEqual(self.run_step(step, **expected), (0, f"sha={self.candidate}\n"))
-        for overrides in (
-            {"GITHUB_REF": "refs/heads/other"},
-            {"COMMIT_REPLY": ""},
-            {"COMPARE_REPLY": ""},
-            {"COMPARE_REPLY": json.dumps({"status": "diverged"})},
-        ):
-            with self.subTest(overrides=overrides):
-                code, output = self.run_step(step, **expected, **overrides)
-                self.assertNotEqual(code, 0)
-                self.assertEqual(output, "")
+    def test_freeze_uses_main_as_the_source_branch(self):
+        """Gym opts into the shared workflow's cutoff policy for main."""
+        inputs = FREEZE_JOBS["code-freeze"]["with"]
+        self.assertEqual(inputs["freeze-source-branch"], "main")
+        self.assertEqual(inputs["freeze-commit"], "${{ inputs.freeze-commit }}")
 
 
 if __name__ == "__main__":
