@@ -135,7 +135,8 @@ allowed host is open on every port. The OpenSandbox policy is set when the sandb
 is created, so a session that borrows a task sandbox rejects any value other than
 `inherit` (the default, the provider's network), and it cannot be combined with
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download
-the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or use an
+the runtime: set `sandbox_runtime_upload: true`, set `sandbox_executable_path` and
+`sandbox_executable_sha256`, or use an
 image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
 (see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
 Without either, the seed is accepted and each attempt then fails downloading OpenCode.
@@ -160,6 +161,11 @@ it, pin one (see [Owner extensions](#owner-extensions)), or set
 `sandbox_ripgrep_download: true` to let OpenCode download ripgrep on demand, which
 needs GitHub access from the sandbox. Cached matching OpenCode runtimes need no
 runtime download. A pinned binary is never downloaded. Task dependencies are preserved.
+
+`sandbox_runtime_upload: true` moves both downloads to the agent server host, so that an
+image that runs as a non-root user, has no curl or ripgrep, has another package manager
+than apt-get or apk, or cannot reach GitHub still gets the runtime. It is off by default;
+see [Runtime uploaded from the agent server host](#runtime-uploaded-from-the-agent-server-host).
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call
@@ -305,8 +311,9 @@ harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), whic
 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
 instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`. It sets `network_access: model_only`,
 so the sandbox reaches only the model server; a search preset overrides it with `model_and_tools`. A restricted
-sandbox cannot download OpenCode, so supply `sandbox_executable_path` and `sandbox_executable_sha256` for a binary
-in the image.
+sandbox cannot download OpenCode, so the profile requires `sandbox_executable_path` and `sandbox_executable_sha256`
+for a binary in the image. To upload the runtime from the agent server host instead, set
+`sandbox_runtime_upload: true` and both of those fields to `null`.
 
 `configs/profiles/offline_science.yaml` builds on `benchmark.yaml` for the offline scientific presets
 (`benchmarks/hle/opencode.yaml`, `opencode_search.yaml`, `benchmarks/apex_shortlist/opencode.yaml`). It runs the
@@ -438,6 +445,54 @@ SHA-256. Seed verifies bytes and version before copying it into the adapter cach
 `sandbox_path_prefix` adds executable directories for installation and
 CLI/tool subprocesses while retaining the image PATH. These paths must already
 exist; the sandbox owner supplies mounts or image contents.
+
+### Runtime uploaded from the agent server host
+
+With `sandbox_runtime_upload: true`, the agent server host downloads OpenCode and ripgrep
+and uploads them into each sandbox, as the mini-SWE and Hermes runtimes are. In the
+sandbox, setup then needs Bash and coreutils (`sha256sum`), and no curl, tar, gzip, CA
+bundle, GitHub access, root or package manager.
+
+- **On the host.** For each sandbox platform, the host downloads the release archive of
+  `opencode_version` once, checks it against the pinned SHA-256 (`OPENCODE_RELEASE_SHA256`
+  in `runtime.py`) and unpacks the executable. It does the same for ripgrep 15.1.0, the
+  release OpenCode 1.19.6 and 2.3.2 download for themselves. The archives are cached under
+  `sandbox_opencode` in Gym's `cache_dir`. A host that cannot reach GitHub can be given
+  them there, named `opencode-<version>-linux-<asset>.tar.gz` (asset `x64-baseline`,
+  `x64-baseline-musl`, `arm64` or `arm64-musl`) and as ripgrep's releases name them; the
+  checksums still apply. `HTTPS_PROXY` applies to the downloads. The host needs the
+  archives for every seed, also for a sandbox that already holds the runtime.
+- **At session setup.** The agent asks the sandbox for its CPU architecture (x86_64 or
+  aarch64) and C library (glibc or musl) and uploads the builds for that platform, never
+  the host's own, into the session directory. They take the routes of an owner's pinned
+  files: the installer copies the executable, compares its SHA-256 with the one the host
+  computed and checks that `--version` reports `opencode_version`; ripgrep is staged like
+  a pinned `rg` (see [Pinned offline runtime bundle](#pinned-offline-runtime-bundle)). The
+  uploads are removed once both are installed.
+- **What is uploaded.** The unpacked executables: on x86_64 glibc, 216 MB for OpenCode
+  1.19.6 and 253 MB for 2.3.2 (their release archives are 80 MB and 123 MB), and 5 MB for
+  ripgrep. A sandbox whose runtime directory already holds the same executable, by its
+  SHA-256, from an earlier session or from its image, gets only ripgrep, and the
+  installer checks that file as it checks an upload; a runtime that only reports the
+  same version is replaced. Every other sandbox gets one upload through
+  the sandbox provider's file transfer, so setup time and the agent server's outbound
+  traffic grow with the number of sandboxes that start at once.
+- **Concurrent uploads.** Each agent server process runs two of these uploads at a time,
+  OpenCode or ripgrep, and further sessions wait for their turn within
+  `sandbox_install_timeout_seconds`. A provider that reads an upload into memory before
+  sending it, as OpenShell and E2B do, holds the file in the agent server's memory for
+  each upload in progress, which this bounds.
+- **Settings it combines with.** It needs an `opencode_version` with pinned digests and
+  refuses the seed together with `sandbox_executable_path`. A ripgrep pinned with
+  `sandbox_ripgrep_path` is used instead of the uploaded one. ripgrep 15.1.0 has no
+  aarch64 build for musl: such a sandbox gets no ripgrep upload, and setup looks for `rg`
+  as it does without this setting. OpenCode 1 still installs its plugin dependencies from
+  the npm registry at every start unless `sandbox_plugin_dependencies_path` supplies them.
+- **Failures.** A host download that fails or does not match its SHA-256, a failed upload,
+  a sandbox check that does not run and an uploaded file that fails its checks in the
+  sandbox are retryable setup errors.
+  The platform probe, the host downloads and the uploads together are bounded by
+  `sandbox_install_timeout_seconds`.
 
 `sandbox_model_id` selects the native OpenCode model ID. It defaults to the existing
 `dummy_model` compatibility alias. Benchmarks can set the native ID to retain
@@ -613,7 +668,8 @@ handled in `opencode2/`:
 
 - **Installation.** The installer downloads the same release asset names and checks each download against the
   release's SHA-256 (`OPENCODE_RELEASE_SHA256` in `runtime.py`); a 2.x version without pinned digests needs
-  `sandbox_executable_path`. OpenCode 2 prints `opencode v2.3.2` for `--version`. It installs no plugin
+  `sandbox_executable_path`. `sandbox_runtime_upload` uploads the same release assets from the agent server host.
+  OpenCode 2 prints `opencode v2.3.2` for `--version`. It installs no plugin
   dependencies, so `sandbox_plugin_dependencies_path` is refused. ripgrep is found as in OpenCode 1. The
   OpenCode 1 provider and launch settings of [Task-container settings](#task-container-settings) are refused too.
 - **Processes.** Every command runs with `--standalone`: without it, OpenCode 2 joins (or, for `session export`

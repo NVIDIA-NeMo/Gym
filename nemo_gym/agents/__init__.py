@@ -74,7 +74,13 @@ if TYPE_CHECKING:
     )
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
-    from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
+    from nemo_gym.agents.utils.sandbox_python import (
+        SandboxPlatform,
+        SandboxPythonRuntime,
+        download_pinned,
+        probe_sandbox_platform,
+        sandbox_cache_dir,
+    )
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -172,6 +178,7 @@ _PUBLIC_API = {
     "check_harness_checkpointing": "testing.checkpoint_conformance",
     "check_restored": "utils.supervisor_client",
     "confirmed_policy_response_timeout": "agent_outcome",
+    "download_pinned": "utils.sandbox_python",
     "queued_policy_response_timeout": "agent_outcome",
     "exec_idempotent": "utils.setup_retry",
     "exec_timeout": "utils.supervisor_client",
@@ -188,6 +195,7 @@ _PUBLIC_API = {
     "restrict_sandbox_network": "utils.sandbox_network",
     "restricted_network_policy": "agent_tools",
     "run_with_checkpoint_pauses": "utils.run_with_checkpoint_pauses",
+    "sandbox_cache_dir": "utils.sandbox_python",
     "sandbox_server_url": "agent_tools",
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",

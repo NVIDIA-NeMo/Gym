@@ -143,10 +143,15 @@ def _agent_environment_pins() -> tuple[str, ...]:
     return tuple(sorted(pins.values()))
 
 
+def sandbox_cache_dir(name: str) -> Path:
+    """Where the host keeps files it uploads into sandboxes: the folder ``name`` under Gym's ``cache_dir``."""
+    configured = (maybe_get_global_config_dict() or {}).get(CACHE_DIR_KEY_NAME)
+    return Path(configured or CACHE_DIR) / name
+
+
 def _cache_dir() -> Path:
     """Where the host keeps the archives: ``sandbox_python`` under Gym's ``cache_dir``."""
-    configured = (maybe_get_global_config_dict() or {}).get(CACHE_DIR_KEY_NAME)
-    return Path(configured or CACHE_DIR) / "sandbox_python"
+    return sandbox_cache_dir("sandbox_python")
 
 
 def _environment_proxy(url: str) -> str | None:
@@ -186,18 +191,12 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VERSION) -> Path:
-    """Return the host-cache path to the target platform's Python archive after checking its published SHA-256."""
-    checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}.get(version)
-    if checksums is None:
-        raise RuntimeError(f"No pinned Python {version} build; add its checksums to sandbox_python.py")
-    expected = checksums.get(f"{platform.arch}/{platform.libc}")
-    if expected is None:
-        raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")
-    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=version, arch=platform.arch, libc=platform.libc)
-    url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{_PYTHON_RELEASE}/{name}"
-    # A host that cannot download it can be given the file here.
-    path = _cache_dir() / name.replace("%2B", "+")
+async def download_pinned(url: str, path: Path, sha256: str) -> Path:
+    """Return ``path`` on this host, downloaded from ``url`` unless it is there, once its SHA-256 is ``sha256``.
+
+    A host that cannot download it can be given the file at ``path``. Raises ``RuntimeError`` when the download
+    fails or the bytes do not match; a download that does not match is not kept.
+    """
 
     async def download() -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,17 +210,30 @@ async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VE
                 with partial.open("wb") as output:
                     async for chunk in response.content.iter_chunked(1 << 20):
                         await asyncio.to_thread(output.write, chunk)
-            if await asyncio.to_thread(_sha256, partial) != expected:
+            if await asyncio.to_thread(_sha256, partial) != sha256:
                 raise RuntimeError(f"Checksum mismatch for {url}")
             os.replace(partial, path)
         finally:
             partial.unlink(missing_ok=True)
 
     await _cached(path, download)
-    # The cache outlives this process, so check the bytes that are about to be uploaded.
-    if await asyncio.to_thread(_sha256, path) != expected:
-        raise RuntimeError(f"Cached Python build {path} does not match its pinned checksum; delete it to retry")
+    # The cache outlives this process, so check the bytes that are about to be used.
+    if await asyncio.to_thread(_sha256, path) != sha256:
+        raise RuntimeError(f"Cached download {path} does not match its pinned checksum; delete it to retry")
     return path
+
+
+async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VERSION) -> Path:
+    """Return the host-cache path to the target platform's Python archive after checking its published SHA-256."""
+    checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}.get(version)
+    if checksums is None:
+        raise RuntimeError(f"No pinned Python {version} build; add its checksums to sandbox_python.py")
+    expected = checksums.get(f"{platform.arch}/{platform.libc}")
+    if expected is None:
+        raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")
+    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=version, arch=platform.arch, libc=platform.libc)
+    url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{_PYTHON_RELEASE}/{name}"
+    return await download_pinned(url, _cache_dir() / name.replace("%2B", "+"), expected)
 
 
 def _source_built(requirements: Iterable[str]) -> list[str]:

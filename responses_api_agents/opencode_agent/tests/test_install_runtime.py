@@ -365,6 +365,31 @@ def test_preinstalled_binary_needs_no_download_and_checks_digest(sandbox, valid_
         assert not (root / "runtime/opencode").exists()
 
 
+def test_supplied_binary_and_ripgrep_need_no_root_download_archive_tool_or_package_manager(sandbox):
+    """What the installer needs of an image when the agent server host uploads OpenCode and ripgrep."""
+    root, env = sandbox
+    # Without getconf or ldd the installer cannot tell the libc, which only a download needs.
+    for tool in ("rg", "tar", "gzip", "apt-get", "getconf"):
+        (root / "bin" / tool).unlink()
+    (root / "debian-ca.crt").unlink()
+    refused = run_installer(root, env | {"TEST_UID": "1000", "NG_OPENCODE_SKIP_RIPGREP": "1"})
+    assert refused.returncode == 1 and "could not identify the sandbox libc" in refused.stderr
+    binary = root / "uploaded-opencode"
+    binary.write_text("#!/bin/bash\necho 1.17.11\n")
+    result = seed_binary(root, env | {"TEST_UID": "1000", "NG_OPENCODE_SKIP_RIPGREP": "1"}, binary)
+    assert result.returncode == 0, result.stderr
+    assert (root / "runtime/opencode").read_bytes() == binary.read_bytes()
+    assert not (root / "download.log").exists() and not (root / "packages.log").exists()
+    # A later session finds that executable in the sandbox and supplies it in place of an upload: the installer
+    # checks it the same way, here even after it lost its execute bit.
+    installed = root / "runtime/opencode"
+    installed.chmod(0o644)
+    result = seed_binary(root, env | {"TEST_UID": "1000", "NG_OPENCODE_SKIP_RIPGREP": "1"}, installed)
+    assert result.returncode == 0, result.stderr
+    assert installed.read_bytes() == binary.read_bytes() and installed.stat().st_mode & 0o111
+    assert not (root / "download.log").exists() and not (root / "packages.log").exists()
+
+
 def seed_binary(
     root: Path, env: dict[str, str], binary: Path, *, version: str = "1.17.11", digest: str | None = None
 ) -> subprocess.CompletedProcess[str]:

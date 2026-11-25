@@ -36,3 +36,24 @@ def test_profile_restricts_the_sandbox_to_the_model_server(monkeypatch: pytest.M
     # OpenCode cannot download its binary through that policy, so the profile requires one in the image.
     assert settings.sandbox_executable_path == REQUIRED_SETTING_VALUES["sandbox_executable_path"]
     assert settings.sandbox_executable_sha256 == REQUIRED_SETTING_VALUES["sandbox_executable_sha256"]
+
+
+def test_profile_takes_a_runtime_uploaded_from_the_host_in_place_of_a_binary_in_the_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composed = "hle_equivalence_llm_judge_opencode_agent"
+    settings = f"++{composed}.responses_api_agents.opencode_agent"
+    # The two required fields are set to null, as the README says: the upload replaces the binary in the image.
+    config = compose_profile_on_hle(
+        "opencode_agent",
+        monkeypatch,
+        required=False,
+        cli_args=(
+            f"{settings}.sandbox_runtime_upload=true",
+            f"{settings}.sandbox_executable_path=null",
+            f"{settings}.sandbox_executable_sha256=null",
+        ),
+    )
+    agent = get_first_server_config_dict(config, composed)
+    assert agent.sandbox_runtime_upload is True
+    assert agent.sandbox_executable_path is None and agent.sandbox_executable_sha256 is None

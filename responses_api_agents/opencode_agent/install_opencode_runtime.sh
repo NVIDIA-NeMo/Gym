@@ -77,7 +77,9 @@ if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
   :
 elif [[ "$(ldd --version 2>&1 || true)" == *musl* ]]; then
   arch="${arch}-musl"
-else
+elif [ -z "$source_binary" ]; then
+  # The libc selects the release to download. A supplied binary was already chosen for this image and proves
+  # itself below by its SHA-256 and its --version.
   echo 'OpenCode sandbox execution requires glibc or musl; could not identify the sandbox libc' >&2
   exit 1
 fi
