@@ -24,9 +24,8 @@ verifiers use harbor-rewardkit criteria, which changes the meaning of test count
   in the task sandbox with the image's package manager, which it cannot do in the three tasks whose image runs as a non-root user
   (`fp8-rmsnorm-gemm`, `risk-scorer-replay`, `rs-archive-clone`): leave them out with `--exclude-tasks`, or
   compare harnesses on the 63 other tasks with `++task_ids_fpath=benchmarks/terminal_bench_4/root_image_tasks.txt`.
-  Its step limit is 1000 (`agent.build.steps`), set so that the run limit is the bound, not the 500 steps of the
-  Artificial Analysis settings of `terminal_bench_4/miniswe`, so its scores are not comparable with that profile's
-  unless mini-SWE runs with `++tb4_max_steps=1000` too.
+  It has no step limit, so its scores are not comparable with the Artificial Analysis settings of
+  `terminal_bench_4/miniswe`.
 - `terminal_bench_4/miniswe_legacy_agent` (deprecated): the same mini-SWE version in
   `miniswe_sandboxed_agent`, over the legacy `/run` relay of the TB4 resources server. It stays for comparison until that
   server is retired; "The `/run` profile" and its subsections describe this path.
