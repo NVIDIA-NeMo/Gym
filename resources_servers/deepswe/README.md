@@ -92,6 +92,21 @@ gym env start \
   ++deepswe_opencode_agent.responses_api_agents.opencode_agent.sandbox_executable_sha256=<sha256>
 ```
 
+## Run Hermes rollouts
+
+`benchmarks/deepswe/hermes.yaml` runs `hermes_agent` on the same episode: the same agent sandbox, three-hour budget,
+episode bound and verifier as the OpenCode recipe. The Agent Server stages Hermes's runtime into the sandbox, so
+nothing has to be mounted and the sandbox needs no network. Hermes keeps its own step limit (90 model calls),
+per-command timeout (180 seconds) and toolsets, and declares the 262144-token context window; match that value to the
+serving window when you change it.
+
+```bash
+gym env start \
+  --config benchmarks/deepswe/hermes.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config responses_api_models/<model>/configs/<model>.yaml
+```
+
 The resources server keeps each episode session until the Environment Server closes it. A session that is never
 closed expires after the agent sandbox's `ttl_s`, and shutdown stops what is left. Verify grades a session once: an
 identical retry returns the same verdict, and a verify after close is masked as a lost session.
