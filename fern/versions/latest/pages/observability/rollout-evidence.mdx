@@ -367,8 +367,9 @@ Each dispatched rollout's saved row or failure row also records `_ng_transport_r
 of its `/run` dispatch, in the collection driver and in every Gym server below it. A transport resend is another
 attempt of the same HTTP request that Gym's HTTP client starts after the attempt before it raised: a refused, reset
 or dropped connection, a timeout, or another error the client retries, such as a reply body cut off mid-read. It is
-counted as the attempt starts, so a failure that ends the retries adds nothing. The collection driver's resends of a
-refused `/run` and the remote agent's retries of its service count the same way. A reply that arrives is an answer
+counted as the attempt starts, so a failure that ends the retries adds nothing. Of the retry loops outside the client,
+two count the same way: the collection driver's resends of a refused `/run` and the remote agent's retries of its
+service. A reply that arrives is an answer
 whatever its status, so a model client's retries of 429 and 5xx replies are not included, and nor are rollout
 retries. Each Gym server reports the resends made while serving a request in its reply's
 `X-NG-Transport-Resend-Count` header, sent only when there were any, and the caller adds them to its own. The caller
@@ -382,6 +383,8 @@ The count is a lower bound. These resends are not seen:
 - one that aiohttp makes inside a single request: after a dropped connection it sends an idempotent request, such as
   a `GET`, once more on a new connection;
 - those a server makes after its reply has started, as a streaming model server's backend can;
+- those of any other retry loop outside the client, such as the Terminus 2 agent's new model call after one that ran
+  past its `llm_request_timeout`: each call starts its own attempt count;
 - those of a Gym server without the header, or reported to a client marked neither internal nor `gym_server`;
 - those of a harness that calls the model server from a separate process, such as the BrowseComp agent's sandbox
   runner.

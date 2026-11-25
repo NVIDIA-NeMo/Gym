@@ -50,7 +50,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Trace** | Debug-oriented log of a rollout (timing, tool I/O, metadata) beyond the scored trajectory. |
 | **Rollout batch** | Multiple rollouts generated together (across tasks for throughput, or grouped on one task for methods like GRPO). |
 | **Rollout collection** | Running inference, tools, and verification at scale to produce scored rollouts. Start with the [Quickstart](/get-started/quickstart) or [Evaluate](/evaluation). |
-| **Transport resend** | Another attempt of the same HTTP request that a retry loop starts after the attempt before it raised, such as on a refused or dropped connection. Recorded per rollout as `_ng_transport_resends`. It is not a rollout retry, which runs the rollout again, and not a model client's retry of a 429 or 5xx reply. See [Rollout Evidence](/main/observability/rollout-evidence). |
+| **Transport resend** | Another attempt of the same HTTP request that Gym's HTTP client starts after the attempt before it raised, such as on a refused or dropped connection. Recorded per rollout as `_ng_transport_resends`. It is not a rollout retry, which runs the rollout again, and not a model client's retry of a 429 or 5xx reply. [Rollout Evidence](/main/observability/rollout-evidence) names the retry loops outside the client that also count. |
 
 ### Environment
 
