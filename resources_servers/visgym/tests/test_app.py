@@ -158,7 +158,7 @@ def _assert_no_session_state(server: visgym_app.VisGymResourcesServer) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_abort_close_tombstones_id_against_delayed_seed(
+async def test_unknown_abort_close_fences_id_against_delayed_seed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -166,12 +166,11 @@ async def test_unknown_abort_close_tombstones_id_against_delayed_seed(
 
     now = [100.0]
     monkeypatch.setattr(base_resources_server, "monotonic", lambda: now[0])
-    monkeypatch.setattr(visgym_app, "monotonic", lambda: now[0])
     env = StubVisGymEnv()
     stub_gym = StubGym(env)
     monkeypatch.setattr(visgym_app, "gym", stub_gym)
     monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
-    server = _server(tmp_path, [_row()], cleanup_tombstone_ttl_seconds=10.0, session_close_retry_window_seconds=10.0)
+    server = _server(tmp_path, [_row()], session_close_retry_window_seconds=10.0)
     env_id = "reordered-cleanup-session"
 
     closed = await server.close(
@@ -180,7 +179,6 @@ async def test_unknown_abort_close_tombstones_id_against_delayed_seed(
     )
 
     assert closed.success is True
-    assert server.cleanup_tombstone_expiry[env_id] == 110.0
     with pytest.raises(HTTPException) as exc_info:
         await server.seed_session(
             _request(),
@@ -196,7 +194,6 @@ async def test_unknown_abort_close_tombstones_id_against_delayed_seed(
         VisGymSeedSessionRequest(env_id=env_id, task_idx=0),
     )
     assert seeded.env_id == env_id
-    assert env_id not in server.cleanup_tombstone_expiry
     await server.close(_request(), VisGymCloseRequest(env_id=env_id, discard_reward=True))
     _assert_no_session_state(server)
 
@@ -206,7 +203,6 @@ async def test_unknown_abort_close_tombstones_id_against_delayed_seed(
     [
         ("num_workers", 2),
         ("return_transitions", True),
-        ("cleanup_tombstone_ttl_seconds", 0),
     ],
 )
 def test_stateful_resource_config_rejects_unsafe_process_or_output_modes(field: str, value: object) -> None:
@@ -459,7 +455,6 @@ async def test_abort_close_waits_for_failing_constructor_and_retires_empty_reser
 
     assert exc_info.value.status_code == 500
     assert closed.success is True
-    assert env_id in server.cleanup_tombstone_expiry
     _assert_no_session_state(server)
 
 

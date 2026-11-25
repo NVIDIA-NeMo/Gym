@@ -92,20 +92,7 @@ def _as_core_input_message(message: Any) -> Any:
     return message
 
 
-# Brace-depth scanner ported from resources_servers/string_match/app.py's
-# _extract_boxed (Doc 2 Revision R7). Ported rather than imported because
-# visgym_agent runs in its own per-server venv and importing from
-# string_match would couple the two servers' dependency closures.
-#
-# The naive r"\\boxed\{\s*(.*?)\s*\}" alternative -- what this file used to
-# define as BOXED_PATTERN -- is non-greedy and stops at the FIRST closing
-# brace, so it truncates any nested-brace content, most commonly a model
-# wrapping its action in \\boxed{\\text{('move', 0)}}: it would capture
-# "\\text{('move', 0)" (an unbalanced fragment) instead of "('move', 0)". A
-# regression test (test_pattern_constant_matches_string_match) asserted this
-# constant against its own literal, so it could never have caught the two
-# implementations diverging; it now round-trips a nested-brace string through
-# both extractors instead.
+# Extract nested boxed actions without coupling this component to another server.
 BOXED_START_PATTERN = re.compile(r"\\boxed\{")
 LATEX_TEXT_WRAP = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
 TERMINAL_CHAT_TOKENS = ("<|im_end|>", "<|eot_id|>")
@@ -148,8 +135,8 @@ class TextActionAgentConfig(BaseResponsesAPIAgentConfig):
         default=None,
         ge=1,
         description=(
-            "Hard cap on rollout turns. Per-env horizon_cap in the Doc-1 JSONL "
-            "row is the primary enforcement point; this is a global backstop."
+            "Hard cap on rollout turns. Per-env horizon_cap in the task row "
+            "is the primary enforcement point; this is a global backstop."
         ),
     )
     return_transitions: Literal[False] = Field(
@@ -198,16 +185,12 @@ class TextActionAgentConfig(BaseResponsesAPIAgentConfig):
         default=False,
         description=(
             "If True, prepend a one-line action-vocabulary summary to every env "
-            "user turn obs. Default off matches Pattern A (rules in first turn "
-            "only); see Doc 2 § re_emit_rules_each_turn flag."
+            "user observation. Default off retains the initial instructions without repeating them."
         ),
     )
     rules_summary_template: str = Field(
         default="Reminder: respond with your reasoning, then write your action as \\boxed{...}.",
-        description=(
-            "Template used when re_emit_rules_each_turn=True. Per-env "
-            "specialization is a Doc-7 follow-on; default is path-generic."
-        ),
+        description=("Template used when re_emit_rules_each_turn=True."),
     )
     system_prompt: str = Field(
         default=DEFAULT_VISGYM_SYSTEM_PROMPT,
@@ -582,9 +565,6 @@ class TextActionAgent(SimpleResponsesAPIAgent):
 
         seed_session_response = await self._seed_session(req.task_idx, task_row)
 
-        # Path B: tools is empty by Doc-2 commitment; if the JSONL row carries
-        # tools (e.g., misconfigured), we don't strip them. The model can
-        # ignore them — the agent never inspects function_call output items.
         # Apply rules-summary reminder to turn-1's seed observation too (when
         # re_emit_rules_each_turn is on), not just /step responses; otherwise
         # the very first turn — the most format-sensitive one — sees the env's

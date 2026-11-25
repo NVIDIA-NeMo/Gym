@@ -43,8 +43,8 @@ VISGYM_BINARY_SUCCESS_ENV_IDS = frozenset(
 )
 
 
-class TaskData(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class VisGymTaskFields(BaseModel):
+    """Task fields shared by dataset validation and runtime session requests."""
 
     env_id: str = Field(
         description="VisGym registry identifier, for example 'maze_2d/easy'.",
@@ -98,6 +98,11 @@ class TaskData(BaseModel):
         description="Optional keyword arguments passed to the environment's get_prompt() method.",
         json_schema_extra={"consumed_by": ["prompt"]},
     )
+
+
+class TaskData(VisGymTaskFields):
+    model_config = ConfigDict(extra="allow")
+
     task_idx: int | None = Field(
         default=None,
         ge=0,

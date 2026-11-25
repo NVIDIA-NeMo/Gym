@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import uuid
@@ -17,7 +18,6 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from functools import partial
 from pathlib import Path
-from time import monotonic
 from typing import Annotated, Any, ClassVar
 
 import anyio
@@ -117,15 +117,10 @@ def _ensure_matplotlib_canvas_compatibility() -> None:
     FigureCanvasBase.print_to_buffer = print_to_buffer  # type: ignore[attr-defined]
 
 
-# Serializes every mental_rotation_3d_cube figure operation in this process.
-# The environment renders through the pyplot state machine (plt.figure, then
-# plt.close) and its close() calls plt.close("all") / plt.clf() / plt.cla(),
-# all of which mutate matplotlib's *global* figure registry. This server runs
-# sessions concurrently in a threadpool, so one session tearing down its
-# environment while another is mid-render drops the second one's axes out of
-# the registry and raises `KeyError: <Axes3D: >`. It is intermittent and
-# invisible to a single-threaded probe: a blended 16-node run hit it twice.
-_MENTAL_ROTATION_3D_FIGURE_LOCK = threading.RLock()
+# Both matchstick and cube rendering/cleanup mutate pyplot's process-global state.
+# Acquire this in the worker thread for every operation in either family, including
+# failed-seed cleanup. Reentrant because the cube compatibility wrapper also uses it.
+_PYPLOT_LOCK = threading.RLock()
 
 
 def _install_mental_rotation_3d_renderer_compatibility() -> None:
@@ -141,7 +136,7 @@ def _install_mental_rotation_3d_renderer_compatibility() -> None:
     original_close = module.MentalRotation3DCubeEnv.close
 
     def render(env: Any, rotation: Any) -> Any:
-        with _MENTAL_ROTATION_3D_FIGURE_LOCK:
+        with _PYPLOT_LOCK:
             image = original_render(env, rotation)
         height, width = (int(value) for value in env.image_size)
         if image.shape[:2] != (height, width):
@@ -152,7 +147,7 @@ def _install_mental_rotation_3d_renderer_compatibility() -> None:
         return image
 
     def close(env: Any) -> Any:
-        with _MENTAL_ROTATION_3D_FIGURE_LOCK:
+        with _PYPLOT_LOCK:
             return original_close(env)
 
     module.MentalRotation3DCubeEnv._render = render
@@ -261,10 +256,8 @@ class VisGymResourcesServer(SimpleResourcesServer):
     env_id_to_turn_count: dict[str, int] = Field(default_factory=lambda: defaultdict(int))
     env_id_to_task_success: dict[str, bool | None] = Field(default_factory=dict)
     env_id_to_operation: dict[str, _SessionOperation] = Field(default_factory=dict, exclude=True)
-    cleanup_tombstone_expiry: dict[str, float] = Field(default_factory=dict, exclude=True)
     background_close_tasks: set[asyncio.Task[VisGymCloseResponse]] = Field(default_factory=set, exclude=True)
     env_construction_lock: Any = Field(default_factory=asyncio.Lock)
-    serial_env_op_lock: Any = Field(default_factory=asyncio.Lock)
 
     def model_post_init(self, _ctx: Any) -> None:
         _ensure_headless_defaults()
@@ -369,7 +362,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
                         constructed_env[0] = made_env
                         return made_env
 
-                    env = await _run_in_threadpool_to_completion(construct_env)
+                    env = await self._run_env_operation(row.env_id, construct_env)
                 obs, info = await self._reset_env(env, row)
                 obs_msg = observation_to_user_message(
                     image_value=await self._image_value(env, obs, row.env_id),
@@ -408,13 +401,14 @@ class VisGymResourcesServer(SimpleResourcesServer):
             try:
                 if env is not None:
                     try:
-                        await _run_in_threadpool_to_completion(env.close)
+                        await self._run_env_operation(row.env_id, env.close)
                     except BaseException:
                         # Retain the failed-close object and reservation so an
                         # abort /close can retry instead of losing an orphaned
                         # native environment when seed itself already failed.
                         close_failed = True
                         self.env_id_to_env[env_id] = env
+                        self.env_id_to_task_row[env_id] = row.model_dump(mode="json")
                         logger.warning("Failed to close partially seeded VisGym env %s", row.env_id, exc_info=True)
             finally:
                 operation.seed_finished.set()
@@ -477,7 +471,18 @@ class VisGymResourcesServer(SimpleResourcesServer):
         row_dict = self.env_id_to_task_row[body.env_id]
         env_id_str = row_dict["env_id"]
 
-        obs, reward, terminated, truncated, info = await self._step_env(env, env_id_str, body.action_string)
+        try:
+            obs, reward, terminated, truncated, info = await self._step_env(env, env_id_str, body.action_string)
+        except (TypeError, ValueError, OverflowError):
+            # Some provider action-space validators raise for malformed values.
+            # Only attribute a type/value error to the model when the task's
+            # declared action grammar independently proves the action invalid.
+            grammar = row_dict.get("act_grammar_regex")
+            if grammar is None or re.fullmatch(grammar, body.action_string) is not None:
+                raise
+            logger.warning("VisGym rejected malformed action for %s", env_id_str, exc_info=True)
+            self.env_id_to_turn_count[body.env_id] += 1
+            return VisGymStepResponse(obs=[], reward=0.0, done=True)
 
         self.env_id_to_turn_count[body.env_id] += 1
         raw_env_reward = float(reward)
@@ -551,11 +556,6 @@ class VisGymResourcesServer(SimpleResourcesServer):
         return await self._close_native_session(request, body)
 
     async def _close_native_session(self, request: Request | None, body: VisGymCloseRequest) -> VisGymCloseResponse:
-        # An abort can reach this process before the seed request it is cleaning
-        # up. Tombstone the client-generated ID before consulting live state so
-        # the delayed mutation cannot publish an orphan.
-        if body.discard_reward:
-            self._record_cleanup_tombstone(body.env_id)
         operation = self.env_id_to_operation.get(body.env_id)
         if operation is None:
             return VisGymCloseResponse(success=True, message="already closed")
@@ -586,7 +586,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
             return VisGymCloseResponse(success=True, message="already closed")
 
         try:
-            await _run_in_threadpool_to_completion(env.close)
+            await self._run_env_operation(self.env_id_to_task_row[env_id]["env_id"], env.close)
         except Exception as exc:
             logger.warning("VisGym env.close raised on env_id=%s: %s", env_id, exc)
             return VisGymCloseResponse(success=False, message=repr(exc))
@@ -711,33 +711,11 @@ class VisGymResourcesServer(SimpleResourcesServer):
         )
 
     def _reserve_session(self, env_id: str) -> _SessionOperation:
-        if self._has_active_cleanup_tombstone(env_id):
-            raise ResourcesSessionConflictError(f"env_id={env_id} was already closed.")
         if self._session_id_in_use(env_id):
             raise ResourcesSessionConflictError(f"env_id={env_id} is already in use.")
         operation = _SessionOperation()
         self.env_id_to_operation[env_id] = operation
         return operation
-
-    def _record_cleanup_tombstone(self, env_id: str) -> None:
-        now = monotonic()
-        self._prune_cleanup_tombstones(now)
-        self.cleanup_tombstone_expiry[env_id] = now + self.config.cleanup_tombstone_ttl_seconds
-
-    def _has_active_cleanup_tombstone(self, env_id: str) -> bool:
-        now = monotonic()
-        expiry = self.cleanup_tombstone_expiry.get(env_id)
-        if expiry is None:
-            return False
-        if expiry <= now:
-            self.cleanup_tombstone_expiry.pop(env_id, None)
-            return False
-        return True
-
-    def _prune_cleanup_tombstones(self, now: float) -> None:
-        for env_id, expiry in list(self.cleanup_tombstone_expiry.items()):
-            if expiry <= now:
-                self.cleanup_tombstone_expiry.pop(env_id, None)
 
     def _discard_session_state(self, env_id: str) -> None:
         self.env_id_to_env.pop(env_id, None)
@@ -776,29 +754,29 @@ class VisGymResourcesServer(SimpleResourcesServer):
             )
         return VisGymTaskRow.model_validate(self.task_rows[body.task_idx])
 
-    async def _reset_env(self, env: Any, row: VisGymTaskRow) -> tuple[Any, dict[str, Any]]:
-        if self._serializes_env_ops(row.env_id):
-            async with self.serial_env_op_lock:
-                return await self._reset_env_unlocked(env, row)
-        return await self._reset_env_unlocked(env, row)
+    async def _run_env_operation(self, env_id: str, operation: Any, *args: Any, **kwargs: Any) -> Any:
+        def run() -> Any:
+            if env_id.startswith(("matchstick_", "mental_rotation_3d_cube/")):
+                with _PYPLOT_LOCK:
+                    return operation(*args, **kwargs)
+            return operation(*args, **kwargs)
 
-    async def _reset_env_unlocked(self, env: Any, row: VisGymTaskRow) -> tuple[Any, dict[str, Any]]:
-        if row.init_state is not None:
-            try:
-                return await _run_in_threadpool_to_completion(env.reset, seed=row.seed, init_state=row.init_state)
-            except TypeError:
-                return await _run_in_threadpool_to_completion(
-                    env.reset,
-                    seed=row.seed,
-                    options={"init_state": row.init_state},
-                )
-        return await _run_in_threadpool_to_completion(env.reset, seed=row.seed)
+        return await _run_in_threadpool_to_completion(run)
+
+    async def _reset_env(self, env: Any, row: VisGymTaskRow) -> tuple[Any, dict[str, Any]]:
+        def reset() -> tuple[Any, dict[str, Any]]:
+            observation = env.reset(seed=row.seed)
+            if row.init_state is None:
+                return observation
+            # Gymnasium wrappers accept only seed/options; the pinned VisGym
+            # environments consume init_state directly. Initialize wrapper state
+            # first so OrderEnforcing still permits subsequent step/render calls.
+            return env.unwrapped.reset(seed=row.seed, init_state=row.init_state)
+
+        return await self._run_env_operation(row.env_id, reset)
 
     async def _step_env(self, env: Any, env_id: str, action_string: str) -> tuple[Any, Any, Any, Any, Any]:
-        if self._serializes_env_ops(env_id):
-            async with self.serial_env_op_lock:
-                return await _run_in_threadpool_to_completion(env.step, action_string)
-        return await _run_in_threadpool_to_completion(env.step, action_string)
+        return await self._run_env_operation(env_id, env.step, action_string)
 
     async def _image_value(self, env: Any, obs: Any, env_id: str) -> Any:
         """Return something image-like for this observation, rendering if needed.
@@ -825,17 +803,10 @@ class VisGymResourcesServer(SimpleResourcesServer):
 
     async def _safe_render(self, env: Any, env_id: str) -> Any:
         try:
-            if self._serializes_env_ops(env_id):
-                async with self.serial_env_op_lock:
-                    return await _run_in_threadpool_to_completion(env.render)
-            return await _run_in_threadpool_to_completion(env.render)
+            return await self._run_env_operation(env_id, env.render)
         except Exception:
             logger.debug("VisGym env.render failed", exc_info=True)
             return None
-
-    @staticmethod
-    def _serializes_env_ops(env_id: str) -> bool:
-        return env_id.startswith("matchstick_")
 
     def _feedback_text(self, info: Any) -> str | None:
         if not self.config.include_env_feedback:

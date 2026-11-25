@@ -52,7 +52,11 @@ identical retry gets the same grade; a changed request is masked as
 Abort close (`discard_reward=true`) discards reward and invalidates retry evidence.
 
 Provider-reported invalid actions retain their normal observation/reward/done
-semantics, including the configured horizon. Unexpected step, rendering, or
+semantics, including the configured horizon. If an action-space validator raises
+a type/value/overflow error and the task's `act_grammar_regex` independently rejects
+the action, the episode ends as a scored model failure with zero additional reward.
+Without that grammar evidence, the exception remains a simulator failure.
+Unexpected step, rendering, or
 success-contract errors, and nonfinite rewards, end the episode and return a
 masked `simulator_failed` grade. They are not counted as incorrect model
 answers. Failed native calls are never repeated within that session; framework
@@ -95,7 +99,8 @@ public request and response schemas for all existing consumers.
 files or an inline `task_row`. The server:
 
 - calls `gymnasium.make()` with `env_id` and `env_kwargs`;
-- calls `env.reset(seed=..., init_state=...)` when an initial state is present;
+- initializes the Gymnasium wrappers, then calls the underlying VisGym
+  environment's `reset(seed=..., init_state=...)` when an initial state is present;
 - obtains the environment prompt with `env.get_prompt(**prompt_kwargs)` when
   available;
 - converts the returned observation into a user message;
@@ -113,7 +118,8 @@ IDs, and log probabilities, while the reset observation is environment state.
 `env.step(action_string)`, records the turn count, accumulates reward, and
 returns the next visual observation.
 
-Provider-reported invalid actions are returned as ordinary feedback. Unexpected
+Provider-reported invalid actions are returned as ordinary feedback. Raising
+invalid actions follow the grammar-backed scoring rule above. Unexpected
 exceptions instead follow the masked failure contract above. A configured
 `horizon_cap` can terminate an episode before native termination.
 

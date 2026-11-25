@@ -20,33 +20,14 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
+from resources_servers.visgym.task_data import VisGymTaskFields
 
 
-class VisGymTaskRow(BaseModel):
-    """One VisGym task row loaded from a JSONL file or passed to /seed_session."""
+class VisGymTaskRow(VisGymTaskFields):
+    """One task selected for a session; discard unrelated dataset/dispatcher fields."""
 
-    env_id: str = Field(..., description="VisGym/Gymnasium env ID, e.g. 'maze_2d/easy'.")
-    env_kwargs: dict[str, Any] = Field(default_factory=dict)
-    seed: int = Field(..., description="Seed passed to env.reset().")
-    task_id: str | None = None
-    act_grammar_regex: str | None = Field(
-        default=None,
-        description="Regex matching legal action strings for rollout inspection.",
-    )
-    horizon_cap: int | None = Field(default=None, ge=1)
-    task_metadata: dict[str, Any] = Field(default_factory=dict)
-    init_state: dict[str, Any] | None = Field(
-        default=None,
-        description="Optional VisGym initial state passed to reset(init_state=...).",
-    )
-    seed_key: str | None = Field(
-        default=None,
-        description="Optional env constructor kwarg name that should receive seed.",
-    )
-    prompt_kwargs: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Optional kwargs passed to env.get_prompt(**prompt_kwargs).",
-    )
+    model_config = ConfigDict(extra="ignore")
+
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
         ...,
         description="OpenAI Responses-API request body; input is filled by /seed_session.",
@@ -83,14 +64,6 @@ class VisGymResourcesServerConfig(BaseResourcesServerConfig):
             "Reject registry IDs outside VisGym's 17 audited binary-terminal families. "
             "Disable only for reward-only diagnostics; unsupported rows then return "
             "task_success=null."
-        ),
-    )
-    cleanup_tombstone_ttl_seconds: float = Field(
-        default=600.0,
-        ge=1.0,
-        description=(
-            "How long an aborting /close for a client-generated env_id prevents "
-            "a delayed /seed_session with the same ID from creating an orphan."
         ),
     )
     return_transitions: Literal[False] = False
