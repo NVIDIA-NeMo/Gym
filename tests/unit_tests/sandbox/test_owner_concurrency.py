@@ -8,8 +8,9 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_ow
 
 
 class TestOwnerConcurrency:
-    def test_a_block_without_it_is_unbounded(self) -> None:
-        concurrency = resolve_provider_owner_concurrency({"docker": {}})
+    @pytest.mark.parametrize("settings", [{}, {"owner_concurrency": None}, {"owner_concurrency": {}}])
+    def test_a_block_without_limits_is_unbounded(self, settings: dict) -> None:
+        concurrency = resolve_provider_owner_concurrency({"docker": {}, **settings})
 
         assert (concurrency.starts, concurrency.stops) == (None, None)
 
@@ -21,7 +22,7 @@ class TestOwnerConcurrency:
         assert (concurrency.starts, concurrency.stops) == (64, 16)
         assert resolve_provider_config("docker_sandbox", named) == {"docker": {}}, "it is not a provider key"
 
-    @pytest.mark.parametrize("value", [{"starts": 0}, {"stops": -1}, {"start": 4}])
-    def test_an_invalid_value_is_refused(self, value: dict) -> None:
+    @pytest.mark.parametrize("value", [{"starts": 0}, {"stops": -1}, {"start": 4}, False, 0, [], ""])
+    def test_an_invalid_value_is_refused(self, value: object) -> None:
         with pytest.raises(ValueError, match="owner_concurrency"):
             resolve_provider_owner_concurrency({"docker": {}, "owner_concurrency": value})

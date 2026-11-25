@@ -659,9 +659,13 @@ class AsyncSandbox:
         *,
         snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
-        _owner_rolls_back: bool = False,
+        take_ownership: Callable[["AsyncSandbox"], None] | None = None,
     ) -> "AsyncSandbox":
-        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
+        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image.
+
+        If supplied, ``take_ownership`` receives the sandbox when its handle can be stopped, before file upload.
+        The caller then owns rollback if startup fails or is cancelled. By default, start rolls back failed uploads.
+        """
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
@@ -707,6 +711,8 @@ class AsyncSandbox:
         self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
         self._stopped = False
+        if take_ownership is not None:
+            take_ownership(self)
         interval = sampling_interval()
         if interval and isinstance(self._provider, ResourceProvider):
             self._resource_sampler = ResourceSampler(
@@ -729,7 +735,7 @@ class AsyncSandbox:
                         await self.upload(source_path, target_path)
         except BaseException as error:
             # An owner that tracks the handle rolls it back under its own provider concurrency limit.
-            if not _owner_rolls_back:
+            if take_ownership is None:
                 await _stop_after_failed_start(self, error)
             raise
 
