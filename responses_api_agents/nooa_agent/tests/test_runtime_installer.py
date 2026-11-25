@@ -196,7 +196,7 @@ def test_private_root_belongs_to_this_user_alone() -> None:
     # Not tmp_path, for the same reason as the check above.
     base = Path(tempfile.mkdtemp(prefix="nooa-private-", dir="/tmp"))
     try:
-        base.chmod(0o777)
+        base.chmod(0o1777)  # Shared like /tmp: the sticky bit keeps each user's entries in place.
         script = base / "setup.sh"
         shutil.copyfile(INSTALLER, script)
         script.chmod(0o755)
@@ -228,6 +228,103 @@ def test_private_root_belongs_to_this_user_alone() -> None:
         for name in refused:
             result = claim(name)
             assert (result.returncode, result.stdout) == (1, ""), name
+
+        # The parent's own name must be fixed too, even when it leads to a directory that is safe now.
+        (base / "linked").symlink_to(base)
+        result = claim("linked/runtime")
+        assert (result.returncode, result.stdout) == (1, "")
+        assert f"{base / 'linked'} is a symbolic link" in result.stderr
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.parametrize("sticky", [True, False])
+def test_private_root_needs_a_parent_where_others_cannot_replace_it(sticky: bool) -> None:
+    base = Path(tempfile.mkdtemp(prefix="nooa-parent-", dir="/tmp"))
+    try:
+        base.chmod(0o755)
+        as_root = os.geteuid() == 0
+        uid = 65534 if as_root else os.geteuid()
+        kwargs = {"user": 65534, "group": 65534, "extra_groups": []} if as_root else {}
+        call = base / "call"
+        call.mkdir()
+        call.chmod(0o777)
+        script = call / "setup.sh"
+        shutil.copyfile(INSTALLER, script)
+        script.chmod(0o755)
+        shared = base / "shared"
+        shared.mkdir()
+        # A runtime that passes the health check is already in place, in a directory that is
+        # itself private to this user. Its interpreter leaves a mark whenever it is run.
+        root = shared / f"runtime-{uid}"
+        runtime = root / FINGERPRINT
+        python = runtime / "python/bin/python3"
+        python.parent.mkdir(parents=True)
+        (runtime / "ready").write_text(FINGERPRINT + "\n")
+        mark = root / "executed"
+        python.write_text(f"#!/bin/sh\ntouch {mark}\n")
+        python.chmod(0o755)
+        root.chmod(0o700)
+        for path in [root, *root.rglob("*")]:
+            os.chown(path, uid, -1)
+        shared.chmod(0o1777 if sticky else 0o777)
+
+        def run(*arguments: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["bash", str(script), *arguments], text=True, capture_output=True, timeout=20, **kwargs
+            )
+
+        claim = run("private-root", str(shared / "runtime"))
+        if sticky:
+            assert (claim.returncode, claim.stdout) == (0, f"{root}\n"), claim.stderr
+            # The caller checks a runtime only below a root that was handed out.
+            check = run("check", f"{claim.stdout.strip()}/{FINGERPRINT}", FINGERPRINT, "pass")
+            assert check.returncode == 0, check.stdout + check.stderr
+            assert mark.exists()
+        else:
+            # Another user could swap the directory after any check of it, so nothing in it is run.
+            assert (claim.returncode, claim.stdout) == (1, "")
+            assert f"other users can write {shared} and it has no sticky bit" in claim.stderr
+            assert not mark.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="Acting as two different users needs root")
+def test_another_user_cannot_replace_a_private_root_that_was_handed_out() -> None:
+    owner, other = ({"user": uid, "group": uid, "extra_groups": []} for uid in (65534, 65533))
+    base = Path(tempfile.mkdtemp(prefix="nooa-two-users-", dir="/tmp"))
+    try:
+        base.chmod(0o755)
+        script = base / "setup.sh"
+        shutil.copyfile(INSTALLER, script)
+        script.chmod(0o755)
+        shared = base / "shared"
+        shared.mkdir()
+        root = shared / "runtime-65534"
+        claim = ["bash", str(script), "private-root", str(shared / "runtime")]
+        replace = ["sh", "-c", 'mv "$0" "$0.moved" && mkdir "$0"', str(root)]
+
+        shared.chmod(0o1777)
+        result = subprocess.run(claim, text=True, capture_output=True, timeout=20, **owner)
+        assert (result.returncode, result.stdout) == (0, f"{root}\n"), result.stderr
+        assert subprocess.run(replace, capture_output=True, timeout=20, **other).returncode != 0
+        assert root.stat().st_uid == 65534
+
+        # Without the sticky bit the same replacement succeeds, which is why the root is refused there.
+        shared.chmod(0o777)
+        assert subprocess.run(replace, capture_output=True, timeout=20, **other).returncode == 0
+        assert root.stat().st_uid == 65533
+        result = subprocess.run(claim, text=True, capture_output=True, timeout=20, **owner)
+        assert (result.returncode, result.stdout) == (1, "")
+        assert "no sticky bit" in result.stderr
+
+        # The sticky bit does not bind the parent's owner, so only root or this user may own it.
+        shared.chmod(0o1777)
+        os.chown(shared, 65533, -1)
+        result = subprocess.run(claim, text=True, capture_output=True, timeout=20, **owner)
+        assert (result.returncode, result.stdout) == (1, "")
+        assert f"{shared} belongs to uid 65533" in result.stderr
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

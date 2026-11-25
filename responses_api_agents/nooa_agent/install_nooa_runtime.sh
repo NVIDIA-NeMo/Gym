@@ -35,9 +35,21 @@ probe() {
 # write a shared location such as /tmp, and a runtime one of them placed there must never run.
 private_root() {
   require id stat mkdir
-  local uid root
+  local uid root parent owner mode
   uid=$(id -u)
   root="$1-$uid"
+  # Whoever can write the parent can rename this directory away and put another in its place
+  # after it was checked. Only the sticky bit stops that, and not for the parent's owner.
+  # A parent that is a symbolic link could itself lead elsewhere after the check.
+  parent=${root%/*}
+  [[ -n "$parent" ]] || parent=/
+  [[ ! -L "$parent" ]] \
+    || fail "refusing $root: $parent is a symbolic link, so the directory behind it could be replaced"
+  owner=$(stat -c %u "$parent") && mode=$(stat -c %a "$parent") || fail "cannot inspect $parent"
+  [[ "$owner" = 0 || "$owner" = "$uid" ]] \
+    || fail "refusing $root: $parent belongs to uid $owner, who could replace the runtime placed there"
+  (( !(8#$mode & 8#022) || (8#$mode & 8#1000) )) \
+    || fail "refusing $root: other users can write $parent and it has no sticky bit, so they could replace the runtime placed there"
   mkdir -p "$root" || fail "cannot create $root"
   [[ -d "$root" && ! -L "$root" && "$(stat -c %u:%a "$root")" =~ ^$uid:[0-7]?7[0145][0145]$ ]] \
     || fail "$root must be a directory that uid $uid owns and no other user can write"

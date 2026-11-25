@@ -196,8 +196,9 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
     Cold setup requires Linux x86_64/aarch64 with glibc, bash, tar, gzip,
     sha256sum, flock, tee, mv with -T support, and writable /tmp. The runtime
     is installed under /opt/nemo-gym-nooa, or under /tmp/nemo-gym-nooa-runtime-<uid>
-    (which needs id, stat and a /tmp that allows executable files) when the
-    sandbox user cannot create or write that directory. No root or system
+    (which needs id, stat and a /tmp that allows executable files and, when
+    other users can write it, has the sticky bit) when the sandbox user
+    cannot create or write that directory. No root or system
     package manager is invoked. The controller supplies Python; the sandbox still
     needs outbound package/build dependency access unless wheelhouse_path selects
     a source-bound bundle prepared outside the task. Offline setup installs only
