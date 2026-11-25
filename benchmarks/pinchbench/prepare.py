@@ -14,18 +14,9 @@
 # limitations under the License.
 """Prepare the full 147-task PinchBench benchmark dataset.
 
-The PinchBench skill is not vendored (same convention as `harbor_agent` / `mini_swe_agent`:
-pin an upstream ref, don't copy task files). This clones it at the SAME ref the per-task
-image bakes in — `Dockerfile.benchmark`'s `PINCHBENCH_SKILL_REF` — so the prompts written
-here describe the tasks `benchmark.py` actually loads inside the sandbox.
-
-Row shape mirrors `responses_api_agents/pinchbench/dataset_preprocess.py` (which generates
-the committed 5-task `data/example.jsonl`): the task's human-readable `## Prompt` section in
-`input`, plus `verifier_metadata.task_id`. `task_id` is the authoritative selector — at run
-time `run_task.sh` passes it to `benchmark.py --suite`, which loads the full task (prompt +
-assets + grading) from the skill. `_assert_matches_example_jsonl` re-derives the 5 example
-rows and compares them byte-for-byte against that committed file, so the two generators
-cannot silently diverge and upstream prompt drift is caught here rather than mid-run.
+The released PinchBench task definitions supply the prompts and task IDs. The verifier image
+uses the same revision to stage fixtures and score each episode. The five committed OpenClaw
+example rows are compared byte-for-byte to preserve the dataset format.
 
 Set `PINCHBENCH_SKILL_DIR` to an existing checkout at `SKILL_REF` to skip the clone.
 """
@@ -55,8 +46,7 @@ AGENT_DIR = BENCHMARK_DIR.parents[1] / "responses_api_agents" / "pinchbench"
 EXAMPLE_JSONL_FPATH = AGENT_DIR / "data" / "example.jsonl"
 
 SKILL_REPO_URL = "https://github.com/pinchbench/skill"
-# Keep in lockstep with `PINCHBENCH_SKILL_REF` in
-# responses_api_agents/pinchbench/Dockerfile.benchmark.
+# Keep in lockstep with the verifier image and the standalone OpenClaw runner.
 SKILL_REF = "v2.0.0"
 # The v2.0.0 manifest's task count; upstream drift surfaces here rather than as a
 # silently shorter run.

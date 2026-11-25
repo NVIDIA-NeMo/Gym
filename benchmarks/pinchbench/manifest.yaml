@@ -1,10 +1,10 @@
 name: pinchbench
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
-integration_profile: external-agent-loop
+integration_profile: custom-gym-agent-loop
 domain: agent
-description: PinchBench v2.0.0 tasks run through the native OpenClaw benchmark harness,
+description: PinchBench v2.0.0 tasks run through agent sessions on a shared task workspace,
   with continuous grading in [0, 1].
 modality: text
 licensing: MIT
@@ -16,7 +16,8 @@ reward:
   - 1.0
   higher_is_better: true
 determinism: unknown
-agent_server: pinchbench
+agent_server: openclaw_agent
+model_server: policy_model
 datasets:
 - name: pinchbench
   type: benchmark
@@ -24,6 +25,6 @@ datasets:
   prepare_script: benchmarks/pinchbench/prepare.py
   num_repeats: 10
 canonical_split: benchmark
-prompt_source: agent
+prompt_source: prepared
 lifecycle: active
 resources_server: null

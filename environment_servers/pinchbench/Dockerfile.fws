@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM node:22-trixie
+RUN apt-get update && apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @juppytt/fws@0.4.4 @googleworkspace/cli@0.22.5 \
+    && gws --version && gh --version
+COPY --chmod=755 environment_servers/pinchbench/fws-cli.sh /usr/local/libexec/pinchbench-fws-cli
+RUN ln -sf /usr/local/libexec/pinchbench-fws-cli /usr/local/bin/gws \
+    && ln -s /usr/local/libexec/pinchbench-fws-cli /usr/local/bin/gh

@@ -40,13 +40,27 @@ def test_ioi26_prepare_imports_as_a_package_module() -> None:
     assert prepare.split_subtasks is importlib.import_module("benchmarks.ioi26.subtask_split").split
 
 
-def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
-    repo_root = Path(__file__).parents[3]
-    benchmark = safe_load((repo_root / "benchmarks/pinchbench/config.yaml").read_text())
-    agent = safe_load((repo_root / "responses_api_agents/pinchbench/configs/pinchbench.yaml").read_text())
+def test_pinchbench_legacy_tavily_key_is_derived_from_environment() -> None:
+    root = Path(__file__).parents[3]
+    recipe = safe_load((root / "benchmarks/pinchbench/legacy.yaml").read_text())
+    agent = safe_load((root / "responses_api_agents/pinchbench/configs/pinchbench.yaml").read_text())
 
-    assert benchmark["tavily_api_key"] == "${oc.env:PINCHBENCH_TAVILY_API_KEY,null}"
-    assert agent["pinchbench_agent"]["responses_api_agents"]["pinchbench"]["tavily_api_key"] == ("${tavily_api_key}")
+    assert recipe["tavily_api_key"] == "${oc.env:PINCHBENCH_TAVILY_API_KEY,null}"
+    assert agent["pinchbench_agent"]["responses_api_agents"]["pinchbench"]["tavily_api_key"] == "${tavily_api_key}"
+
+
+@pytest.mark.parametrize(("recipe", "agent"), [("config", "openclaw_agent"), ("opencode", "opencode_agent")])
+def test_pinchbench_dataset_routes_to_the_selected_agent(recipe: str, agent: str) -> None:
+    from omegaconf import OmegaConf
+
+    root = Path(__file__).parents[3]
+    config = OmegaConf.merge(
+        OmegaConf.load(root / "environment_servers/pinchbench/configs/pinchbench.yaml"),
+        OmegaConf.load(root / f"benchmarks/pinchbench/{recipe}.yaml"),
+    )
+    (dataset,) = config[agent].responses_api_agents[agent].datasets
+    environment = config[config.environment_server_routes[dataset.taskset]].environment_servers.pinchbench
+    assert environment.agent_server.name == agent
 
 
 @pytest.fixture(autouse=True)
