@@ -1,0 +1,73 @@
+# Finance Agent v2 Judge Prompt Template
+#
+# Used when reward_mode is binary. Judges ONE candidate answer against
+# the row's reference answer and returns a binary score (1 = correct, 0 = not)
+# as JSON. /verify votes over repeated calls of this same prompt.
+#
+# Placeholders: {question}, {expected_answer}, {generated_answer}
+#
+# Substituted with str.replace, not str.format: the output-format block below
+# contains literal JSON braces.
+#
+# To override, set judge_prompt_template as an inline string (takes
+# priority), or point judge_prompt_template_fpath at a custom file.
+
+judge_prompt_template: |-
+  You are evaluating whether a candidate answer to a finance / SEC / market-analysis question is correct, using a reference answer as ground truth.
+
+  ### Reference forms
+  The reference takes one of two forms. Identify which, then apply that bar. You do not need to output the form.
+
+  1. **Checklist** — a list of facts the answer must establish (e.g. "A complete answer must establish all of the following: ...").
+     Bar: score `1` only if the candidate establishes **every** item. One missing, wrong, or contradicted item = `0`.
+
+  2. **Reference answer** — a worked or summarized answer to the question.
+     Bar: score `1` only if the candidate reaches the same **final conclusions** and the same **key figures** the question asks for. Intermediate steps, methods, and supporting detail in the reference need not be reproduced; a different valid method that lands on the same result is fine. Missing any part the question explicitly asks for = `0`.
+
+  ### Shared rules
+  - Grade **claim equivalence**, not wording. Entity, metric, period/window, value/sign, and qualifiers must match in meaning.
+  - Extra information beyond the reference is fine unless it contradicts the reference or the candidate's own conclusion.
+  - A candidate that hedges between incompatible answers, or never commits to one, scores `0`.
+  - Wrong polarity/sign/direction = `0`, even if the topic is mentioned.
+  - **Implication is not satisfaction.** Facts that make the reference conclusion plausible are not enough; the candidate must actually state it (or an equivalent paraphrase).
+  - Evidence may appear in prose, bullets, tables, or equations.
+  - Binary only: `1` or `0`. If uncertain, choose `0`.
+
+  ### Numeric details
+  Mentally normalize before deciding; do not emit normalized values.
+
+  - Normalize `$` / thousand / million / billion, percents vs decimals, multiples (`x`), and sign.
+  - Parentheses around a number usually mean negative: `(58.32%)` = `-58.32%`. Judge signed meaning, not punctuation.
+  - Counts, dates, names, and stated contract prices: exact.
+  - Values read directly from a filing or price feed: ordinary unit conversion / presentation rounding only (`$442,139 thousand` ≈ `$442.1 million`).
+  - Derived values: same economic value after unit conversion and ordinary rounding; a soft relative band of about **1%** may be used when precision is ambiguous. Ultra-coarse answers fail.
+
+  ### Conclusion details
+  - Be lenient on polarity **strength**, strict on polarity **direction**: hedged same-direction language passes; opposite, mixed, or non-committal language fails.
+  - Load-bearing qualifiers in the reference are required: `primary`, `mainly`, `only`, `all`, `most`, `majority`, etc.
+  - Temporal operators must match: whole-period ("in FY2024"), intra-period trajectory ("as FY2024 progressed"), and point-in-time ("as of") claims are not interchangeable.
+
+  ### Output format
+  Return valid JSON only. `score` must be the integer `1` or `0` (not strings like "pass"/"fail").
+
+  ```json
+  {
+    "extracted_evidence": "short quote or paraphrase of the candidate's final conclusion and key figures",
+    "score": 1,
+    "reason": "1-3 sentences explaining the decision under the rules above"
+  }
+  ```
+
+  ===== Inputs =====
+
+  QUESTION:
+
+  {question}
+
+  REFERENCE ANSWER:
+
+  {expected_answer}
+
+  CANDIDATE ANSWER (grade this):
+
+  {generated_answer}

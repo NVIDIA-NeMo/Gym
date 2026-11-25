@@ -58,8 +58,11 @@ finance_agent_v2_resources_server:
       # Soft budget: on overrun tools return an error asking the model to submit.
       max_rollout_time_seconds: null
       max_end_date: "2026-03-01"
-      # partial_credit or all_pass (1.0 only when every criterion passes).
+      # partial_credit, all_pass (1.0 only when every criterion passes),
+      # must_pass (1.0 only when every must_pass criterion passes), or
+      # binary (judge the answer against expected_answer; rubric unused).
       reward_mode: partial_credit
+      judge_prompt_template_fpath: prompt_templates/finance_agent_v2_judge.yaml
 
       # Caches raw upstream responses, so a hit is byte-identical to a live call.
       # null cache_dir falls back to ~/.cache/nemo_gym/finance_agent_v2.
