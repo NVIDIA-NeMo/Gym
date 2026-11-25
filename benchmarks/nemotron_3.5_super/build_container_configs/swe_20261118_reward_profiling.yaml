@@ -5,6 +5,11 @@ config_paths:
   - benchmarks/nemotron_3.5_super/build_container_configs/swe_8n-11_reward_profiling.yaml
 
 slurm:
+  account: nemotron_rl_algo
+  partition: batch
+  qos: short
+
+slurm_run:
   account: nemotron_n4_longeval
   qos: n4_longeval
   partition: batch_long
