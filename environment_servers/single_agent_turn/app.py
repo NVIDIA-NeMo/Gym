@@ -62,7 +62,6 @@ from nemo_gym.server_runtime import (
     NG_SANDBOX_ACCESS_KEY,
     PREPARE_SANDBOX_PATH,
     AttemptSandbox,
-    AttemptSandboxConfig,
     AttemptSandboxEnvironmentServerConfig,
     BaseEnvironmentServer,
     CleanupContext,
@@ -98,9 +97,6 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
-
-# Kept importable from here, where it was defined before the base class owned the attempt sandbox.
-__all__ = ["AttemptSandboxConfig"]
 
 
 class ToolSession(BaseModel):
@@ -481,7 +477,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             skipped_reward = self._skipped_verification_reward()
             if skipped_reward is None:
                 async with self.checkpoint_step(request, handles.resources_verify_step_type):
-                    verification = await self._verify(request, handles, agent_response, observations, trajectory)
+                    try:
+                        verification = await self._verify(request, handles, agent_response, observations, trajectory)
+                    finally:
+                        # Nothing borrows the attempt's sandbox group once /verify has replied; cleanup stops it too.
+                        if handles.attempt_sandbox is not None:
+                            await self.release_attempt_sandbox(handles.attempt_sandbox.key)
             else:
                 # The flag marks the fixed reward, so anything reading the result can tell it from a measured one.
                 verification = SingleAgentTurnResult.model_validate(
@@ -542,21 +543,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         """
         seed = await self._seed_resources(request, handles)
         tool_accesses = await self._seed_tool_servers(request, handles)
-        handles.attempt_sandbox = self.plan_attempt_sandbox(
+        handles.attempt_sandbox, sandbox_access = await self.seed_attempt_sandbox(
+            request,
             key=self._attempt_sandbox_key(handles),
             lent=seed.sandbox_access,
             group=seed.sandbox_group,
+            verifier_executes_nothing=seed.verifier_executes_nothing,
             task_tools=self._task_tools(request, tool_accesses),
             resources_server=repr(self.config.resources_server.name),
+            prepare=lambda access: self._prepare_resources_sandbox(request, handles, access),
         )
-        sandbox_access = None
-        if handles.attempt_sandbox is not None and handles.attempt_sandbox.lend_to_agent:
-            sandbox_access = await self.start_attempt_sandbox(
-                request,
-                handles.attempt_sandbox,
-                stage="seed",
-                prepare=lambda access: self._prepare_resources_sandbox(request, handles, access),
-            )
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
         await self._seed_agent(request, handles, seed, tool_accesses, sandbox_access=sandbox_access)
         return registered
@@ -582,20 +578,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             server_name=self.config.resources_server.name,
             url_path=PREPARE_SANDBOX_PATH,
             json=ResourcesPrepareSandboxRequest(
-                resources_session_id=handles.resources_session_id, sandbox_access=access
+                resources_session_id=handles.resources_session_id,
+                episode_id=request.episode_id,
+                task_id=request.task.task_id,
+                task_data=request.task.task_input.task_data,
+                sandbox_access=access,
             ).model_dump(mode="json"),
             cookies=handles.resources_cookies,
         )
         await raise_boundary_failure(response)
-
-    async def _stop_attempt_sandbox_early(self, handles: "SessionHandles") -> None:
-        """Stop the group once nothing borrows it any more; a failed stop is left to the episode's cleanup."""
-        try:
-            await self.stop_attempt_sandbox(self._attempt_sandbox_key(handles))
-        except Exception as error:
-            LOGGER.warning(
-                "The attempt sandbox of %s was not stopped yet; cleanup retries: %r", handles.agent_session_id, error
-            )
 
     @staticmethod
     def _attempt_sandbox_key(handles: "SessionHandles") -> str:
@@ -885,31 +876,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     ) -> SingleAgentTurnResult:
         verifier_invocations = None
         sandbox_field = {}
-        attempt = handles.attempt_sandbox
-        if attempt is not None and attempt.lend_to_grader:
-            # The attempt's sandbox group, lent to the verifier now that the agent has closed (NG_SANDBOX_ACCESS_KEY):
-            # the one the agent borrowed, or one started now for the grader alone, when the task opted out. A group
-            # that cannot start or be described is an infrastructure failure: the attempt is retried, never graded
-            # without it.
-            evidence = {
-                "partial_response": agent_response,
-                "agent_observations": observations,
-                "trajectory": trajectory,
-            }
-            if attempt.lend_to_agent:
-                access = await self.attempt_sandbox_access(attempt, stage="verification", **evidence)
-            else:
-                access = await self.start_attempt_sandbox(
-                    request,
-                    attempt,
-                    stage="verification",
-                    prepare=lambda lent: self._prepare_resources_sandbox(request, handles, lent),
-                    **evidence,
-                )
+        # The attempt's sandbox group, lent to the verifier now that the agent has closed (NG_SANDBOX_ACCESS_KEY): the
+        # one the agent borrowed, or one started now for the verifier alone, when the task opted out.
+        access = await self.verifier_sandbox_access(
+            request,
+            handles.attempt_sandbox,
+            prepare=lambda lent: self._prepare_resources_sandbox(request, handles, lent),
+            partial_response=agent_response,
+            agent_observations=observations,
+            trajectory=trajectory,
+        )
+        if access is not None:
             sandbox_field = {NG_SANDBOX_ACCESS_KEY: access.model_dump(mode="json")}
-        elif attempt is not None and attempt.lend_to_agent:
-            # The grader opted out and runs in the Resources Server: the group the agent borrowed is done.
-            await self._stop_attempt_sandbox_early(handles)
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
