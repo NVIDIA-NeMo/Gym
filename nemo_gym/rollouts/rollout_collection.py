@@ -4215,7 +4215,7 @@ executions → not run again (left to recovery)
                     _EXPORTED_JOB.reset(job_token)
                     _OWNED_JOB_SPAN_CONTEXT.reset(token)
                     if exported is not None and exported.run_context is not None:
-                        safe_set_span_attributes(job, exported.run_context.attributes())
+                        safe_set_span_attributes(exported.span, exported.run_context.attributes())
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         # Choose the target before locking, including fresh runs. Replacing an
