@@ -220,8 +220,7 @@ COPY --chown=node:node <<'EOF' /app/package.json
   },
   "overrides": {
     "motion-dom": "12.23.28",
-    "motion-utils": "12.23.28",
-    "sharp": "0.35.5"
+    "motion-utils": "12.23.28"
   }
 }
 EOF
