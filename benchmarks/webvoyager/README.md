@@ -6,8 +6,9 @@ Playwright for browser lifecycle and navigation, and PyAutoGUI for visible
 coordinate input. The removed `browsergym_web` path and its 643-task dataset
 are not part of this benchmark profile.
 
-See the [WebVoyager deployment guide](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#webvoyager)
-to set up the browser, public-site access, policy, and judge on your own host.
+Use the [WebVoyager reference deployment](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#webvoyager-reference)
+to reproduce the reported 418/552 run. The [host setup](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#webvoyager)
+covers the browser, public-site access, policy, and judge.
 
 Model behavior is selected independently from browser execution:
 

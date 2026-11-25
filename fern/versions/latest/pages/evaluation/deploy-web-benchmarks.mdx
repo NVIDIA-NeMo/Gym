@@ -1,10 +1,10 @@
 ---
 title: "Deploy Web Benchmarks"
-description: "Set up WebVoyager, WebArena, and VisualWebArena from a clean Linux host and verify a smoke rollout."
+description: "Plan the model, browser, and site deployments needed to reproduce reported web benchmark runs."
 position: 9
 ---
 
-Run each benchmark from a Gym checkout on a Linux host. Start with one browser and one rollout at a time. The policy model can run on a separate GPU host or behind an API endpoint.
+To reproduce a reported result, start with its frozen run record. The record identifies the exact Gym source, trained checkpoint, prepared tasks, judge, and deployment assets. Use the Linux setup below to bring up the services and check their connectivity.
 
 | Benchmark | Websites | Evaluation |
 | --- | --- | --- |
@@ -12,9 +12,77 @@ Run each benchmark from a Gym checkout on a Linux host. Start with one browser a
 | [WebArena](#webarena) | An owned deployment of the seven WebArena endpoints | Reference evaluator with a Chat Completions judge for semantic checks |
 | [VisualWebArena](#visualwebarena) | An owned deployment of the five VisualWebArena endpoints, plus a reset service | Reference evaluator with local task images, visual checks, and a Chat Completions judge |
 
+## Reproduce a reported result
+
+| Reference run | Observed result | Policy checkpoint | Published evidence |
+| --- | --- | --- | --- |
+| [WebVoyager, October 21, 2026](#webvoyager-reference) | 418 successes and 134 valid zeros from 552 tasks, 75.72% success | Nano Omni tuned `iter_0004622` | [WebVoyager result and configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#instance-pool-validation-on-2026-10-21) |
+| [WebArena, November 11, 2026](#webarena-reference) | Raw reward `475.0/812`, full successes `475/812` | Nano Omni specialist `iter_0005034/mcore_to_hf` | [WebArena result and configuration](https://github.com/NVIDIA-NeMo/Gym/pull/2917#issuecomment-6811644462) |
+| [VisualWebArena, November 10–12, 2026](#visualwebarena-reference) | Raw reward `231.0/908`, full successes `231/908` | Nano Omni tuned `iter_0004622` | [VisualWebArena result and configuration](https://github.com/NVIDIA-NeMo/Gym/pull/2918#issuecomment-6949230827) |
+
+### Arrange the deployment
+
+Give the deployment team the selected reference and the source and input identities below. Ask the benchmark run owner for the corresponding release manifest and launcher, and request access to the matching assets before booking compute. The release-specific weights and some runtime assets require access from their owners. Each run uses its own serving and evaluation configuration, even when two runs name the same checkpoint.
+
+| Owner | What to stage from the reference | Before starting the run |
+| --- | --- | --- |
+| Run coordinator | Exact Gym checkout or source archive, original runtime and component dependency inventories, prepared JSONL, task IDs, ordered phase and shard files, per-worker configs, and launch and reconciliation commands | Match the source and input hashes. Bind paths and endpoints to the new deployment and diff the resolved settings against the archived config. |
+| Policy service | The frozen weights and per-file inventory, tokenizer, image processor, selected chat template, tool and reasoning parsers, serving image and launch arguments | Check every asset against its recorded hash and confirm the served model handles inline images and emits the expected tool calls. |
+| Browser workers | The recorded browser image, Chromium/Playwright, displays, viewport, agent configuration and worker capacity | Check that each worker can reach the model, judge and its target sites. Run the reference smoke, including real browser actions, verification and cleanup. |
+| Site operator | For WebArena and VisualWebArena, the reference site images, seed data, Map services where required, and deployment patches and phase order | Restore the original seed state on an owned deployment. Verify the site and login from the worker. Use a separate site replica for another run. |
+| External services | The reference judge, its credentials and request settings. For WebVoyager, also the reference site's browser egress and CAPTCHA service configuration. | Verify the actual endpoint and model IDs from the worker. Supply credentials through the operator's normal secret store. |
+
+For the Git revisions linked below, check the exact commit in a separate checkout. Enter the reference commit and the path to the staged checkout.
+
+```bash
+read -rp "Path to frozen Gym checkout: " REPRO_GYM_DIR
+read -rp "Reference Gym commit: " REPRO_GYM_COMMIT
+test "$(git -C "$REPRO_GYM_DIR" rev-parse HEAD)" = "$REPRO_GYM_COMMIT" &&
+  test -z "$(git -C "$REPRO_GYM_DIR" status --porcelain --untracked-files=no)"
+```
+
+For a source archive, enter the source archive SHA-256 shown for the selected run and the path to the downloaded file. After extracting it, verify the files against the release inventory. Run the same checksum check for the prepared JSONL using its own reference hash.
+
+```bash
+read -rp "Path to staged archive or prepared JSONL: " REPRO_FILE
+read -rp "Reference SHA-256: " REPRO_SHA256
+printf '%s  %s\n' "$REPRO_SHA256" "$REPRO_FILE" | sha256sum --check -
+```
+
+Once these checks pass, start the model service and provision the browser displays and sites. Use the original launch commands and task shards from the run record for formal collection. The general setup later in this guide uses the current Gym benchmark entrypoints. A run on current Gym has its own source, evaluator and result.
+
+### WebVoyager reference
+
+- **Source and input.** Gym [`60fa5e37cb1812e2e377ac441eac371197e15e1a`](https://github.com/NVIDIA-NeMo/Gym/commit/60fa5e37cb1812e2e377ac441eac371197e15e1a). Stage all 552 prepared tasks with reference date `2026-10-11` and SHA-256 `951bfe5c328bf53859a81b6d75e45943a630fb19f2d73e8f09a4aa275af8cb6d`. Use the archived prepared JSONL for that date. The live-site setup below renders a new date for a fresh evaluation.
+- **Serving and browser.** Use the tuned `iter_0004622` weights with the archived serving image, tokenizer and `keep_history` template. The model service used one TP8 replica on eight H100 GPUs, context length `128000`, max sequences `32`, reasoning parser `nano_v3` and tool parser `qwen3_coder`. The browser used `local_instance_pool` with 16 instances and a maximum of two sessions per site. Sampling was temperature `0.1` and `top_p=0.95`, with the request-level output cap omitted.
+- **Judge.** The reference used `gcp/google/gemini-3-flash-preview` at `https://inference-api.nvidia.com/v1` through the Responses API. Retain the archived judge prompt, screenshot selection and verdict handling along with the endpoint and model ID.
+- **Launch and reconcile.** Use the original full launch recipe for all 552 inputs. The published result used 275 valid outcomes from the initial run, then 265 and 12 valid outcomes in two recovery generations. Keep each first valid result, including scored zeros, and restrict a recovery to IDs without a valid outcome.
+
+Live sites and their contents change, and the original travel dates eventually expire. A fresh run can compare the measured coverage and per-task outcomes for today's sites. Record the rendered date and input hash for any newly prepared workload. The archived result can still be checked against its original 552 selected outcomes.
+
+### WebArena reference
+
+- **Source and input.** Gym `363bd7c9a1e0c33028c56443e4303cb773b7472c`, the frozen snapshot-fix candidate evaluated for 475/812. Ask the run owner for the archived source from release `2026-11-11-webarena-pr2917-iter0005034-snapshot-r4`. The verified source archive SHA-256 is `67d58f074c4cbffd791299be76a6c87b5647118545ad7428f43138fb346b6de5`. The 812-row prepared input SHA-256 is `7ca11a1127f52ce80e96fb9a59f7b0223bb04691bc5cf350be719d28bae2fd16` and the four-stage plan SHA-256 is `38284a252adbe7ff8eb44055bd337f645f4b7fa14d2c1687a6d06487c51445b8`. The run used OpenAI SDK `2.44.0` and its original evaluator revision.
+- **Serving and browser.** Use `iter_0005034/mcore_to_hf`, BF16, one TP8 replica on eight H100 GPUs, context length `128000`, max sequences `32`, and the recorded `nano_v3` and `qwen3_coder` parsers. The policy used temperature `0.1`, `top_p=0.95`, no request-level output cap, a 100-step limit and three recent screenshots. Keep argument repair disabled, the original uncapped Nano Omni scroll amount, and the 30-second scroll timeout. Start up to three separate headed Chromium workers at `1920×1080`, one task per worker and per site. Cross-site work runs alone.
+- **Sites and order.** Restore the frozen Shopping, Shopping Admin, Reddit and GitLab seeds, plus the reference Map and Wikipedia data. Run 435 single-site reads, five cross-site reads, 352 single-site writes and 20 cross-site writes in that order. The archived stage plan supplies the exact grouping and within-group order.
+- **Judge.** The original evaluator called `us/azure/openai/gpt-4.1` through the NVIDIA Inference API with a 120-second timeout. Retain the original evaluator and request settings for a comparison to 475/812. The later scorer fixes in #2917 have their own validation.
+
+### VisualWebArena reference
+
+- **Source and input.** Gym [`f8031c55e638491f4d0b39890714d553ed1fc09e`](https://github.com/NVIDIA-NeMo/Gym/commit/f8031c55e638491f4d0b39890714d553ed1fc09e). Stage the exact 908-row input from release `2026-11-10-visualwebarena-pr2918-full-908-r1` with SHA-256 `504c75655b1afa81d3d2d202470a838ac74383acb1c071604590da6550837a5f` and all 341 task image files with the recorded paths and hashes. The four-stage plan SHA-256 is `a0f2df2731b4457def465f7a8b8409c754f5b0f2e6d6d2299a28d4115d11e71c`.
+- **Serving and browser.** Use `iter_0004622`, BF16, one TP8 replica on eight H100 GPUs, context length `64000`, max sequences `32`, `nano_v3` and `qwen3_coder`, and the recorded tokenizer and `keep_history` template with history-thinking truncation disabled. Keep temperature `0.1`, `top_p=0.95`, the omitted request-level output cap, the 100-step limit, three recent screenshots and the `1920×1080` viewport. Keep argument repair disabled. The two task-image readers each allow `33554432` bytes.
+- **Sites and order.** Restore the reference Shopping, Reddit and Classifieds seeds, with a fresh database volume for Classifieds, plus the matching Wikipedia and homepage assets. Use the recorded four-stage launcher with up to three isolated browser workers and one task per site. The stages are 480 single-site reads, 12 cross-site reads, 404 single-site writes and 12 cross-site writes. The later `benchmarks.visualwebarena.run` coordinator documented below implements a different clean-state schedule.
+- **Judge and result scope.** The original evaluator used `us/azure/openai/gpt-4.1` through the NVIDIA Inference API with a 120-second timeout. All 908 native outcomes and the technical audit passed. The original-frame manual review was still pending in the published result record.
+
+The later VisualWebArena run uses the specialist checkpoint `vwa-v10/iter_0001253` and a revised scorer. See its [separate evaluation record](https://github.com/NVIDIA-NeMo/Gym/pull/2918#issuecomment-6999876118).
+
+### Compare the rerun
+
+Reconcile by task ID against the reference input. Keep one conclusive result per task, retain valid zeros, and report any missing, extra, duplicate, masked or evaluator-error records separately. Compare raw reward sums and full successes on the same task IDs. Preserve the per-task comparison, including which tasks changed result. Sampling and live-site conditions can change the observed outcomes even when the launch configuration matches.
+
 ## Install Gym and Chromium
 
-These commands use Bash on Ubuntu 24.04. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) at the version required by Gym's `pyproject.toml`.
+These commands bring up the current Gym composition on Ubuntu 24.04. Use the frozen source and runtime instructions for a reference run above. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) at the version required by the selected checkout's `pyproject.toml`.
 
 ```bash
 sudo apt-get update
@@ -36,7 +104,7 @@ uv run --locked --project resources_servers/webarena_browser \
 
 ### Configure the policy and judge
 
-The default Nano Omni composition needs a vision-capable policy endpoint with OpenAI-compatible Chat Completions, inline images, and automatic function calling. Use the checkpoint's matching tokenizer, chat template, and tool and reasoning parsers. For example, deploy the public [Nemotron 3 Nano Omni model](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16) using the vLLM instructions in its model card. They cover the serving image, GPU requirements, `qwen3_coder` tool parser, and `nemotron_v3` reasoning parser. Use an image limit of at least six for VisualWebArena so the request can carry three recent screenshots and up to three task images. The WebVoyager Qwen composition has its own [serving contract](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#select-a-policy).
+The default Nano Omni composition needs a vision-capable policy endpoint with OpenAI-compatible Chat Completions, inline images, and automatic function calling. Deploy the checkpoint with the serving image, tokenizer, chat template, tool parser and reasoning parser from the selected run. Check the model server's image limit against the configured screenshot history and task images. The WebVoyager Qwen composition has its own [serving contract](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#select-a-policy).
 
 Export the policy and judge endpoints and served model names in the shell where you start Gym. Use the original judge configuration to reproduce a reference result. The [WebVoyager README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#configure-external-services) gives its reference settings. For an unauthenticated local vLLM instance, enter `local-vllm` at the policy key prompt.
 
@@ -160,7 +228,7 @@ Use the [README's reconciliation commands](https://github.com/NVIDIA-NeMo/Gym/bl
 
 For the example below, put Gym, the browser, and one site stack on the same dedicated Linux `x86_64` VM. The published seed images use `linux/amd64`. For a full WebArena setup, the upstream AMI guide budgets about 1 TB for the Docker images, expanded data, and scratch space. Check free space on both the archive partition and the Docker data partition. The separately deployed Map backend has its own storage requirements. Keep site and database ports on a private network restricted to your workers. The seed images ship with public benchmark accounts.
 
-The pinned [site setup scripts](https://github.com/gasse/webarena-setup/tree/8d0e0a20d50e4a8c02d1520195182e19fc3c080f) are an Apache-2.0 Docker deployment recipe used by the BrowserGym documentation. They are run in a separate checkout to install the sites. Gym runs the agent and browser. Install [Docker Engine and Compose](https://docs.docker.com/engine/install/ubuntu/) on the site host, then choose `webarena` or `visualwebarena` for that installation. Use a separate VM for a second site stack because these scripts give containers fixed names.
+The pinned [site setup scripts](https://github.com/gasse/webarena-setup/tree/8d0e0a20d50e4a8c02d1520195182e19fc3c080f) are an Apache-2.0 Docker deployment recipe used by the BrowserGym documentation. For a reference run, validate the images, seeds, volumes and site patches against its archived deployment before starting Gym. Install [Docker Engine and Compose](https://docs.docker.com/engine/install/ubuntu/) on the site host, then choose `webarena` or `visualwebarena` for that installation. Use a separate VM for a second site stack because these scripts give containers fixed names.
 
 ```bash
 sudo apt-get install -y python3-venv unzip

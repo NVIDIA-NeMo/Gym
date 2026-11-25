@@ -27,6 +27,10 @@ For an offline copy, set `WEBARENA_SOURCE_JSONL`; the same checks still apply.
 
 ## External environment
 
+For the reported 475/812 run, use the [reference deployment](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#webarena-reference)
+to obtain the frozen source, checkpoint, and site seeds and reproduce the original
+four-stage schedule.
+
 Follow the [WebArena deployment guide](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#deploy-the-webarena-family-sites)
 to install the site images and Map backend, restore the seed state, and verify
 access from the browser worker. Then export the task-visible endpoints:
