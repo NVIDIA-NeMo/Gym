@@ -1192,6 +1192,38 @@ def test_rollout_behavior_writes_evidence_and_never_raises(tmp_path) -> None:
     assert anyio.run(_rollout_behavior, body, str(results_fpath)) is None
 
 
+from responses_api_agents.opencode_sandboxed_agent.app import _rollout_verify_record  # noqa: E402
+
+
+def test_rollout_verify_record_writes_grader_view_and_never_raises(tmp_path) -> None:
+    results_fpath = tmp_path / "export.json"
+    results_fpath.write_text("{}")
+    result = {
+        "reward": 0.0,
+        "resolved": False,
+        "instance_id": "owner__repo-1",
+        "test_results": {"tests": [{"name": "test_a", "status": "FAILED"}]},
+        "test_output": "E   assert 1 == 2",
+        "model_patch": "diff --git a/x.py b/x.py",
+        "failure_kind": None,
+        "response": {"output": ["big"]},
+        "responses_create_params": {"input": []},
+        "ng_trajectory": {"turns": []},
+        "ng_agent_observations": {"records": []},
+        "opencode_run_stdout": "a" * 50_000 + "TAIL",
+    }
+    anyio.run(_rollout_verify_record, result, str(results_fpath))
+    saved = json.loads((tmp_path / "verify.json").read_text())
+    assert saved["test_results"] == result["test_results"] and saved["model_patch"] == result["model_patch"]
+    assert saved["instance_id"] == "owner__repo-1" and saved["reward"] == 0.0 and saved["test_output"]
+    assert not {"response", "responses_create_params", "ng_trajectory", "ng_agent_observations"} & set(saved)
+    assert saved["opencode_run_stdout"] == "a" * 50_000 + "TAIL"  # kept in full, never shortened
+    assert not (tmp_path / "verify.json.partial").exists()
+
+    anyio.run(_rollout_verify_record, result, "")  # no export path: nothing written, no error
+    anyio.run(_rollout_verify_record, {"x": object()}, str(tmp_path / "missing_dir" / "export.json"))  # never raises
+
+
 _OOM_ERROR = (
     "Failed to run command failed: Sandbox 670ccf7a has ended (OOMKilled): 1/1 observed pods failed | "
     "[SANDBOX::ENDED] Sandbox 670ccf7a has ended"

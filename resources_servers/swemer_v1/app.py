@@ -379,7 +379,7 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
                 "language": body.language,
                 "test_framework": body.test_framework,
                 "test_results": result.test_results,
-                "test_output": result.test_output[-100_000:],
+                "test_output": result.test_output,  # full log (no tail cut): turn_judge reads it in full
                 "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,

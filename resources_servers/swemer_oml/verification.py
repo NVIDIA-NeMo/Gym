@@ -144,7 +144,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
         f'echo "{TEST_OUTPUT_BEGIN}"\n'
         f"bash {TESTS_DIR}/test.sh > {TEST_SH_LOG} 2>&1\n"
         "__test_exit=$?\n"
-        f"tail -c {TEST_OUTPUT_TAIL_BYTES} {TEST_SH_LOG}\n"
+        f"cat {TEST_SH_LOG}\n"  # the whole log (was: last TEST_OUTPUT_TAIL_BYTES); turn_judge reads it in full
         f'echo "{TEST_OUTPUT_END}"\n'
         f'echo "{REWARD_BEGIN}"\n'
         f"cat {REWARD_FILE} 2>/dev/null\n"

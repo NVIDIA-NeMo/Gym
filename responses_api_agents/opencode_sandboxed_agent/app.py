@@ -502,6 +502,35 @@ async def _rollout_behavior(body: BaseRunRequest, results_fpath: str) -> Optiona
         return None
 
 
+# verify.json beside the export: the grader's view of one rollout (reward, per-test status, test output, the graded
+# patch, failure kind, task fields), so a rollout can be read offline with its outcome evidence; the trainer keeps only
+# the reward. The trajectory and the prompt are already in generation.json / export.json and the observation bundles
+# only feed the trainer, so they are left out. Nothing else is shortened: the record exists to be read in full
+# (OpenCode stdout / stderr and the grader's test output included).
+_VERIFY_JSON_EXCLUDE = frozenset({"response", "responses_create_params", "ng_trajectory", "ng_agent_observations"})
+
+
+def _write_verify(results_fpath: Path, result: Dict[str, Any]) -> None:
+    record: Dict[str, Any] = {}
+    for key, value in result.items():
+        if key in _VERIFY_JSON_EXCLUDE:
+            continue
+        record[key] = value
+    partial = results_fpath.with_name("verify.json.partial")
+    partial.write_text(json.dumps(record, default=str))
+    partial.replace(results_fpath.with_name("verify.json"))
+
+
+async def _rollout_verify_record(result: Dict[str, Any], results_fpath: str) -> None:
+    """Write verify.json beside the exported session (``results_fpath``); never raises, logs on failure."""
+    if not results_fpath:
+        return
+    try:
+        await to_thread(_write_verify, Path(results_fpath), result)
+    except Exception:
+        print("Failed to write verify.json", format_exc(), file=sys.stderr)
+
+
 # Why a rollout's OpenCode session could not be exported although the failure is neither the
 # model's nor transient: the agent's sandbox no longer exists (killed for memory, or ended for
 # another reason), or `opencode session list` comes back without a session (seen after runs that
@@ -1350,6 +1379,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "verify_time_taken": verify_time_taken,
             "rollout_time_taken": perf_counter() - run_started,
         }
+        await _rollout_verify_record(response_dict, run_result.get("opencode_results_fpath") or "")
         if trajectory is not None:
             response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
