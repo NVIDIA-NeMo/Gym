@@ -175,9 +175,13 @@ Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0
 | --- | --- | --- |
 | `prepare` | `{}` | Overrides forwarded to `gym eval prepare`. When non-empty, `gym eval prepare` runs in the driver before the benchmark. |
 | `run` | `{}` | Overrides forwarded to `gym eval run`. |
+| `target` | `null` | A Harbor task `TARGET`: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` reference. The driver passes it to `gym eval run` ahead of the `run` overrides, so a task run needs no `command`; `gym eval run` prepares the target itself, and a non-empty `prepare` still runs exactly as configured before it (for example a dataset adapter that writes the task folders the target names). The rows, run config and verifier logs the run prepares are kept in the benchmark's job directory (`artifacts/harbor/`, through `+harbor_output_root`), so a continuation in a fresh checkout finds the same files. For a resumable run, the target must resolve to the same folder on every allocation: an absolute path on shared storage, or a `harbor:` reference with `NEMO_GYM_DATASETS_DIR` set to a folder that outlives the allocation. Requires `agent`; cannot be combined with `command`. |
+| `agent` | `null` | The harness that runs the `target`, as `--agent` (a folder under `responses_api_agents/`, such as `opencode_agent`). |
+| `sandbox` | `null` | The sandbox provider for the `target`'s task containers, as `--sandbox` (for example `opensandbox`). |
 | `command` | `null` | A shell script that runs **instead of** `gym eval run`. See [Custom Harness](/orchestration/how-to/custom-harness). Cannot be combined with `run` or `resumable`. |
 | `resumable` | `false` | `true` for auto-resume with defaults, or `{max_retries, max_walltime}` to tune it. See [Resumable Runs](/orchestration/how-to/resumable-runs). |
 | `export` | `{}` | Exports of the finished run, by exporter name (`atif`, `mlflow`, `wandb`). Each value is that exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export. Slurm only, and not combinable with `command`. See [export](#export). |
+| `reverify` | `{}` | Reverify steps over the finished run, by step name: `{config: [paths], overrides: {...}}` each. Slurm only, and not combinable with `command`. See [reverify](#reverify). |
 
 `prepare` and `run` are nested mappings that are flattened to Hydra overrides: `{split: benchmark, config_paths: [a.yaml, b.yaml]}` becomes `+split=benchmark` and `+config_paths=[a.yaml,b.yaml]`, and nested keys become dotted paths.
 
@@ -246,6 +250,23 @@ Credentials are not export settings. `resolved-config.yaml` and `--resolve-only`
 
 The duplicate check only sees the settings written in the benchmark's `run` block. A live exporter that is switched on some other way is not detected before submit: through a config file listed in `config_paths`, through an `env.yaml`, or through a file in the `gym_install` checkout. If you also use an `export` for that backend, the run is logged twice, once live and once as a separate run by the export, and `gym eval export` logs a warning naming the live run. To avoid it, do not enable the live exporter for a backend you export with `export`.
 
+### reverify
+
+A reverify step judges every saved rollout of the benchmark again with another resources server, such as a judge that labels reward hacking, without running the policy again and without changing the run's rewards:
+
+```yaml
+driver:
+  benchmarks:
+    terminal_bench:
+      reverify:
+        second_pass:
+          config: [resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml]
+          overrides:
+            concurrency_hint: 4
+```
+
+After `gym eval run` exits 0, the driver runs `gym eval reverify` for each step, before the exports, with the step's `config` files (relative to the Gym checkout) and `overrides`. It reads `<benchmark dir>/artifacts/rollouts.jsonl` and its materialized inputs, and writes `<benchmark dir>/artifacts/rollouts_<step name>.jsonl` with its aggregate metrics. `NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS` names the run's rollouts file, so a server config can read what `/verify` is not sent, such as the saved rewards. When the job runs again, a step whose output exists resumes it. A failed step is reported in the driver log and does not change the job's exit code; its judge model must be reachable from the driver node.
+
 ## job
 
 | Field | Description |
@@ -273,6 +294,7 @@ Schema validation runs when the config is composed, before anything is rendered 
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
+- **Benchmark `target`** without an `agent`, `agent` or `sandbox` without a `target`, an empty `target` or `agent`, `target` combined with `command`, or `target` with `only_tasks`, `exclude_tasks` or `skip_unloadable` under `run` (`gym eval run` takes those only as command-line flags) is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 
 Mount source existence, SSH reachability, and OTel destination checks happen later, at submit time.

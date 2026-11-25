@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.server_runtime.base_resources_server import (
+    RESOURCES_SESSIONS,
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -28,6 +30,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesCloseSessionResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_runtime.request_handling.session_routing import install_session_routing
 
 
 AUTH = {"authorization": "Bearer t"}
@@ -102,12 +105,25 @@ class RestartOnlyServer(CounterServer):
     checkpoint_mode: ClassVar[str] = "restart_only"
 
 
-def make_server(server_type: type[CounterServer] = CounterServer) -> tuple[CounterServer, httpx.AsyncClient]:
+def make_server(
+    server_type: type[CounterServer] = CounterServer, *, routed: bool = False, socket_dir: str | None = None
+) -> tuple[CounterServer, httpx.AsyncClient]:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
     config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="counter")
     server = server_type(config=config, server_client=server_client, counters={})
     app = server.setup_webserver()
+    if socket_dir is not None:
+        # As run_webserver wires a worker of a multi-worker server, which tracks the sessions it owns.
+        cookie = server.get_session_middleware_key()
+        install_session_routing(
+            app, socket_dir=socket_dir, session_cookie=cookie, secret_key=cookie, **server.owned_session_routing()
+        )
+    elif routed:
+        cookie = server.get_session_middleware_key()
+        install_session_routing(
+            app, kind=RESOURCES_SESSIONS, socket_dir=None, session_cookie=cookie, secret_key=cookie
+        )
     return server, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://r")
 
 
@@ -598,6 +614,90 @@ async def test_the_seed_reply_and_status_report_the_verify_step_type(
     assert status["verify"] == expected
 
 
+@pytest.mark.parametrize("server_type", [CounterServer, ReplayVerifyServer, RestartOnlyServer])
+async def test_seed_reports_the_resources_session_id_bound_to_its_cookie(server_type: type[CounterServer]) -> None:
+    server, client = make_server(server_type)
+    async with client:
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+    [session_id] = server.counters
+    assert seed.status_code == 200
+    assert unquote(seed.headers["x-ng-checkpoint-resources-session-id"]) == session_id
+
+
+async def test_reported_session_id_closes_a_routed_session_without_weakening_mismatch_checks() -> None:
+    server, client = make_server(ReplayVerifyServer, routed=True)
+    async with client:
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        assert seed.status_code == 200
+        session_id = unquote(seed.headers["x-ng-checkpoint-resources-session-id"])
+        assert session_id != "run:r"
+        verified = await client.post("/ng-rollout/r/verify", json=VERIFY, headers=CLOSE_FOLLOWS)
+        assert verified.status_code == 200 and server.checkpoint_participant.is_open(session_id)
+        refused = await client.post(
+            "/ng-rollout/r/close_session", json={"resources_session_id": "run:r", "episode_id": {"rollout_id": "r"}}
+        )
+        assert refused.status_code == 409 and server.checkpoint_participant.is_open(session_id)
+        closed = await client.post(
+            "/ng-rollout/r/close_session", json={"resources_session_id": session_id, "episode_id": {"rollout_id": "r"}}
+        )
+    assert closed.status_code == 200 and server.closed == [session_id]
+    assert not server.checkpoint_participant.is_open(session_id)
+
+
+class SessionStateServer(ReplayVerifyServer):
+    """Seeds and closes through the base server, which keeps per-session state in the three session-state hooks."""
+
+    live: set[str] = set()
+
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        return await SimpleResourcesServer.seed_session(self, body, request=request)
+
+    close_resources_session = SimpleResourcesServer.close_resources_session
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.live
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        self.live.add(session_id)
+
+    async def release_session_state(self, session_id: str) -> None:
+        self.live.discard(session_id)
+
+
+async def test_closing_the_reported_session_id_releases_its_state_and_the_worker_s_ownership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+    server, client = make_server(SessionStateServer, socket_dir=str(tmp_path))
+    server.live = set()
+    lifetimes = client._transport.app.state.nemo_gym_resources_session_lifetimes
+    async with client:
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        session_id = unquote(seed.headers["x-ng-checkpoint-resources-session-id"])
+        assert server.live == {session_id}
+        verified = await client.post("/ng-rollout/r/verify", json=VERIFY, headers=CLOSE_FOLLOWS)
+        assert verified.status_code == 200, verified.text
+        # The agent's own session key names another session than the cookie, so the close is refused
+        # and the worker keeps the session's state and ownership.
+        refused = await client.post(
+            "/ng-rollout/r/close_session",
+            json={"resources_session_id": "run:r", "episode_id": {"rollout_id": "r"}},
+        )
+        assert refused.status_code == 409 and server.live == {session_id}
+        clock[0] = 1000
+        assert lifetimes.sweep() == [] and lifetimes.holds(session_id)
+        closed = await client.post(
+            "/ng-rollout/r/close_session",
+            json={"resources_session_id": session_id, "episode_id": {"rollout_id": "r"}},
+        )
+    assert closed.status_code == 200, closed.text
+    assert server.live == set() and server.session_is_closed(session_id)
+    # Ownership now outlives the close only by the close retry window.
+    clock[0] += server.config.session_close_retry_window_seconds
+    assert lifetimes.sweep() == [session_id] and not lifetimes.holds(session_id)
+
+
 async def test_the_seed_reply_reports_nothing_when_checkpointing_is_off() -> None:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = DictConfig({})
@@ -608,6 +708,7 @@ async def test_the_seed_reply_reports_nothing_when_checkpointing_is_off() -> Non
 
     assert seed.status_code == 200
     assert "x-ng-checkpoint-verify" not in seed.headers
+    assert "x-ng-checkpoint-resources-session-id" not in seed.headers
 
 
 async def test_a_session_the_server_already_dropped_is_not_exported_and_does_not_fail_the_commit(
@@ -1177,6 +1278,45 @@ def test_mcp_session_tokens_are_decoded_with_one_serializer_per_server(monkeypat
     assert built.count("serializer") == 1
 
 
+def test_mcp_session_tokens_ride_as_bearer_tokens_with_mcp_bearer_token() -> None:
+    from nemo_gym.server_runtime._checkpoint.resources import MCPTokenClaims
+    from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
+
+    server, _ = make_server()
+    server.config.mcp_bearer_token = True
+    token = mcp_session_token_serializer(server.session_secret).dumps({"sid": "s", "episode": "r-a1"})
+
+    def claims(*headers: tuple[bytes, bytes]) -> Any:
+        return server._mcp_token_claims({"headers": list(headers)})
+
+    expected = MCPTokenClaims("s", EpisodeId(rollout_id="r", attempt=1))
+    assert claims((b"authorization", f"Bearer {token}".encode())) == expected
+    # Gym's own header, another scheme, or no credentials name no session.
+    assert claims((b"x-nemo-gym-session-token", token.encode())) is None
+    assert claims((b"authorization", f"Basic {token}".encode())) is None
+    assert claims((b"authorization", b"Bearer ")) is None
+
+
+def test_mcp_session_tokens_are_read_with_the_servers_own_secret() -> None:
+    from nemo_gym.server_runtime._checkpoint.resources import MCPTokenClaims
+    from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
+
+    class SecretServer(CounterServer):
+        def get_session_secret(self) -> str:
+            return "a secret, not the server's name"
+
+    server, _ = make_server(SecretServer)
+    payload = {"sid": "s", "episode": "r-a1"}
+
+    def claims(key: str) -> Any:
+        token = mcp_session_token_serializer(key).dumps(payload)
+        return server._mcp_token_claims({"headers": [(b"x-nemo-gym-session-token", token.encode())]})
+
+    assert claims("a secret, not the server's name") == MCPTokenClaims("s", EpisodeId(rollout_id="r", attempt=1))
+    # The server's public name, which the secret replaces as the key, signs no token this server accepts.
+    assert claims(server.get_session_middleware_key()) is None
+
+
 def test_an_exported_server_without_its_hooks_fails_at_startup() -> None:
     class Unfinished(SimpleResourcesServer):
         ray_enabled = False
@@ -1258,7 +1398,8 @@ class ReplacingSeedServer(CounterServer):
 async def test_a_session_whose_id_the_seed_replaces_is_tracked_under_its_new_id() -> None:
     server, client = make_server(ReplacingSeedServer)
     async with client:
-        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        assert seed.headers["x-ng-checkpoint-resources-session-id"] == "caller-session"
         tracked = server._checkpoint.readiness().counts["sessions"]
         await client.post(
             "/ng-rollout/r/close_session",
@@ -1909,3 +2050,138 @@ def test_an_exported_server_whose_export_hook_cannot_take_the_checkpoint_id_fail
         ExportsWithoutTheId(config=config, server_client=server_client, counters={}).setup_webserver()
     ExportsWithKeywords(config=config, server_client=server_client, counters={}).setup_webserver()
     CounterServer(config=config, server_client=server_client, counters={}).setup_webserver()
+
+
+class PartlyExportedServer(CounterServer):
+    """An exported server that cannot export the sessions seeded while ``unexported`` is set."""
+
+    unexported: bool = False
+    seed_error: Any = None
+    # The session ID a seed's handler gives the session, as a server does that names it after its caller's ID.
+    renamed_to: Any = None
+
+    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        if self.unexported:
+            self._checkpoint.restart_session()
+        if self.seed_error is not None:
+            raise self.seed_error
+        if self.renamed_to is not None:
+            request.session[SESSION_ID_KEY] = self.renamed_to
+        return await super().seed_session(request, body)
+
+
+async def test_a_session_an_exported_server_cannot_export_is_a_restart_and_is_left_out_of_the_commit(
+    tmp_path: Path,
+) -> None:
+    server, client = make_server(PartlyExportedServer)
+    async with client:
+        server.unexported = True
+        unexported = await client.post("/ng-rollout/r-a2/seed_session", json=SEED)
+        server.unexported = False
+        # Another caller: the session cookie of the first seed would name the same session.
+        client.cookies.clear()
+        exported = await client.post("/ng-rollout/q/seed_session", json=SEED)
+        prepared = (await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)).json()
+        refused = await client.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control(checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r", "attempt": 2}]),
+            headers=AUTH,
+        )
+        committed = await client.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control(checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "q"}]),
+            headers=AUTH,
+        )
+        # Without a scope too: the hook must not be asked for a session the server said it cannot export.
+        everything = await server._checkpoint.export(None, checkpoint_id="c1")
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+
+    # Only that session's seed reply tells its episode to start over after a crash, as a restart_only server's does.
+    assert unexported.headers["x-ng-checkpoint-restart"] == "1"
+    assert exported.status_code == 200 and "x-ng-checkpoint-restart" not in exported.headers
+    assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["r-a2"]
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
+    assert committed.status_code == 200 and committed.json()["manifest"]["record_count"] == 1
+    assert [record.episode_id.rollout_id for record in everything] == ["q"]
+    assert len(server.counters) == 2, "the server holds both sessions; only one is exported"
+
+
+@pytest.mark.parametrize("error", [HTTPException(500, "setup failed"), RuntimeError("setup failed")])
+async def test_a_seed_that_fails_leaves_no_session_reported_as_a_restart(error: Exception) -> None:
+    server, client = make_server(PartlyExportedServer)
+    server.unexported, server.seed_error = True, error
+    async with client:
+        if isinstance(error, HTTPException):
+            assert (await client.post("/ng-rollout/r/seed_session", json=SEED)).status_code == 500
+        else:
+            # The handler raised, so no reply passed through the checkpoint middleware.
+            with pytest.raises(RuntimeError, match="setup failed"):
+                await client.post("/ng-rollout/r/seed_session", json=SEED)
+
+    assert server._checkpoint._restart_sessions == set() and server._checkpoint.readiness().restarts == []
+
+
+async def test_a_session_the_server_cannot_export_is_reported_as_a_restart_only_until_it_ends() -> None:
+    server, client = make_server(PartlyExportedServer)
+    server.unexported = True
+    async with client:
+        seeded = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        during = server._checkpoint.readiness().restarts
+        session_id = next(iter(server.counters))
+        closed = await client.post(
+            "/ng-rollout/r/close_session", json={"resources_session_id": session_id, "episode_id": {"rollout_id": "r"}}
+        )
+
+    assert seeded.status_code == 200 and during == ["r"]
+    assert closed.status_code == 200, closed.text
+    assert server._checkpoint._restart_sessions == set() and server._checkpoint.readiness().restarts == []
+
+
+async def test_a_session_whose_seed_gives_it_another_id_is_reported_under_the_id_its_requests_carry(
+    tmp_path: Path,
+) -> None:
+    server, client = make_server(PartlyExportedServer)
+    server.unexported, server.renamed_to = True, "named-by-the-seed"
+    async with client:
+        seeded = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        restarts = server._checkpoint.readiness().restarts
+        exported = await server._checkpoint.export(None, checkpoint_id="c1")
+
+    assert seeded.headers["x-ng-checkpoint-restart"] == "1"
+    assert server._checkpoint._restart_sessions == {"named-by-the-seed"}
+    assert restarts == ["r"] and exported == []
+
+
+@pytest.mark.parametrize("error", [HTTPException(500, "setup failed"), RuntimeError("setup failed"), None])
+async def test_a_later_seed_on_its_cookie_leaves_a_session_the_server_cannot_export_reported(
+    tmp_path: Path, error: Exception | None
+) -> None:
+    """Whether that seed fails, or succeeds without the server reporting the session again."""
+    server, client = make_server(PartlyExportedServer)
+    server.unexported = True
+    async with client:
+        assert (await client.post("/ng-rollout/r/seed_session", json=SEED)).status_code == 200
+        server.unexported, server.seed_error = error is not None, error
+        if isinstance(error, RuntimeError):
+            with pytest.raises(RuntimeError, match="setup failed"):
+                await client.post("/ng-rollout/r/seed_session", json=SEED)
+        else:
+            again = await client.post("/ng-rollout/r/seed_session", json=SEED)
+            assert again.status_code == (500 if error is not None else 200)
+            assert ("x-ng-checkpoint-restart" in again.headers) == (error is None)
+        prepared = (await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)).json()
+        exported = await server._checkpoint.export(None, checkpoint_id="c1")
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+
+    assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["r"]
+    assert exported == [] and len(server.counters) == 1
+
+
+async def test_a_report_outside_a_request_that_starts_a_session_reports_nothing() -> None:
+    server, client = make_server(PartlyExportedServer)
+    async with client:
+        server._checkpoint.restart_session()
+        seeded = await client.post("/ng-rollout/r/seed_session", json=SEED)
+
+    assert seeded.status_code == 200 and "x-ng-checkpoint-restart" not in seeded.headers
+    assert server._checkpoint._restart_sessions == set()

@@ -84,9 +84,15 @@ from nemo_gym.orchestration.executors.slurm.resume_script import (
     render_resume_epilogue,
     render_resume_prologue,
 )
-from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
+from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args, render_target_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
-from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, EVAL_SUCCEEDED_FILENAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
+from nemo_gym.orchestration.jobs import (
+    ARTIFACTS_DIRNAME,
+    EVAL_SUCCEEDED_FILENAME,
+    LOGS_DIRNAME,
+    ROLLOUTS_FILENAME,
+    LogSource,
+)
 
 
 _SCRIPT_TEMPLATE = """\
@@ -195,6 +201,24 @@ def _resolve_env(env: dict[str, str]) -> str:
     return f"env {pairs} "
 
 
+# Every srun step of a job writes one log per job, in the job directory. This is the one place that
+# layout is written down: the `--output` flags in the job script and the LogSource entries planned
+# for the record both come from `log_path`, so the two cannot disagree.
+LOG_DIR = "logs"
+DRIVER_STEP = "driver"
+# Left in a planned LogSource: the scheduler's job id is not known until the job is queued.
+JOB_ID_PLACEHOLDER = "{job_id}"
+_RUNTIME_JOB_ID = "$SLURM_JOB_ID"
+
+
+def log_path(step: str, job_id: str) -> str:
+    """The log of srun step `step` in job `job_id`, relative to the job directory.
+
+    A resumed job keeps the job directory and gets a new job id, so it keeps the previous job's logs.
+    """
+    return f"{LOG_DIR}/{step}-{job_id}.log"
+
+
 def _render_service_command(
     name: str,
     container: str | None,
@@ -250,7 +274,7 @@ def _render_service_command(
     return (
         f"# service: {name}\n"
         f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}{account_flag}"
-        f" --output={LOGS_DIRNAME}/{name}-$SLURM_JOB_ID.log {command} &\n"
+        f" --output={log_path(name, _RUNTIME_JOB_ID)} {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -1035,6 +1059,34 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     return run
 
 
+# Set for each reverify step: the run's rollouts file, so a resources server can read what /verify is not sent
+# (the saved rewards, for instance) from its config with ${oc.env:NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS}.
+REVERIFY_SOURCE_ROLLOUTS_ENV = "NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS"
+
+
+def reverify_steps(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> list[tuple[str, str, str]]:
+    """(step name, shell-quoted output path, command) for each reverify step of a benchmark."""
+    artifacts = remote_bench_dir / ARTIFACTS_DIRNAME
+    rollouts = shlex.quote(str(artifacts / ROLLOUTS_FILENAME))
+    inputs = shlex.quote(str(artifacts / "rollouts_materialized_inputs.jsonl"))
+    steps = []
+    for name, step in benchmark.reverify.items():
+        output = shlex.quote(str(artifacts / f"rollouts_{name}.jsonl"))
+        command = " ".join(
+            [
+                f"{REVERIFY_SOURCE_ROLLOUTS_ENV}={rollouts}",
+                "gym eval reverify",
+                *(f"--config {shlex.quote(path)}" for path in step.config),
+                f"--inputs {inputs}",
+                f"--rollouts {rollouts}",
+                f"--output {output}",
+                *flatten_export_args(step.overrides),
+            ]
+        )
+        steps.append((name, output, command))
+    return steps
+
+
 def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> dict[str, str]:
     """Environment a `command` benchmark gets in place of `gym eval run` arguments.
 
@@ -1094,6 +1146,22 @@ def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
     if resumable and "resume_from_cache" not in run:
         return {**run, "resume_from_cache": True}
     return run
+
+
+def planned_log_sources(config: SubmitConfig, compute: SlurmComputeConfig) -> list[LogSource]:
+    """The logs `build_sbatch_script` makes a job write: the driver's, then one per service step.
+
+    Steps are named as the script names them: the telemetry collector when it is on, a ray service's
+    head and each of its worker steps, and every other service, including a vllm_pd service's tiers
+    and router, by its name in `deployed_services`. Locations keep the job id placeholder.
+    """
+    steps = [COLLECTOR_SERVICE_NAME] if otel_active(config) else []
+    for name, service in config.deployed_services.items():
+        steps += _ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name]
+    return [
+        LogSource(name=DRIVER_STEP, kind="driver", location=log_path(DRIVER_STEP, JOB_ID_PLACEHOLDER)),
+        *(LogSource(name=step, kind="service", location=log_path(step, JOB_ID_PLACEHOLDER)) for step in steps),
+    ]
 
 
 def build_sbatch_script(
@@ -1235,7 +1303,17 @@ def build_sbatch_script(
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
-        gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+        # A task target goes first (`gym eval run` reads its first bare token as TARGET), and its rows live in the
+        # job directory, not in the fresh checkout this allocation works in.
+        target_args = render_target_args(
+            benchmark.target,
+            agent=benchmark.agent,
+            sandbox=benchmark.sandbox,
+            output_root=f"{remote_bench_dir}/{ARTIFACTS_DIRNAME}/harbor",
+        )
+        gym_cmd = render_gym_cmd(
+            "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(run_args)
+        )
         # A job queued by `gym eval resubmit` resets the attempt budget and enables resume before exporters open:
         # a fresh start would delete the run's rollouts, whatever its original config says.
         # The auto-resume prologue, when there is one, has moved the variables into `_gym_resubmit` and
@@ -1273,8 +1351,9 @@ def build_sbatch_script(
                 )
                 for name, settings in exports.items()
             ],
+            reverify_steps(benchmark, remote_bench_dir),
         )
-        if exports
+        if exports or benchmark.reverify
         else None
     )
     extras = tuple(
@@ -1323,7 +1402,7 @@ def build_sbatch_script(
     driver_srun = (
         f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
-        f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
+        f"--output={log_path(DRIVER_STEP, _RUNTIME_JOB_ID)} {entrypoint}"
     )
     if resume and benchmark.command is None:
         # Run only the saved-state reader, with the same pinned install, image and mounted artifacts as the

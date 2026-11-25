@@ -202,6 +202,41 @@ def trajectory(status="completed", *, child=False):
     )
 
 
+@pytest.mark.parametrize("shell_name", ["bash", "shell", "exec_command"])
+def test_default_failure_filter_follows_shell_name(shell_name):
+    config = OpenCodeToolRewardConfig(shell_tool_name=shell_name)
+    calls = [call(0, name=shell_name)]
+    result = score_opencode_tools(execution_records(calls, statuses={"0": ("error", None)}), calls, 1.0, config)
+    assert config.invalid_tool_call_names == (shell_name,)
+    assert result.auxiliary_reward == pytest.approx(-0.05)
+    assert result.tool_error_count == 1
+    assert OpenCodeToolRewardConfig.model_validate_json(config.model_dump_json()) == config
+
+
+@pytest.mark.parametrize("names,penalty", [(None, -0.05), ((), 0.0), (("read",), 0.0), (("shell",), -0.05)])
+def test_explicit_failure_filter_is_preserved(names, penalty):
+    config = OpenCodeToolRewardConfig(shell_tool_name="shell", invalid_tool_call_names=names)
+    calls = [call(0, name="shell")]
+    result = score_opencode_tools(execution_records(calls, statuses={"0": ("error", None)}), calls, 1.0, config)
+    assert config.invalid_tool_call_names == names
+    assert result.auxiliary_reward == pytest.approx(penalty)
+
+
+def test_shell_name_rejects_empty_string():
+    with pytest.raises(ValidationError, match="shell_tool_name"):
+        OpenCodeToolRewardConfig(shell_tool_name="")
+
+
+def test_null_shell_name_preserves_main_behavior():
+    config = OpenCodeToolRewardConfig(shell_tool_name=None)
+    calls = [call(i) for i in range(6)]
+    result = score_opencode_tools(execution_records(calls), calls, 1.0, config)
+    assert config.effective_shell_tool_names == ()
+    assert config.invalid_tool_call_names == ("bash",)
+    assert result.bash_call_count == 0
+    assert result.auxiliary_reward == 0
+
+
 def tool_response(answer="A"):
     from resources_servers.opencode_multimodal_benchmarks.tests.response_fixtures import completion
 
@@ -248,7 +283,7 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
     from unittest.mock import MagicMock
 
     from nemo_gym.client import ServerClient
-    from resources_servers.opencode_string_match_tool_rewards.app import (
+    from resources_servers.string_match_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
         ToolRewardVerifyRequest,
@@ -312,14 +347,14 @@ async def test_masked_base_verifier_result_preserves_original_response_without_s
     from unittest.mock import AsyncMock, MagicMock
 
     from nemo_gym.client import ServerClient
-    from resources_servers.opencode_string_match_tool_rewards.app import (
-        ToolRewardConfig,
-        ToolRewardServer,
-        ToolRewardVerifyRequest,
-    )
     from resources_servers.string_match.app import (
         StringMatchResourcesServer,
         StringMatchVerifyResponse,
+    )
+    from resources_servers.string_match_tool_rewards.app import (
+        ToolRewardConfig,
+        ToolRewardServer,
+        ToolRewardVerifyRequest,
     )
 
     body = ToolRewardVerifyRequest(
@@ -357,7 +392,7 @@ async def test_existing_training_graders_shape_real_scores_and_preserve_tool_evi
 
     if resource == "math_with_judge":
         pytest.importorskip("math_verify")
-    component = {"mcqa": "opencode_mcqa_tool_rewards", "math_with_judge": "opencode_math_tool_rewards"}[resource]
+    component = {"mcqa": "mcqa_tool_rewards", "math_with_judge": "math_tool_rewards"}[resource]
     entrypoint = importlib.import_module(f"resources_servers.{component}.app")
     request_type = entrypoint.ToolRewardVerifyRequest
     config = {"name": "test", "host": "127.0.0.1", "port": 1, "entrypoint": "app.py"}
@@ -406,7 +441,7 @@ async def test_math_judge_records_final_shaped_grade(verdict, base, calls, reply
     from nemo_gym.core import rollout_context
     from nemo_gym.server_runtime import observe_verifier
     from nemo_gym.trajectory import grading_result_binding
-    from resources_servers.opencode_math_tool_rewards.app import (
+    from resources_servers.math_tool_rewards.app import (
         ToolRewardConfig,
         ToolRewardServer,
         ToolRewardVerifyRequest,
@@ -782,7 +817,7 @@ def test_null_or_singleton_shell_names_preserve_singular_behavior(names):
 @pytest.mark.parametrize("settings", [{}, {"shell_tool_name": "shell"}, {"shell_tool_names": ["terminal", "exec"]}])
 @pytest.mark.parametrize("failure_filter", [{}, {"invalid_tool_call_names": None}, {"invalid_tool_call_names": []}])
 def test_shell_selection_survives_config_serialization(settings, failure_filter):
-    from resources_servers.opencode_string_match_tool_rewards.app import ToolRewardConfig
+    from resources_servers.string_match_tool_rewards.app import ToolRewardConfig
 
     config = ToolRewardConfig(
         name="training_string", host="127.0.0.1", port=1, entrypoint="app.py", tool_rewards=settings | failure_filter

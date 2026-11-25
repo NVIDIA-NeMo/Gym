@@ -42,10 +42,12 @@ TOOLKIT = REPO_ROOT / ".agents/skills/nemo-gym-blade-analysis/scripts/blade_tool
 def test_agent_specific_skill_paths_resolve_to_canonical_skills():
     for skill in CLAUDE_SKILLS:
         canonical_skill = REPO_ROOT / ".agents/skills" / skill
+        assert (canonical_skill / "SKILL.md").is_file()
         assert (REPO_ROOT / ".claude/skills" / skill).resolve() == canonical_skill.resolve()
 
     for skill in CODEX_COMPATIBILITY_LINKS:
         canonical_skill = REPO_ROOT / ".agents/skills" / skill
+        assert (canonical_skill / "SKILL.md").is_file()
         assert (REPO_ROOT / ".codex/skills" / skill).resolve() == canonical_skill.resolve()
 
 

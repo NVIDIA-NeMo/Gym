@@ -25,7 +25,7 @@ import shlex
 import shutil
 import signal
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.docker import pty as docker_pty
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 
 
 LOGGER = logging.getLogger(__name__)
@@ -357,6 +358,9 @@ class DockerProvider:
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -698,10 +702,14 @@ class DockerProvider:
             if probe.stable_delay_s > 0:
                 await asyncio.sleep(probe.stable_delay_s)
 
+    def exec_takes_argv(self) -> bool:
+        """``docker exec`` runs an argument list as the container process's argv (``SupportsSandboxExecArgv``)."""
+        return True
+
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -711,6 +719,7 @@ class DockerProvider:
     ) -> SandboxExecResult:
         """Run ``<shell> -c <command>`` via ``docker exec``; never raises for command failure.
 
+        An argument list goes to ``docker exec`` as the program and its arguments, without the shell.
         ``user`` maps to ``--user`` (root/0 -> 0). A timeout kills the local docker client only; the
         in-container process is reaped when the sandbox is closed.
         """
@@ -729,7 +738,8 @@ class DockerProvider:
             flags += ["--user", _user_flag(user)]
         flags += list(self._exec_config.extra_exec_args)
 
-        argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
+        process_argv = [inst.shell, "-c", command] if isinstance(command, str) else list(command)
+        argv = [self._binary, "exec", *flags, inst.name, *process_argv]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
         try:
             code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)

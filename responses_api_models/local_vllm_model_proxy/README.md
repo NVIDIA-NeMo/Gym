@@ -11,6 +11,11 @@ gym env start \
 ```
 
 
+# Bounding startup
+By default the proxy waits without limit for the referenced `local_vllm_model` server to come up. Set
+`model_server_wait_timeout_seconds` to make startup fail with a `TimeoutError` after that long. The same value is the
+time limit for the proxy's config request to that server.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A

@@ -9,12 +9,11 @@ import logging
 import shlex
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from time import monotonic
 from typing import ClassVar
 
 from fastapi import FastAPI, Request
-from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
+from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, field_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -56,7 +55,7 @@ from resources_servers.pdf_analyst_qa.documents import (
     mounted_document_manifest,
     sandbox_script_files,
 )
-from resources_servers.pdf_analyst_qa.task_data import PdfAnalystQaSeedRequest, PdfAnalystQaTask
+from resources_servers.pdf_analyst_qa.task_data import PdfAnalystQaSeedRequest, PdfAnalystQaTask, PdfAnalystQaTaskRow
 from resources_servers.pdf_analyst_qa.verifier_fixture import (
     FIXTURE_CASES_PATH,
     create_fixture_server,
@@ -85,7 +84,6 @@ SANDBOX_ENV = {
 class PdfAnalystQaResourcesServerConfig(BaseResourcesServerConfig):
     """Dataset location and sandbox settings."""
 
-    dataset_root: str
     document_image: str
     sandbox_provider: str = "sandbox"
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
@@ -157,7 +155,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
     """Manage task sandboxes and give OpenCode access to the selected PDFs."""
 
     config: PdfAnalystQaResourcesServerConfig
-    seed_request_model: ClassVar[type[PdfAnalystQaSeedRequest]] = PdfAnalystQaSeedRequest
+    seed_request_model: ClassVar[type[PdfAnalystQaSeedRequest]] = PdfAnalystQaTaskRow
     _sessions: dict[str, _SessionState] = PrivateAttr(default_factory=dict)
     _sandbox_slots: asyncio.Semaphore = PrivateAttr()
 
@@ -198,36 +196,29 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan
         return app
 
-    def _load_task(self, data: PdfAnalystQaSeedRequest) -> PdfAnalystQaTask:
-        root = Path(self.config.dataset_root).expanduser().resolve()
-        try:
-            task = PdfAnalystQaTask.model_validate_json((root / "tasks" / f"{data.task_id}.json").read_bytes())
-        except (OSError, ValidationError) as error:
-            raise ResourcesSeedRejectedError("trusted PDF task is unavailable or invalid") from error
-        if task.task_id != data.task_id or task.workspace_id != data.workspace_id:
-            raise ResourcesSeedRejectedError("hidden task and requested workspace do not match")
+    @staticmethod
+    def _check_reference(task: PdfAnalystQaTask) -> None:
         try:
             grade = grade_task_answer(task, task.final_answer)
         except (ValueError, KeyError) as error:
             raise ResourcesSeedRejectedError("reference answer is invalid") from error
         if not grade["semantic_correct"] or not grade["format_compliant"]:
             raise ResourcesSeedRejectedError("reference answer violates its requested answer format")
-        return task
 
     def has_session_state(self, session_id: str) -> bool:
         return session_id in self._sessions
 
-    async def initialize_session_state(self, session_id: str, body: PdfAnalystQaSeedRequest) -> None:
+    async def initialize_session_state(self, session_id: str, body: PdfAnalystQaTaskRow) -> None:
         identity = self.session_identity(session_id)
         if identity is None or identity[1].task_id != body.task_id:
             raise ResourcesSeedRejectedError("TaskId differs from the trusted PDF task")
-        task = await asyncio.to_thread(self._load_task, body)
-        state = _SessionState(task, body.prompt_version)
+        self._check_reference(body.reference)
+        state = _SessionState(body.reference, body.prompt_version)
         self._sessions[session_id] = state  # publish before the first allocation await
         async with asyncio.timeout(self.config.sandbox_queue_timeout_s):
             await self._sandbox_slots.acquire()
         state.owns_slot = True
-        await self._start_sandbox(state, body.workspace_id)
+        await self._start_sandbox(state, body)
         result = await state.sandbox.exec(
             shlex.join(
                 [
@@ -244,10 +235,9 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
             raise RuntimeError(f"document sandbox preflight failed: {result.error_type or result.return_code}")
         state.started_at = monotonic()
 
-    async def _start_sandbox(self, state: _SessionState, workspace_id: str) -> None:
+    async def _start_sandbox(self, state: _SessionState, body: PdfAnalystQaTaskRow) -> None:
         config = self.config
-        root = Path(config.dataset_root).expanduser().resolve()
-        manifest = await asyncio.to_thread(mounted_document_manifest, root, workspace_id, config.mounted_documents)
+        manifest = mounted_document_manifest(body.documents, config.mounted_documents)
         global_config = self.server_client.global_config_dict
         provider_config = resolve_provider_config(config.sandbox_provider, global_config)
         if set(provider_config) != {"opensandbox"}:
@@ -269,7 +259,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
         metadata = (
             resolve_provider_metadata(config.sandbox_provider, global_config)
             | dict(config.sandbox_config.get("metadata", {}))
-            | {"workspace-id": workspace_id[:63]}
+            | {"workspace-id": body.workspace_id[:63]}
         )
         spec = SandboxSpec(
             image=config.document_image,
@@ -319,8 +309,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
         if state is None:
             return
         if state.sandbox is not None:
-            async with asyncio.timeout(self.config.cleanup_timeout_s):
-                await state.sandbox.stop()
+            await state.sandbox.stop(timeout_s=self.config.cleanup_timeout_s)
             state.sandbox = None
         if state.owns_slot:
             self._sandbox_slots.release()
