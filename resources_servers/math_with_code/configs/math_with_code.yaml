@@ -2,7 +2,6 @@ math_with_code:
   resources_servers:
     math_with_code:
       entrypoint: app.py
-      max_execution_time: 10
       domain: math
       verified: false
       description: Model solves competitive math problems using simple calculator tools
@@ -30,6 +29,15 @@ math_with_code_simple_agent:
           type: example
           jsonl_fpath: resources_servers/math_with_code/data/example.jsonl
       max_steps: 3  # Tighter cap to reduce long-tail rollout stragglers
+      # The agent loop and the model's Python run in the sandbox the Environment Server lends each attempt. Rows
+      # opt into execute_python with agent_context: {agent: {values: {python_tools: [execute_python]}}}.
+      python_tools:
+        execute_python:
+          timeout_seconds: 10
+          requirements: [numpy==2.5.5, scipy==1.18.1, pandas==3.1.1]
+          preload: {np: numpy, numpy: numpy, scipy: scipy, pd: pandas, pandas: pandas}
+          builtins: [print, len, str, int, float, list, dict, tuple, set, min, max, sum, abs, range, enumerate, zip,
+            __import__]
 
 math_with_code_environment_server:
   environment_servers:
@@ -41,5 +49,12 @@ math_with_code_environment_server:
       agent_server:
         type: responses_api_agents
         name: math_with_code_simple_agent
-      resources_tool_transports:
-      - direct_http
+      # Configure a top-level sandbox provider block named `sandbox` before starting. The sandbox reaches only the
+      # model server: the Python tool runs inside it, and this Resources Server has no tools.
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /workspace
+        ttl_s: 25200  # above the agent's sandbox_runner_timeout_seconds plus cleanup
+        network: model_only
+        model_server: policy_model
