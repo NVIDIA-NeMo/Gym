@@ -563,10 +563,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     def _task_tools(self, request: SingleAgentTurnRequest, tool_accesses: Sequence[ToolAccess]) -> list[str]:
         """The tools the task declares or the episode grants, which a pure QA task's sandbox opt-out refuses."""
-        names = [
-            str((tool if isinstance(tool, Mapping) else vars(tool)).get("name") or "tool")
-            for tool in request.task.task_input.responses_create_params.tools or []
+        declared = [
+            tool if isinstance(tool, Mapping) else vars(tool)
+            for tool in request.task.task_input.responses_create_params.tools
         ]
+        names = [str(tool.get("name") or tool.get("type") or "tool") for tool in declared]
         names += [
             f"{self.config.resources_server.name} {transport}" for transport in self.config.resources_tool_transports
         ]
