@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 import shlex
 import shutil
 import socket
@@ -792,6 +793,285 @@ async def test_upload_fast_path(fake_binary: str, monkeypatch: pytest.MonkeyPatc
 
     assert (staging / "sub" / "dest.txt").read_bytes() == b"payload"
     assert rec.calls == []  # fast path never shells out
+
+
+async def test_upload_copies_a_large_file_in_chunks_to_a_new_nested_path(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(apptainer_provider, "STAGED_WRITE_CHUNK_BYTES", 1000)
+    staging = tmp_path / "staging"
+    (staging / "a").mkdir(parents=True)
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    payload = bytes(range(256)) * 41  # not a multiple of the chunk size, and not UTF-8
+    src = tmp_path / "src.bin"
+    src.write_bytes(payload)
+    reference = tmp_path / "reference"
+    reference.write_bytes(b"")
+
+    await provider.upload_file(_make_handle(staging), src, "/sandbox/a/./b/c/data.bin")
+
+    dest = staging / "a" / "b" / "c" / "data.bin"
+    assert dest.read_bytes() == payload
+    assert not dest.is_symlink() and dest.is_file()
+    # A new file gets the same permissions as any file the server writes.
+    assert dest.stat().st_mode == reference.stat().st_mode
+    assert sorted(path.name for path in dest.parent.iterdir()) == ["data.bin"]  # no temporary file left
+    assert rec.calls == []
+
+
+async def test_upload_overwrites_a_file_and_keeps_its_permissions(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "run.sh").write_bytes(b"old and longer content")
+    (staging / "run.sh").chmod(0o750)
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.sh"
+    src.write_bytes(b"new")
+
+    await provider.upload_file(_make_handle(staging), src, "/sandbox/run.sh")
+
+    assert (staging / "run.sh").read_bytes() == b"new"
+    assert (staging / "run.sh").stat().st_mode & 0o7777 == 0o750
+    assert [path.name for path in staging.iterdir()] == ["run.sh"]
+
+
+async def test_upload_missing_source_still_raises_file_not_found(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    with pytest.raises(FileNotFoundError):
+        await provider.upload_file(_make_handle(staging), tmp_path / "absent", "/sandbox/sub/dest.txt")
+    with pytest.raises(FileNotFoundError):
+        await provider.upload_file(_make_handle(staging), tmp_path / "absent", "/etc/app.conf")
+    assert list(staging.iterdir()) == []
+
+
+@pytest.mark.parametrize("target", ["host-file", "dangling"])
+async def test_upload_replaces_a_link_at_the_target_name_without_following_it(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str
+) -> None:
+    # The sandbox can write the staging dir: a link there must not make the host write another host file.
+    host_file = tmp_path / "host-file"
+    host_file.write_text("host content")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "dest.txt").symlink_to(tmp_path / target)
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+
+    await provider.upload_file(_make_handle(staging), src, "/sandbox/dest.txt")
+
+    assert host_file.read_text() == "host content"
+    assert not (tmp_path / "dangling").exists()
+    assert not (staging / "dest.txt").is_symlink()
+    assert (staging / "dest.txt").read_bytes() == b"payload"
+    assert [path.name for path in staging.iterdir()] == ["dest.txt"]
+
+
+@pytest.mark.parametrize(
+    "target_path",
+    [
+        "/sandbox/linked/new.txt",
+        "/sandbox/linked/sub/new.txt",
+        "/sandbox/real/inside/new.txt",
+        "/sandbox/file/new.txt",
+    ],
+)
+async def test_upload_refuses_a_linked_or_non_directory_parent(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target_path: str
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    staging = tmp_path / "staging"
+    (staging / "real" / "kept").mkdir(parents=True)
+    (staging / "linked").symlink_to(outside, target_is_directory=True)
+    (staging / "real" / "inside").symlink_to(staging / "real" / "kept", target_is_directory=True)
+    (staging / "file").write_text("a file")
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+
+    with pytest.raises(RuntimeError, match="apptainer upload to .* failed: .* is a symbolic link or not a directory"):
+        await provider.upload_file(_make_handle(staging), src, target_path)
+
+    assert list(outside.iterdir()) == []  # nothing created or written outside the staging dir
+    assert list((staging / "real" / "kept").iterdir()) == []
+    assert (staging / "file").read_text() == "a file"
+    assert rec.calls == []
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory permissions")
+async def test_upload_passes_on_other_filesystem_errors(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    (staging / "locked").mkdir(parents=True)
+    (staging / "locked").chmod(0o000)
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+    try:
+        with pytest.raises(PermissionError):
+            await provider.upload_file(_make_handle(staging), src, "/sandbox/locked/dest.txt")
+    finally:
+        (staging / "locked").chmod(0o700)
+    assert list((staging / "locked").iterdir()) == []
+
+
+@pytest.mark.parametrize("relative_path", ["../outside.txt", "sub/../../outside.txt", "", "."])
+def test_write_staged_file_refuses_a_path_that_leaves_the_mount(tmp_path: Path, relative_path: str) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+    with pytest.raises(RuntimeError, match="not a file inside the sandbox mount"):
+        apptainer_provider._write_staged_file(staging, relative_path, src, "/sandbox/x")
+    assert not (tmp_path / "outside.txt").exists()
+    assert list(staging.iterdir()) == []
+
+
+async def test_upload_to_the_mount_itself_or_outside_it_never_writes_the_host(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+
+    with pytest.raises(RuntimeError, match="not a file inside the sandbox mount"):
+        await provider.upload_file(_make_handle(staging), src, "/sandbox")
+    # A path that climbs out of the mount is a container path: it goes through the in-container copy.
+    await provider.upload_file(_make_handle(staging), src, "/sandbox/../outside.txt")
+    assert len(rec.calls) == 1 and "/sandbox/../outside.txt" in rec.calls[0]["argv"][-1]
+    assert not (tmp_path / "outside.txt").exists()
+    assert list(staging.iterdir()) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs not available")
+async def test_upload_replaces_a_fifo_at_the_target_name_without_opening_it(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    os.mkfifo(staging / "dest.txt")
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+
+    # Nothing ever reads the FIFO: opening it for writing would never return.
+    with anyio.fail_after(5):
+        await provider.upload_file(_make_handle(staging), src, "/sandbox/dest.txt")
+
+    assert (staging / "dest.txt").is_file()
+    assert (staging / "dest.txt").read_bytes() == b"payload"
+
+
+async def test_upload_refuses_a_directory_at_the_target_name(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    (staging / "dest" / "kept").mkdir(parents=True)
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+
+    with pytest.raises(RuntimeError, match="apptainer upload to '/sandbox/dest' failed: the target is a directory"):
+        await provider.upload_file(_make_handle(staging), src, "/sandbox/dest")
+
+    assert [path.name for path in staging.iterdir()] == ["dest"]
+    assert [path.name for path in (staging / "dest").iterdir()] == ["kept"]
+
+
+def test_write_staged_file_refuses_a_directory_that_appears_before_the_rename(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The sandbox can create the directory after the check: the rename then fails, and the temporary file is removed.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+    copyfileobj = shutil.copyfileobj
+
+    def copy_then_plant_directory(*args: Any) -> None:
+        copyfileobj(*args)
+        (staging / "dest").mkdir()
+
+    monkeypatch.setattr(apptainer_provider.shutil, "copyfileobj", copy_then_plant_directory)
+    with pytest.raises(RuntimeError, match="the target is a directory"):
+        apptainer_provider._write_staged_file(staging, "dest", src, "/sandbox/dest")
+    assert [path.name for path in staging.iterdir()] == ["dest"]
+    assert list((staging / "dest").iterdir()) == []
+
+
+async def test_upload_fallback_stages_a_regular_file_for_the_copy(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    seen: dict[str, Any] = {}
+
+    async def fake_exec(h: SandboxHandle, command: str, *, user: Any = None, **_: Any) -> SandboxExecResult:
+        # What the in-container `cp` reads: the staged file, at the path the command names.
+        staged = staging / Path(shlex.split(command)[-2]).name
+        seen["regular"] = staged.is_file() and not staged.is_symlink()
+        seen["bytes"] = staged.read_bytes()
+        seen["names"] = [path.name for path in staging.iterdir()]
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(provider, "exec", fake_exec)
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+    await provider.upload_file(_make_handle(staging), src, "/etc/app.conf")
+
+    assert seen["regular"] and seen["bytes"] == b"payload"
+    assert len(seen["names"]) == 1
+    assert list(staging.iterdir()) == []  # temp staging file cleaned up
+
+
+async def test_upload_does_not_block_the_event_loop(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import threading
+    import time
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"slow")
+    copy_threads: list[int] = []
+    copyfileobj = shutil.copyfileobj
+
+    def slow_copy(*args: Any) -> None:
+        copy_threads.append(threading.get_ident())
+        time.sleep(0.4)
+        copyfileobj(*args)
+
+    monkeypatch.setattr(apptainer_provider.shutil, "copyfileobj", slow_copy)
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await anyio.sleep(0.01)
+            ticks += 1
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(ticker)
+        await provider.upload_file(_make_handle(staging), src, "/sandbox/slow.bin")
+        ticks_during_copy = ticks
+        tasks.cancel_scope.cancel()
+
+    assert (staging / "slow.bin").read_bytes() == b"slow"
+    assert copy_threads and copy_threads[0] != threading.get_ident()
+    assert ticks_during_copy >= 10
 
 
 async def test_upload_fallback(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

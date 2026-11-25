@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -56,6 +58,8 @@ INSTANCE_NAME_PREFIX = "nemo-gym-"
 READY_PROBE_COMMAND = "printf apptainer-sandbox-ready"
 READY_PROBE_EXPECTED = "apptainer-sandbox-ready"
 SANDBOX_RUNTIME_RETURN_CODE = 125
+# Uploads copy into the staging dir in chunks of this size instead of loading the whole file.
+STAGED_WRITE_CHUNK_BYTES = 1024 * 1024
 # Exit code apptainer uses when it fails on its own (CLI / starter error).
 APPTAINER_FATAL_RETURN_CODE = 255
 # Apptainer logs its own failures as lines starting with "FATAL:" / "ERROR:" (the
@@ -321,6 +325,71 @@ def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None
             os.close(fd)
         if path is not None:
             path.unlink(missing_ok=True)
+
+
+def _write_staged_file(staging_dir: Path, relative_path: str, source_path: Path, target_path: str) -> None:
+    """Copy the host file ``source_path`` to ``relative_path`` under the staging dir. Blocking: run in a thread.
+
+    Code inside the sandbox can write anything into the staging dir, so nothing in it is trusted. The path is
+    walked one component at a time from the staging dir, creating missing directories and never following a
+    symbolic link, so nothing is created or written outside it. The bytes go to a new file beside the final name,
+    which is then renamed over it: a link or FIFO left at that name is replaced, never followed or opened.
+    ``target_path`` only names the file in errors.
+    """
+
+    def refuse(reason: str) -> RuntimeError:
+        return RuntimeError(f"apptainer upload to {target_path!r} failed: {reason}")
+
+    parts = [part for part in relative_path.split("/") if part and part != "."]
+    if not parts or ".." in parts:
+        raise refuse("not a file inside the sandbox mount")
+    name = parts[-1]
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    with source_path.open("rb") as source:
+        fd = os.open(staging_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            for index, part in enumerate(parts[:-1]):
+                try:
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, dir_fd=fd)
+                    next_fd = os.open(part, directory_flags, dir_fd=fd)
+                except OSError as e:
+                    # A symbolic link gives ELOOP, ENOTDIR or EMLINK; a file in a directory's place gives ENOTDIR.
+                    if e.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                        raise refuse(f"{'/'.join(parts[: index + 1])!r} is a symbolic link or not a directory") from e
+                    raise
+                os.close(fd)
+                fd = next_fd
+
+            # Keep the permissions of a regular file being overwritten, as writing it in place did.
+            mode = None
+            with contextlib.suppress(FileNotFoundError):
+                existing = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(existing.st_mode):
+                    raise refuse("the target is a directory")
+                if stat.S_ISREG(existing.st_mode):
+                    mode = stat.S_IMODE(existing.st_mode) & 0o777
+
+            temp_name = f".{name[:64]}.{uuid.uuid4().hex}.upload"
+            temp_fd = os.open(
+                temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666, dir_fd=fd
+            )
+            try:
+                with os.fdopen(temp_fd, "wb") as target:
+                    shutil.copyfileobj(source, target, STAGED_WRITE_CHUNK_BYTES)
+                    if mode is not None:
+                        os.fchmod(target.fileno(), mode)
+                try:
+                    os.replace(temp_name, name, src_dir_fd=fd, dst_dir_fd=fd)
+                except IsADirectoryError as e:
+                    raise refuse("the target is a directory") from e
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp_name, dir_fd=fd)
+                raise
+        finally:
+            os.close(fd)
 
 
 class ApptainerProvider:
@@ -768,19 +837,22 @@ class ApptainerProvider:
         Fast path (target under the bind mount): write directly to the host side
         of the shared folder. Fallback (arbitrary path): stage into the shared
         folder, then cp inside the container.
+
+        Both paths write the shared folder, which the sandbox can also write,
+        through ``_write_staged_file``: no symbolic link is followed, and the
+        copy runs in a worker thread. A target that would leave the shared
+        folder, or that is a directory, raises ``RuntimeError``.
         """
         inst = handle.raw
 
         rel = _path_under_mount(inst.mount_point, target_path)
         if rel is not None:
-            dest = inst.staging_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(source_path.read_bytes())
+            await asyncio.to_thread(_write_staged_file, inst.staging_dir, rel, source_path, target_path)
             return
 
         tmp_name = uuid.uuid4().hex
         host_tmp = inst.staging_dir / tmp_name
-        host_tmp.write_bytes(source_path.read_bytes())
+        await asyncio.to_thread(_write_staged_file, inst.staging_dir, tmp_name, source_path, target_path)
         try:
             container_tmp = f"{inst.mount_point.rstrip('/')}/{tmp_name}"
             parent = posixpath.dirname(target_path)
