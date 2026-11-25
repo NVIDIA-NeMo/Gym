@@ -201,10 +201,19 @@ async def test_sandbox_access_env_pwd_entry_leaves_pwd_at_the_workdir(tmp_path):
     assert (tmp_path / "stdout.jsonl").read_text() == f"{tmp_path}\n"
 
 
+async def test_sandbox_access_env_task_only_path_reaches_opencode_and_not_the_setup(tmp_path):
+    # The task's PATH holds neither the setup's rm and mkdir nor printenv, which is staged by its absolute path.
+    access = lent_sandbox(tmp_path, {"PATH": "/task-tools/bin"})
+    argv = await stage(tmp_path, [shutil.which("printenv"), "PATH"], sandbox_access=access)
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "stdout.jsonl").read_text() == "/task-tools/bin\n"
+
+
 async def test_sandbox_access_env_entries_keep_a_failed_setup_from_starting_opencode(tmp_path):
     # The setup cannot record the task's directories in a folder.
     (tmp_path / "task-env.json").mkdir()
-    access = lent_sandbox(tmp_path, {"TASK_API_TOKEN": "task value"})
+    access = lent_sandbox(tmp_path, {"HOME": "/task-home"})
     argv = await stage(tmp_path, ["true"], sandbox_access=access, path_prefix=["/opt/tools/bin"])
     assert subprocess.run(argv, capture_output=True, text=True, timeout=10).returncode == 125
 

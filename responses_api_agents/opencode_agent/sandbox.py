@@ -527,19 +527,25 @@ class OpenCodeSandboxSession(AgentSessionState):
             if not key.startswith(("OPENCODE_", "OPENAI_", "NEMO_GYM_"))
         }
         if access_env:
+            # shell_assignments rejects an entry whose name is not a shell variable name. env(1), which sets the
+            # entries below, could take such a name for an option or for an assignment to another variable.
+            shell_assignments({"access_env": access_env})
             if payload.get("path_prefix") and "PATH" in access_env:
                 # As below: preinstalled runtime tools come first.
                 access_env["PATH"] = ":".join([*payload["path_prefix"], access_env["PATH"]])
             # No entry becomes a variable of the runner's shell, where one named like a runner parameter, such as
-            # ``command``, would replace it. The setup runs in a subshell that exports the entries, so it records a
-            # HOME or XDG directory among them as the task's.
-            params["setup"] = (
-                "(\n"
-                + shell_assignments({"access_env": access_env})
-                + 'export "${access_env[@]}"\n'
-                + params["setup"]
-                + ") || exit 1\n"
-            )
+            # ``command``, would replace it. A HOME or XDG directory among the entries is exported in a subshell around
+            # the setup, which records it as the task's. No other entry reaches the setup, so its ``rm`` and ``mkdir``
+            # run with the sandbox's own variables, such as PATH.
+            task_directories = {key: access_env[key] for key in _TASK_DIRECTORY_KEYS if key in access_env}
+            if task_directories:
+                params["setup"] = (
+                    "(\n"
+                    + shell_assignments({"task_directories": task_directories})
+                    + 'export "${task_directories[@]}"\n'
+                    + params["setup"]
+                    + ") || exit 1\n"
+                )
             # env(1) then sets the entries for the CLI alone, over the sandbox's values. The names in ``env`` are left
             # out, so the adapter's own variables keep their values, and so is PWD, which the runner's ``cd`` sets.
             params["command"] = [
