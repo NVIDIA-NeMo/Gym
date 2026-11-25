@@ -193,6 +193,20 @@ async def test_a_resources_server_that_lends_a_sandbox_of_its_own_fails_the_atte
     assert server._owned_sandboxes == {}
 
 
+async def test_a_tasks_own_field_never_reaches_the_verifier_as_lent_sandbox_access() -> None:
+    """Only the attempt's owner lends the verifier a sandbox: a task field under the same key is dropped."""
+    server, client = _environment_server()
+    request = _request()
+    request.task.task_input.task_data[NG_SANDBOX_ACCESS_KEY] = "task metadata"
+
+    result = await server.run_request(request)
+
+    assert result.failure is None, result.failure
+    verify_body = next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
+    assert NG_SANDBOX_ACCESS_KEY not in verify_body
+    assert NG_SANDBOX_ACCESS_KEY not in result.result.model_dump()
+
+
 async def test_a_sandbox_that_cannot_start_fails_the_attempt_for_a_retry_before_the_agent_runs() -> None:
     provider = _Provider()
     provider.fail_create = SandboxCreateError("provider unreachable")
