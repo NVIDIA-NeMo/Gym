@@ -3,6 +3,7 @@
 """The attempt sandbox: what the Resources Server declares at seed, and how the base Environment Server plans,
 starts, lends and stops each attempt's sandbox group."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
@@ -231,13 +232,26 @@ class _Response(BaseEpisodeResponse[str]):
 
 
 class _Server(BaseEnvironmentServer[_Request, _Response]):
+    """An Environment Server type other than single_agent_turn: its agent turn is a wait while it holds the group."""
+
     request_model = _Request
     response_model = _Response
     lends_sandboxes = True
     owned_sandbox_blocks = ATTEMPT_SANDBOX_BLOCKS
+    turn: ClassVar[asyncio.Event | None] = None
 
     async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
-        raise NotImplementedError
+        key = f"attempt/{request.episode_id.capture_key}"
+        cleanup.register_cleanup("attempt sandbox", lambda: self.stop_attempt_sandbox(key))
+        attempt = self.plan_attempt_sandbox(key=key)
+        access = await self.start_attempt_sandbox(request, attempt, stage="seed")
+        if self.turn is not None:
+            await self.turn.wait()
+        return _Response(
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            result=access.connection.descriptor["sandbox_id"],
+        )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         return AggregateMetrics()
@@ -476,3 +490,33 @@ def test_an_attempt_records_who_borrows_its_group_for_a_checkpoint_boundary() ->
     attempt = AttemptSandbox(key="a", lend_to_grader=True, group=SandboxGroupSpec(grader_runs_code=True))
 
     assert AttemptSandbox.model_validate(attempt.model_dump(mode="json")) == attempt
+
+
+async def test_another_environment_server_type_runs_an_attempt_in_a_group_it_starts_and_stops() -> None:
+    provider = _Provider()
+    server = _server(provider)
+
+    response = await server.run_request(_request())
+
+    assert response.failure is None, response.failure
+    assert response.result == "sb-1"
+    assert provider.running() == []
+
+
+async def test_another_environment_server_types_cancelled_attempt_leaves_no_group_running() -> None:
+    provider = _Provider()
+    waiting = type("Waiting", (_Server,), {"turn": asyncio.Event()})
+    server = waiting(config=_server().config, server_client=MagicMock(spec=ServerClient))
+    server._owned_sandboxes["sandbox_provider"] = OwnedSandboxes(
+        provider, state_dir=None, server_name="environment", provider_config_ref="attempt_sandboxes"
+    )
+
+    episode = asyncio.create_task(server.run_request(_request()))
+    while provider.running() != ["sb-1"]:
+        await asyncio.sleep(0.01)
+    episode.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await episode
+
+    assert provider.running() == []
+    assert server.sandboxes.keys == []
