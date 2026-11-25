@@ -27,9 +27,11 @@ deepswe_hermes_agent:
         name: deepswe_hermes_resources_server
       # DeepSWE agent budget: 3 hours, as opencode.yaml.
       sandbox_runner_timeout_seconds: 10800
-      # Hermes's own defaults for the step limit and the per-command timeout; hermes_agent.yaml lowers them to
-      # 30 and 60. Every toolset stays enabled, as hermes_agent.yaml leaves it.
-      max_turns: 90
+      # No step limit: the run limit above is the bound, as for OpenCode, which has none. max_turns takes no
+      # null, so it is set where three hours cannot reach it.
+      max_turns: 1000000
+      # Hermes's own default for the per-command timeout; hermes_agent.yaml lowers it to 60. Every toolset
+      # stays enabled, as hermes_agent.yaml leaves it.
       terminal_timeout: 180
       # Match the serving context window when overriding it; compression triggers at 85% of it.
       context_length: 262144
