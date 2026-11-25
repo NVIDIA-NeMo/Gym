@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
 import time
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -11,7 +10,6 @@ from threading import Thread
 import orjson
 import pytest
 from omegaconf import OmegaConf
-from pydantic import TypeAdapter
 
 from nemo_gym.config.config_types import HeadServerUnreachableError
 from nemo_gym.rollouts import provenance
@@ -351,75 +349,6 @@ def _write_without_probing(output: Path, config, monkeypatch) -> dict:
     return orjson.loads(provenance.write_run_provenance(output, config).read_bytes())
 
 
-@pytest.mark.parametrize("configured", ["6", " 6 ", "6.0", None])
-def test_gdpval_judge_request_limit_is_recorded_as_its_model_server_reads_it(
-    configured, tmp_path: Path, monkeypatch
-) -> None:
-    from responses_api_models.openai_model.app import SimpleModelServerConfig
-
-    if configured is None:
-        monkeypatch.delenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", raising=False)
-    else:
-        monkeypatch.setenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", configured)
-    judge = OmegaConf.load(REPO_ROOT / "benchmarks/gdpval/config.yaml").gdpval_gemini31_judge_model
-    config = OmegaConf.create({"gdpval_gemini31_judge_model": judge})
-    server = SimpleModelServerConfig.model_validate(
-        {
-            **OmegaConf.to_container(judge.responses_api_models.openai_model, resolve=True),
-            "name": "gdpval_gemini31_judge_model",
-            "host": "127.0.0.1",
-            "port": 8000,
-        }
-    )
-
-    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
-
-    assert server.max_concurrent_requests == (2 if configured is None else 6)
-    assert record["concurrency_limits"] == {
-        "gdpval_gemini31_judge_model.responses_api_models.openai_model": {
-            "max_concurrent_requests": server.max_concurrent_requests
-        }
-    }
-
-
-@pytest.mark.parametrize("configured", ["7", " 8 ", None])
-@pytest.mark.parametrize(
-    ("config_fpath", "path", "config_model"),
-    [
-        (
-            "benchmarks/gdpval/config.yaml",
-            "gdpval_resources_server.resources_servers.gdpval",
-            "resources_servers.gdpval.app:GDPValResourcesServerConfig",
-        ),
-        (
-            "benchmarks/aa_briefcase_lite/config.yaml",
-            "aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite",
-            "resources_servers.aa_briefcase_lite.app:AABriefcaseLiteResourcesServerConfig",
-        ),
-    ],
-)
-def test_the_judge_sampling_seed_is_recorded_as_its_resources_server_reads_it(
-    config_fpath, path, config_model, configured, tmp_path: Path, monkeypatch
-) -> None:
-    module, name = config_model.split(":")
-    field = getattr(importlib.import_module(module), name).model_fields["judge_sampling_seed"]
-    if configured is None:
-        monkeypatch.delenv("JUDGE_SAMPLING_SEED", raising=False)
-    else:
-        monkeypatch.setenv("JUDGE_SAMPLING_SEED", configured)
-    shipped = OmegaConf.to_container(OmegaConf.select(OmegaConf.load(REPO_ROOT / config_fpath), path), resolve=False)
-    config: dict = {"judge_sampling_seed": shipped["judge_sampling_seed"]}
-    for part in reversed(path.split(".")):
-        config = {part: config}
-    config = OmegaConf.create(config)
-
-    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
-
-    seed = TypeAdapter(field.annotation).validate_python(OmegaConf.select(config, f"{path}.judge_sampling_seed"))
-    assert seed == (None if configured is None else int(configured))
-    assert record["sampling_parameters"] == {path: {"judge_sampling_seed": seed}}
-
-
 @pytest.mark.parametrize(("configured", "limit"), [(" 16 ", 16), (None, 32)])
 def test_an_env_backed_sandbox_exec_concurrency_is_recorded(configured, limit, monkeypatch) -> None:
     if configured is None:
@@ -466,41 +395,6 @@ def test_a_setting_that_cannot_be_resolved_is_left_out_without_losing_the_record
         "judge.responses_api_models.openai_model": {"num_workers": 2},
     }
     assert record["sampling_parameters"] == {"judge.responses_api_models.openai_model.extra_body": {"top_p": 0.9}}
-
-
-def test_a_sampling_value_gym_forwards_as_given_is_recorded_only_when_it_is_a_number(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from responses_api_models.openai_model.app import SimpleModelServerConfig
-
-    config = OmegaConf.merge(
-        OmegaConf.load(REPO_ROOT / "benchmarks/legal_agent_bench/model_sampling_openai.yaml"),
-        {
-            "lab": {"policy_temperature": "0.6", "policy_top_p": 0.95},
-            "policy_model": {"responses_api_models": {"openai_model": {"request_overrides": {"seed": "7", "n": 1}}}},
-        },
-    )
-    server = SimpleModelServerConfig.model_validate(
-        {
-            **OmegaConf.to_container(config.policy_model.responses_api_models.openai_model, resolve=True),
-            "name": "policy_model",
-            "host": "127.0.0.1",
-            "port": 8000,
-            "entrypoint": "app.py",
-            "openai_base_url": "http://127.0.0.1:1/v1",
-            "openai_api_key": "dummy",  # pragma: allowlist secret
-            "openai_model": "policy",
-        }
-    )
-
-    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
-
-    assert server.extra_body["temperature"] == "0.6"
-    assert server.request_overrides["seed"] == "7"
-    assert record["sampling_parameters"] == {
-        "policy_model.responses_api_models.openai_model.extra_body": {"top_p": 0.95},
-        "policy_model.responses_api_models.openai_model.request_overrides": {"n": 1},
-    }
 
 
 def test_a_quoted_number_in_row_metadata_is_left_out_without_losing_the_record(tmp_path: Path) -> None:

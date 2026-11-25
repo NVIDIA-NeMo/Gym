@@ -3,8 +3,10 @@
 
 from pathlib import Path
 
+import orjson
 import pytest
 from omegaconf import OmegaConf
+from pydantic import TypeAdapter
 
 from benchmarks.aa_briefcase_lite.prepare import AGENT_MAX_TURNS
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
@@ -14,6 +16,9 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     resolve_dataset_agent,
 )
+from nemo_gym.rollouts import provenance
+from nemo_gym.utils import materialized_path_for
+from resources_servers.aa_briefcase_lite.app import AABriefcaseLiteResourcesServerConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -85,3 +90,25 @@ def test_judging_can_be_switched_off_to_save_deliverables_only(resolve_config) -
     config = resolve_config(f"{RESOURCES_KEY}.judge_deliverables=false")
 
     assert get_first_server_config_dict(config, RESOURCES_NAME).judge_deliverables is False
+
+
+@pytest.mark.parametrize("configured", ["7", " 8 ", None])
+def test_run_provenance_records_the_judge_sampling_seed_as_the_server_reads_it(configured, tmp_path, monkeypatch):
+    if configured is None:
+        monkeypatch.delenv("JUDGE_SAMPLING_SEED", raising=False)
+    else:
+        monkeypatch.setenv("JUDGE_SAMPLING_SEED", configured)
+    monkeypatch.setattr(provenance, "served_models", lambda servers: {})
+    shipped = OmegaConf.to_container(OmegaConf.select(OmegaConf.load(CONFIG_PATH), RESOURCES_KEY), resolve=False)
+    config = OmegaConf.create(
+        {RESOURCES_NAME: {"resources_servers": {"aa_briefcase_lite": {"judge_sampling_seed": shipped["judge_sampling_seed"]}}}}
+    )
+    output = tmp_path / "rollouts.jsonl"
+    materialized_path_for(output).write_bytes(b"")
+
+    record = orjson.loads(provenance.write_run_provenance(output, config).read_bytes())
+
+    field = AABriefcaseLiteResourcesServerConfig.model_fields["judge_sampling_seed"]
+    seed = TypeAdapter(field.annotation).validate_python(OmegaConf.select(config, f"{RESOURCES_KEY}.judge_sampling_seed"))
+    assert seed == (None if configured is None else int(configured))
+    assert record["sampling_parameters"] == {RESOURCES_KEY: {"judge_sampling_seed": seed}}

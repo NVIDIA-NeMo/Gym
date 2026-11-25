@@ -5,9 +5,13 @@
 import logging
 from pathlib import Path
 
+import orjson
 import pytest
 from omegaconf import OmegaConf
+from pydantic import TypeAdapter
 
+from nemo_gym.rollouts import provenance
+from nemo_gym.utils import materialized_path_for
 from resources_servers.gdpval.app import GDPValResourcesServerConfig, JudgePanelMember
 from responses_api_models.openai_model.app import SimpleModelServerConfig
 
@@ -157,3 +161,58 @@ def test_removed_handles_audio_video_flag_is_migrated_inside_the_server_config()
 def test_mixing_removed_and_new_av_flags_fails(new_key):
     with pytest.raises(ValueError, match="handles_audio_video"):
         JudgePanelMember(name="gemini", handles_audio_video=True, **{new_key: False})
+
+
+def _write_run_provenance(output: Path, config, monkeypatch) -> dict:
+    monkeypatch.setattr(provenance, "served_models", lambda servers: {})
+    materialized_path_for(output).write_bytes(b"")
+    return orjson.loads(provenance.write_run_provenance(output, config).read_bytes())
+
+
+@pytest.mark.parametrize("configured", ["6", " 6 ", "6.0", None])
+def test_run_provenance_records_the_judge_request_limit_as_its_model_server_reads_it(
+    configured, tmp_path, monkeypatch
+):
+    if configured is None:
+        monkeypatch.delenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", raising=False)
+    else:
+        monkeypatch.setenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", configured)
+    judge = OmegaConf.load(BENCHMARK).gdpval_gemini31_judge_model
+    config = OmegaConf.create({"gdpval_gemini31_judge_model": judge})
+    server = SimpleModelServerConfig.model_validate(
+        {
+            **OmegaConf.to_container(judge.responses_api_models.openai_model, resolve=True),
+            "name": "gdpval_gemini31_judge_model",
+            "host": "127.0.0.1",
+            "port": 8000,
+        }
+    )
+
+    record = _write_run_provenance(tmp_path / "rollouts.jsonl", config, monkeypatch)
+
+    assert server.max_concurrent_requests == (2 if configured is None else 6)
+    assert record["concurrency_limits"] == {
+        "gdpval_gemini31_judge_model.responses_api_models.openai_model": {
+            "max_concurrent_requests": server.max_concurrent_requests
+        }
+    }
+
+
+@pytest.mark.parametrize("configured", ["7", " 8 ", None])
+def test_run_provenance_records_the_judge_sampling_seed_as_the_server_reads_it(configured, tmp_path, monkeypatch):
+    path = "gdpval_resources_server.resources_servers.gdpval"
+    if configured is None:
+        monkeypatch.delenv("JUDGE_SAMPLING_SEED", raising=False)
+    else:
+        monkeypatch.setenv("JUDGE_SAMPLING_SEED", configured)
+    shipped = OmegaConf.to_container(OmegaConf.select(OmegaConf.load(BENCHMARK), path), resolve=False)
+    config = OmegaConf.create(
+        {"gdpval_resources_server": {"resources_servers": {"gdpval": {"judge_sampling_seed": shipped["judge_sampling_seed"]}}}}
+    )
+
+    record = _write_run_provenance(tmp_path / "rollouts.jsonl", config, monkeypatch)
+
+    field = GDPValResourcesServerConfig.model_fields["judge_sampling_seed"]
+    seed = TypeAdapter(field.annotation).validate_python(OmegaConf.select(config, f"{path}.judge_sampling_seed"))
+    assert seed == (None if configured is None else int(configured))
+    assert record["sampling_parameters"] == {path: {"judge_sampling_seed": seed}}
