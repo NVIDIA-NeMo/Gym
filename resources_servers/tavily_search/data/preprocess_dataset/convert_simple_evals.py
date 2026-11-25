@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import argparse
 import copy
 import json
 import os
@@ -296,14 +297,25 @@ def write_train_validation_samples(rl_samples, output_data_folder, train_file_na
 
 
 if __name__ == "__main__":
-    GYM_ROOT = Path(__file__).resolve().parents[4]
-    INPUT_DIR = Path(os.environ.get("BROWSECOMP_INPUT_DIR", str(GYM_ROOT / "data/browsecomp_source")))
-    OUTPUT_DIR = Path(
-        os.environ.get(
-            "BROWSECOMP_OUTPUT_DIR",
-            str(GYM_ROOT / "resources_servers/tavily_search/data/benchmark/browsecomp"),
-        )
+    parser = argparse.ArgumentParser(
+        description="Convert BrowseComp JSONL files for the Tavily Search environment"
     )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=Path("/path/to/browsecomp_source"),
+        help="Directory containing the source JSONL files",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "benchmark/browsecomp",
+        help="Directory where converted JSONL files are written",
+    )
+    args = parser.parse_args()
+    input_dir = args.input_dir
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     SOURCE_FILES = [
         "browsecomp_test_set.jsonl",
@@ -318,8 +330,8 @@ if __name__ == "__main__":
     ]
 
     for filename in SOURCE_FILES:
-        input_path = INPUT_DIR / filename
-        output_path = OUTPUT_DIR / filename
+        input_path = input_dir / filename
+        output_path = output_dir / filename
         print(f"\n{'=' * 60}")
         print(f"Processing: {filename}")
         print(f"{'=' * 60}")

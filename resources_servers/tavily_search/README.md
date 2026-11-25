@@ -11,6 +11,19 @@ guide includes a small run with the committed example dataset and explains how
 to configure your own training or evaluation data.
 
 
+## Preparing BrowseComp data
+
+Convert BrowseComp JSONL source files for this environment with:
+
+```bash
+python resources_servers/tavily_search/data/preprocess_dataset/convert_simple_evals.py \
+  --input-dir /path/to/browsecomp_source \
+  --output-dir /path/to/browsecomp_output
+```
+
+The script expects its listed source files in `--input-dir`. `--output-dir` defaults to
+`resources_servers/tavily_search/data/benchmark/browsecomp`.
+
 ### Performance Metrics
 100*16 samples:
 - Acc: 0.3212
