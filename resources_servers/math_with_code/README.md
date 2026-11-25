@@ -158,7 +158,8 @@ at most 2 GiB: code that asks for more gets a `MemoryError` instead of stopping 
 |---|---|---|
 | attempt group | `none` | The task has the `execute_python` Python tool, which runs in the agent's container. The verifier normalizes the boxed answer and compares strings and floats, so it executes nothing. |
 
-See [Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs).
+`math_with_code_environment_server` sets `sandbox_config`, the task sandbox the agent borrows, and
+`verifier: {mode: none}`. See [Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs).
 
 This server keeps the session contract for `math_with_code_environment_server` (`single_agent_turn_legacy`): a
 `/verify` for a closed session returns a masked sample instead of a reward of 0.

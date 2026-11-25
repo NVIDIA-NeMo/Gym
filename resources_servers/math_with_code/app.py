@@ -56,7 +56,8 @@ class PythonMathVerifyResponse(BaseVerifyResponse):
 
 class MathWithCodeResourcesServer(SimpleResourcesServer):
     config: MathWithCodeResourcesServerConfig
-    # verify normalizes the boxed answer and compares strings and floats; it executes nothing.
+    # The mode a pairing gets when it leaves verifier.mode unset, and the only one verify supports: it normalizes the
+    # boxed answer and compares strings and floats, so it executes nothing and borrows no sandbox.
     verifier_mode = "none"
 
     # The server holds no state for a session, but implements the session hooks, so verify keeps masking a sample
