@@ -33,7 +33,7 @@ from typing import Any
 
 import orjson
 from omegaconf import OmegaConf
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
@@ -819,7 +819,10 @@ def incomplete_run_export_error(output: Path) -> str | None:
     run with no Store predates coverage: neither is judged here.
     """
     saved_config = resolved_config_path_for(output)
-    if not saved_config.is_file() or OmegaConf.load(saved_config).get("require_complete") is not True:
+    if not saved_config.is_file():
+        return None
+    # Read as collection reads it, so a quoted "true" is strict here too.
+    if not TypeAdapter(bool).validate_python(OmegaConf.load(saved_config).get("require_complete", False)):
         return None
     store = RolloutStore.read(output, import_legacy=False)
     if store is None:

@@ -31,18 +31,22 @@ def pass_settles_one_row(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "complete_only, run_is_complete, recomputed",
+    "complete_only, run_is_complete, aggregate_written, recomputed",
     [
-        pytest.param(True, False, 0, id="rejected-and-still-incomplete"),
-        pytest.param(True, True, 1, id="rejected-and-completed-by-the-pass"),
-        pytest.param(False, False, 1, id="not-a-rejection"),
+        pytest.param(True, False, False, 0, id="rejected-and-still-incomplete"),
+        # allow_incomplete_aggregate wrote the settled score before the pass: it follows the new grades.
+        pytest.param(True, False, True, 1, id="rejected-and-still-incomplete-with-its-aggregate"),
+        pytest.param(True, True, False, 1, id="rejected-and-completed-by-the-pass"),
+        pytest.param(False, False, False, 1, id="not-a-rejection"),
     ],
 )
 def test_metrics_are_recomputed_only_for_a_run_that_may_publish_them(
-    tmp_path, monkeypatch, pass_settles_one_row, complete_only, run_is_complete, recomputed
+    tmp_path, monkeypatch, pass_settles_one_row, complete_only, run_is_complete, aggregate_written, recomputed
 ) -> None:
     reads = []
     monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: reads.append(output) or run_is_complete)
+    if aggregate_written:
+        (tmp_path / "rollouts_aggregate_metrics.json").write_text("[]")
 
     returned = eval_cli._rejudge_saved_judge_failures(
         {},

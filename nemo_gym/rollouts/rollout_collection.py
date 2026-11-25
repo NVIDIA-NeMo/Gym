@@ -180,7 +180,7 @@ from nemo_gym.rollouts.rollout_recovery import (
 from nemo_gym.rollouts.rollout_recovery import (
     record_resubmit_offset as record_resubmit_offset,
 )
-from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_store import RolloutStore, incomplete_run_export_error
 from nemo_gym.rollouts.tool_telemetry import record_tool_telemetry
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
@@ -1694,9 +1694,9 @@ class SharedRolloutCollectionConfig(
         default=False,
         description=(
             "With require_complete, still write the aggregate of a run that is not complete and has no rollout left "
-            "to retry, computed over the rollouts that settled. The run still ends incomplete, and its denominator is the settled rollouts, not "
-            "the expected ones, so reading the score is the user's explicit choice. A provider stop for credentials "
-            "or quota writes no aggregate."
+            "to retry, computed over the scored rows: the settled rollouts and any failures counted as zero. The run "
+            "still ends incomplete and its denominator can be smaller than the expected rollouts, so reading the "
+            "score is the user's explicit choice. A provider stop for credentials or quota writes no aggregate."
         ),
     )
     num_samples_in_parallel: Optional[int] = Field(
@@ -3360,7 +3360,8 @@ def _iter_jsonl(path: Path) -> Iterator[Dict]:
 
 
 AGENT_COMPLETE_SCHEMA_VERSION = "1"
-# An early /aggregate_metrics call past this is recorded as an aggregation error: the run waits for it.
+# An early /aggregate_metrics call, or the optional one of an incomplete run, past this is recorded as an aggregation
+# error: the run waits for it.
 AGENT_COMPLETE_AGGREGATION_TIMEOUT_S = 1800.0
 
 
@@ -5361,9 +5362,9 @@ executions → not run again (left to recovery)
         else:
             if rejection is not None:
                 print(
-                    "The run is incomplete and allow_incomplete_aggregate is set: the aggregate covers the settled "
-                    "rollouts only and is not exported. Its denominator is not the expected rollouts, and the run "
-                    "stays incomplete."
+                    "The run is incomplete and allow_incomplete_aggregate is set: the aggregate covers the scored "
+                    "rows (the settled rollouts and any failures counted as zero) and is not exported. Its "
+                    "denominator can be smaller than the expected rollouts, and the run stays incomplete."
                 )
             print("Computing aggregate metrics")
             if config.count_failure_classes_as_zero:
@@ -5388,8 +5389,10 @@ executions → not run again (left to recovery)
                 [metadata_rows[i] for i in order],
                 output_fpath,
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
-                # An incomplete run's aggregate is not exported, so no tracker shows it as the run's score.
+                # An incomplete run's aggregate is not exported, so no tracker shows it as the run's score. It is
+                # optional, so a server that never answers cannot hold back the run's rejection.
                 export=rejection is None,
+                timeout_s=None if rejection is None else AGENT_COMPLETE_AGGREGATION_TIMEOUT_S,
             )
 
         if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
@@ -5402,7 +5405,10 @@ executions → not run again (left to recovery)
             )
             final_status_written = True
 
-        _raise_for_aggregation_errors(aggregate_metrics_fpath)
+        if rejection is None:
+            _raise_for_aggregation_errors(aggregate_metrics_fpath)
+        # An incomplete run's failed aggregation stays recorded in its entries, and the rejection below is raised, so
+        # the CLI still re-judges the saved answers of the incomplete run.
 
         expected_rollouts = completion["expected"]
         scored_rollouts = completion["successful"] - completion["unscored"] + len(counted)
@@ -5616,11 +5622,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         *,
         raise_on_error: bool = True,
         export: bool = True,
+        timeout_s: Optional[float] = None,
     ) -> Optional[Path]:
         """Aggregate ``results`` per environment server and write the run's _aggregate_metrics.json.
 
         ``export=False`` writes the file without exporting the metrics, for an aggregate that is not the score of a
-        complete run.
+        complete run. ``timeout_s`` bounds each server's call, as in ``_aggregate_entries``.
 
         See ``_aggregate_entries`` for how rows are grouped. Writes a single _aggregate_metrics.json with
         one entry per environment server (same shape as the old _agent_metrics.json, plus the server
@@ -5634,7 +5641,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not results:
             return None
 
-        all_agent_metrics, first_error = await self._aggregate_entries(results, rows)
+        all_agent_metrics, first_error = await self._aggregate_entries(results, rows, timeout_s=timeout_s)
 
         if export:
             export_metrics(flatten_aggregate_metrics(all_agent_metrics))
@@ -7197,7 +7204,13 @@ class RolloutAggregationHelper(BaseModel):
             print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
         scored = sorted(results + counted, key=_rollout_order_key)
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(
-            scored, scored, output_fpath, raise_on_error=False
+            scored,
+            scored,
+            output_fpath,
+            raise_on_error=False,
+            # A strict run that is still incomplete, re-aggregated after its saved answers were graded again, is not
+            # exported, as at collection.
+            export=incomplete_run_export_error(output_fpath) is None,
         )
         if batch_tracker is not None:
             batch_tracker.write_status(

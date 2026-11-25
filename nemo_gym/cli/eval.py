@@ -131,7 +131,7 @@ from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
 from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
-from nemo_gym.utils.path_utils import materialized_path_for
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_path_for
 
 
 if TYPE_CHECKING:
@@ -992,11 +992,14 @@ def _rejudge_saved_judge_failures(
     if complete_only and not complete:
         # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
         # pass settled: the aggregation that rewrites it is skipped with the metrics. No completion file can follow
-        # it either, so they are removed.
-        if scored or raised or changed:
-            _remove_completion_files(output)
+        # it either, so they are removed. An aggregate `allow_incomplete_aggregate` wrote before the pass is
+        # recomputed from the new grades instead, and still not exported.
+        if not (scored or raised or changed):
+            return complete
+        _remove_completion_files(output)
+        if not aggregate_metrics_path_for(output).exists():
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
-        return complete
+            return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
             run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
@@ -1009,8 +1012,11 @@ def _rejudge_saved_judge_failures(
             flush=True,
         )
         _remove_completion_files(output)
+        if complete_only and not complete:  # an incomplete run's aggregate from before the new grades is stale
+            aggregate_metrics_path_for(output).unlink(missing_ok=True)
         return complete
-    _refresh_completion_files(output, run_config)
+    if complete or not complete_only:
+        _refresh_completion_files(output, run_config)
     return complete
 
 
