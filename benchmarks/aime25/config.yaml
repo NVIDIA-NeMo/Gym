@@ -41,7 +41,7 @@ aime25_math_with_judge_environment_server:
       sandbox_provider: sandbox
       sandbox_config:
         image: python:3.13-slim
-        # A directory every image has: some providers (Enroot) run commands in it without creating it.
+        # The agent loop keeps its files elsewhere; /tmp exists in every image.
         workdir: /tmp
         ttl_s: 25200
         network: model_only
