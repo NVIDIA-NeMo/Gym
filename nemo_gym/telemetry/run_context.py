@@ -26,7 +26,8 @@ from either is omitted rather than guessed:
 * A row's benchmark is the ``type: benchmark`` dataset it was prepared from. Rows record only
   their declaring instance (``task_source``) and, when materialized, their taskset, so the name
   is known only for a ``split=benchmark`` run and only when that instance or taskset maps to
-  exactly one benchmark dataset.
+  exactly one benchmark dataset. An entry that sets no ``taskset`` declares the taskset of its
+  own name, as rollout collection reads it.
 * The attempt index is the driver's resume counter; the driver leaves it unstamped on the
   first attempt, which is attempt 0.
 
@@ -116,8 +117,8 @@ def run_context_from_config(global_config: Mapping[str, object]) -> RunContext:
     by_task_source: dict[str, set[str]] = {}
     for instance_name, name, taskset in _benchmark_datasets(global_config):
         by_task_source.setdefault(instance_name, set()).add(name)
-        if taskset is not None:
-            by_taskset.setdefault(taskset, set()).add(name)
+        # An entry that sets no taskset declares the one of its own name, as a Harbor dataset's generated entry does.
+        by_taskset.setdefault(taskset or name, set()).add(name)
     return RunContext(
         model_name=model_name,
         benchmark_by_taskset=_unambiguous(by_taskset),

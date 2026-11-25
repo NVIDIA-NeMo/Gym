@@ -120,6 +120,21 @@ def test_benchmark_name_is_known_only_when_the_config_names_exactly_one(config, 
     assert context.benchmark_name(row) == expected_benchmark
 
 
+def test_a_harbor_benchmark_is_named_by_its_generated_dataset_entry(tmp_path):
+    """The entry `gym eval run` generates for a Harbor dataset is named after its taskset and sets no `taskset`."""
+    from nemo_gym.data.tasks.harbor.materialize import agent_instance, dataset_entry
+
+    taskset = "terminal_bench_2_1"
+    config = {
+        "split": "benchmark",
+        agent_instance(taskset): _agent(dataset_entry(taskset, tmp_path / "rows.jsonl")),
+    }
+    # A Harbor row's task_source is its dataset folder's name, not an instance.
+    row = {"task_source": taskset, "task_id": {"taskset": taskset, "task_id": "t0"}, "task_input": {}}
+
+    assert run_context_from_config(OmegaConf.create(config)).benchmark_name(row) == taskset
+
+
 @pytest.mark.parametrize(
     ("config", "expected_model"),
     [
