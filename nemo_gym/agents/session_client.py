@@ -35,7 +35,8 @@ from nemo_gym.core import (
     NgFailureEvent,
 )
 from nemo_gym.sandbox import SandboxAccess
-from nemo_gym.server_runtime import CleanupContext, CleanupHandle, ToolAccess, dependency_failure
+from nemo_gym.server_runtime.base_environment_server import CleanupContext, CleanupHandle, dependency_failure
+from nemo_gym.server_runtime.tool_access import ToolAccess
 
 
 class TurnRecord(BaseModel):
