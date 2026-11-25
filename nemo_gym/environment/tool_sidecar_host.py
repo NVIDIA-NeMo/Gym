@@ -6,9 +6,10 @@ The Resources Server unpacks ``nemo_gym`` and its own package beside this file a
 runtime:
 
 - ``tool_sidecar_host.py <spec.json>`` builds the Resources Server class the spec names, with its config, and serves
-  its app on ``0.0.0.0:<port>`` without ``/verify`` and ``/aggregate_metrics``: grading stays with the Resources
-  Server. It adds ``/_tool_sidecar/ready`` and ``/_tool_sidecar/state``, which returns ``export_tool_state()`` of the
-  caller's session.
+  its tool routes on ``0.0.0.0:<port>``. Grading and the session's lifecycle stay with the Resources Server: the
+  episode routes other than ``/seed_session`` are not served, and ``/seed_session`` and ``/_tool_sidecar/state``
+  (``export_tool_state()`` of the caller's session) answer only callers inside the sidecar, so the agent container
+  reaches the tools alone. ``/_tool_sidecar/ready`` answers anyone.
 - ``tool_sidecar_host.py --ready <port>`` exits 0 once the tool host answers.
 - ``tool_sidecar_host.py --call <port> <request.json> <reply.json>`` sends one request to the tool host and writes its
   status, body and cookies, so the Resources Server can seed a session and read its state from outside the group.
@@ -30,13 +31,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 READY_PATH = "/_tool_sidecar/ready"
 STATE_PATH = "/_tool_sidecar/state"
-# Grading never runs in the sidecar.
-_DROPPED_ROUTES = frozenset({"/verify", "/aggregate_metrics"})
+# Grading and the session's lifecycle stay with the Resources Server.
+_DROPPED_ROUTES = frozenset(
+    {"/verify", "/aggregate_metrics", "/close_session", "/reverify_mode", "/prepare_sandbox", "/tool_sidecar/collect"}
+)
+# Routes only the Resources Server calls, from inside the sidecar (``--call``).
+_LOCAL_ROUTES = frozenset({"/seed_session", STATE_PATH})
+_LOOPBACK = frozenset({"127.0.0.1", "::1"})
 
 
 def build_app(spec: dict[str, Any]) -> Any:
     """The Resources Server's app as the tool host serves it."""
     from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse
     from omegaconf import OmegaConf
 
     from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
@@ -61,6 +68,13 @@ def build_app(spec: dict[str, Any]) -> Any:
 
     async def state(request: Request) -> dict[str, Any]:
         return {"state": server.export_tool_state(request.session[SESSION_ID_KEY])}
+
+    @app.middleware("http")
+    async def only_local_callers_seed_or_read_state(request: Request, call_next: Any) -> Any:
+        # The agent container reaches this host by its address, never as loopback.
+        if request.url.path in _LOCAL_ROUTES and (request.client is None or request.client.host not in _LOOPBACK):
+            return JSONResponse({"detail": "only the Resources Server seeds this tool host or reads its state"}, 403)
+        return await call_next(request)
 
     # First, so no catch-all tool route of the server answers for them.
     existing = list(app.router.routes)

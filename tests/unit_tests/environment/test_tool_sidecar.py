@@ -97,16 +97,24 @@ def test_the_tool_host_serves_the_tools_and_their_state_but_not_grading() -> Non
     # In this process the fixture's module is importable under its test package's name.
     app = build_app(spec | {"module": "tests.unit_tests.environment.fixtures.tool_server.app"})
 
-    with TestClient(app) as client:
-        assert client.get("/_tool_sidecar/ready").json() == {"ready": True}
-        assert client.post("/seed_session", json=_seed()).status_code == 200
-        assert client.post("/pay", json={"value": 3}).text == "pay #1"
-        # The catch-all tool route, registered last, does not answer for the state route.
-        assert client.post("/_tool_sidecar/state").json() == {"state": {"ledger": ["opening:hi", "pay:3"]}}
-        # No grading route: /verify reaches the tool route as an unknown tool, and nothing is scored.
-        verify = client.post("/verify", json={})
-        assert "reward" not in verify.text
-        assert client.post("/aggregate_metrics", json={}).text == "aggregate_metrics #3"
+    # The Resources Server calls from inside the sidecar; the agent container calls from its own address.
+    with TestClient(app, client=("127.0.0.1", 40000)) as local, TestClient(app, client=("10.0.0.7", 40000)) as agent:
+        assert agent.get("/_tool_sidecar/ready").json() == {"ready": True}
+        # Only the Resources Server seeds the tool host.
+        assert agent.post("/seed_session", json=_seed()).status_code == 403
+        assert local.post("/seed_session", json=_seed()).status_code == 200
+        agent.cookies.clear()
+        agent.cookies.update(dict(local.cookies))
+        assert agent.post("/pay", json={"value": 3}).text == "pay #1"
+        # Only the Resources Server reads the state, and the catch-all tool route does not answer for that route.
+        assert agent.post("/_tool_sidecar/state").status_code == 403
+        assert local.post("/_tool_sidecar/state").json() == {"state": {"ledger": ["opening:hi", "pay:3"]}}
+        # The session's lifecycle and grading stay with the Resources Server: these reach the tool route as unknown
+        # tools, so nothing is scored or closed.
+        for path in ("/verify", "/close_session", "/aggregate_metrics"):
+            reply = agent.post(path, json={"resources_session_id": SESSION})
+            assert (reply.status_code, "reward" in reply.text) == (200, False), path
+        assert local.post("/_tool_sidecar/state").json()["state"]["ledger"][-1] == "aggregate_metrics:None"
 
 
 class _RecordingSidecar:

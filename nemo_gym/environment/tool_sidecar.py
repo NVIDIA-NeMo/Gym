@@ -389,12 +389,11 @@ async def _call(
     The request and the reply travel as files, so a large seed or state passes no argument or output limit.
     """
     call = f"{_ROOT}/calls/{uuid4().hex}"
-    request = await asyncio.to_thread(
-        lambda: _write_private(
-            json.dumps({"method": method, "path": path, "body": body, "cookies": dict(cookies)}).encode(), ".json"
-        )
-    )
-    await sidecar.upload(request, f"{call}.request.json")
+    payload = json.dumps({"method": method, "path": path, "body": body, "cookies": dict(cookies)}).encode()
+    with tempfile.TemporaryDirectory(dir=_private_dir()) as scratch:
+        request = Path(scratch) / "request.json"
+        await asyncio.to_thread(request.write_bytes, payload)
+        await sidecar.upload(request, f"{call}.request.json")
     result = await sidecar.exec(
         python, "-E", "-s", _HOST, "--call", str(port), f"{call}.request.json", f"{call}.reply.json", timeout_s=300
     )

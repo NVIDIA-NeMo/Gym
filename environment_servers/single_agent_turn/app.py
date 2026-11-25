@@ -6,6 +6,7 @@
 import asyncio
 import functools
 import logging
+import shlex
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 from uuid import uuid4
@@ -628,7 +629,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         elif len(serving) > 1:
             refusal = f"{resources} declared {len(serving)} tool sidecars; an agent is granted one direct_http address"
         elif handles.attempt_sandbox is None or not handles.attempt_sandbox.lend_to_agent:
-            refusal = f"{resources} serves its tools from a sidecar of an attempt sandbox group the agent does not borrow"
+            refusal = (
+                f"{resources} serves its tools from a sidecar of an attempt sandbox group the agent does not borrow"
+            )
         elif "direct_http" not in self.config.resources_tool_transports:
             refusal = f"{resources} serves its tools from a sidecar, which this server grants over direct_http only"
         if refusal is not None:
@@ -650,8 +653,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             raise RuntimeError("the attempt's sandbox group is gone before its tool sidecar was checked")
         probe = (
             "command -v python3 >/dev/null || exit 127; "
-            f"python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' "
-            f"{url}/_tool_sidecar/ready"
+            "python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' "
+            f"{shlex.quote(url + '/_tool_sidecar/ready')}"
         )
         result = await sandbox.exec(probe, cwd="/", timeout_s=60)
         if result.return_code == 127 and result.error_type is None:
