@@ -37,16 +37,25 @@ performance metrics.
 
 The persona simulator is part of the environment, not of the policy:
 
-- Only the policy's activations carry a training framework's sampling values and, with token capture on, the
-  training-token tag (`applies_model_sampling`). The persona's carry `null` sampling, so it keeps its own settings.
+- Only the policy's activations carry the episode's sampling values (`applies_model_sampling`). The persona's carry
+  `null` sampling, so it keeps its own settings.
 - A persona failure is the environment's, never a score against the policy.
 - Each session owns its own model calls in the published observations, so the persona's calls are never the policy's
   turns. Gym's trajectory record has no participant kind besides agents and verifiers, so the persona's session is
-  published as an agent beside the policy's, and the response's usage covers both.
+  published as an agent beside the policy's, and the response's usage covers both. Usage becomes the policy's only
+  once Gym tells such a session apart from the policy's
+  ([NVIDIA-NeMo/Gym#6779](https://github.com/NVIDIA-NeMo/Gym/issues/6779)).
 
 Both participants run on `simple_agent` with `max_steps: 1` and `execute_tools: false`, which answers each activation
 from the input it is given. The resources server's `allowed_agents` lists the harnesses that passed a smoke run as the
 policy.
+
+## Evaluation only
+
+The server refuses to start when the run's token capture covers the policy agent (`token_id_capture.enabled` with
+`all_agents`, or the policy agent's own `token_id_capture`). Each policy turn sends its own system prompt
+(`Current turn: k of n`), so no turn's input continues the previous turn's, and token capture could join the policy's
+calls into no single chain: it would mask every multi-turn rollout. No activation carries the training-token tag.
 
 ## Failures
 

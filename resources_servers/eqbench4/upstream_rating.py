@@ -13,7 +13,6 @@ a rating with its 95% interval, so the ratings are the leaderboard's by construc
 """
 
 import hashlib
-import importlib.util
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -91,10 +90,11 @@ class UpstreamSolver:
                 raise FileNotFoundError(
                     f"EQ-Bench 4 rating solver not found at {file}; run `gym eval prepare --benchmark eqbench4`"
                 )
-            digest = hashlib.sha256(file.read_bytes()).hexdigest()
+            data = file.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
             if digest != expected:
                 raise ValueError(f"{file} does not match its pinned SHA-256 (got {digest}); prepare again")
-            sources[path] = file
+            sources[path] = (file, data)
         self._solver = _import_solver(sources, directory / _PACKAGE_DIR)
 
     def fit(self, models: Sequence[str], outcomes: Sequence[Outcome]) -> dict[str, float]:
@@ -121,9 +121,12 @@ class UpstreamSolver:
         }
 
 
-def _import_solver(sources: dict[str, Path], package_dir: Path) -> ModuleType:
+def _import_solver(sources: dict[str, tuple[Path, bytes]], package_dir: Path) -> ModuleType:
     """Import the solver and its settings under their upstream names, then take those names out of
     ``sys.modules`` again: the solver keeps its own references, and nothing else sees an ``eqbench`` package.
+
+    Each module runs the bytes checked against its pin, compiled here: the file is not read again and no cached
+    bytecode is loaded or written.
 
     The ``eqbench`` package is an empty stand-in located at ``package_dir`` (nothing of upstream's package
     ``__init__`` runs), where the settings module reads its rubric files."""
@@ -137,10 +140,11 @@ def _import_solver(sources: dict[str, Path], package_dir: Path) -> ModuleType:
         sys.modules["eqbench"].__file__ = str(package_dir / "__init__.py")
         loaded = {}
         for path in ("src/eqbench/ranking/config.py", "src/eqbench/ranking/soft_bt_solver.py"):
-            spec = importlib.util.spec_from_file_location(_MODULE_NAMES[path], sources[path])
-            module = importlib.util.module_from_spec(spec)
+            file, data = sources[path]
+            module = ModuleType(_MODULE_NAMES[path])
+            module.__file__ = str(file)
             sys.modules[_MODULE_NAMES[path]] = module
-            spec.loader.exec_module(module)
+            exec(compile(data, str(file), "exec", dont_inherit=True), module.__dict__)
             loaded[path] = module
         return loaded["src/eqbench/ranking/soft_bt_solver.py"]
     finally:

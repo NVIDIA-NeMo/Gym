@@ -33,8 +33,10 @@ reveals its hidden profile to the policy. After each policy turn the persona sim
 only the dialogue. The [`eqbench4` environment server](../../environment_servers/eqbench4/README.md) runs the
 conversation: the policy and the persona simulator each answer through their own agent session (`simple_agent` with
 `max_steps: 1` and `execute_tools: false`), and each policy turn sends that turn's whole input, since the system prompt
-changes every turn. The persona simulator is part of the environment: a training framework's sampling values and
-training-token capture reach only the policy.
+changes every turn. The persona simulator is part of the environment: sampling values a run sets for the policy
+reach only the policy. EQ-Bench 4 is evaluation-only: since each turn has its own system prompt, the policy's turns
+form no single token chain to train on, and the environment server refuses at startup a run that captures the policy's
+tokens (`token_id_capture`).
 
 **Scoring.** For each row the resources server compares the policy's conversation with four published conversations
 of the same scenario. The pairwise judge reads both transcripts, the persona's monologues, and the full hidden
@@ -76,7 +78,7 @@ failure is recorded in `trait_judge_error` and changes nothing else.
 
 **Conversations the policy stops are losses.** A conversation the policy stops scores as a loss to every opponent of
 the scenario (fraction 0 each, reward 0, not masked), so a model is never rated only on the scenarios it chose to
-finish, and a trainer cannot learn that stopping avoids a low reward. Its `policy_stop_reason` records why:
+finish. Its `policy_stop_reason` records why:
 
 | `policy_stop_reason` | Cause | Usual fix |
 | --- | --- | --- |

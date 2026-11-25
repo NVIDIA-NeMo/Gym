@@ -67,6 +67,22 @@ def test_a_missing_or_changed_solver_is_refused(tmp_path: Path, monkeypatch: pyt
         UpstreamSolver(directory)
 
 
+def test_the_solver_runs_the_bytes_that_were_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = install_stand_in_solver(tmp_path, monkeypatch)
+    import_solver = upstream_rating._import_solver
+
+    def change_the_files_after_the_check(sources, package_dir):
+        for file, _ in sources.values():
+            if file.suffix == ".py":
+                file.write_text("raise SystemExit('never run')\n")
+        return import_solver(sources, package_dir)
+
+    monkeypatch.setattr(upstream_rating, "_import_solver", change_the_files_after_the_check)
+    solver = UpstreamSolver(directory)
+    assert solver.fit(["a", "b", "c"], OUTCOMES) == pytest.approx(stand_in_rating(["a", "b", "c"], OUTCOMES))
+    assert not list(directory.rglob("__pycache__"))
+
+
 def test_canonical_orders_the_models() -> None:
     assert canonical(Outcome("b", "a", 0.3)) == Outcome("a", "b", pytest.approx(0.7))
     assert canonical(Outcome("a", "b", 0.3)) == Outcome("a", "b", 0.3)

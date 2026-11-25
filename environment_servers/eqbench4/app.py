@@ -48,7 +48,6 @@ from nemo_gym.agents import (
 from nemo_gym.client import format_exception_with_response_body, get_response_json, raise_boundary_failure
 from nemo_gym.config import (
     TOKEN_CAPTURE_BLOCK,
-    TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -118,10 +117,10 @@ class EQBench4AgentOutcomePolicyConfig(AgentOutcomePolicyConfig):
     """
 
     by_failure_kind: dict[str, OutcomeAction] = Field(
-        default_factory=lambda: AgentOutcomePolicyConfig.model_fields["by_failure_kind"].get_default(
-            call_default_factory=True
+        default_factory=lambda: (
+            AgentOutcomePolicyConfig.model_fields["by_failure_kind"].get_default(call_default_factory=True)
+            | {MODEL_POLICY_RESPONSE_TIMEOUT: OutcomeAction.RETRY}
         )
-        | {MODEL_POLICY_RESPONSE_TIMEOUT: OutcomeAction.RETRY}
     )
 
 
@@ -307,8 +306,28 @@ class EQBench4EnvironmentServer(BaseEnvironmentServer[EQBench4EpisodeRequest, EQ
     config: EQBench4EnvironmentServerConfig
     request_model = EQBench4EpisodeRequest
     response_model = EQBench4EpisodeResponse
-    # The policy's calls carry a training framework's sampling values; the persona's carry null and keep its own.
+    # The policy's calls carry the episode's sampling values; the persona's carry null and keep its own.
     applies_model_sampling = True
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        # Evaluation only. EQ-Bench 4 gives each policy turn its own system prompt ("Current turn: k of n"), so no
+        # turn's input continues the previous turn's, the captured calls form no single token chain, and token
+        # capture would mask every multi-turn rollout. Refuse at startup rather than deliver masked rollouts.
+        if self._captures_tokens(self.config.agent_server.name):
+            raise ValueError(
+                f"Environment Server {self.config.name!r} is evaluation-only: EQ-Bench 4 changes the policy's system "
+                "prompt every turn, so its turns form no token chain for training. Turn token_id_capture off for "
+                f"the policy agent {self.config.agent_server.name!r}"
+            )
+
+    def _captures_tokens(self, agent_name: str) -> bool:
+        """Whether the run's token capture covers ``agent_name``'s calls."""
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
+        agent_config = get_first_server_config_dict(self.server_client.global_config_dict, agent_name)
+        return bool(block.get("enabled", False)) and (
+            bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
+        )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """The resources server's rating and conversation statistics, with performance metrics for the whole batch.
@@ -576,7 +595,7 @@ class EQBench4EnvironmentServer(BaseEnvironmentServer[EQBench4EpisodeRequest, EQ
         """One activation of an agent session: ``params`` is its whole input."""
         response = await self.server_client.post(
             server_name=session.agent_name,
-            url_path=self._responses_path(request, session.agent_name, trained=trained),
+            url_path=self._responses_path(request, trained=trained),
             json=params,
             cookies=session.cookies,
         )
@@ -584,19 +603,12 @@ class EQBench4EnvironmentServer(BaseEnvironmentServer[EQBench4EpisodeRequest, EQ
         session.cookies |= _cookies(response)
         return NeMoGymResponse.model_validate(await get_response_json(response))
 
-    def _responses_path(self, request: EQBench4EpisodeRequest, agent_name: str, *, trained: bool) -> str:
-        """The rollout-scoped activation path. Only the policy is what a training framework trains: its calls carry
-        the episode's sampling values and, when capture is on, the training-token tag; the persona's carry neither."""
-        capture_segment = ""
-        if trained and not request.skip_token_capture:
-            block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
-            agent_config = get_first_server_config_dict(self.server_client.global_config_dict, agent_name)
-            if bool(block.get("enabled", False)) and (
-                bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
-            ):
-                capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}"
+    def _responses_path(self, request: EQBench4EpisodeRequest, *, trained: bool) -> str:
+        """The rollout-scoped activation path. Only the policy's calls carry the episode's sampling values; the
+        persona's carry null and keep its own. No call carries the training-token tag: the server is
+        evaluation-only, and refuses at startup a run that captures the policy's tokens."""
         sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=trained))
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
+        return f"/ng-rollout/{request.episode_id.capture_key}{sampling_segment}/v1/responses"
 
     async def _seed_resources(
         self, request: EQBench4EpisodeRequest, session_id: str, cookies: dict[str, str]

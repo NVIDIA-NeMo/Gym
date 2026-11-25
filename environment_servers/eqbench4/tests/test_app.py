@@ -248,14 +248,19 @@ class FakeServers(ServerClient):
 
 
 def make_server(
-    *, policy: list[Any], persona: list[Any], token_capture: bool = False, **overrides: Any
+    *,
+    policy: list[Any],
+    persona: list[Any],
+    token_capture: dict[str, Any] | None = None,
+    captured_agents: tuple[str, ...] = (),
+    **overrides: Any,
 ) -> tuple[EQBench4EnvironmentServer, FakeServers]:
     global_config = OmegaConf.create(
         {
-            POLICY: {"responses_api_agents": {"simple_agent": {"token_id_capture": token_capture}}},
-            PERSONA: {"responses_api_agents": {"simple_agent": {"token_id_capture": token_capture}}},
-            "token_id_capture": {"enabled": token_capture},
+            name: {"responses_api_agents": {"simple_agent": {"token_id_capture": name in captured_agents}}}
+            for name in (POLICY, PERSONA)
         }
+        | {"token_id_capture": token_capture or {"enabled": False}}
     )
     servers = FakeServers(
         head_server_config=BaseServerConfig(host="head", port=1),
@@ -644,35 +649,49 @@ def test_persona_messages_show_only_the_latest_reply_in_full() -> None:
     ]
 
 
-@pytest.mark.parametrize("token_capture", [False, True])
-async def test_a_training_frameworks_sampling_and_capture_reach_the_policy_but_not_the_persona(
-    token_capture: bool,
-) -> None:
-    server, servers = make_server(
-        policy=["Hi."], persona=[persona_text("Bye.", status="done")], token_capture=token_capture
-    )
+async def test_a_frameworks_sampling_reaches_the_policy_but_not_the_persona() -> None:
+    server, servers = make_server(policy=["Hi."], persona=[persona_text("Bye.", status="done")])
     sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
     response = await server.run_request(make_request(model_sampling=sampling))
 
     assert response.failure is None, response.failure
-    capture = "/training-token-capture" if token_capture else ""
     assert servers.paths(POLICY) == [
-        f"/ng-rollout/rollout-a2{capture}/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+        f"/ng-rollout/rollout-a2/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
     ]
-    # The persona is not trained: it keeps its own sampling and is never captured for training.
+    # The persona keeps its own sampling.
     assert servers.paths(PERSONA) == ["/ng-rollout/rollout-a2/ng-sampling/null/v1/responses"]
+
+
+@pytest.mark.parametrize(
+    "token_capture,captured_agents",
+    [({"enabled": True}, (POLICY,)), ({"enabled": True, "all_agents": True}, ())],
+    ids=["policy_agent", "all_agents"],
+)
+def test_a_run_that_captures_the_policys_tokens_is_refused_at_startup(
+    token_capture: dict[str, Any], captured_agents: tuple[str, ...]
+) -> None:
+    # Each policy turn has its own system prompt, so the turns form no token chain to train on.
+    with pytest.raises(ValueError, match="evaluation-only"):
+        make_server(policy=[], persona=[], token_capture=token_capture, captured_agents=captured_agents)
+
+
+@pytest.mark.parametrize("captured_agents", [(), (PERSONA,)])
+async def test_capture_that_does_not_cover_the_policy_tags_no_call(captured_agents: tuple[str, ...]) -> None:
+    server, servers = make_server(
+        policy=["Hi."],
+        persona=[persona_text("Bye.", status="done")],
+        token_capture={"enabled": True},
+        captured_agents=captured_agents,
+    )
+    response = await server.run_request(make_request())
+    assert response.failure is None, response.failure
+    assert servers.paths(POLICY) == servers.paths(PERSONA) == ["/ng-rollout/rollout-a2/v1/responses"]
 
 
 async def test_gym_only_evaluation_activates_both_sessions_under_the_rollout() -> None:
     server, servers = make_server(policy=["Hi."], persona=[persona_text("Bye.", status="done")])
     await server.run_request(make_request())
     assert servers.paths(POLICY) == servers.paths(PERSONA) == ["/ng-rollout/rollout-a2/v1/responses"]
-
-
-async def test_a_validation_rollout_skips_the_policys_capture() -> None:
-    server, servers = make_server(policy=["Hi."], persona=[persona_text("Bye.", status="done")], token_capture=True)
-    await server.run_request(make_request(skip_token_capture=True))
-    assert servers.paths(POLICY) == ["/ng-rollout/rollout-a2/v1/responses"]
 
 
 @pytest.mark.parametrize("silent", ["policy", "persona"])
