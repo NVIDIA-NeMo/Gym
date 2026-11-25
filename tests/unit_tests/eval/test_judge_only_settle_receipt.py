@@ -180,21 +180,45 @@ def test_the_job_settles_refreshes_the_run_and_ends_with_a_receipt(tmp_path, mon
     assert due_judge_failures(output) == []
 
 
-def test_the_settled_run_recounts_its_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
-    """The run status counts the rows as collection left them; the job settles rows after that, so it recounts them."""
-    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+@pytest.mark.parametrize(
+    "judge_failures, before_counts, after_counts",
+    [
+        pytest.param(1, (2, {"judge_failed": 1}), (3, {}), id="every-failure-settles"),
+        pytest.param(2, (1, {"judge_failed": 2}), (2, {"judge_failed": 1}), id="one-settles-one-fails-again"),
+    ],
+)
+def test_the_settled_run_recounts_its_run_status(
+    tmp_path, verifier, aggregation, judge_failures, before_counts, after_counts
+) -> None:  # noqa: F811
+    """The run status counts the rows as collection left them; the job settles rows after that, so it recounts them
+    and keeps the aggregation status the run's aggregation recorded."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=judge_failures)
     (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
     status = batch_status_path_for(output)
     status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
     refresh_run_status(output)
-    before = json.loads(status.read_text())["members"]["agent"]
+    seeded = json.loads(status.read_text())
+    seeded["members"]["agent"]["aggregation_status"] = "deferred"
+    status.write_text(json.dumps(seeded))
+    before = seeded["members"]["agent"]
+    event = {"event_id": "judge-again", "boundary": "resources_server", "failure_kind": "judge_failed"}
+    judge_failed_again = {
+        "_ng_failure_events": {"judge-again": event},
+        "_ng_failure_id": "judge-again",
+        "_ng_failure_class": "judge_failed",
+        "failure_kind": "judge_failed",
+        "mask_sample": True,
+        "reward": 0.0,
+    }
+    verifier["grade"] = lambda json: json | (judge_failed_again if json["_ng_task_index"] == 1 else {"reward": 1.0})
     config = _job_config(output, settle_source_snapshot_json=_snapshot(output))
 
     eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
 
     after = json.loads(status.read_text())["members"]["agent"]
-    assert (before["completed_rollout_count"], before["failures_by_class"]) == (2, {"judge_failed": 1})
-    assert (after["completed_rollout_count"], after["failures_by_class"]) == (3, {})
+    assert (before["completed_rollout_count"], before["failures_by_class"]) == before_counts
+    assert (after["completed_rollout_count"], after["failures_by_class"]) == after_counts
+    assert after["aggregation_status"] == "deferred"
 
 
 def test_the_recount_keeps_an_aggregation_status_written_while_it_scanned(tmp_path, monkeypatch) -> None:
