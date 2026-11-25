@@ -266,7 +266,9 @@ includes `model_call_capture_pending`. The model server claims each call in
 `<rollout_id>.capture.claims` before forwarding it and releases the claim once its record is
 written. The snapshot deletes the claims file only when no claim in it is outstanding. If a call
 was still in flight at the snapshot or arrived after it, the claims file stays next to its capture
-file until the same rollout ID is dispatched again.
+file until the same rollout ID is dispatched again. A run that deletes merged captures also keeps a
+capture file that gained a row after the snapshot. A claims file whose lock stays held past a short
+wait counts as having a claim outstanding.
 
 Claims rely on one file lock that every writer of the claims file shares. With node-local locks,
 such as a Lustre mount with `localflock`, a model server on another host that shares the capture

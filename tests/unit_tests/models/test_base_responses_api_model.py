@@ -1868,11 +1868,12 @@ def test_record_releases_the_claim_after_the_row_is_written(tmp_path, monkeypatc
     store = CaptureStore(tmp_path)
     store.mark_pending("r", "call-1")
     record = store.record
+    pending_after_write = []
 
     def record_then_check(rollout_id, exchange):
         record(rollout_id, exchange)
-        # The claim is still open while the row is being written.
-        assert store.has_pending(rollout_id) is True
+        # Observed here, asserted below: `_record` swallows an exception raised inside the write.
+        pending_after_write.append(store.has_pending(rollout_id))
 
     monkeypatch.setattr(store, "record", record_then_check)
     _record(
@@ -1890,6 +1891,8 @@ def test_record_releases_the_claim_after_the_row_is_written(tmp_path, monkeypatc
         latency_ms=1.0,
     )
 
+    # The claim is still open right after the row is written, and released only then.
+    assert pending_after_write == [True]
     assert store.has_pending("r") is False
     assert [orjson.loads(line) for line in store.claims_path_for("r").read_bytes().splitlines() if line] == [
         {"claim": "call-1"},

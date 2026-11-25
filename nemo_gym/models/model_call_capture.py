@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import time
+import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
@@ -135,6 +136,8 @@ class ModelCallCaptureConfig(BaseModel):
 _PENDING_SUFFIX = ".capture.pending"
 _CLAIMS_SUFFIX = ".capture.claims"
 _CLAIM_APPEND_ATTEMPTS = 5
+# A claims lock is held for one read or one append; a reader that waits longer counts the claims as outstanding.
+_CLAIMS_LOCK_WAIT_S = 5.0
 
 
 def _pending_marker_rollout_id(name: str) -> Optional[str]:
@@ -154,6 +157,26 @@ def _is_live(handle: Any, path: Path) -> bool:
     except FileNotFoundError:
         return False
     return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+
+
+def _lock_within(handle: Any, operation: int, wait_s: float) -> bool:
+    """Take a ``flock`` without waiting longer than ``wait_s``; False if another holder kept it that long."""
+    deadline = time.monotonic() + wait_s
+    delay = 0.001
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), operation | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.05)
+
+
+def _file_identity(status: os.stat_result) -> tuple[int, int, int]:
+    return status.st_dev, status.st_ino, status.st_size
 
 
 def _has_outstanding_claim(content: bytes) -> bool:
@@ -239,24 +262,33 @@ class CaptureStore:
         except OSError:
             logger.warning("Could not release the capture claim for rollout %s.", rollout_id, exc_info=True)
 
-    def has_pending(self, rollout_id: str) -> bool:
-        """True while a claimed write of this rollout has not been released. Reads only the claims file."""
-        try:
-            with self.claims_path_for(rollout_id).open("rb") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+    def has_pending(self, rollout_id: str, *, lock_wait_s: float = _CLAIMS_LOCK_WAIT_S) -> bool:
+        """True while a claimed write of this rollout has not been released. Reads only the claims file.
+
+        A claims lock still held after ``lock_wait_s`` counts as a claim outstanding.
+        """
+        path = self.claims_path_for(rollout_id)
+        for _ in range(_CLAIM_APPEND_ATTEMPTS):
+            try:
+                handle = path.open("rb")
+            except FileNotFoundError:
+                return False
+            with handle:
+                if not _lock_within(handle, fcntl.LOCK_SH, lock_wait_s):
+                    return True
                 try:
-                    content = handle.read()
+                    # A file deleted after this open can hide a claim taken in its replacement.
+                    if _is_live(handle, path):
+                        return _has_outstanding_claim(handle.read())
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except FileNotFoundError:
-            return False
-        return _has_outstanding_claim(content)
+        return True
 
-    def delete_claims_if_settled(self, rollout_id: str) -> bool:
+    def delete_claims_if_settled(self, rollout_id: str, *, lock_wait_s: float = _CLAIMS_LOCK_WAIT_S) -> bool:
         """Delete the claims file if no claim in it is outstanding; False while one is.
 
         The read and the unlink hold the claims file's lock, and an appender skips a deleted file, so a claim
-        taken at any point stays visible.
+        taken at any point stays visible. A lock still held after ``lock_wait_s`` keeps the file.
         """
         path = self.claims_path_for(rollout_id)
         for _ in range(_CLAIM_APPEND_ATTEMPTS):
@@ -265,7 +297,8 @@ class CaptureStore:
             except FileNotFoundError:
                 return True
             with handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                if not _lock_within(handle, fcntl.LOCK_EX, lock_wait_s):
+                    return False
                 try:
                     if not _is_live(handle, path):
                         continue
@@ -278,11 +311,72 @@ class CaptureStore:
                     return True
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return not self.has_pending(rollout_id)
+        return not self.has_pending(rollout_id, lock_wait_s=lock_wait_s)
+
+    def capture_identity(
+        self, rollout_id: str, *, lock_wait_s: float = _CLAIMS_LOCK_WAIT_S
+    ) -> Optional[tuple[int, int, int]]:
+        """The capture's device, inode and size between appends; None if it is missing or its lock stays held."""
+        try:
+            handle = self.path_for(rollout_id).open("rb")
+        except FileNotFoundError:
+            return None
+        with handle:
+            if not _lock_within(handle, fcntl.LOCK_SH, lock_wait_s):
+                return None
+            try:
+                return _file_identity(os.fstat(handle.fileno()))
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def delete_capture_if_unchanged(
+        self, rollout_id: str, snapshot: tuple[int, int, int], *, lock_wait_s: float = _CLAIMS_LOCK_WAIT_S
+    ) -> bool:
+        """Delete this rollout's capture files if the capture is still ``snapshot`` and no claim is outstanding.
+
+        ``snapshot`` is the ``capture_identity`` taken before the capture was read, so every row it covers was read.
+        The claims file's lock is held throughout: no call can claim meanwhile, and with no claim outstanding no write
+        is still on its way to the capture, so a row that landed after the snapshot keeps every file.
+        """
+        claims = self.claims_path_for(rollout_id)
+        for _ in range(_CLAIM_APPEND_ATTEMPTS):
+            # Created if the merge already deleted it, so a call claimed meanwhile waits on this lock.
+            with claims.open("a+b") as handle:
+                if not _lock_within(handle, fcntl.LOCK_EX, lock_wait_s):
+                    return False
+                try:
+                    if not _is_live(handle, claims):
+                        continue
+                    handle.seek(0)
+                    if _has_outstanding_claim(handle.read()):
+                        return False
+                    try:
+                        current = _file_identity(os.stat(self.path_for(rollout_id)))
+                    except FileNotFoundError:
+                        return False
+                    if current != snapshot:
+                        return False
+                    self.path_for(rollout_id).unlink()
+                    self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+                    claims.unlink()
+                    return True
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
 
     def delete_claims(self, rollout_id: str) -> None:
         """Delete the claims file whatever it holds, before the rollout ID is reused."""
         self.claims_path_for(rollout_id).unlink(missing_ok=True)
+
+    def clear_all_pending(self, rollout_id: str) -> None:
+        """Deprecated: use ``delete_claims``. Drops every claim of this rollout, outstanding or not."""
+        warnings.warn(
+            "CaptureStore.clear_all_pending is deprecated; use CaptureStore.delete_claims.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.delete_claims(rollout_id)
+        self.remove_pending_markers({rollout_id})
 
     def remove_pending_markers(self, rollout_ids: set[str]) -> None:
         """Remove earlier Gym versions' per-call pending markers of these rollouts, listing the directory once."""

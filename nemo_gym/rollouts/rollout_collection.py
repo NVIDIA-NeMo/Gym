@@ -131,11 +131,12 @@ from nemo_gym.rollouts.batch_status import (
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
     await_model_call_capture_quiescence,
-    clear_model_call_captures_after_snapshot,
+    clear_model_call_capture_after_snapshot,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
+    snapshot_model_call_capture,
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
@@ -1032,6 +1033,7 @@ async def enrich_run_result(
     # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
     # nothing unreadable, and the bodies kept (not redacted).
     safe_to_delete = False
+    snapshot = None
     redacted = _has_observation_gap(result, "multimodal_history_redacted")
     payloads_kept = include_payloads and not redacted
     if capture_dirs and (
@@ -1047,8 +1049,13 @@ async def enrich_run_result(
         quiesced = False
         if rollout_id_for_capture is not None:
             quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
+            if delete_capture:
+                # Before the merge reads: every row the deletion could remove is then one the merge read.
+                snapshot = await asyncio.to_thread(snapshot_model_call_capture, rollout_id_for_capture, capture_dirs)
         # Available unredacted responses verify exact tool requests before output omission.
-        merge_model_call_capture_into_record(
+        # Off the event loop: the merge reads the capture and waits on the claims file's lock.
+        await asyncio.to_thread(
+            merge_model_call_capture_into_record,
             result,
             capture_dirs,
             include_payloads=not redacted if trajectory_schema_version == "2.0" else payloads_kept,
@@ -1096,8 +1103,8 @@ async def enrich_run_result(
     # Assembles ng_perf from ng_trajectory when observability is enabled.
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
-    if delete_capture and safe_to_delete:
-        clear_model_call_captures_after_snapshot([result], capture_dirs)
+    if delete_capture and safe_to_delete and snapshot is not None:
+        await asyncio.to_thread(clear_model_call_capture_after_snapshot, snapshot)
     return result
 
 

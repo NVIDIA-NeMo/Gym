@@ -7,7 +7,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
@@ -125,9 +125,14 @@ async def await_model_call_capture_quiescence(
         return True
     stores = [CaptureStore(directory) for directory in capture_dirs]
     deadline = time.monotonic() + timeout_s
+
+    def any_pending(lock_wait_s: float) -> bool:
+        return any(store.has_pending(rollout_id, lock_wait_s=lock_wait_s) for store in stores)
+
     while True:
         try:
-            if not any(store.has_pending(rollout_id) for store in stores):
+            # Off the event loop, since it waits on the claims file's lock; a lock held to the deadline is pending.
+            if not await asyncio.to_thread(any_pending, max(0.0, deadline - time.monotonic())):
                 return True
         except OSError:
             logger.warning("Could not poll model-call capture claims for rollout %s.", rollout_id, exc_info=True)
@@ -170,19 +175,27 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
             store.remove_pending_markers(rollout_ids)
 
 
-def clear_model_call_captures_after_snapshot(records: list[Any], capture_dirs: list[Path]) -> None:
-    """Remove the capture files of rollouts whose records were snapshotted with their calls merged.
+class CaptureSnapshot(NamedTuple):
+    """A rollout's capture as it stood before a merge read it."""
 
-    A claims file goes only once no claim in it is outstanding, so a call still in flight or taken after
-    the snapshot stays visible until the rollout ID is dispatched again. Nothing is listed.
-    """
-    rollout_ids = _rollout_ids(records)
-    for directory in capture_dirs:
-        store = CaptureStore(directory)
-        for rollout_id in rollout_ids:
-            store.path_for(rollout_id).unlink(missing_ok=True)
-            store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-            store.delete_claims_if_settled(rollout_id)
+    store: CaptureStore
+    rollout_id: str
+    identity: tuple[int, int, int]
+
+
+def snapshot_model_call_capture(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureSnapshot]:
+    """Snapshot the capture the merge will read, so deleting it afterwards can tell whether a row landed since."""
+    store = _store_for_rollout(rollout_id, capture_dirs)
+    identity = store.capture_identity(rollout_id) if store is not None else None
+    return CaptureSnapshot(store, rollout_id, identity) if identity is not None else None
+
+
+def clear_model_call_capture_after_snapshot(snapshot: CaptureSnapshot) -> None:
+    """Delete a merged rollout's capture files, unless a row landed after the snapshot or a claim is outstanding."""
+    try:
+        snapshot.store.delete_capture_if_unchanged(snapshot.rollout_id, snapshot.identity)
+    except OSError:
+        logger.warning("Could not delete the model-call capture of rollout %s.", snapshot.rollout_id, exc_info=True)
 
 
 def merge_model_call_capture_into_record(

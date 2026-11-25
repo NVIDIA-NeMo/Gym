@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Preserve separately captured judge exchanges using the judge's own close evidence."""
 
+import asyncio
 import json
 import shutil
 from collections import defaultdict
@@ -179,7 +180,7 @@ async def collect_judge_evidence(
         entries, invalid_count = store.read_available(episode)
         # Checked again under the claims file's lock: a judge call can be claimed after the drain returned.
         try:
-            settled = store.delete_claims_if_settled(episode)
+            settled = await asyncio.to_thread(store.delete_claims_if_settled, episode)
         except OSError:
             settled = False
         exchanges = [exchange for _, exchange in entries]

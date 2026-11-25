@@ -387,9 +387,10 @@ async def test_capture_reads_never_list_the_capture_directory(tmp_path, monkeypa
 
     from nemo_gym.rollouts.model_calls import (
         await_model_call_capture_quiescence,
-        clear_model_call_captures_after_snapshot,
+        clear_model_call_capture_after_snapshot,
         clear_model_call_captures_for_rollouts,
         merge_model_call_capture_into_record,
+        snapshot_model_call_capture,
     )
 
     store = CaptureStore(tmp_path)
@@ -408,9 +409,10 @@ async def test_capture_reads_never_list_the_capture_directory(tmp_path, monkeypa
     record = {"_ng_task_index": 10, "_ng_rollout_index": 0}
 
     assert await await_model_call_capture_quiescence("10-0", [tmp_path]) is True
+    snapshot = snapshot_model_call_capture("10-0", [tmp_path])
     merge_model_call_capture_into_record(record, [tmp_path])
-    clear_model_call_captures_after_snapshot([record], [tmp_path])
-    assert scans == []
+    clear_model_call_capture_after_snapshot(snapshot)
+    assert scans == [] and not store.path_for("10-0").exists()
 
     # Before dispatch, each directory is listed once per call for earlier Gym versions' markers, however many rows.
     clear_model_call_captures_for_rollouts([record, {"_ng_task_index": 10, "_ng_rollout_index": 1}], [tmp_path])
@@ -443,7 +445,9 @@ async def test_await_quiescence_backs_off_while_a_claim_is_outstanding(tmp_path,
     store.mark_pending("12-0", "call-1")
     polls = []
     has_pending = CaptureStore.has_pending
-    monkeypatch.setattr(CaptureStore, "has_pending", lambda self, rid: polls.append(rid) or has_pending(self, rid))
+    monkeypatch.setattr(
+        CaptureStore, "has_pending", lambda self, rid, **kwargs: polls.append(rid) or has_pending(self, rid, **kwargs)
+    )
 
     assert await await_model_call_capture_quiescence("12-0", [tmp_path], timeout_s=0.5, poll_s=0.01) is False
     # A fixed 10 ms poll would read the claims about 50 times.
@@ -495,7 +499,9 @@ def test_deleting_settled_claims_never_hides_a_call_admitted_meanwhile(tmp_path,
     monkeypatch.setattr(
         capture,
         "fcntl",
-        SimpleNamespace(flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_SH=fcntl.LOCK_SH, LOCK_UN=fcntl.LOCK_UN),
+        SimpleNamespace(
+            flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_SH=fcntl.LOCK_SH, LOCK_UN=fcntl.LOCK_UN, LOCK_NB=fcntl.LOCK_NB
+        ),
     )
     unlink = Path.unlink
 
@@ -583,23 +589,68 @@ def test_settled_claims_that_cannot_be_removed_still_read_as_settled(tmp_path, m
     assert "Could not delete the capture claims" in caplog.text
 
 
-def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
-    from nemo_gym.rollouts.model_calls import clear_model_call_captures_after_snapshot
+def _snapshot(store, rollout_id):
+    from nemo_gym.rollouts.model_calls import snapshot_model_call_capture
+
+    return snapshot_model_call_capture(rollout_id, [store.root])
+
+
+def _call(store, rollout_id, model_call_id):
+    store.mark_pending(rollout_id, model_call_id)
+    store.record(rollout_id, {"model_call_id": model_call_id, "dialect": "responses", "request": {}, "response": {}})
+    store.clear_pending(rollout_id, model_call_id)
+
+
+def test_deleting_a_merged_capture_removes_every_file_of_a_settled_rollout(tmp_path):
+    from nemo_gym.rollouts.model_calls import clear_model_call_capture_after_snapshot
 
     store = CaptureStore(tmp_path)
-    for rollout_index in (0, 1):
-        store.mark_pending(f"14-{rollout_index}", "call-1")
-        store.record(f"14-{rollout_index}", {"model_call_id": "call-1"})
-    store.clear_pending("14-0", "call-1")
-    (tmp_path / "14-0.old.capture.pending").touch()
+    _call(store, "14-0", "call-1")
+    snapshot = _snapshot(store, "14-0")
+    # The merge already deleted the settled claims file; the deletion locks a fresh one and removes it too.
+    assert store.delete_claims_if_settled("14-0") is True
 
-    rows = [{"_ng_task_index": 14, "_ng_rollout_index": rollout_index} for rollout_index in (0, 1)]
-    clear_model_call_captures_after_snapshot(rows, [tmp_path])
+    clear_model_call_capture_after_snapshot(snapshot)
 
-    assert not store.path_for("14-0").exists() and not store.claims_path_for("14-0").exists()
-    assert store.has_pending("14-1") is True
-    # Earlier Gym versions' markers are a pre-dispatch concern.
-    assert (tmp_path / "14-0.old.capture.pending").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_deleting_a_merged_capture_keeps_an_outstanding_claim(tmp_path):
+    from nemo_gym.rollouts.model_calls import clear_model_call_capture_after_snapshot
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("14-1", "call-1")
+    store.record("14-1", {"model_call_id": "call-1"})
+
+    clear_model_call_capture_after_snapshot(_snapshot(store, "14-1"))
+
+    assert store.path_for("14-1").exists() and store.has_pending("14-1") is True
+
+
+def test_deleting_a_merged_capture_keeps_a_row_that_landed_after_the_merge(tmp_path, monkeypatch):
+    import asyncio
+
+    import nemo_gym.rollouts.rollout_collection as collection
+
+    store = CaptureStore(tmp_path)
+    _call(store, "22-0", "call-1")
+    merge = collection.merge_model_call_capture_into_record
+
+    def merge_then_land(record, *args, **kwargs):
+        merged = merge(record, *args, **kwargs)
+        _call(store, "22-0", "late")  # Read call-1 only; a later call lands and releases before the deletion.
+        return merged
+
+    monkeypatch.setattr(collection, "merge_model_call_capture_into_record", merge_then_land)
+    row = {"_ng_task_index": 22, "_ng_rollout_index": 0}
+    result = asyncio.run(
+        collection.enrich_run_result(
+            row, dict(row), capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
+        )
+    )
+
+    assert [call["model_call_id"] for call in result["ng_model_call_capture"]["calls"]] == ["call-1"]
+    assert [exchange["model_call_id"] for exchange in store.read("22-0")] == ["call-1", "late"]
 
 
 def test_deleting_a_merged_capture_keeps_a_claim_admitted_after_the_merge(tmp_path, monkeypatch):
@@ -608,26 +659,129 @@ def test_deleting_a_merged_capture_keeps_a_claim_admitted_after_the_merge(tmp_pa
     import nemo_gym.rollouts.rollout_collection as collection
 
     store = CaptureStore(tmp_path)
-    store.mark_pending("22-0", "call-1")
-    store.record("22-0", {"model_call_id": "call-1", "dialect": "responses", "request": {}, "response": {"id": "r"}})
-    store.clear_pending("22-0", "call-1")
+    _call(store, "22-1", "call-1")
     merge = collection.merge_model_call_capture_into_record
 
     def merge_then_admit(record, *args, **kwargs):
         merged = merge(record, *args, **kwargs)
-        store.mark_pending("22-0", "late")
+        store.mark_pending("22-1", "late")
         return merged
 
     monkeypatch.setattr(collection, "merge_model_call_capture_into_record", merge_then_admit)
-    row = {"_ng_task_index": 22, "_ng_rollout_index": 0}
+    row = {"_ng_task_index": 22, "_ng_rollout_index": 1}
     asyncio.run(
         collection.enrich_run_result(
             row, dict(row), capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
         )
     )
 
-    assert not store.path_for("22-0").exists()
-    assert store.has_pending("22-0") is True
+    # The late call may already hold the capture open, so nothing it could append to is deleted.
+    assert store.path_for("22-1").exists()
+    assert store.has_pending("22-1") is True
+
+
+def test_deleting_a_merged_capture_waits_only_a_bounded_time_on_the_claims_lock(tmp_path):
+    import fcntl
+
+    store = CaptureStore(tmp_path)
+    _call(store, "22-2", "call-1")
+    snapshot = _snapshot(store, "22-2")
+
+    with store.claims_path_for("22-2").open("rb") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_SH)
+        assert store.delete_capture_if_unchanged("22-2", snapshot.identity, lock_wait_s=0.05) is False
+
+    assert store.path_for("22-2").exists()
+
+
+def test_deleting_a_merged_capture_logs_a_failed_unlink(tmp_path, monkeypatch, caplog):
+    from nemo_gym.rollouts.model_calls import clear_model_call_capture_after_snapshot
+
+    store = CaptureStore(tmp_path)
+    _call(store, "22-3", "call-1")
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(CaptureStore, "delete_capture_if_unchanged", refuse)
+    clear_model_call_capture_after_snapshot(_snapshot(store, "22-3"))
+
+    assert "Could not delete the model-call capture of rollout 22-3" in caplog.text
+
+
+def test_a_held_claims_lock_counts_as_pending(tmp_path):
+    import fcntl
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("24-0", "call-1")
+    store.clear_pending("24-0", "call-1")
+
+    with store.claims_path_for("24-0").open("rb") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        assert store.has_pending("24-0", lock_wait_s=0.05) is True
+        assert store.delete_claims_if_settled("24-0", lock_wait_s=0.05) is False
+    assert store.has_pending("24-0") is False
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_keeps_the_event_loop_free_while_a_claims_lock_is_held(tmp_path):
+    import asyncio
+    import fcntl
+
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("24-1", "call-1")
+    store.clear_pending("24-1", "call-1")
+    ticks = 0
+
+    async def tick():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    ticker = asyncio.create_task(tick())
+    with store.claims_path_for("24-1").open("rb") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        drained = await await_model_call_capture_quiescence("24-1", [tmp_path], timeout_s=0.3)
+    ticker.cancel()
+
+    assert drained is False
+    assert ticks >= 10
+
+
+def test_has_pending_follows_a_claims_file_replaced_before_its_lock(tmp_path, monkeypatch):
+    import nemo_gym.models.model_call_capture as capture
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("24-2", "call-1")
+    store.clear_pending("24-2", "call-1")
+    is_live = capture._is_live
+    replaced = []
+
+    def replaced_once(handle, path):
+        if not replaced:
+            replaced.append(path)
+            # After this reader opened the settled file, a merge deleted it and a new call claimed in a replacement.
+            path.unlink()
+            store.mark_pending("24-2", "call-2")
+        return is_live(handle, path)
+
+    monkeypatch.setattr(capture, "_is_live", replaced_once)
+
+    assert store.has_pending("24-2") is True
+
+
+def test_clear_all_pending_still_drops_every_claim(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("24-3", "call-1")
+    (tmp_path / "24-3.old.capture.pending").touch()
+
+    with pytest.warns(DeprecationWarning, match="delete_claims"):
+        store.clear_all_pending("24-3")
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_merge_keeps_the_calls_it_read_when_the_claims_cannot_be_checked(tmp_path, monkeypatch, caplog):
