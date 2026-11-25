@@ -100,6 +100,8 @@ def test_resources_seed_response_keeps_its_object_schema(mode: str) -> None:
         "sandbox_access",
         "observation",
         "sandbox_group",
+        "verifier_mode",
+        "supported_verifier_modes",
     }
     assert schema["required"] == ["resources_session_id"]
     assert schema["additionalProperties"] is False
@@ -125,6 +127,8 @@ def test_resources_seed_response_keeps_its_http_response_schema() -> None:
         "sandbox_access",
         "observation",
         "sandbox_group",
+        "verifier_mode",
+        "supported_verifier_modes",
     }
     assert schema["required"] == ["resources_session_id"]
     assert schema["additionalProperties"] is False
