@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServer
 from environment_servers.single_agent_turn.tests.test_attempt_sandbox import _lending_server, _Provider
+from environment_servers.single_agent_turn.tests.test_sandbox_placement import _recording
 from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.sandbox import SandboxAccess, SandboxCapabilities, SandboxExecResult, SandboxHandle
 from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, DirectHTTPToolAccess
@@ -75,11 +76,13 @@ def _paths(client: Any) -> list[str]:
 async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads_their_state_first() -> None:
     provider = _SidecarProvider()
     server, client = _sidecar_server(provider)
+    recorded = _recording(client, provider)
 
     result = await server.run_request(_request())
 
     assert result.failure is None, result.failure
     assert result.result.reward == 1.0
+    running_at = dict(recorded)
     # One group: the agent container, model only, and the tool sidecar the seed declared, which reaches no host.
     assert list(provider.boxes) == ["sb-1"]
     spec = provider.boxes["sb-1"]["spec"]
@@ -108,9 +111,30 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
     [grant] = seed.tool_accesses
     assert isinstance(grant, DirectHTTPToolAccess)
     assert (str(grant.base_url).rstrip("/"), dict(grant.cookies)) == ("http://tools:8000", {"session": "cookie-value"})
-    # The state the tool calls left is copied out of the same group before /verify grades it.
-    imported = calls["/tool_sidecar/import_state"]["json"]
-    assert imported["sandbox_access"] == calls["/verify"]["json"][NG_SANDBOX_ACCESS_KEY]
+    # The state the tool calls left is copied out of the group while it runs. The verifier (verifier_mode "none")
+    # grades it in the Resources Server, lent nothing, after the group has stopped.
+    imported = SandboxAccess.model_validate(calls["/tool_sidecar/import_state"]["json"]["sandbox_access"])
+    assert imported.connection.descriptor["sandbox_id"] == "sb-1"
+    assert running_at["/tool_sidecar/import_state"] == ["sb-1"]
+    assert NG_SANDBOX_ACCESS_KEY not in calls["/verify"]["json"]
+    assert running_at["/verify"] == []
+    assert provider.running() == []
+
+
+async def test_a_shared_verifier_reads_the_tool_state_and_borrows_the_same_group() -> None:
+    provider = _SidecarProvider()
+    server, client = _sidecar_server(provider)
+    client.responses[0] = _Response(SEED_REPLY | {"verifier_mode": "shared"})
+    recorded = _recording(client, provider)
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None, result.failure
+    running_at = dict(recorded)
+    calls = {path: kwargs for _, path, kwargs in client.calls}
+    imported = calls["/tool_sidecar/import_state"]["json"]["sandbox_access"]
+    assert imported == calls["/verify"]["json"][NG_SANDBOX_ACCESS_KEY]
+    assert running_at["/verify"] == ["sb-1"]
     assert provider.running() == []
 
 
