@@ -24,7 +24,7 @@ nl2repobench_resources_server:
       #   specific task's own package/repo.
       agent_network_mode: official
       sandbox_config:
-        # Must outlive the agent's whole budget (sandbox_timeout 21600 s + wall_grace_s) plus the export, the workspace
+        # Must outlive the agent's whole budget (21600 s in the shipped presets) plus the export, the workspace
         # collection and the grading that follow in the same session: 18000 s expired a six-hour agent's sandbox.
         ttl_s: 25200
         ready_timeout_s: 1200
