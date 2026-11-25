@@ -265,7 +265,7 @@ docker build --platform linux/amd64 -t gym-opencode-hle-reference:local \
   responses_api_agents/opencode_sandboxed_agent/hle_reference_image
 ```
 
-Pi adds Node 22.23.2 and Pi 0.85.1 in a small layer:
+Pi adds Node 22.23.2 and Pi 1.5.2 in a small layer:
 
 ```bash
 docker build --platform linux/amd64 \

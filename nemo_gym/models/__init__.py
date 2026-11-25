@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.models.chat_completions_converter import (
         ChatCompletionsConverter,
+        ToolParameterType,
         chat_completion_usage_to_response_usage,
         message_content_to_text,
         split_responses_input_output_items,
@@ -88,6 +89,7 @@ _PUBLIC_API = {
     "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "PolicyModelParticipant": "_checkpoint",
     "SimpleResponsesAPIModel": "base_responses_api_model",
+    "ToolParameterType": "chat_completions_converter",
     "VLLMWorkerCaptureHandler": "token_capture.external_capture",
     "add_dynamo_gym_extras": "token_capture.external_capture",
     "chat_completion_usage_to_response_usage": "chat_completions_converter",
