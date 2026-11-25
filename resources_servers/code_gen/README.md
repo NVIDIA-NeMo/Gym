@@ -27,6 +27,8 @@ Every candidate runs in a fresh provider sandbox using the LiveCodeBench harness
 timer of the time limit, 4 GiB `RLIMIT_DATA` and `RLIMIT_STACK`, and disabled destructive builtins.
 The stack limit cannot exceed the provider's hard limit. The overall deadline is
 `(time_limit + 1) * num_tests + 5` seconds, plus one time limit for compilation when the task sets `time_limit_s`.
+With the server setting `unit_test_timeout_secs: 0`, the per-case timer is disabled and the overall deadline still
+applies. The response then reports `limits.time_limit_s` as null. An explicit task time limit must be positive.
 
 A task's `memory_limit_mb` also caps address space (`RLIMIT_AS`) at the grading process's size before grading
 (harness, NumPy and test inputs) plus `memory_limit_mb`. The harness's per-test stdin copies, about 11 times the

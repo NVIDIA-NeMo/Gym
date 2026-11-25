@@ -212,7 +212,11 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # for this verification instead of for the whole run. Falls back to the
         # old plaintext shape so pre-patch artifacts still verify.
         _raw_tests = body.verifier_metadata["unit_tests"]
-        if isinstance(_raw_tests, dict) and "packed" in _raw_tests:
+        if (
+            isinstance(_raw_tests, dict)
+            and "packed" in _raw_tests
+            and _raw_tests.get("type", "unit-tests") == "unit-tests"
+        ):
             _decoded = json.loads(zlib.decompress(base64.b64decode(_raw_tests["packed"])))
             _raw_tests = {
                 "inputs": _decoded["inputs"],
@@ -227,7 +231,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         )
         # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
         deadline_s = task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
-        limits = ResourceLimits(time_limit_s=timeout, memory_limit_mb=task_limits.memory_limit_mb)
+        limits = ResourceLimits(time_limit_s=timeout or None, memory_limit_mb=task_limits.memory_limit_mb)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)

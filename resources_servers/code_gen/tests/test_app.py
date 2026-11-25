@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import json
 import sys
+import zlib
 from typing import Generator
 from unittest.mock import MagicMock
 
@@ -396,6 +399,41 @@ class TestSandboxVerify:
         res = await self._sandbox_server().verify(request)
 
         assert res.limits.model_dump() == {"time_limit_s": 10, "memory_limit_mb": None}
+
+    async def test_disabled_server_timer_keeps_the_outer_deadline(self, monkeypatch) -> None:
+        async def _passing(sample, generation, timeout, debug, **kwargs):
+            assert timeout == 0
+            assert kwargs["deadline_s"] is None
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        server = self._sandbox_server()
+        server.config.unit_test_timeout_secs = 0
+        res = await server.verify(_verify_request("print(9)"))
+
+        assert res.reward == 1
+        assert res.limits.time_limit_s is None
+
+    @pytest.mark.parametrize("format_tag", [None, "unit-tests", "unknown-format"])
+    async def test_packed_unit_tests_respect_the_format_tag(self, monkeypatch, format_tag) -> None:
+        async def _passing(sample, *args, **kwargs):
+            assert json.loads(sample["input_output"])["inputs"] == ["3\n", "5\n"]
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        request = _verify_request("print(9)")
+        original = json.dumps(request.verifier_metadata["unit_tests"]).encode()
+        packed = {"packed": base64.b64encode(zlib.compress(original)).decode()}
+        if format_tag is not None:
+            packed["type"] = format_tag
+        request.verifier_metadata["unit_tests"] = packed
+        server = self._sandbox_server()
+
+        if format_tag == "unknown-format":
+            with pytest.raises(ValidationError):
+                await server.verify(request)
+        else:
+            assert (await server.verify(request)).reward == 1
 
     @pytest.mark.parametrize(
         "resource_limits",
