@@ -275,7 +275,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             ```
             """
 
-            # Measured from here: a fresh sandbox's slot is held, and a lent grade's time includes borrowing the
+            # Measured from here: a fresh sandbox's slot is held, and a grade in a lent sandbox includes borrowing the
             # sandbox and waiting for an earlier grade in it.
             start_time = time()
 
@@ -341,7 +341,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             key = json.dumps(access.connection.model_dump(mode="json"), sort_keys=True)
             lock = self._lent_sandbox_locks.setdefault(key, Lock())
             async with lock:
-                return await self._run_tests_in_lent(access, task_args, num_tests=num_tests)
+                return await self._run_tests_in_lent_sandbox(access, task_args, num_tests=num_tests)
         provider, sandbox_metadata = self._resolve_sandbox_target()
         return await check_correctness_in_sandbox(
             *task_args,
@@ -351,7 +351,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             metadata=sandbox_metadata,
         )
 
-    async def _run_tests_in_lent(
+    async def _run_tests_in_lent_sandbox(
         self, access: SandboxAccess, task_args: tuple[Any, ...], *, num_tests: int
     ) -> tuple[list[bool | int], dict[str, Any] | None]:
         """Borrow the lent sandbox, run the unit tests in it, and release the client; its owner stops it."""

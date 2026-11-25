@@ -432,7 +432,7 @@ class TestLentSandboxVerify:
         assert lent.disconnected == 1
         assert NG_SANDBOX_ACCESS_KEY not in res.model_dump()
 
-    async def test_a_lent_grade_does_not_queue_behind_this_servers_own_sandboxes(self, monkeypatch) -> None:
+    async def test_a_grade_in_a_lent_sandbox_does_not_wait_for_num_processes(self, monkeypatch) -> None:
         async def _borrow(access):
             return _LentSandbox()
 

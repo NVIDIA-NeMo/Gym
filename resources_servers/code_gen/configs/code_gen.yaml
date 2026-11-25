@@ -91,7 +91,7 @@ code_gen_environment_server:
         # could not stop.
         ttl_s: 25200
         # The same limits as code_gen's own verification sandbox; change both together, since the thread caps of a
-        # lent grade come from code_gen's sandbox_config.resources.
+        # grade in a lent sandbox come from code_gen's sandbox_config.resources.
         resources:
           cpu: 1
           memory_mib: 6144
