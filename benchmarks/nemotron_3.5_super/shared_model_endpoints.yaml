@@ -40,7 +40,7 @@ hle_benchmark_equivalence_judge_model:
       openai_model: openai/openai/gpt-5.6-luna
 
 # AA-Omniscience judge.
-# TODO @bxyu-nvidia: Need to properly rename this and add this Gemini config.
+# TODO Need to properly rename this and add this Gemini config.
 genrm_model:
   responses_api_models:
     openai_model:

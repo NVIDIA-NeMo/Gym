@@ -14,7 +14,7 @@ gym_env_start:
 # Slurm and container settings, so a run needs only MODEL on the command line.
 # Each sbatch key becomes SBATCH_<KEY>; a launcher's own env var overrides either block.
 # sbatch:
-#   account: nemotron_n3_post
+#   account: your_slurm_account
 #   qos: interactive
 #   timelimit: "04:00:00"
 # srun:
@@ -30,5 +30,4 @@ entries:
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/tau_pivot/super_row_54_1000_synthetic_tau_all_rollouts_leq_60_passrate.jsonl
-    owner: jkyi
+    data: data/tau_pivot.jsonl

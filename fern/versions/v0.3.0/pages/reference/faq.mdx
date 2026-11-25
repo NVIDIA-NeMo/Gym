@@ -237,15 +237,6 @@ ng_prepare_data "+config_paths=[$config_paths]" \
     +should_download=true
 ```
 
-For NVIDIA internal users, you can download from GitLab instead:
-
-```bash
-ng_prepare_data "+config_paths=[$config_paths]" \
-    +output_dirpath=data/example_multi_step \
-    +mode=train_preparation \
-    +should_download=true \
-    +data_source=gitlab
-```
 
 Run NeMo Gym servers the exact same way with the same configs!
 ```bash

@@ -93,8 +93,9 @@ Pro also ships five prepared example rows at
 `resources_servers/swebench_pro/data/example.jsonl`; these include pinned task
 scripts and image digests and can be used for the first smoke run.
 
-Cluster deployment uses the Slurm evaluations repository's existing pipeline;
-select its [evaluation configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/evaluations/swebench-pro-hermes.yaml).
+Cluster deployment uses the evaluation pipeline and configuration maintained
+by the deployment team. Follow the deployment documentation available in your
+environment.
 For a reference-patch control, use Pro's existing
 [golden-patch commands](../../resources_servers/swebench_pro/README.md#golden-patch-smoke-test).
 

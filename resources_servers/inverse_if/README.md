@@ -284,8 +284,8 @@ inverse_if/
 
 ---
 
-**Note**: The default raw data path is hardcoded in `dataset_preprocess.py`:
+**Note**: The default raw data path is `data/inverse_if`:
 ```
-/lustre/fsw/portfolios/llmservice/users/mfathi/data/inverse_if
+data/inverse_if
 ```
-Use `--data-dir` to specify a different location.
+Use `--data-dir` or `INVERSE_IF_DATA_DIR` to specify a different location.

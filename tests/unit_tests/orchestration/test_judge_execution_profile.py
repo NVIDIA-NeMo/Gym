@@ -107,20 +107,22 @@ def test_a_saved_cpu_node_pool_names_the_judge_partition(tmp_path) -> None:
             "scorer": {"partition": "cpu_long", "nodes": 1, "gpus_per_node": 0, "extra_args": {"qos": "cpu"}},
         },
     )
-    partition, source = choose_judge_partition(config, "cluster", reader_srun="-p cpu_short")
+    partition, source = choose_judge_partition(config, "cluster", reader_srun="-p example_partition")
     assert partition == "cpu_long" and source == "the saved node pool 'scorer'"
 
 
-@pytest.mark.parametrize("args", ["-p cpu_short -c 4", "--partition cpu_short", "--partition=cpu_short -c 4"])
+@pytest.mark.parametrize(
+    "args", ["-p example_partition -c 4", "--partition example_partition", "--partition=example_partition -c 4"]
+)
 def test_the_reader_placement_names_the_partition_when_the_saved_config_has_no_cpu_pool(tmp_path, args) -> None:
-    assert reader_step_partition(args) == "cpu_short"
+    assert reader_step_partition(args) == "example_partition"
     partition, source = choose_judge_partition(model_served(tmp_path), "cluster", reader_srun=args)
-    assert partition == "cpu_short" and "NEMO_GYM_REMOTE_READER_SRUN" in source
+    assert partition == "example_partition" and "NEMO_GYM_REMOTE_READER_SRUN" in source
 
 
 def test_an_explicit_judge_partition_wins(tmp_path) -> None:
     partition, source = choose_judge_partition(
-        model_served(tmp_path), "cluster", partition="ops", reader_srun="-p cpu_short"
+        model_served(tmp_path), "cluster", partition="ops", reader_srun="-p example_partition"
     )
     assert partition == "ops" and source == "--judge-partition"
 

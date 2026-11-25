@@ -22,7 +22,7 @@ Constraints on NRT interactive GPU enroot (3.5.0 as deployed):
     rootless netns; service hostnames are rewritten to 127.0.0.1.
 
 Images: ``$SAAS_ENROOT_IMAGE_DIR/<name>.sqsh`` from
-``scripts/nrt/convert_images_to_enroot.sh`` (run on cpu_short).
+``scripts/nrt/convert_images_to_enroot.sh`` (run on a CPU partition).
 """
 
 from __future__ import annotations
@@ -323,7 +323,7 @@ def _sqsh_for_image(image_ref: str) -> Path:
             return sqsh
     raise RuntimeError(
         f"missing enroot image for {image_ref} (tried {candidates}; "
-        f"run scripts/nrt/convert_images_to_enroot.sh on cpu_short; "
+        f"run scripts/nrt/convert_images_to_enroot.sh on a CPU partition; "
         f"SAAS_ENROOT_IMAGE_DIR={_IMAGE_DIR})"
     )
 

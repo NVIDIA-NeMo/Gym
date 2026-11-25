@@ -24,7 +24,7 @@ from pathlib import Path
 random.seed(42)
 
 
-# SFT_DATA_FILE_PATH="/lustre/fsw/portfolios/llmservice/users/rgala/repos/research-scratch/11_12_search/data/12_14_postprocessed_exa_search_tool_sft_1395samples_with_think_and_tools.jsonl"
+# SFT_DATA_FILE_PATH="data/source.jsonl"
 QUERY_TEMPLATE = """
 {Question}
 
@@ -296,13 +296,13 @@ def write_train_validation_samples(rl_samples, output_data_folder, train_file_na
 
 
 if __name__ == "__main__":
-    INPUT_DIR = Path(
-        "/lustre/fsw/portfolios/llmservice/users/rgala/repos/abhibha-browsecomp"
-        "/nemo-gym/resources_servers/tavily_search/data/benchmark/browsecomp"
-    )
+    GYM_ROOT = Path(__file__).resolve().parents[4]
+    INPUT_DIR = Path(os.environ.get("BROWSECOMP_INPUT_DIR", str(GYM_ROOT / "data/browsecomp_source")))
     OUTPUT_DIR = Path(
-        "/lustre/fsw/portfolios/llmservice/users/rgala/repos/browsecomp-integration-finsih"
-        "/resources_servers/tavily_search/data/benchmark/browsecomp"
+        os.environ.get(
+            "BROWSECOMP_OUTPUT_DIR",
+            str(GYM_ROOT / "resources_servers/tavily_search/data/benchmark/browsecomp"),
+        )
     )
 
     SOURCE_FILES = [

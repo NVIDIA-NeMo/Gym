@@ -126,8 +126,8 @@ the highest-k values for `pass@1[avg-of-{k}]/accuracy` and `pass@{k}/accuracy`.
 ## Data Download
 
 Media files (scientific figures and table images/PDFs) are downloaded from a
-public GCS bucket by `prepare_data.py`. Validation JSONL can also be
-downloaded via `gitlab_identifier` (for internal NVIDIA users) using
+public GCS bucket by `prepare_data.py`. A validation JSONL source configured
+for your environment can also be downloaded with
 `gym dataset collate +should_download=true +data_source=gitlab`.
 
 Media files must always be downloaded separately via `prepare_data.py` --

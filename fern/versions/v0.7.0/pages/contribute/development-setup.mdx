@@ -84,11 +84,10 @@ You do **not** need Fern dashboard org membership to contribute docs.
 3. Open a pull request from a fork or branch.
 4. Rely on CI: `fern check` and the automatic Fern preview comment use the repository `DOCS_FERN_TOKEN`, including for fork PRs.
 
-Optional local preview follows the Fern README. Full `make docs` / library autodoc (`fern docs md generate`) may require membership in the Fern `nvidia` organization if you hit `HTTP 403: User does not belong to organization`.
+Optional local preview follows the Fern README. Generating the library API reference may require additional Fern access. Documentation checks and pull request previews use CI credentials.
 
-**Requesting Fern `nvidia` org access (optional):** open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) on NVIDIA-NeMo/Gym. Suggested title: `Fern nvidia org access request`. Add the `community-request` label if you can, and say you need Fern dashboard membership for local autodoc (`make docs` / `fern docs md generate`). Maintainers triage the request.
+If local API reference generation reports an access error, open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) and describe the command and error. Do not include credentials or restricted information.
 
-**NVIDIA employees:** if you already have NVIDIA Slack, you can also ask in `#fern` for org access or docs help. Slack `#fern` is not required for external contributors.
 
 ### Public repository content
 

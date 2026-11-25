@@ -1,7 +1,7 @@
 config_paths:
 - benchmarks/nemotron_3.5_super/eval_container_config.yaml
 
-# @bxyu-nvidia: We manually copy over the datasets here
+# We manually copy over the datasets here
 swebench_verified_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:

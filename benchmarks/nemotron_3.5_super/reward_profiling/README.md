@@ -1,10 +1,10 @@
 # Nemotron 3.5 Super — Reward Profiling
 
-Runs the policy over every dataset in the RL training blend and summarizes per-task reward, so you
-can see which environments the checkpoint has saturated and which still carry signal.
+Runs a policy over configured datasets and summarizes per-task reward, so you can see which
+environments the checkpoint has saturated and which still carry signal.
 
-`manifests/nemotron_3_5_super.yaml` is the full sweep: **36 environments, 726,121 source rows**, run
-as **one** Gym deployment over one concatenated input. Each row carries its own `agent_ref` and
+`manifests/nemotron_3_5_super.yaml` is a multi-environment sweep, run as **one** Gym deployment over
+one concatenated input. Each row carries its own `agent_ref` and
 rollout collection dispatches per row, so judge-scored, sandbox-backed and plain environments all
 coexist in a single job. The machinery is generic and lives in `infra/` beside this file -- nothing in Gym imports it,
 so it is not part of `nemo_gym`; only the
@@ -26,6 +26,10 @@ To contribute an environment, see [CONTRIBUTING.md](./CONTRIBUTING.md).
 6. Appendix — [sharding by hand](#a1---sharding-and-unsharding-by-hand), [building the container](#a2---building-the-reward-profiling-container)
 
 ## Quick start
+
+The checked-in manifests use placeholder paths for datasets, models, containers, and Slurm
+accounts. Replace those values with resources available to your environment before running the
+commands below. Each dataset entry uses `data/<entry-label>.jsonl` as its local path by default.
 
 Three commands, from the repo root. Everything else on this page is a variation on them.
 
@@ -83,12 +87,18 @@ variable that sbatch never sees, and `export` there only reaches a login shell.
 
 ## 01 - (Optional) Create a container
 
-The manifest already names a container that exists, so a normal run needs nothing here. Build a new
-one only when an entry pulls in a server the image does not have — see
+Set the container paths in your manifest to images available in your environment. Build a new one
+only when an entry pulls in a server the image does not have — see
 [A2](#a2---building-the-reward-profiling-container), and
 [CONTRIBUTING](CONTRIBUTING.md#01---creating-a-container) for how to tell.
 
 ## 02 - Create a Manifest
+
+Before running a manifest, replace its portable placeholders with local paths. The full sweep
+expects one dataset file per entry label under `data/`; edit the `data:` fields if your files live
+elsewhere. Set `vllm.model`, `srun.container`, `srun.sandbox_container`, and `sbatch.account` to
+resources available in your environment.
+
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
 Every block but `nickname`, `num_shards` and `entries` is named for the command it configures, so
 where a setting goes follows from which command consumes it. Order in the file is free — the list
@@ -187,7 +197,7 @@ materialize:
   seed: 0
 
 sbatch:                          # optional; each key becomes SBATCH_<KEY>
-  account: nemotron_n3_post
+  account: your_slurm_account
   qos: normal                    # not interactive: capped at 4 nodes / 8 jobs, DenyOnLimit,
   timelimit: "04:00:00"          # so a sharded run fails at submit rather than queueing
 
@@ -583,7 +593,7 @@ mkdir -p results/vllm
 CONTAINER_IMAGE_PATH=vllm/vllm-openai:v0.27.1
 enroot import -o "results/$CONTAINER_IMAGE_PATH" "docker://${CONTAINER_IMAGE_PATH}"
 
-SLURM_ACCOUNT=nemotron_n3_post \
+SLURM_ACCOUNT=your_slurm_account \
 SBATCH_PARTITION=batch \
 SBATCH_QOS=interactive \
 BASE_IMAGE=$(pwd)/results/vllm/vllm-openai:v0.27.1 \
@@ -591,7 +601,7 @@ bash benchmarks/nemotron_3.5_super/build-super-vl-evals-v0271-thin.sh \
     $(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh
 
 # 2. make reward profiling container from vllm container
-SBATCH_ACCOUNT=nemotron_n3_post \
+SBATCH_ACCOUNT=your_slurm_account \
 SBATCH_PARTITION=batch \
 SBATCH_QOS=interactive \
 SBATCH_GRES=gpu:4 \
@@ -620,4 +630,4 @@ Building all three lanes' servers gives 63 baked venvs. Building only a subset a
 manifest that needs more is the failure above -- it presents as a hang, not an error.
 
 You also need a **sandbox container** if any entry uses `ns_tools` or `math_formal_lean`. Only one
-arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
+Set `srun.sandbox_container` to a sandbox image available in your environment.

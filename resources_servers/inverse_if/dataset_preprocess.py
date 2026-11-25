@@ -32,13 +32,14 @@ Key transformations:
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 
-# Hardcoded path for raw Inverse IF data
-DEFAULT_RAW_DATA_DIR = Path("/lustre/fsw/portfolios/llmservice/users/mfathi/data/inverse_if")
+# Override this default when the source data lives elsewhere.
+DEFAULT_RAW_DATA_DIR = Path(os.environ.get("INVERSE_IF_DATA_DIR", "data/inverse_if"))
 
 
 # ---------------------------------------------------------------------------

@@ -181,7 +181,7 @@ uWSGI process per worker, so the worker count *is* the concurrency — a session
 the sandboxes ride along on the vLLM nodes and are fronted by an nginx balancer hashing the same
 header, so they cost no extra nodes. If your environment executes code, size this rather than
 assuming GPUs are the limit. Only one arm64 build exists:
-`/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
+`/path/to/nemo-skills-sandbox.sqsh`
 
 ## 04 - Adding a manifest entry into manifests/nemotron_3_5_super.yaml
 

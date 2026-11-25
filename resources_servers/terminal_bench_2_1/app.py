@@ -127,7 +127,7 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
-    sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    sandbox_handle: str  # Just a plain string URI for now for OpenSandbox backend.
 
 
 class TerminalBench21SeedSessionRequest(BaseModel):
@@ -382,7 +382,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
     ) -> None:
-        # TODO @bxyu-nvidia: These patches may not be necessary eventually, but for now we need them in order for the below instance golden patches to pass.
+        # TODO These patches may not be necessary eventually, but for now we need them in order for the below instance golden patches to pass.
         tasks_to_increase_initial_resources_for = {
             "terminal-bench/torch-pipeline-parallelism",
             "terminal-bench/torch-tensor-parallelism",
@@ -400,7 +400,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     async def _create_sandbox(
         self, verify_request: TerminalBench21SeedSessionRequest, *, session_id: str | None = None
     ) -> AsyncSandbox:
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        # TODO Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)

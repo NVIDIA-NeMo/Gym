@@ -184,7 +184,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     )
 
 
-# @bxyu-nvidia: This is a wrapper that can be passed directly to a very lightly modified version of `run_instance`
+# This is a wrapper that can be passed directly to a very lightly modified version of `run_instance`
 # The method is almost identical to the original, just with async awaits rather than sync.
 # See resources_servers/swebench/swebench_patches.py
 class DockerContainer(BaseModel):
@@ -216,7 +216,7 @@ class DockerContainer(BaseModel):
 
         return ExecResult(
             exit_code=res.return_code,
-            # @bxyu-nvidia: This is not entirely 1:1, but it works for the purposes of this patch.
+            # This is not entirely 1:1, but it works for the purposes of this patch.
             # The sandbox API returns None for an empty stream (docker-py returned bytes).
             output=((res.stdout or "") + (res.stderr or "")).encode(),
         )
@@ -301,14 +301,14 @@ class DockerContainer(BaseModel):
         )
 
 
-# TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
+# TODO Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
 # They can possibly even omitted once this graduates to core infra.
 class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest):
     sandbox_spec: Optional[Dict[str, Any]] = None
 
 
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
-    sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    sandbox_handle: str  # Just a plain string URI for now for OpenSandbox backend.
 
 
 # The agent's working tree is graded by the diff it leaves behind. A plain
@@ -363,7 +363,7 @@ class SwebenchResourcesServer(CheckpointedSandboxSessionResourcesServer):
     ) -> AsyncSandbox:
         """Start a sandbox from the instance image. ``test_assets`` are uploaded for the evaluation script only: the
         agent's sandbox must not hold the hidden tests' reference files."""
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        # TODO Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)

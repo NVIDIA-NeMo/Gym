@@ -122,7 +122,7 @@ If the build-docs check fails:
 
 1. **Test documentation locally**: Follow the [Fern docs quickstart](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md).
    - For local documentation previews, ensure Node.js 22+ is installed.
-   - From the repository root, run `make docs-login` once to provision and authenticate Fern.
+   - From the repository root, run `make docs-login` if Fern requests authentication.
    - From the repository root, run `make docs` to generate the API reference and start the local preview.
    - After the initial generation, prose-only changes can use `cd fern && npm run dev`.
 
@@ -140,11 +140,9 @@ You do **not** need Fern dashboard org membership to contribute docs.
 3. Open a pull request from a fork or branch.
 4. Rely on CI: `fern check` and the automatic Fern preview comment use the repository `DOCS_FERN_TOKEN`, including for fork PRs.
 
-Optional local preview follows the Fern README. Full `make docs` / library autodoc (`fern docs md generate`) may require membership in the Fern `nvidia` organization if you hit `HTTP 403: User does not belong to organization`.
+Optional local preview follows the Fern README. Generating the library API reference may require additional Fern access. Documentation checks and pull request previews use CI credentials.
 
-**Requesting Fern `nvidia` org access (optional):** open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) on NVIDIA-NeMo/Gym. Suggested title: `Fern nvidia org access request`. Add the `community-request` label if you can, and say you need Fern dashboard membership for local autodoc (`make docs` / `fern docs md generate`). Maintainers triage the request.
-
-**NVIDIA employees:** if you already have NVIDIA Slack, you can also ask in `#fern` for org access or docs help. Slack `#fern` is not required for external contributors.
+If local API reference generation reports an access error, open a [GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) and describe the command and error. Do not include credentials or restricted information.
 
 ### Public repository content
 

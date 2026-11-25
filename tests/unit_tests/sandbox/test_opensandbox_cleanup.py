@@ -738,16 +738,16 @@ def test_cleanup_job_partition_qos_and_quoting_come_from_the_environment(tmp_pat
     calls_path, env = install_sbatch_stub(tmp_path)
     env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
     env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
-    env["SBATCH_CPU_PARTITION"] = "cpu_short"
-    env["SBATCH_CPU_QOS"] = "cpu-high"
+    env["SBATCH_CPU_PARTITION"] = "example_partition"
+    env["SBATCH_CPU_QOS"] = "example_qos"
     env["NEMO_GYM_USER"] = "name with 'quote' and $dollar"
 
     result = run_launcher_from(submit_dir, env)
 
     assert result.returncode == 0, result.stderr
     _main_call, cleanup_call = read_sbatch_calls(calls_path)
-    assert "--partition=cpu_short" in cleanup_call
-    assert "--qos=cpu-high" in cleanup_call
+    assert "--partition=example_partition" in cleanup_call
+    assert "--qos=example_qos" in cleanup_call
     # The wrapped command survives the shell that sbatch runs it with: one argument per value.
     command = cleanup_command(cleanup_call)
     assert command[command.index("--user") + 1] == "name with 'quote' and $dollar"

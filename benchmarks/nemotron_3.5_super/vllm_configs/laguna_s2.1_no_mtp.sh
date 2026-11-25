@@ -2,7 +2,7 @@
 
 GYM_MODEL_PARAMS=()
 
-# @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
+# V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
 VLLM_COMMON_ARGS=(

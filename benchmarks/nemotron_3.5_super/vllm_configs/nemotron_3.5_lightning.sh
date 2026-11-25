@@ -15,7 +15,7 @@ GYM_MODEL_PARAMS=(
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
-# @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
+# V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
 # A TP1 engine only uses one GPU, so the vLLM step must run four of them per node. The eval step sources this

@@ -147,8 +147,8 @@ def test_gitlab_adapter_selects_current_contract_version() -> None:
     assert f'GYM_CI_CONTRACT_VERSION: "{expected_version}"' in GITLAB_PIPELINE.read_text()
 
 
-def test_gitlab_adapter_selects_cpu_short_partition() -> None:
-    assert 'GYM_SLURM_PARTITION: "cpu_short"' in GITLAB_PIPELINE.read_text()
+def test_gitlab_adapter_uses_configured_slurm_partition() -> None:
+    assert 'GYM_SLURM_PARTITION: "$CI_GYM_SLURM_PARTITION"' in GITLAB_PIPELINE.read_text()
 
 
 @pytest.mark.parametrize(

@@ -28,12 +28,13 @@ Each output line contains the task data formatted for the simple_agent.
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 
-# Hardcoded path for raw multichallenge data
-DEFAULT_RAW_DATA_DIR = Path("/lustre/fsw/portfolios/llmservice/users/mfathi/data/multichallenge")
+# Override this default when the source data lives elsewhere.
+DEFAULT_RAW_DATA_DIR = Path(os.environ.get("MULTICHALLENGE_DATA_DIR", "data/multichallenge"))
 
 
 def build_input_messages(task: dict) -> list[dict]:

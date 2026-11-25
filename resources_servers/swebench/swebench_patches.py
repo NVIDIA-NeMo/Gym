@@ -19,7 +19,7 @@ This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pu
 import re
 from typing import Any, Dict, Optional
 
-# @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
+# We import wildcard because there are a million imports otherwise...
 from swebench.harness.constants import END_TEST_OUTPUT, FAIL_ONLY_REPOS, MAP_REPO_TO_EXT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import *
 
@@ -35,7 +35,7 @@ from resources_servers.swebench.failure_only_grading import failure_only_suite_c
 EVAL_SCRIPT_COMMAND = "/bin/bash /eval.sh 2>&1"
 
 
-# @bxyu-nvidia: We modify the run_instance function to:
+# We modify the run_instance function to:
 # 1. Enable async container operations.
 # 2. Avoid complicated patching logic.
 async def run_instance(
@@ -357,7 +357,7 @@ def patch_swebench_chartjs_chrome_flag(test_spec: TestSpec) -> None:
 # START SWE Bench Multilingual instance patches
 ########################################
 
-# @bxyu-nvidia: These are the patches to the `eval.sh` produced by SWE Bench that needed to be done in order for the golden patches to pass
+# These are the patches to the `eval.sh` produced by SWE Bench that needed to be done in order for the golden patches to pass
 # Each patch here is not intended to help the model, they are literally making the test cases runnable.
 # Most of these are specific to Nvidia's OpenSandbox server. A lot of these aren't issues when run on bare metal AWS EC2 instances.
 # These patches may or may not be relevant to your specific sandboxing setup.

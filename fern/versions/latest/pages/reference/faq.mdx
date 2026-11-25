@@ -239,17 +239,6 @@ gym dataset collate \
     --download
 ```
 
-For NVIDIA internal users, you can download from GitLab instead:
-
-```bash
-gym dataset collate \
-    --resources-server example_multi_step \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
-    --output-dir data/example_multi_step \
-    --mode train_preparation \
-    --download \
-    +data_source=gitlab
-```
 
 Run NeMo Gym servers the exact same way with the same configs!
 ```bash

@@ -703,13 +703,13 @@ def _assistant_part_items(
             ),
             NeMoGymFunctionCallOutput(
                 call_id=part["callID"],
-                # @bxyu-nvidia: Somehow the output here may be missing...
+                # Somehow the output here may be missing...
                 output=part["state"].get("output", ""),
             ),
         ]
     if part["type"] in ("step-finish", "step-start", "patch"):
         return []
-    # @bxyu-nvidia: Defensive raise in case we're missing something.
+    # Defensive raise in case we're missing something.
     raise NotImplementedError(part)
 
 
@@ -739,7 +739,7 @@ def parse_opencode_export(
                     _assistant_part_items(part, gym_reasoning=gym_reasoning, keep_empty_answer=index == empty_answer)
                 )
         else:
-            # @bxyu-nvidia: Defensive raise in case we're missing something.
+            # Defensive raise in case we're missing something.
             raise NotImplementedError(message)
 
     return messages
