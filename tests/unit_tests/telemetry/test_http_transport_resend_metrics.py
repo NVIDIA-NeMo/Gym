@@ -61,20 +61,6 @@ def _install_transport(monkeypatch: pytest.MonkeyPatch, outcomes: list[Any]) -> 
     return client
 
 
-class _RecordingSpan:
-    def __init__(self) -> None:
-        self.attributes: dict[str, Any] = {}
-
-    def is_recording(self) -> bool:
-        return True
-
-    def set_attributes(self, attributes: dict[str, Any]) -> None:
-        self.attributes.update(attributes)
-
-    def set_attribute(self, key: str, value: Any) -> None:
-        self.attributes[key] = value
-
-
 @pytest.mark.parametrize(
     ("failure", "reason"),
     [
@@ -166,14 +152,42 @@ async def test_a_request_that_succeeds_first_time_records_nothing(
     assert gym_metrics.HTTP_TIMEOUT_INSTRUMENT not in metrics
 
 
+@pytest.fixture
+def finished_client_spans(monkeypatch: pytest.MonkeyPatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer", provider.get_tracer)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _group: True)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_trace_exporter_active", lambda: True)
+
+    def finished() -> list[Any]:
+        return [span for span in exporter.get_finished_spans() if span.kind == trace.SpanKind.CLIENT]
+
+    yield finished
+    provider.shutdown()
+
+
 @requires_lens
-async def test_the_client_span_carries_this_requests_resend_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_transport(monkeypatch, [ServerDisconnectedError(), ClientOSError(), "ok"])
-    span = _RecordingSpan()
+@pytest.mark.parametrize(
+    ("outcomes", "resends"),
+    [(["ok"], 0), ([ServerDisconnectedError(), ClientOSError(), "ok"], 2)],
+    ids=["first time", "after two resends"],
+)
+async def test_the_client_span_carries_this_requests_resend_count(
+    finished_client_spans, monkeypatch: pytest.MonkeyPatch, outcomes: list[Any], resends: int
+) -> None:
+    _install_transport(monkeypatch, outcomes)
 
-    await nemo_gym.client.http_client._request_with_retries("POST", "http://gym/run", _internal=True, _span=span)
+    await nemo_gym.client.http_client.request("POST", "http://gym/run", _internal=True)
 
-    assert span.attributes[HTTP_TRANSPORT_RESEND_COUNT_SPAN_ATTRIBUTE] == 2
+    (span,) = finished_client_spans()
+    assert span.attributes[HTTP_TRANSPORT_RESEND_COUNT_SPAN_ATTRIBUTE] == resends
 
 
 async def test_each_retry_is_counted_by_the_failure_just_before_it(
