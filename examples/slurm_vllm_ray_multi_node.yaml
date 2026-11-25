@@ -23,7 +23,7 @@ services:
     health_check:
       timeout_seconds: 1200
     mounts:
-      - /path/to/datasets:/data
+      - /lustre/datasets:/data
 
 driver:
   policy_model: vllm_model
@@ -39,4 +39,4 @@ driver:
           - benchmarks/gpqa/config.yaml
 
 job:
-  output_path: /path/to/outputs
+  output_path: /lustre/fsw/my-path

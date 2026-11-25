@@ -23,7 +23,7 @@ services:
     health_check:
       timeout_seconds: 1200
     mounts:
-      - /path/to/datasets:/data
+      - /lustre/datasets:/data
     # env values are resolved with one of three prefixes (a bare value is an implicit `lit:`):
     #   lit:VALUE   - literal value, used as-is.
     #   host:VAR    - read from VAR in the shell running `gym eval submit` (this machine).
@@ -50,4 +50,4 @@ driver:
           - benchmarks/gpqa/config.yaml
 
 job:
-  output_path: /path/to/outputs
+  output_path: /lustre/fsw/my-path
