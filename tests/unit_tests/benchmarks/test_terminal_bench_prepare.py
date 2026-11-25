@@ -103,6 +103,25 @@ def test_different_repository_is_rejected(task_source: tuple[Path, str, str]) ->
         preparation.prepare(task_revision=first, task_repository=str(source.parent / "other"))
 
 
+def test_pinned_preparation_ignores_git_url_rewrites(
+    task_source: tuple[Path, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, first, _ = task_source
+    repository = "https://example.test/tasks"
+    # A rewrite, as a token or a mirror adds one: `remote get-url` returns the source path, the stored origin does not.
+    for name, value in (
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", f"url.{source}.insteadOf"),
+        ("GIT_CONFIG_VALUE_0", repository),
+    ):
+        monkeypatch.setenv(name, value)
+    preparation.prepare(task_revision=first, task_repository=repository)  # first preparation clones
+    preparation.prepare(task_revision=first, task_repository=repository)  # a repeat accepts its own checkout
+    assert git(preparation.BENCHMARK_DIR / "terminal-bench-2-1", "rev-parse", "HEAD") == first
+    with pytest.raises(ValueError, match="different origin"):
+        preparation.prepare(task_revision=first, task_repository="https://example.test/other")
+
+
 def test_non_commit_object_is_rejected(task_source: tuple[Path, str, str]) -> None:
     source, first, _ = task_source
     preparation.prepare(task_revision=first, task_repository=str(source))
@@ -125,6 +144,9 @@ def test_cli_accepts_repository_and_revision(tmp_path: Path) -> None:
     git(source, "add", ".")
     git(source, "commit", "--quiet", "-m", "tasks")
     revision = git(source, "rev-parse", "HEAD")
+    # A later commit, so that the requested revision differs from the repository's HEAD.
+    (source / "tasks/0/instruction.md").write_text("Changed later")
+    git(source, "commit", "--quiet", "-am", "later")
     # Run the actual script from an isolated benchmark directory, with no network or model dependency.
     script = tmp_path / "benchmarks/terminal_bench_2_1/prepare.py"
     script.parent.mkdir(parents=True)
@@ -136,3 +158,6 @@ def test_cli_accepts_repository_and_revision(tmp_path: Path) -> None:
     assert len(rows) == preparation.NUM_TASKS
     assert {row["task_name"] for row in rows} == {f"task-{index}" for index in range(preparation.NUM_TASKS)}
     assert git(script.parent / "terminal-bench-2-1", "rev-parse", "HEAD") == revision
+    assert git(script.parent / "terminal-bench-2-1", "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"  # detached
+    first_task = next(row for row in rows if row["task_name"] == "task-0")
+    assert first_task["responses_create_params"]["input"][0]["content"] == "Task 0"
