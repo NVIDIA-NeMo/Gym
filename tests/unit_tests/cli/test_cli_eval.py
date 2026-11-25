@@ -281,8 +281,9 @@ def test_collect_rollouts_preserves_incomplete_exit_and_shuts_down_telemetry(
 def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_accepted(tmp_path, monkeypatch, saved):
     """A resume of saved rollouts writes its resolved config only once the collector has accepted it. A resume the
     collector refuses leaves the saved rollouts as the earlier run's, and so that run's resolved config, or none
-    where it had none. A run with nothing saved under its output names writes the file before it collects."""
-    from nemo_gym.rollouts.rollout_collection import _ON_RUN_ACCEPTED, RolloutCollectionHelper
+    where it had none. So does a report for another rollouts file, such as a part of the run a driver collects under
+    its own names. A run with nothing saved under its output names writes the file before it collects."""
+    from nemo_gym.rollouts.rollout_collection import _ON_RUN_ACCEPTED, RolloutCollectionHelper, report_run_accepted
     from nemo_gym.rollouts.rollout_recovery import ResumeRefusedError
     from nemo_gym.telemetry import setup
     from nemo_gym.utils.path_utils import resolved_config_path_for
@@ -302,12 +303,12 @@ def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_acce
         monkeypatch.setattr(setup, name, lambda *args, **kwargs: None)
     before_collection = []
 
-    def collect(*, saved_rollouts, accepts):
+    def collect(*, saved_rollouts, accepts, reported=output):
         async def run_from_config(self, config):
             before_collection.append(resolved_config.read_text() if resolved_config.exists() else None)
             if not accepts:
                 raise ResumeRefusedError("Cannot resume with incompatible resolved configuration.")
-            _ON_RUN_ACCEPTED.get()()
+            report_run_accepted(reported)
             raise ConfigError("The input file is missing.")
 
         monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", run_from_config)
@@ -325,6 +326,9 @@ def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_acce
     assert before_collection[-1] == saved
     assert (resolved_config.read_text() if resolved_config.exists() else None) == saved
     assert sorted(tmp_path.iterdir()) == sorted([output] if saved is None else [output, resolved_config])
+
+    collect(saved_rollouts=True, accepts=True, reported=tmp_path / "part.jsonl")
+    assert (resolved_config.read_text() if resolved_config.exists() else None) == saved
 
     collect(saved_rollouts=True, accepts=True)
     assert before_collection[-1] == saved

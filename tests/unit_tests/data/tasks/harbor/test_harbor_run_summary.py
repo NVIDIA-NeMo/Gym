@@ -1132,41 +1132,84 @@ async def _single_pass_driver(rollout_collection_config, global_config_dict):
     await RolloutCollectionHelper().run_from_config(rollout_collection_config)
 
 
-async def _driver_failing_on_its_own(rollout_collection_config, global_config_dict):
-    """A custom driver that collects without the built-in collector, and fails."""
+# The resolved config as each driver below found it, by moment. The drivers run in this process.
+_RESOLVED_CONFIG_SEEN: dict[str, bytes] = {}
+
+
+def _note_resolved_config(moment: str, rollout_collection_config) -> None:
+    output = Path(rollout_collection_config.output_jsonl_fpath)
+    _RESOLVED_CONFIG_SEEN[moment] = resolved_config_path_for(output).read_bytes()
+
+
+async def _driver_refusing_the_resume(rollout_collection_config, global_config_dict):
+    """A custom driver that collects without the built-in collector and refuses the saved run before it writes."""
+    _note_resolved_config("on entry", rollout_collection_config)
+    raise ValueError("the saved run is not this command's")
+
+
+async def _driver_failing_after_it_took_the_run_over(rollout_collection_config, global_config_dict):
+    """A custom driver that collects without the built-in collector: it takes the saved run over, writes a row of
+    its own and fails. A part it collects under other names is not the run."""
+    from nemo_gym.rollouts.rollout_collection import report_run_accepted
+
+    output = Path(rollout_collection_config.output_jsonl_fpath)
+    _note_resolved_config("on entry", rollout_collection_config)
+    report_run_accepted(output.with_name("part.jsonl"))
+    _note_resolved_config("after reporting a part", rollout_collection_config)
+    report_run_accepted(output)
+    _note_resolved_config("after reporting the run", rollout_collection_config)
+    with output.open("a") as rows:
+        rows.write(json.dumps(result(response={"output": []})) + "\n")
     raise RuntimeError("the driver failed after writing rows of its own")
 
 
-def test_a_driver_that_fails_without_the_collector_still_saves_its_resolved_config(
-    tmp_path, monkeypatch, capsys, oracle_collection
+async def _driver_that_reports_nothing(rollout_collection_config, global_config_dict):
+    """A custom driver that collects without the built-in collector and never reports that it took the run over."""
+    _note_resolved_config("on entry", rollout_collection_config)
+
+
+def test_a_driver_that_collects_on_its_own_has_its_resolved_config_written_once_it_takes_the_run_over(
+    tmp_path, monkeypatch, oracle_collection
 ):
-    """A custom driver may collect without the built-in collector, which is what reports that a resume was
-    accepted. What such a driver wrote before it failed is its command's, so that command's resolved config and run
-    summary are written, not left as the earlier run's."""
+    """A custom driver may collect without the built-in collector. On a resume of saved rollouts its command's
+    resolved config is written when the driver reports that it took the saved run over, not before the driver runs:
+    a driver that refuses the saved run leaves that run's file, and one that fails after it took the run over has
+    its own beside the rows it wrote. A driver that never reports has its file written once it ends normally."""
     write_task(tmp_path / "ds" / "a")
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     oracle_collection.payload = lambda row: result(response={"output": []})
-    rollouts = tmp_path / "results" / "harbor" / "ds" / "rollouts.jsonl"
+    resolved_config_path = resolved_config_path_for(tmp_path / "results" / "harbor" / "ds" / "rollouts.jsonl")
 
-    def run(*flags):
+    def run(driver=None):
         monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        _RESOLVED_CONFIG_SEEN.clear()
         argv = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", "opencode_agent", "--model-type", "vllm_model"]
         policy = ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
-        monkeypatch.setattr(sys, "argv", [*argv, *policy, "+disable_aggregation=true", *flags])
+        resume = ["+resume_from_cache=true", "+reuse_existing_data_preparation=true"] if driver else []
+        driver_flag = [f"+rollout_collection_driver={__name__}:{driver}"] if driver else []
+        monkeypatch.setattr(sys, "argv", [*argv, *policy, "+disable_aggregation=true", *resume, *driver_flag])
         main_module.main()
 
     run()
-    assert "_driver_failing_on_its_own" not in resolved_config_path_for(rollouts).read_text()
-    capsys.readouterr()
+    saved = resolved_config_path.read_bytes()
+    assert b"rollout_collection_driver" not in saved
+
+    with pytest.raises(ValueError, match="not this command's"):
+        run("_driver_refusing_the_resume")
+    assert _RESOLVED_CONFIG_SEEN == {"on entry": saved}
+    assert resolved_config_path.read_bytes() == saved
 
     with pytest.raises(RuntimeError, match="the driver failed"):
-        run(
-            "+resume_from_cache=true",
-            "+reuse_existing_data_preparation=true",
-            f"+rollout_collection_driver={__name__}:_driver_failing_on_its_own",
-        )
-    assert "_driver_failing_on_its_own" in resolved_config_path_for(rollouts).read_text()
-    assert "Run summary written" in capsys.readouterr().out
+        run("_driver_failing_after_it_took_the_run_over")
+    assert _RESOLVED_CONFIG_SEEN["on entry"] == saved
+    assert _RESOLVED_CONFIG_SEEN["after reporting a part"] == saved
+    taken_over = _RESOLVED_CONFIG_SEEN["after reporting the run"]
+    assert b"_driver_failing_after_it_took_the_run_over" in taken_over
+    assert resolved_config_path.read_bytes() == taken_over
+
+    run("_driver_that_reports_nothing")
+    assert _RESOLVED_CONFIG_SEEN == {"on entry": taken_over}
+    assert b"_driver_that_reports_nothing" in resolved_config_path.read_bytes()
 
 
 @pytest.mark.parametrize("driver", [(), (f"+rollout_collection_driver={__name__}:_single_pass_driver",)])
@@ -1176,9 +1219,9 @@ def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(
     """A run collected with one agent is resumed on the same output with another. The resume stops before the
     collector accepts it and leaves the saved rollouts alone, so they stay the first agent's, and so do the run
     summary and the resolved config beside them. When the resume reuses the prepared input, the collector refuses
-    the changed configuration; otherwise data preparation stops it first. A resume the collector does not accept
-    for another reason, here a missing file of the saved run, keeps them too. The same holds when a custom driver
-    runs the collector."""
+    the changed configuration; otherwise data preparation stops it first, or a configuration check before that. A
+    resume the collector does not accept for another reason, here a missing file of the saved run, keeps them too.
+    The same holds when a custom driver runs the collector."""
     write_task(tmp_path / "ds" / "a")
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     oracle_collection.payload = lambda row: result(response={"output": []})
@@ -1225,6 +1268,14 @@ def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(
     assert len(oracle_collection.dispatched) == 1
     assert {path: path.read_bytes() for path in run_files} == collected
     assert "Run summary written" not in capsys.readouterr().out
+
+    # A check that stops the resume before data preparation: no dataset of the requested split is declared.
+    with pytest.raises(SystemExit):
+        run("hermes_agent", "+resume_from_cache=true", "+split=train")
+    out = capsys.readouterr().out
+    assert "No dataset of type `train` is declared" in " ".join(out.split())
+    assert {path: path.read_bytes() for path in run_files} == collected
+    assert "Run summary written" not in out
 
     failures = failures_path_for(rollouts)
     saved_failures = failures.read_bytes()

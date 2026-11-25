@@ -232,6 +232,8 @@ def test_adaptive_capture_selected_parameters_and_resume(
     monkeypatch.setattr(http_client, "raise_for_status", status)
     monkeypatch.setattr(http_client, "get_response_json", response_json)
     monkeypatch.setattr(http_client, "request", judge_request)
+    taken_over = []
+    monkeypatch.setattr(rollout_collection, "report_run_accepted", taken_over.append)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     config = SimpleNamespace(
         num_repeats=1,
@@ -417,11 +419,15 @@ def test_adaptive_capture_selected_parameters_and_resume(
         saved = core.read(tmp_path / "out.jsonl")["response"]
         config.resume_from_cache = True
         config.limit = 1
+        assert taken_over == [tmp_path / "out.jsonl"]
         with pytest.raises(ValueError, match="inventory"):
             asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        # The driver refused the saved run, so it did not report that it took the run over.
+        assert taken_over == [tmp_path / "out.jsonl"]
         config.limit = 2
         with pytest.raises(ValueError, match="Ambiguous"):
             asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert taken_over == [tmp_path / "out.jsonl"] * 2
         assert all(path.read_bytes() == saved for path, saved in artifacts.items())
         assert inventory_path.read_bytes() == inventory_bytes
         assert len(calls) == 2 and len(judge_calls) == 1

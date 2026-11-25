@@ -42,8 +42,9 @@ gets a summary that says so (``files.rollouts`` is ``null`` and every task is ``
 path the command asked for. The tasks a validate left out for want of a ``solution/`` are not scored and have
 no task entry; they are named under ``unvalidated`` with the reason, as the tasks that did not load are under
 ``skipped``, so an all-unsolvable selection explains why nothing ran. The one run that writes no summary is a
-resume that data preparation stopped or the collector did not accept (its configuration differs from the saved
-run's, for example): the saved rollouts stay that run's, and so does the summary it left.
+resume of saved rollouts that stopped before its servers started or that the collector did not accept (its
+configuration differs from the saved run's, for example): the saved rollouts stay that run's, and so does the
+summary it left.
 
 Nothing here depends on the run having succeeded, and the writer never raises into the run: the CLI logs a
 summary it could not write and keeps the run's own outcome.

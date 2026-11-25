@@ -4340,16 +4340,12 @@ class TestCachedDeliverableReuse:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The multi-stage driver collects without ``run_from_config``, so it tells the command that dispatched it
-        itself, once it has decided to resume or replace the saved run; the command writes its resolved config then."""
-        from nemo_gym.rollouts.rollout_collection import _ON_RUN_ACCEPTED
-
+        itself, once it has decided to resume or replace the saved run, and names the rollouts file it decided for;
+        the command writes its resolved config then."""
         reported = []
-        token = _ON_RUN_ACCEPTED.set(lambda: reported.append(True))
-        try:
-            await self._run_two_stages(tmp_path, monkeypatch, cached=True)
-        finally:
-            _ON_RUN_ACCEPTED.reset(token)
-        assert reported == [True]
+        monkeypatch.setattr(multistage_module, "report_run_accepted", reported.append)
+        await self._run_two_stages(tmp_path, monkeypatch, cached=True)
+        assert reported == [tmp_path / "rollouts.jsonl"]
 
     async def test_a_later_stage_judges_the_cached_deliverable_through_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

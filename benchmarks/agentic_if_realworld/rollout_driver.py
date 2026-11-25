@@ -60,6 +60,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         await_model_call_capture_quiescence,
         merge_model_call_capture_into_record,
         model_call_capture_dirs_from_config,
+        report_run_accepted,
     )
     from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
     from nemo_gym.utils import materialized_path_for
@@ -194,6 +195,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         if not snapshot_path.exists():
             # JSON is valid YAML; reuse the atomic private receipt writer.
             write(snapshot_path, OmegaConf.to_container(snapshot, resolve=True))
+        # Under the lock, with the saved run's inventory matched: what sits under the output names is this command's.
+        report_run_accepted(output)
         # failures halt admission; deferred (receipted transport) failures wait for a resume while other tasks run.
         results, failures, deferred, validated_results = [], [], [], {}
         writing_failed = False

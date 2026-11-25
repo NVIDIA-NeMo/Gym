@@ -108,6 +108,7 @@ from nemo_gym.rollouts import (
     model_call_capture_dirs_from_config,
     observed_elapsed,
     record_resubmit_offset,
+    report_run_accepted,
 )
 from nemo_gym.rollouts import journal_path_for as rollout_attempts_path_for
 from nemo_gym.rollouts.rollout_collection import (
@@ -116,7 +117,6 @@ from nemo_gym.rollouts.rollout_collection import (
     _environment_server_for_agent,
     _environment_servers_by_agent,
     _record_rollout_outcome,
-    _report_run_accepted,
 )
 from nemo_gym.rollouts.rollout_records import prepare_append
 from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline
@@ -2968,7 +2968,7 @@ async def run_e2e_multistage(
         accepted_fingerprints=(legacy_fingerprint,),
     )
     # The saved run is resumed or set aside from here on, so what sits under the output names is this command's.
-    _report_run_accepted()
+    report_run_accepted(output_fpath)
 
     # Rewrite the materialized inputs from the journal on every plan and outcome: a stage's
     # references come from the previous stage's ELO, and its accepted row count from its outcome.
