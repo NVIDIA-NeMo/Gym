@@ -401,18 +401,84 @@ def test_a_run_records_its_service_declaration(tmp_path, monkeypatch, existing, 
         assert on_disk.services == [] and on_disk.gpus == []
 
 
-def test_a_run_with_a_custom_collection_driver_records_its_service_declaration_before_the_driver_runs():
-    import inspect
+_CUSTOM_DRIVER = """\
+from pathlib import Path
+
+SEEN = {}
+
+
+async def run(config, resolved_config):
+    path = Path(config.output_jsonl_fpath).with_name("rollouts_service_declaration.json")
+    SEEN["declaration"] = path.read_text() if path.exists() else None
+"""
+
+
+@pytest.mark.parametrize(
+    "existing, status, reason",
+    [
+        pytest.param(None, "unavailable", NOT_PLACED_REASON, id="fresh_output_dir"),
+        pytest.param(
+            _available("1111"),
+            "unavailable",
+            f"The service declaration in the run folder belongs to Slurm job 1111, not to this run (Slurm job {JOB_ID}).",
+            id="stale_slurm_declaration",
+        ),
+        pytest.param(_available(JOB_ID), "available", None, id="this_jobs_declaration"),
+    ],
+)
+def test_a_custom_collection_driver_finds_the_runs_service_declaration_when_it_starts(
+    tmp_path, monkeypatch, existing, status, reason
+):
+    """`gym eval run` with a `rollout_collection_driver` (GDPVal's multistage orchestrator, Agentic IF), which may
+    never call the built-in helper that records the declaration. Server startup is stubbed."""
+    import importlib
+
+    from omegaconf import OmegaConf
 
     from nemo_gym.cli import eval as eval_cli
 
-    # The e2e entry point starts the run's servers, so it cannot run here. A custom driver, such as GDPVal's
-    # multistage orchestrator, may never call the helper that records the declaration for the built-in path.
-    e2e = inspect.getsource(eval_cli.e2e_rollout_collection)
-    driver_branch = e2e[
-        e2e.index("if driver_path:\n        _remove_health_reports") : e2e.index("asyncio.run(driver_fn(")
-    ]
-    assert "record_service_declaration(output_fpath)" in driver_branch
+    output = tmp_path / "rollouts.jsonl"
+    prepared = tmp_path / "rollouts" / "preprocessed_datasets" / "benchmark.jsonl"
+    prepared.parent.mkdir(parents=True)
+    prepared.write_text('{"responses_create_params": {"input": "hi"}}\n')
+    if existing is not None:
+        (tmp_path / "rollouts_service_declaration.json").write_text(existing)
+    (tmp_path / "custom_driver_for_declaration.py").write_text(_CUSTOM_DRIVER)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    driver = importlib.import_module("custom_driver_for_declaration")
+    monkeypatch.setenv("SLURM_JOB_ID", JOB_ID)
+    config = {
+        "output_jsonl_fpath": str(output),
+        "split": "benchmark",
+        "reuse_existing_data_preparation": True,
+        "rollout_collection_driver": "custom_driver_for_declaration:run",
+        "disable_aggregation": True,
+        "require_complete": False,
+    }
+    monkeypatch.setattr(eval_cli, "get_global_config_dict", lambda: OmegaConf.create(config))
+    monkeypatch.setattr(eval_cli, "_validate_split_datasets_declared", lambda *args: None)
+
+    class Supervisor:
+        def start(self, *args):
+            pass
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(eval_cli, "ServerSupervisor", Supervisor)
+    monkeypatch.setattr(eval_cli, "_interrupt_on_sigterm", lambda: None)
+    monkeypatch.setattr(eval_cli, "_check_collection_completion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(eval_cli, "_finalize_live_exporters", lambda output: None)
+    monkeypatch.setattr("nemo_gym.artifacts.resolved_config.write_resolved_config", lambda *args, **kwargs: None)
+
+    eval_cli.e2e_rollout_collection()
+
+    seen = driver.SEEN["declaration"]
+    assert seen is not None, "the driver started before the run's declaration was recorded"
+    declaration = ServiceDeclaration.model_validate_json(seen)
+    assert (declaration.status, declaration.reason, declaration.slurm_job_id) == (status, reason, JOB_ID)
+    if existing is not None and status == "available":
+        assert seen == existing
 
 
 def test_an_unwritable_run_folder_does_not_fail_the_run(tmp_path, monkeypatch, caplog):
