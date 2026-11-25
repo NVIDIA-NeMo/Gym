@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from nemo_gym.agents import (
     AgentCloseSessionRequest,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     is_harness_termination_failure,
     parse_cleanup_receipt,
@@ -2111,6 +2112,81 @@ def test_runtime_dir_must_be_absolute(setup):
     agent, _ = setup
     with pytest.raises(ValidationError):
         OpenClawAgentConfig.model_validate({**agent.config.model_dump(), "sandbox_runtime_dir": "opt/openclaw"})
+
+
+_UPLOADED_RUNTIME = "/tmp/nemo-gym-openclaw-runtime-node-22.19.0-openclaw-2026.6.11"
+
+
+@pytest.mark.parametrize(
+    ("failure", "status"),
+    [
+        (None, 200),
+        # A failed host build or installation may pass on another attempt.
+        (RuntimeError("npm install exited with 1"), 500),
+        # A platform without a Node.js build fails the same way every time.
+        (AgentSeedRejectedError("musl build for x86_64 only"), 422),
+    ],
+    ids=["published", "failed", "unsupported_platform"],
+)
+def test_uploaded_runtime_is_published_then_checked_instead_of_installed_in_the_sandbox(setup, failure, status):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.sandbox_runtime_upload = True
+    run_exec = sandbox.run_exec
+
+    async def report_version(command, **kwargs):
+        if command.endswith(f"{_UPLOADED_RUNTIME}/openclaw/node_modules/openclaw/package.json"):
+            return SimpleNamespace(error_type=None, return_code=0, stdout="2026.6.11", stderr="")
+        return await run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = report_version
+
+    with patch(
+        "responses_api_agents.openclaw_agent.app.upload_openclaw_runtime", AsyncMock(side_effect=failure)
+    ) as upload:
+        _, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+
+    upload.assert_awaited_once_with(
+        sandbox, runtime_dir=_UPLOADED_RUNTIME, openclaw_version="2026.6.11", timeout_s=600
+    )
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    # Nothing is downloaded inside the sandbox.
+    assert not any("install_openclaw_runtime.sh" in command for command in commands)
+    assert not any(path.endswith("/install_openclaw_runtime.sh") for path in sandbox.files)
+    assert created.status_code == status, created.text
+    if failure is None:
+        # The uploaded runtime passes the same check as a preinstalled one before the session uses it.
+        assert _runtime_check(commands).startswith(f"{_UPLOADED_RUNTIME}/node/bin/node -e ")
+    else:
+        assert not any(command.endswith("/openclaw/node_modules/openclaw/package.json") for command in commands)
+        sandbox.stop.assert_awaited_once()
+
+
+def test_runtime_is_installed_inside_the_sandbox_unless_upload_is_configured(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    assert agent.config.sandbox_runtime_upload is False
+
+    with patch("responses_api_agents.openclaw_agent.app.upload_openclaw_runtime", AsyncMock()) as upload:
+        _, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+
+    assert created.status_code == 200, created.text
+    upload.assert_not_awaited()
+    (install,) = [
+        call.args[0] for call in sandbox.exec.await_args_list if "install_openclaw_runtime.sh" in call.args[0]
+    ]
+    assert install.endswith("/install_openclaw_runtime.sh /tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11 2026.6.11")
+    assert any(path.endswith("/install_openclaw_runtime.sh") for path in sandbox.files)
+
+
+def test_runtime_upload_cannot_be_combined_with_a_preinstalled_runtime(setup):
+    agent, _ = setup
+    with pytest.raises(ValidationError, match="set only one of them"):
+        OpenClawAgentConfig.model_validate(
+            {**agent.config.model_dump(), "sandbox_runtime_upload": True, "sandbox_runtime_dir": "/opt/openclaw"}
+        )
 
 
 def test_owned_stop_failure_blocks_close_until_retry(setup):
