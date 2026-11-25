@@ -287,7 +287,8 @@ def test_the_judge_job_runs_the_reverify_command_on_one_cpu_node_without_any_ser
     assert job.services == {} and job.driver.policy_model is None
     assert list(job.driver.benchmarks) == ["bench"]
     bench = job.driver.benchmarks["bench"]
-    assert bench.command == command and bench.run == {} and bench.prepare == {} and bench.resume_config is None
+    assert bench.command == command and bench.run == {} and bench.resume_config is None
+    assert bench.prepare == config.driver.benchmarks["bench"].prepare
     # The run's judge and verifier settings travel with the driver: its env, mounts, container and pinned install.
     assert job.driver.env == config.driver.env and job.driver.gym_install == config.driver.gym_install
     assert job.driver.container == config.driver.container

@@ -263,8 +263,9 @@ class JudgeJobs:
                     *flatten_run_args(run),
                 ]
             )
-            # No preparation, fresh model run, reset prologue, or afternotok successor.
-            bench = original.model_copy(update={"prepare": {}, "run": {}, "command": command, "resumable": False})
+            # The run's own preparation, since a server can read a prepared file at start; no fresh model run, reset
+            # prologue, or afternotok successor.
+            bench = original.model_copy(update={"run": {}, "command": command, "resumable": False})
             bounded_compute = compute.model_copy(
                 update={"walltime": f"{remaining // 3600:02}:{remaining % 3600 // 60:02}:{remaining % 60:02}"}
             )

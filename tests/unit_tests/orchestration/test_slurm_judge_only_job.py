@@ -45,7 +45,12 @@ from tests.unit_tests.orchestration.test_eval_resubmit import (
 
 
 def _model_served_run(
-    tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str | None = None, run: dict | None = None
+    tmp_path: Path,
+    *,
+    cpu_pool: bool = False,
+    judge_pool: str | None = None,
+    run: dict | None = None,
+    prepare: dict | None = None,
 ) -> Path:
     """A submitted run with a vLLM policy on a GPU pool, whose managed Store holds one scored row and one result
     masked by a verify call lost in transport, with its chain accounting complete. With ``judge_pool`` it also serves
@@ -83,6 +88,7 @@ def _model_served_run(
                 "gym_install": {"ref": "a" * 40},
                 "benchmarks": {
                     "bench": {
+                        "prepare": prepare or {},
                         "run": {"config_paths": ["fixture.yaml"], **(run or {})},
                         "resumable": {"max_retries": 3, "max_walltime": "16:00:00"},
                     }
@@ -507,6 +513,16 @@ def test_the_judge_only_job_does_not_inherit_the_collection_limit(tmp_path, judg
 
     assert out.dispatched == "reverify", out.decision.reason
     assert _queued_reverify_config(_queued_script(job_dir)).limit is None
+
+
+def test_the_judge_only_job_prepares_the_benchmark_data_before_it_reverifies(tmp_path, judge_slurm_bin) -> None:
+    # A resources server can read a prepared file when it starts, so the job prepares as the run did.
+    job_dir = _model_served_run(tmp_path, prepare={"config_paths": ["fixture.yaml"]})
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.dispatched == "reverify", out.decision.reason
+    script = _queued_script(job_dir)
+    assert script.index("gym eval prepare") < script.index("gym eval reverify")
 
 
 @pytest.mark.parametrize("render", ["judge-only job", "judge-only job on a saved CPU pool", "the run's own job"])
