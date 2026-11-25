@@ -33,6 +33,7 @@ async def launch(monkeypatch, instance, prompt="Fix the code"):
         runtime="/runtime",
         session=SimpleNamespace(
             session_dir="/tmp/session",
+            root_dir="/tmp/session",
             workdir="/app",
             cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
             artifacts=None,
@@ -76,7 +77,9 @@ def run_runner(tmp_path, prompt=None):
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir=str(tmp_path), sandbox=SimpleNamespace(upload=upload)),
+        session=SimpleNamespace(
+            session_dir=str(tmp_path), root_dir=str(tmp_path), sandbox=SimpleNamespace(upload=upload)
+        ),
     )
     payload = {
         "command": [sys.executable, str(child)],

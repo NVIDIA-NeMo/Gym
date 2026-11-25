@@ -336,14 +336,25 @@ Sandbox requests accept one user text prompt (a string or a single user message)
 optionally preceded by one system message. Assistant/developer messages, multiple
 user turns, and request `instructions` are rejected with HTTP 422 so history or
 instructions cannot be silently dropped. Use the leading system message or
-`system_prompt` for instructions. One session runs one activation and does not
-resume a previous Claude conversation. Local prompt conversion is unchanged.
+`system_prompt` for instructions. A session runs one activation unless its seed opts into
+multi-turn continuation (see below). Local prompt conversion is unchanged.
 
 Sandbox requests may set `metadata.agent_timeout_sec` to a positive number of
 seconds, encoded as a string. This bounds the activation's model and tool work,
 capped by the configured `timeout`; missing or invalid values use that ceiling.
 Other metadata keys are rejected with HTTP 422. Setup and cleanup keep their
 separate limits.
+
+### Multi-turn continuation
+
+A seed with `continuation: {mode: resume_harness_session}` keeps one Claude Code session across activations, as Harbor's `turn_sessions: continue` needs for multi-step tasks. Send each input on the same session with `x-ng-agent-activation: 1`, `2` and so on.
+
+- The first activation starts a Claude Code session. Each later one runs `claude -p --resume <session id>`, with the id from the previous run's stream-json events.
+- The saved session stays in the sandbox, in `CLAUDE_CONFIG_DIR` under the session directory. Each activation gets its own supervisor directory beside it.
+- Every activation passes the same settings, MCP config and model endpoint. The system prompt is the first activation's; a later activation that sends a different one gets HTTP 422.
+- `metadata.agent_timeout_sec` bounds each activation, including its preparation.
+- Each reply carries that activation's output alone, with `activation_id` and `harness_session_id` in its metadata.
+- Close returns one root invocation per activation (`<agent session>:activation-<N>:<Claude session>`, with `activation_id` and `harness_session_id`) and the cumulative trajectory, one turn per activation.
 
 The shared `SandboxSession` supervisor stops the harness before reading its
 dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,

@@ -394,3 +394,23 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
             break
 
     return user_message, system_message
+
+
+def stream_session_id(stdout: str) -> str | None:
+    """The Claude Code session id that ``claude -p --output-format stream-json`` reported, or None.
+
+    The ``system`` ``init`` event names the session when the CLI starts and the ``result`` event when it ends;
+    ``--resume`` passes it to a later invocation.
+    """
+    session_id = None
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        is_init = event.get("type") == "system" and event.get("subtype") == "init"
+        if (is_init or event.get("type") == "result") and isinstance(event.get("session_id"), str):
+            session_id = event["session_id"] or session_id
+    return session_id

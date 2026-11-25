@@ -38,6 +38,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentContinuationCapabilities,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
@@ -86,7 +87,12 @@ from responses_api_agents.claude_code_agent.observability import (
     extract_claude_code_observations,
     read_transcripts,
 )
-from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
+from responses_api_agents.claude_code_agent.parsing import (
+    _extract_instruction,
+    _invocation_outcome,
+    parse_stream_json,
+    stream_session_id,
+)
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
     ClaudeCodeSandboxSession,
@@ -222,6 +228,14 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
         return value
 
 
+def _final_text(response: NeMoGymResponse) -> str | None:
+    """The text of the response's last assistant message, or None."""
+    for item in reversed(response.output):
+        if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
+            return "".join(getattr(part, "text", "") for part in item.content)
+    return None
+
+
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
@@ -351,6 +365,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_active: bool = False,
+        *,
+        resume_session_id: str | None = None,
     ) -> list[str]:
         """Construct the ``claude`` CLI argv from config.
 
@@ -400,6 +416,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
         if self.config.max_turns is not None:
             cmd += ["--max-turns", str(self.config.max_turns)]
+        if resume_session_id is not None:
+            # Continue the saved session: its conversation, with the instruction as the next user message.
+            cmd += ["--resume", resume_session_id]
         # Without an instruction argument, `claude -p` reads the instruction from stdin.
         if instruction is not None:
             cmd += ["--", instruction]
@@ -839,7 +858,74 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_activation_interrupted")],
             ),
+            # A continuation session's turns, every activation's in order; one activation keeps its reply alone.
+            trajectory=state.trajectory if state.is_continuation else None,
         )
+
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
+        return AgentContinuationCapabilities(
+            observations=["trajectory", "timing", "harness_tool_calls", "reasoning", "compaction"]
+        )
+
+    def _continuation_close_timeout(self) -> float:
+        return self.config.session_close_timeout_seconds
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
+        assert isinstance(state, ClaudeCodeSandboxSession)
+        self._validate_sandbox_request(body)
+        _, input_system = self._activation_input(body)
+        # Claude Code takes the system prompt on each invocation, so every activation passes the first one's.
+        if state.instructions_set and input_system is not None and input_system != state.input_system:
+            raise HTTPException(422, "Claude Code continuation cannot replace the session's system prompt")
+
+    @staticmethod
+    def _activation_input(body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str | None]:
+        """The activation's user prompt and its own leading system message, if it has one."""
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        return _extract_instruction(items)
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
+    ) -> NeMoGymResponse:
+        """Resume the saved Claude Code session with the activation's input, under one time budget."""
+        assert isinstance(state, ClaudeCodeSandboxSession)
+        prompt, input_system = self._activation_input(body)
+        if not state.instructions_set:
+            state.input_system, state.instructions_set = input_system, True
+        system = "\n\n".join(part for part in (self.config.system_prompt, state.input_system) if part) or None
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        # asyncio.timeout_at reads the event loop's clock, whose origin can differ from time.monotonic (uvloop).
+        clock = asyncio.get_running_loop().time
+        deadline = clock() + timeout
+        try:
+            async with asyncio.timeout_at(deadline):
+                await state.prepare_activation(
+                    activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
+                )
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise TimeoutError("Claude activation deadline expired before launch")
+        except BaseException as error:
+            # Nothing launched: record the activation's outcome, so close still reports one invocation for it.
+            timed_out = isinstance(error, TimeoutError)
+            cancelled = isinstance(error, asyncio.CancelledError)
+            state.activation_id = activation_id
+            state.observations = state.record_activation(
+                AgentObservationBundle(
+                    source="claude_code", gaps=[ObservationGap(code="agent_activation_interrupted")]
+                ),
+                root_sessions=set(),
+                status="incomplete" if timed_out or cancelled else "failed",
+                error_type="timeout" if timed_out else "cancelled" if cancelled else "sandbox_error",
+                question=prompt,
+                answer=None,
+            )
+            raise
+        return await self._sandbox_response(state, body, prompt=prompt, system=system, timeout=remaining)
 
     def _validate_sandbox_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
         supported = {"input", "model"}
@@ -876,12 +962,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str | None,
+        timeout: float | None = None,
     ) -> NeMoGymResponse:
         directory = state.session.session_dir
         base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
         model = self.config.model if base_url else self.config.model.split("/")[-1]
+        # A continuation activation resumes the session an earlier activation saved, if one did.
+        resume = state.harness_session_id if state.is_continuation else None
         env = {
-            "CLAUDE_CONFIG_DIR": directory + "/config",
+            "CLAUDE_CONFIG_DIR": state.config_dir,
             "IS_SANDBOX": "1",
             "ANTHROPIC_API_KEY": "gym" if self.config.model_server else self.config.anthropic_api_key or "EMPTY",
             "ANTHROPIC_MODEL": model,
@@ -908,7 +997,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 skills_path = self._configured_skills_path()
                 stdin = self.config.instruction_on_stdin
                 command = self._build_command(
-                    model, None if stdin else prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model,
+                    None if stdin else prompt,
+                    system,
+                    mcp_config=mcp_config,
+                    skills_active=bool(skills_path),
+                    resume_session_id=resume,
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
@@ -921,7 +1015,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "skills_path": skills_path,
                         **({"prompt": prompt} if stdin else {}),
                     },
-                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                    timeout=timeout
+                    if timeout is not None
+                    else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as error:
@@ -929,9 +1025,22 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             artifacts = state.session.artifacts
         items, run_metadata = ([], {})
         transcripts = None
+        root_sessions: set[str] = set()
         if artifacts is not None:
             # Read once, for the token usage and the observations.
             transcripts = await asyncio.to_thread(read_artifact_transcripts, artifacts)
+            if state.is_continuation:
+                state.harness_session_id = stream_session_id(artifacts.events) or state.harness_session_id
+                if transcripts is not None:
+                    # The saved transcript holds every activation's records; this one reports only its own.
+                    transcripts = state.new_transcript_records(transcripts)
+                    root_sessions = {
+                        record["sessionId"]
+                        for record in transcripts.records
+                        if isinstance(record.get("sessionId"), str) and not record.get("agentId")
+                    }
+                if state.harness_session_id is not None:
+                    root_sessions.add(state.harness_session_id)
             items, run_metadata = await asyncio.to_thread(
                 parse_stream_json,
                 artifacts.events,
@@ -986,6 +1095,21 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     error_type=reason,
                 )
             )
+        if state.is_continuation:
+            # Close returns the session's evidence; the reply carries this activation's output alone.
+            state.observations = state.record_activation(
+                state.observations,
+                root_sessions=root_sessions,
+                status=status,
+                error_type=reason,
+                question=prompt,
+                answer=_final_text(response),
+            )
+            response.metadata = {
+                **(response.metadata or {}),
+                "activation_id": str(state.activation_id),
+                **({"harness_session_id": state.harness_session_id} if state.harness_session_id else {}),
+            }
         if failure is not None:
             raise failure
         return response
@@ -999,6 +1123,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, ClaudeCodeSandboxSession)
+            if state.is_continuation:
+                return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise AgentSessionConflictError("Claude activation does not match the seeded session and rollout")
             if state.session.closing:

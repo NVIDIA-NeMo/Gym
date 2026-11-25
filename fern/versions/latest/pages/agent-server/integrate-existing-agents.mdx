@@ -317,7 +317,7 @@ The profile runs one trial per task. The leaderboard's protocol is three trials 
 
 ## Resuming harness sessions
 
-OpenCode can resume its saved session across multiple activations in either
+OpenCode and Claude Code can resume their saved session across multiple activations in either
 an owned or borrowed sandbox. Opt in during `/v1/agent_sessions` seed with
 `continuation: {mode: resume_harness_session}`. Existing adapters reject continuation
 requirements they cannot satisfy before preparing the sandbox.
