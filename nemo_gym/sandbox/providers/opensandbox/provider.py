@@ -192,6 +192,11 @@ def _lifecycle_oom_evidence(info: Any, *, sandbox_id: str) -> _SandboxDeathNotic
     )
 
 
+# The lifecycle report of a sandbox whose container exited by itself, as a failed create quotes it.
+_CONTAINER_EXITED = re.compile(
+    r"primary reason=ContainerFailed; .* exited with code (?P<exit>\d{1,3}) \((?!OOMKilled)"
+)
+
 # execd reports os/exec launch errors through CommandExecError, before a child runs.
 # Older servers omit the credential hint; both shapes must retain the fork/exec prefix.
 # https://github.com/opensandbox-group/OpenSandbox/blob/c9df3df530464b9ae2a7580856f6b9bd52b507cc/components/execd/pkg/runtime/command.go#L265-L277
@@ -247,6 +252,17 @@ def _inspect_oom_evidence(inspect: str) -> str | None:
 # Per-attempt metadata key (under the attribution prefix): the only handle on a sandbox whose create
 # request never returned, so a timed-out attempt can find and delete what it started.
 CREATE_ATTEMPT_KEY = "create-attempt"
+# Metadata key (under the attribution prefix) that marks a sidecar's sandbox with the sidecar's name, so cleanup and
+# dashboards can tell it from a task sandbox.
+SIDECAR_KEY = "sidecar"
+# The ports of a sandbox's exec daemon and egress API. A sidecar never offers them to its main sandbox.
+CONTROL_PORTS = frozenset({44772, 18080})
+# The management API's error code when nothing listens on the sandbox port a request is proxied to.
+BACKEND_CONNECTION_FAILED_CODE = "BACKEND_CONNECTION_FAILED"
+# How often a sidecar's service ports are asked again while its service starts.
+SIDECAR_PORT_POLL_INTERVAL_S = 1.0
+# How long a sidecar's service may take to listen when the spec names no ``ready_timeout_s``.
+DEFAULT_SIDECAR_READY_TIMEOUT_S = 120.0
 PENDING_SANDBOX_STATES = {"PENDING"}
 # The limits the OpenSandbox SDK sends when a create declares none; requests are clamped against them too.
 SDK_DEFAULT_RESOURCE_LIMITS = SandboxResources.from_mapping({"cpu": 1, "memory_mib": 2048})
@@ -1162,9 +1178,14 @@ class OpenSandboxProviderOptions:
 
 @dataclass
 class OpenSandboxNetworkingConfig:
-    """Operator assertion that direct sandbox IPs are mutually reachable."""
+    """Operator assertions about the deployment's network: that direct sandbox IPs are mutually reachable
+    (``enabled``), and that its egress layer applies the ``ports`` of a network policy rule
+    (``rule_ports_enforced``). Without the second, an allow rule for a sidecar would open every port of it, its exec
+    daemon included, so a sandbox with a network policy cannot be given a sidecar it may reach.
+    """
 
     enabled: bool = False
+    rule_ports_enforced: bool = False
     loopback_forwarding: bool = False
     python_executable: str = "python3"
     setup_command: str | None = None
@@ -2717,8 +2738,12 @@ class OpenSandboxProvider:
         result = (await asyncio.gather(task, return_exceptions=True))[0]
         return result if isinstance(result, Exception) else None
 
-    async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
-        """Create a sandbox through ``opensandbox.Sandbox.create``."""
+    async def _create_once(self, spec: SandboxSpec, *, sidecar: bool = False) -> SandboxHandle:
+        """Create a sandbox through ``opensandbox.Sandbox.create``.
+
+        A ``sidecar`` gets none of the deployment's setup (``setup.env``, ``setup.commands``, the create probe):
+        that is written for task images and runs a shell, which a service image may lack.
+        """
         # A lease caps the spec's TTL; the renewals then keep the sandbox alive up to the spec's lifetime.
         ttl_s = spec.ttl_s
         if self._create.renew_ttl_s is not None:
@@ -2737,7 +2762,7 @@ class OpenSandboxProvider:
         metadata = {**spec.metadata, attempt_key: uuid.uuid4().hex}
 
         kwargs: dict[str, Any] = {
-            "env": {**self._setup.env, **(spec.env or {})} or None,
+            "env": {**({} if sidecar else self._setup.env), **(spec.env or {})} or None,
             "metadata": metadata,
             "resource": _resource_map(spec.resources),
             "extensions": self._resolve_extensions(options.extensions),
@@ -2835,6 +2860,16 @@ class OpenSandboxProvider:
                 create.cancel()
             raise
         except Exception as e:
+            if sidecar and (exited := _CONTAINER_EXITED.search(str(e))):
+                # The sidecar's image or entrypoint is at fault, for example an image without the shell that the
+                # keep-alive entrypoint or the deployment's own bootstrap runs. Another attempt would end the same.
+                raise opensandbox_failure(
+                    operation="create sidecar",
+                    failure_kind=PROVIDER_SETUP_FAILED,
+                    cause=e,
+                    reason=f"The sidecar's container exited at start with code {exited['exit']}: image "
+                    f"{spec.image!r} cannot run its entrypoint {kwargs.get('entrypoint')!r} on this deployment",
+                ) from e
             if sandbox is not None or not _is_request_timeout(e):
                 raise
             # The SDK's own request timeout fired before the attempt budget: the same open request, the same
@@ -2858,9 +2893,10 @@ class OpenSandboxProvider:
         try:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
-            await self._verify_created_handle(handle)
-            await self._run_setup_commands(handle)
-            await self._create_workdir(handle, spec.workdir)
+            if not sidecar:
+                await self._verify_created_handle(handle)
+                await self._run_setup_commands(handle)
+                await self._create_workdir(handle, spec.workdir)
         except BaseException:
             # Also on cancellation (a caller's timeout, shutdown): otherwise the pod lives to its TTL.
             # The shield lets the cleanup finish even if this task is cancelled again meanwhile.
@@ -3031,10 +3067,7 @@ class OpenSandboxProvider:
             )
         return found
 
-    async def _create_with_retries(
-        self,
-        spec: SandboxSpec,
-    ) -> SandboxHandle:
+    async def _create_with_retries(self, spec: SandboxSpec, *, sidecar: bool = False) -> SandboxHandle:
         AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         backoff = wait_random_exponential(multiplier=self._create.retry_delay_s, max=self._create.retry_max_delay_s)
         retry_policy = AsyncRetrying(
@@ -3053,7 +3086,7 @@ class OpenSandboxProvider:
         async for attempt in retry_policy:
             with attempt:
                 try:
-                    return await self._create_once(spec)
+                    return await (self._create_once(spec, sidecar=True) if sidecar else self._create_once(spec))
                 except (ValueError, NotImplementedError, ImportError):
                     # Invalid local configuration is rejected before a provider operation.
                     raise
@@ -3081,34 +3114,64 @@ class OpenSandboxProvider:
             return await self._create_with_retries(_normalize_spec(spec))
         # A sidecar is a sandbox of its own, from its own image. One placement group keeps it on the main sandbox's
         # cell, where the two reach each other by IP. It gets its own provider options, none of the main sandbox's
-        # (mounts, a snapshot), and the main sandbox's egress policy unless it names its own.
+        # (mounts, a snapshot).
         group = spec.metadata.get(PLACEMENT_GROUP_KEY) or f"sidecars-{uuid.uuid4().hex}"
         spec = replace(spec, metadata={**spec.metadata, PLACEMENT_GROUP_KEY: group})
         policy = spec.provider_options.get("network_policy")
-        # A sidecar's misspelled option or name stops the create before any sandbox starts.
+        # A sidecar that cannot be created as asked stops the create before any sandbox starts.
         for sidecar in spec.sidecars:
             OpenSandboxProviderOptions.from_mapping(sidecar.provider_options)
-            if self._networking.enabled:
-                _check_hostname(sidecar.name)
+            # The name is the sidecar's label value, and its hostname in the main sandbox.
+            _check_hostname(sidecar.name)
+            if len(sidecar.name) > 63:
+                raise ValueError(f"Sandbox sidecar name {sidecar.name!r} is longer than 63 characters")
+            if not sidecar.ports:
+                continue
+            if not self._networking.enabled:
+                raise ValueError(
+                    f"Sidecar {sidecar.name!r} names ports the sandbox may reach, which needs networking.enabled=true"
+                )
+            if control := sorted(CONTROL_PORTS.intersection(sidecar.ports)):
+                raise ValueError(f"Sidecar {sidecar.name!r} cannot offer the sandbox control ports {control}")
+            if policy is not None and not self._networking.rule_ports_enforced:
+                raise ValueError(
+                    f"Sidecar {sidecar.name!r} names ports a sandbox with a network policy may reach. An allow rule "
+                    "limited to those ports needs an egress layer that applies a rule's ports; set "
+                    "networking.rule_ports_enforced=true where the deployment does. Without it the rule would open "
+                    "every port of the sidecar, its exec daemon included."
+                )
+        # A sidecar is no task sandbox: it carries the labels that attribute and place it, not what grants the main
+        # sandbox shared storage, and one that names it.
+        sidecar_metadata = {
+            key: value for key, value in spec.metadata.items() if key not in self._shared_storage.metadata
+        }
         sidecars: dict[str, SandboxHandle] = {}
         handle: SandboxHandle | None = None
         try:
             for sidecar in spec.sidecars:
                 options = dict(sidecar.provider_options)
-                if options.get("network_policy") is None:
-                    # An empty policy still denies by default, so it is passed on like any other; a sidecar never
-                    # gets less restricted egress than the main sandbox unless it names its own policy.
-                    options["network_policy"] = policy
+                if options.get("network_policy") is None and policy is not None:
+                    # Each container reaches only what it was granted: the main sandbox's grants are not the
+                    # sidecar's, so a sidecar that names no policy reaches nothing.
+                    options["network_policy"] = {"defaultAction": "deny", "egress": []}
                 sidecar_spec = SandboxSpec(
                     image=sidecar.image,
                     env=sidecar.env,
                     resources=sidecar.resources,
+                    entrypoint=sidecar.entrypoint,
                     ttl_s=spec.ttl_s,
                     ready_timeout_s=spec.ready_timeout_s,
-                    metadata=spec.metadata,
+                    metadata={**sidecar_metadata, f"{self._attribution.key_prefix}{SIDECAR_KEY}": sidecar.name},
                     provider_options=options,
                 )
-                sidecars[sidecar.name] = await self._create_with_retries(_normalize_spec(sidecar_spec))
+                sidecars[sidecar.name] = await self._create_with_retries(_normalize_spec(sidecar_spec), sidecar=True)
+            ready_timeout_s = spec.ready_timeout_s or DEFAULT_SIDECAR_READY_TIMEOUT_S
+            await asyncio.gather(
+                *(
+                    self._wait_for_sidecar_ports(sidecar.name, sidecars[sidecar.name], sidecar.ports, ready_timeout_s)
+                    for sidecar in spec.sidecars
+                )
+            )
             addresses: dict[str, str] = {}
             if self._networking.enabled:
                 for name, sidecar_handle in sidecars.items():
@@ -3125,12 +3188,19 @@ class OpenSandboxProvider:
                             reason=f"Sidecar {name!r} has no address its sandbox can reach: {error}",
                         ) from error
             if policy is not None and addresses:
-                # The sidecars start first, so the main sandbox is created with their addresses in its policy.
-                # These rules lead, so no rule of the task's own denies a sidecar.
-                allowed = [{"action": "allow", "target": address} for address in addresses.values()]
+                # The sidecars start first, so the main sandbox is created with their addresses in its policy:
+                # one rule per sidecar it may reach, for that sidecar's ports only. These rules lead, so no rule of
+                # the task's own denies them.
+                allowed = [
+                    {"action": "allow", "target": addresses[sidecar.name], "ports": list(sidecar.ports)}
+                    for sidecar in spec.sidecars
+                    if sidecar.ports
+                ]
                 policy = {**policy, "egress": [*allowed, *(policy.get("egress") or ())]}
                 spec = replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
             handle = await self._create_with_retries(_normalize_spec(spec))
+            for sidecar_handle in sidecars.values():
+                await self._restart_sidecar_ttl(sidecar_handle, spec)
             if addresses:
                 # The main sandbox resolves each sidecar by its name.
                 await self.set_hosts(handle, addresses)
@@ -3141,6 +3211,64 @@ class OpenSandboxProvider:
             raise
         self._sidecars[handle.sandbox_id] = sidecars
         return handle
+
+    async def _wait_for_sidecar_ports(
+        self, name: str, handle: SandboxHandle, ports: Sequence[int], timeout_s: float
+    ) -> None:
+        """Wait until the sidecar's service answers on each of ``ports``, or fail the create as a setup failure.
+
+        Each port is asked over HTTP through the sidecar's own endpoint, the way the SDK reaches its exec daemon, so
+        nothing runs in the sidecar's image. Any answer of the service counts, whatever its status.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        waiting = list(ports)
+        while waiting:
+            waiting = [port for port in waiting if not await self._sidecar_port_answers(handle, port)]
+            if not waiting:
+                return
+            if loop.time() >= deadline:
+                raise opensandbox_failure(
+                    operation="sidecar ready",
+                    sandbox_id=handle.sandbox_id,
+                    failure_kind=PROVIDER_SETUP_FAILED,
+                    reason=f"Sidecar {name!r} did not answer on port(s) {waiting} within {timeout_s:g}s",
+                )
+            await asyncio.sleep(SIDECAR_PORT_POLL_INTERVAL_S)
+
+    async def _sidecar_port_answers(self, handle: SandboxHandle, port: int) -> bool:
+        """Whether a service in the sandbox answers an HTTP request on ``port``."""
+        from opensandbox.adapters.factory import AdapterFactory
+        from opensandbox.api.execd.api.health import ping
+
+        try:
+            endpoint = await handle.raw.get_endpoint(port)
+            # The SDK's health client for the port carries the connection's transport, headers and timeouts.
+            health = AdapterFactory(self._connection_config().with_transport_if_missing()).create_health_service(
+                endpoint
+            )
+            response = await ping.asyncio_detailed(client=await health._get_client())
+        except Exception as error:
+            LOGGER.debug("OpenSandbox sidecar %r does not answer on port %d yet: %r", handle.sandbox_id, port, error)
+            return False
+        return BACKEND_CONNECTION_FAILED_CODE.encode() not in response.content
+
+    async def _restart_sidecar_ttl(self, sidecar: SandboxHandle, spec: SandboxSpec) -> None:
+        """Start a sidecar's TTL again once its main sandbox exists, so the sidecar does not end before it."""
+        if spec.ttl_s is None:
+            return
+        lease_s = self._create.renew_ttl_s
+        ttl_s = spec.ttl_s if lease_s is None else min(spec.ttl_s, lease_s)
+        await self._await_sdk_operation(
+            lambda: sidecar.raw.renew(timedelta(seconds=ttl_s)),
+            operation="renew",
+            sandbox_id=sidecar.sandbox_id,
+            timeout_s=self._create.renew_timeout_s or self._connection.request_timeout_s or 60,
+        )
+        if lease_s is not None and spec.ttl_s > lease_s:
+            # The lease's renewals count the spec's lifetime from now on, as the main sandbox's do from its create.
+            await self._stop_renewal(sidecar.sandbox_id)
+            self._start_renewal(sidecar, lease_s, lifetime_s=spec.ttl_s, created_at=asyncio.get_running_loop().time())
 
     async def resource_sample(self, handle: SandboxHandle) -> dict[str, str | int | float | bool]:
         """Read execd's existing snapshot; preserve its timestamp and measurement names."""
@@ -3263,6 +3391,19 @@ class OpenSandboxProvider:
         )
         effective_retries = self._command_retry_count() if retries is None else retries
 
+        # An exception from the caller's callback is the caller's, not the provider's. It ends the forwarding, and is
+        # raised unchanged once the command has ended; the polled path interrupts the command first.
+        callback_errors: list[Exception] = []
+
+        def forward(text: str) -> bool:
+            """Give ``text`` to the caller's callback; whether the callback still takes output."""
+            if not callback_errors:
+                try:
+                    on_stdout(text)
+                except Exception as error:
+                    callback_errors.append(error)
+            return not callback_errors
+
         async def _dispatch() -> SandboxExecResult:
             if self._operations.background_exec:
                 return await self._exec_background(
@@ -3272,7 +3413,7 @@ class OpenSandboxProvider:
                     sdk_timeout_s=sdk_timeout_s,
                     total_timeout_s=timeout_s,
                     retries=effective_retries,
-                    on_stdout=on_stdout,
+                    on_stdout=forward if on_stdout is not None else None,
                 )
 
             run_kwargs: dict[str, Any] = {"opts": RunCommandOpts(**opts_kwargs)}
@@ -3282,7 +3423,7 @@ class OpenSandboxProvider:
                 async def forward_stdout(message: Any) -> None:
                     # Newer execd keeps each line's ending in the event; older execd strips it.
                     text = message.text
-                    on_stdout(text if text.endswith(("\n", "\r")) else text + "\n")
+                    forward(text if text.endswith(("\n", "\r")) else text + "\n")
 
                 run_kwargs["handlers"] = ExecutionHandlers(on_stdout=forward_stdout)
             execution = await self._submit_command(
@@ -3313,28 +3454,29 @@ class OpenSandboxProvider:
         operation_deadline: float | None = None
         try:
             if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
-                return await _dispatch()
-            hard_cap_s = 2.0 * float(sdk_timeout_s) + self._operations.exec_hard_cap_slack_s
-            # asyncio.timeout instead of wait_for: since Python 3.11
-            # asyncio.TimeoutError IS builtin TimeoutError, so a wait_for-based
-            # cap would also catch timeouts raised INSIDE the dispatch (e.g. an
-            # SDK request timeout) and relabel them as a hard-cap trip.
-            hard_cap = asyncio.timeout(hard_cap_s)
-            operation_deadline = hard_cap.when()
-            try:
-                async with hard_cap:
-                    return await _dispatch()
-            except TimeoutError as e:
-                if not hard_cap.expired():
-                    raise
-                raise opensandbox_failure(
-                    operation="exec",
-                    sandbox_id=handle.sandbox_id,
-                    cause=e,
-                    failure_kind=PROVIDER_IO_TIMEOUT,
-                    reason=f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command outcome is unknown "
-                    f"(sandbox_id={handle.sandbox_id!r})",
-                ) from e
+                result = await _dispatch()
+            else:
+                hard_cap_s = 2.0 * float(sdk_timeout_s) + self._operations.exec_hard_cap_slack_s
+                # asyncio.timeout instead of wait_for: since Python 3.11
+                # asyncio.TimeoutError IS builtin TimeoutError, so a wait_for-based
+                # cap would also catch timeouts raised INSIDE the dispatch (e.g. an
+                # SDK request timeout) and relabel them as a hard-cap trip.
+                hard_cap = asyncio.timeout(hard_cap_s)
+                operation_deadline = hard_cap.when()
+                try:
+                    async with hard_cap:
+                        result = await _dispatch()
+                except TimeoutError as e:
+                    if not hard_cap.expired():
+                        raise
+                    raise opensandbox_failure(
+                        operation="exec",
+                        sandbox_id=handle.sandbox_id,
+                        cause=e,
+                        failure_kind=PROVIDER_IO_TIMEOUT,
+                        reason=f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command outcome is "
+                        f"unknown (sandbox_id={handle.sandbox_id!r})",
+                    ) from e
         except Exception as error:
             if isinstance(error, NgFailureEvent) and (
                 error.operation == "command status"
@@ -3361,6 +3503,9 @@ class OpenSandboxProvider:
                 sandbox_id=handle.sandbox_id,
                 cause=error,
             ) from error
+        if callback_errors:
+            raise callback_errors[0]
+        return result
 
     async def _sandbox_death_evidence(
         self, handle: SandboxHandle, *, deadline: float, poll: bool = True
@@ -3479,7 +3624,7 @@ class OpenSandboxProvider:
         sdk_timeout_s: float | None,
         total_timeout_s: int | float | None,
         retries: int,
-        on_stdout: Callable[[str], None] | None = None,
+        on_stdout: Callable[[str], bool] | None = None,
     ) -> SandboxExecResult:
         """Register this command's poll for checkpoint polling scopes, and release it on every exit."""
         poll = _BackgroundCommandPoll(parked=handle.sandbox_id in self._parked_poll_scopes)
@@ -3511,14 +3656,15 @@ class OpenSandboxProvider:
         total_timeout_s: int | float | None,
         retries: int,
         poll: _BackgroundCommandPoll,
-        on_stdout: Callable[[str], None] | None = None,
+        on_stdout: Callable[[str], bool] | None = None,
     ) -> SandboxExecResult:
         """Run a command as a background execution polled via short requests.
 
         The logs endpoint returns one combined stream, so unlike the foreground
         path ``stdout`` carries both streams and ``stderr`` is set only when the
         sandbox itself reports an error. ``on_stdout`` receives that combined
-        output as each poll finds more of it.
+        output as each poll finds more of it, and returns whether it takes more:
+        once it does not, the command is interrupted.
 
         Gym enforces ``total_timeout_s`` itself: once its own deadline passes
         while the command is still running, it interrupts the command and
@@ -3580,10 +3726,41 @@ class OpenSandboxProvider:
         diagnostic_remaining_s = 0.0
         status_failure_error: NgFailureEvent | None = None
         seen_running = False
-        # Where the next read of the command's output starts (execd's byte cursor), and how many characters of
-        # that output `on_stdout` has received.
+        # Where the next read of the command's output for `on_stdout` starts (execd's byte cursor).
         log_cursor = 0
-        forwarded = 0
+        interrupted = False
+
+        async def forward_output(*, timeout_s: float, retries: int) -> bool:
+            """Give `on_stdout` the output after `log_cursor`; whether there was any."""
+            nonlocal log_cursor, interrupted
+            new = await self._await_sdk_operation(
+                lambda: handle.raw.commands.get_background_command_logs(execution_id, log_cursor),
+                operation="command logs",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=timeout_s,
+                retries=retries,
+                is_retryable=lambda error: not _is_deleted_output_error(error),
+                replay_safe=True,
+            )
+            # execd's cursor is the byte offset after what it returned; text decoded from output that is not
+            # UTF-8 has a different length, so the bytes are counted only when it sends none.
+            cursor = getattr(new, "cursor", None)
+            next_cursor = cursor if cursor is not None else log_cursor + len((new.content or "").encode())
+            if not new.content or next_cursor <= log_cursor:
+                return False
+            log_cursor = next_cursor
+            if not on_stdout(new.content) and not interrupted:
+                # Nothing takes the command's output any more, so it is not left to run to its timeout.
+                interrupted = True
+                with suppress(Exception):
+                    await self._await_sdk_call(
+                        handle.raw.commands.interrupt(execution_id),
+                        operation="command interrupt",
+                        sandbox_id=handle.sandbox_id,
+                        timeout_s=timeout_s,
+                    )
+            return True
+
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
             # A parked sandbox is being snapshotted and may not answer: ask once the park ends,
@@ -3701,23 +3878,10 @@ class OpenSandboxProvider:
                 seen_running = True
                 if on_stdout is not None:
                     try:
-                        new = await self._await_sdk_call(
-                            handle.raw.commands.get_background_command_logs(execution_id, log_cursor),
-                            operation="command logs",
-                            sandbox_id=handle.sandbox_id,
-                            timeout_s=status_timeout_s,
-                        )
+                        await forward_output(timeout_s=status_timeout_s, retries=0)
                     except Exception as error:
-                        # Not the command's failure: a later poll, or the read at its end, forwards what this missed.
+                        # Not the command's failure: a later poll, or the reads at its end, forward what this missed.
                         LOGGER.debug("OpenSandbox command output not read while it runs: %r", error)
-                    else:
-                        if new.content:
-                            on_stdout(new.content)
-                            forwarded += len(new.content)
-                        # execd's cursor is the byte offset after what it returned; text decoded from output that
-                        # is not UTF-8 has a different length, so the bytes are counted only when it sends none.
-                        cursor = getattr(new, "cursor", None)
-                        log_cursor = cursor if cursor is not None else log_cursor + len(new.content.encode())
                 if command_deadline is not None and not timed_out and loop.time() >= command_deadline:
                     timed_out = await self._interrupt_at_deadline(
                         handle, execution_id, timeout_s=command_timeout_s, request_timeout_s=status_timeout_s
@@ -3792,11 +3956,16 @@ class OpenSandboxProvider:
             logs = None
             output_deleted = True
         stdout = getattr(logs, "content", None) or None
-        # The rest is sliced from the full read by the characters forwarded so far. Where a poll ended inside a
-        # multi-byte character, the streamed text shows two replacement characters for it and this slice is one
-        # character short; `result.stdout` is exact.
-        if on_stdout is not None and stdout and (rest := stdout[forwarded:]):
-            on_stdout(rest)
+        if on_stdout is not None and not output_deleted:
+            # execd returns a bounded amount of output per read, so the rest is read on from the cursor until a
+            # read brings nothing: output past that bound reaches `on_stdout` too. Where a read ended inside a
+            # multi-byte character, the streamed text shows a replacement character on each side of the cut.
+            try:
+                while await forward_output(timeout_s=poll_timeout_s, retries=self._operations.retries):
+                    pass
+            except Exception as error:
+                if not _is_deleted_output_error(error):
+                    raise
         status_error = getattr(status, "error", None)
         stderr = status_error or None
         if output_deleted:

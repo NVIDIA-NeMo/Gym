@@ -115,6 +115,9 @@ _RECORDER = {
 }
 
 
+_RECORDER_SPEC = SandboxSidecarSpec(name="recorder", image="recorder:1")
+
+
 def test_spec_coerces_sidecar_mappings_and_keeps_specs() -> None:
     explicit = SandboxSidecarSpec(name="metrics", image="metrics:2")
     spec = SandboxSpec(image="task:1", sidecars=[_RECORDER, explicit])
@@ -140,6 +143,28 @@ def test_spec_rejects_invalid_sidecars() -> None:
         SandboxSpec(sidecars=[{"name": "recorder", "image": "recorder:1", "resources": {"cores": 1}}])
     with pytest.raises(TypeError, match="list or tuple"):
         SandboxSpec(sidecars=_RECORDER)
+
+
+def test_a_sidecar_names_its_service_and_the_ports_the_sandbox_may_reach() -> None:
+    service = SandboxSidecarSpec(name="tools", image="tools:2", entrypoint=["tool-server"], ports=[8080, "9000"])
+
+    assert service.entrypoint == ["tool-server"] and service.ports == (8080, 9000)
+    # Without them the sidecar idles, and the sandbox may not reach it.
+    assert (_RECORDER_SPEC.entrypoint, _RECORDER_SPEC.ports) == (None, ())
+
+
+@pytest.mark.parametrize(
+    ("ports", "error", "message"),
+    [
+        ([0], ValueError, "between 1 and 65535"),
+        ([8080, 8080], ValueError, "Duplicate sandbox sidecar TCP port: 8080"),
+        ([True], ValueError, "Invalid sandbox sidecar TCP port"),
+        (8080, TypeError, "Sandbox sidecar ports must be a list or tuple"),
+    ],
+)
+def test_a_sidecar_refuses_ports_that_are_no_tcp_ports(ports: Any, error: type[Exception], message: str) -> None:
+    with pytest.raises(error, match=message):
+        SandboxSidecarSpec(name="tools", image="tools:2", ports=ports)
 
 
 def test_spec_without_sidecars_is_unchanged() -> None:

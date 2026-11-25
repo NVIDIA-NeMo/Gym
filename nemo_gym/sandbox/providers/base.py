@@ -150,11 +150,34 @@ def clamp_resource_requests(
 PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
 
 
+def _tcp_ports(ports: object, *, owner: str) -> tuple[int, ...]:
+    """Validate a spec's TCP port numbers."""
+    if not isinstance(ports, (list, tuple)):
+        raise TypeError(f"{owner} ports must be a list or tuple of TCP port numbers")
+    normalized: list[int] = []
+    for raw_port in ports:
+        if isinstance(raw_port, bool) or not isinstance(raw_port, (int, str)):
+            raise ValueError(f"Invalid {owner.lower()} TCP port: {raw_port!r}")
+        try:
+            port = int(raw_port)
+        except ValueError as exc:
+            raise ValueError(f"Invalid {owner.lower()} TCP port: {raw_port!r}") from exc
+        if port < 1 or port > 65535:
+            raise ValueError(f"{owner} TCP port must be between 1 and 65535, got {port}")
+        if port in normalized:
+            raise ValueError(f"Duplicate {owner.lower()} TCP port: {port}")
+        normalized.append(port)
+    return tuple(normalized)
+
+
 @dataclass(frozen=True)
 class SandboxSidecarSpec:
     """An extra container started with the sandbox from its own image.
 
-    The image is used as a root filesystem; start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    A sidecar that serves the sandbox names its service: ``entrypoint`` starts it and ``ports`` lists the TCP ports
+    the sandbox may reach. The provider waits for those ports before the create returns, and the sandbox reaches
+    no other port of the sidecar where the provider can enforce that. A sidecar without ``ports`` is one the sandbox
+    may not reach, such as a grader; run commands in it with ``AsyncSandbox.sidecar(name).exec``.
     The sidecar has its own filesystem; how the sandbox reaches it over the network is provider-specific.
     """
 
@@ -164,12 +187,17 @@ class SandboxSidecarSpec:
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     # Provider-specific options for this sidecar alone; a provider refuses an option it cannot apply.
     provider_options: dict[str, Any] = field(default_factory=dict)
+    # The command that starts the sidecar's service, run without a shell. Without one the sidecar idles.
+    entrypoint: list[str] | None = None
+    # The TCP ports of the sidecar's service that the sandbox may reach.
+    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not self.name or not self.image:
             raise ValueError("A sandbox sidecar needs a name and an image")
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        object.__setattr__(self, "ports", _tcp_ports(self.ports, owner="Sandbox sidecar"))
 
 
 @dataclass(frozen=True)
@@ -210,24 +238,7 @@ class SandboxSpec:
         if len({sidecar.name for sidecar in sidecars}) != len(sidecars):
             raise ValueError("Sandbox sidecar names must be unique")
         object.__setattr__(self, "sidecars", sidecars)
-        if not isinstance(self.ports, (list, tuple)):
-            raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
-        normalized_ports: list[int] = []
-        for raw_port in self.ports:
-            if isinstance(raw_port, bool):
-                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
-            if not isinstance(raw_port, (int, str)):
-                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
-            try:
-                port = int(raw_port)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}") from exc
-            if port < 1 or port > 65535:
-                raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
-            if port in normalized_ports:
-                raise ValueError(f"Duplicate sandbox TCP port: {port}")
-            normalized_ports.append(port)
-        object.__setattr__(self, "ports", tuple(normalized_ports))
+        object.__setattr__(self, "ports", _tcp_ports(self.ports, owner="Sandbox"))
 
 
 @dataclass
