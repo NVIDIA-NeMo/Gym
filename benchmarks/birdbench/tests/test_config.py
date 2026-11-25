@@ -119,9 +119,12 @@ def test_the_file_name_tables_list_exactly_the_accepted_values():
 def test_eval_sh_accepts_exactly_the_known_versions():
     # eval.sh builds the file name from --version itself, so an unlisted value could name another cached file. It is
     # read, not run: its exit trap reaps orphaned server processes.
+    # The whole case block, so an extra accepting arm before the rejecting `*)` fails too.
     script = (BENCHMARK_DIR / "eval.sh").read_text()
-    (accepted,) = re.findall(r'case "\$\{VERSION\}" in\n\s*([\w|]+)\) ;;', script)
+    (block,) = re.findall(r'case "\$\{VERSION\}" in\n(.*?)\nesac', script, re.S)
+    accepted, rejecting = re.findall(r"^\s*([^\s()]+)\)", block, re.M)
     assert set(accepted.split("|")) == set(birdbench_prepare.VERSIONS)
+    assert rejecting == "*"
 
 
 @pytest.mark.parametrize(
