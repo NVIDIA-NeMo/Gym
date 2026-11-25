@@ -1,4 +1,89 @@
-# Registry migration validation — 2026-11-24
+# Arena Proxy v3 validation
+
+## Full Hindi comparison (November 25, 2026)
+
+Validation head: `2197986` (`21979867381558c35409b3b92ee009eb595dd17c`).
+The complete Hindi population from `lmarena_v3_indic/0.0.1` was generated and
+judged through Gym: **400 tasks, one repeat, 320 single-turn and 80 multi-turn**.
+Inputs came from the checksum-verified internal registry cache. Prompts and frozen
+GPT-5.4-mini answers matched the reference, with no sample limit or exclusions.
+The comparison uses the archived reference's independently generated and judged
+Hindi answers; the reference pipeline was not rerun for this evaluation.
+
+| Setting | Value |
+| --- | --- |
+| Policy model | `google/gemma-4-31B-it` |
+| Checkpoint revision | `842da3794eaa0b77d5f08bae87a17459d91ff475` |
+| Serving | vLLM 0.26.0; BF16; tensor/data parallelism 8/1; expert parallelism disabled |
+| Temperature / top-p / top-k / seed | 1.0 / 0.95 / 64 / 42 |
+| Context / maximum output / reserve | 131,072 / 120,000 / 64 tokens |
+| Reasoning / tool parser | `gemma4` / `gemma4`; thinking enabled |
+| Generation concurrency / maximum sequences | 256 / 256 |
+| GPU memory utilization | 0.85 |
+| Baseline | Frozen `gpt-5.4-mini` answers |
+| Judge | `gcp/google/gemini-3.8-flash`; temperature 0; reasoning effort low; maximum output 32,768 |
+| Judge concurrency | 12 tasks, two swapped positions each; 24 positional calls |
+
+| Hindi population | Tasks | Gym score | Reference score | Gym minus reference | Gym 95% interval | Reference 95% interval |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| All | 400 | **67.40** | **69.41** | **-2.01** | 65.39–70.03 | 67.24–71.24 |
+| Single-turn | 320 | 64.30 | 66.88 | -2.58 | 61.68–67.01 | 64.20–69.08 |
+| Multi-turn | 80 | 80.38 | 80.69 | -0.31 | 76.44–84.81 | 76.44–85.32 |
+
+Scores use strong-verdict weight 3 and the same Arena-Elo calculation, with
+100 bootstrap rounds and seed 42. Reference intervals were recomputed in prepared
+input order; the table shows absolute bounds, while JSON stores offsets. The
+modest difference is consistent with independent generation/judging variation;
+overlapping intervals do not establish equivalence. This is a full **Hindi**
+comparison, not the 12-language Indic headline, which correctly remains absent.
+
+All 50 scalar values across the ten Hindi slices (score, both interval offsets,
+invalid-verdict count, and task count) match exactly between Gym server metrics,
+repeat metrics, and the offline summary. The overall server metric is
+`arena_elo/language/hi/all/score`. Independent weighted counts reproduce all ten
+Gym and ten reference point estimates.
+
+All 400 generations and judged rows completed with no missing tasks, empty policy
+answers, policy truncations, or leaked thinking delimiters. Every prompt-token
+count matched the archived reference, and reverification preserved the generated
+answers. Of 800 positional judge replies, 13 were invalid versus 10 in the
+reference. The existing parser independently reproduced all 800 saved decisions;
+invalid verdicts were retained and excluded individually from weighted battles,
+without selective retries. Judge finish reasons were not saved, so judge
+truncation cannot be established from these rows.
+
+The recorded checkpoint revision and serving/sampling settings match, but weight
+bytes and container-image digest equality were not established. The reference
+batched Indic languages together; Gym generated Hindi alone. This was the
+two-stage `gym eval run` / `gym eval reverify` workflow with a separately submitted
+GPU service, not a deployment validation of `gym eval submit` containers/mounts.
+Artifact health reports 400 expected/completed/scored rows and zero failures;
+all 400 trajectory-quality checks remain unobserved because captures were disabled.
+An 18-case qualitative review found useful Hindi and instruction following, along
+with arithmetic errors, incomplete code, and unsupported research claims. The
+judge sometimes preferred objectively incorrect arithmetic, so the score measures
+relative judge preference rather than factual accuracy.
+
+The completed run is identified as `gemma31b-hi-full-20261125103947Z`. Prepared
+Hindi input SHA-256:
+
+```text
+cd5c2b6b6d97b379e0447d33f6d4da33475aef763c53330475c6450e69fcb08e
+```
+
+Comparison command, with artifact locations represented by environment variables:
+
+```bash
+.venv/bin/python -m benchmarks.indic.arena_proxy_v3.summarize \
+  "$RUN_DIR/judgments/rollouts.jsonl" \
+  --inputs "$RUN_DIR/inputs/arena_proxy_v3_benchmark.jsonl" \
+  --reference-verdicts "$REFERENCE_HI_VERDICTS" \
+  --output "$RUN_DIR/comparison.json"
+```
+
+Raw conversations, answers, credentials, and machine-specific paths are not part
+of this evidence commit. The full 12-language comparison remains outstanding;
+this evidence does not establish Nemotron 4 model validation or rollout approval.
 
 ## Dataset and preparation parity
 
@@ -90,9 +175,10 @@ failures and no official Indic headline.
 
 No new GPU rollout was needed for this data-access migration: the prepared input
 bytes and generation/judging code are unchanged for the selected population.
-A full model run compared with separately generated reference judgments is still
-pending. Dataset licensing metadata is `NVIDIA internal, derived from
-arena-proxy-v3`. Measured end-to-end score equivalence remains unverified.
+The full Hindi run and comparison with separately generated reference judgments
+are recorded above at validation head `2197986`. Dataset licensing metadata is
+`NVIDIA internal, derived from arena-proxy-v3`. Full 12-language comparison and
+end-to-end score equivalence have not been established.
 
 ## Server metric integration
 
@@ -304,4 +390,6 @@ This run validates the application flow with real policy and judge calls. It
 uses a reduced output cap and does not establish agreement with a separate full
 reference run. It also does not validate deployment-specific `gym eval submit`
 containers or mounts; the model service was submitted separately and the Gym
-CLI driver ran on the CPU host. Full paired benchmark evaluation remains pending.
+CLI driver ran on the CPU host. The full Hindi evaluation recorded above supersedes
+this smoke's population and output-cap limits; the 12-language comparison remains
+outstanding.
