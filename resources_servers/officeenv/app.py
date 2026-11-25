@@ -338,8 +338,11 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
     def _new_episode(self, session_id: str, body: ResourcesSeedSessionRequest) -> _Episode:
-        """A new episode: its world, built from its row (``_seed``), and the tools its MCP token admits."""
-        reply = self._seed(session_id, body.task_data)
+        """A new episode: its world, built from its row (``_seed``), and the tools its MCP token admits. The row
+        keeps the task's ``responses_create_params``, as a seed of the whole row does, so ``tool_drift`` compares
+        its tools with the ones the server serves."""
+        params = body.responses_create_params
+        reply = self._seed(session_id, body.task_data | ({"responses_create_params": params} if params else {}))
         return _Episode(body.episode_id, body.task_id, grant=list(reply.body["tools"]))
 
     def _seed(self, session_id: str, row: dict[str, Any]) -> Reply:
