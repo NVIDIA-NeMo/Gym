@@ -333,8 +333,12 @@ class ToolSidecarResources:
 
 
 async def _ready(sidecar: AsyncSandboxSidecar, python: str, port: int) -> bool:
-    """Whether a tool host answers in the sidecar. Before the runtime is installed there is no ``python`` to ask."""
-    result = await sidecar.exec(python, "-E", "-s", _HOST, "--ready", str(port), timeout_s=30)
+    """Whether a tool host answers in the sidecar.
+
+    Through ``sh``, so a sidecar without the runtime yet answers with exit 127 instead of a provider error.
+    """
+    command = shlex.join([python, "-E", "-s", _HOST, "--ready", str(port)])
+    result = await sidecar.exec("sh", "-c", f"test -x {shlex.quote(python)} && exec {command}", timeout_s=30)
     return result.return_code == 0 and result.error_type is None
 
 
