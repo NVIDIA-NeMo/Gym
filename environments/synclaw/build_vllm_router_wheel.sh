@@ -169,7 +169,7 @@ uv pip show --system vllm-router
 
 # The low-disk fallback puts build_root under the bind-mounted /out, where a
 # rustup toolchain, the cargo registry and both target profiles would otherwise
-# outlive the job on Lustre. Clean unconditionally; the wheel is already copied.
+# outlive the job on shared storage. Clean unconditionally; the wheel is already copied.
 rm -rf "\$build_root"
 
 echo ">>> Wheel build complete"
