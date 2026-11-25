@@ -409,6 +409,10 @@ Only the agent types in `STEP_DRIVEN_AGENT_TYPES` (`nemo_gym.config`; today
 other type, since keeping an agent session is not enough.
 A continuation session (seeded with `continuation`) runs a whole turn on new input
 each activation, so `simple_agent` answers the step-limit header on one with 422.
+Without checkpointing, `simple_agent` runs each step once: a step sent again with the
+same activation index, as after a dropped connection, gets the reply that step gave,
+or waits for it while the step still runs, and runs neither its model call nor its
+tool calls again. A step older than the session's latest one is refused with 409.
 
 ## Runs stopped when their task ends
 
@@ -417,9 +421,10 @@ time limit, and the run is graded like a timeout. An Environment Server that end
 episode once its task has ended (`single_agent_turn` with `end_on_task_state` and no
 `max_episode_steps`) sends `{"reason": "task_ended", "completed": true}` instead: the
 run then answers as completed, with no incomplete details, and its `ng_rollout_stop`
-metadata says `"completed": true`. An agent supports this by returning its sandbox
-session from `_rollout_sandbox_session` and passing its response through
-`report_rollout_stop`. The Environment Server refuses at startup an agent type that is
+metadata says `"completed": true`. The session close then reports the run's top-level
+invocation as completed too, while its sandbox observation keeps the supervisor's
+timeout. An agent supports this by returning its sandbox session from
+`_rollout_sandbox_session` and passing its response through `report_rollout_stop`. The Environment Server refuses at startup an agent type that is
 not listed in `ROLLOUT_STOP_AGENT_TYPES` (`nemo_gym.config`).
 
 ## NOOA worker checkpoints
