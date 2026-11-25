@@ -13,6 +13,7 @@ shared_run_warmup_env_vars:
   NUM_PREFILL_NODES: 8
   NUM_DECODE_NODES: 8
   SEGMENT: 1
+  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_withmetrics.sh
 
 run:
   env:
