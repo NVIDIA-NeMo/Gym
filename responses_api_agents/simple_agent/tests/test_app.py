@@ -77,7 +77,6 @@ from nemo_gym.core import (
     failure_report_for,
 )
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     END_ACTIVATION_HEADER,
     TOOL_CALL_ID_HEADER,
@@ -793,15 +792,6 @@ class TestApp:
                     ]
                 },
                 "Simple Agent does not support required MCP tool access: resources",
-            ),
-            (
-                {
-                    "sandbox_access": SandboxAccess(
-                        connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
-                        workdir="/work",
-                    )
-                },
-                "Simple Agent does not support sandbox access",
             ),
             (
                 {

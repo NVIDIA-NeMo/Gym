@@ -1056,3 +1056,17 @@ class TestCoverageBelongsToTheAgentThatEarnedIt:
         results = [self._result(0, 0)]
 
         assert coverage_by_agent(rows, results) == {}
+
+
+def test_importing_reward_profile_loads_no_numpy_pandas_or_scipy() -> None:
+    """Every agent server imports this module for AggregateMetricsMixin, including a loop that runs in a sandbox."""
+    import subprocess
+
+    probe = (
+        "import sys\n"
+        "import nemo_gym.metrics.reward_profile\n"
+        "print(sorted({'numpy', 'pandas', 'scipy', 'pyarrow'} & {name.split('.')[0] for name in sys.modules}))\n"
+    )
+    loaded = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=120)
+
+    assert loaded.stdout.strip() == "[]"
