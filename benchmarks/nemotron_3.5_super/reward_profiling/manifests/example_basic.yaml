@@ -30,4 +30,4 @@ entries:
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
-    data: data/tau_pivot.jsonl
+    data: /path/to/tau_pivot.jsonl

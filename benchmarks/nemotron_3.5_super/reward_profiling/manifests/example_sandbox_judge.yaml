@@ -69,4 +69,4 @@ entries:
     configs:
       - resources_servers/ns_tools/configs/ns_tools.yaml
       - resources_servers/math_with_judge/configs/math_with_judge.yaml
-    data: data/math_tir.jsonl
+    data: /path/to/math_tir.jsonl

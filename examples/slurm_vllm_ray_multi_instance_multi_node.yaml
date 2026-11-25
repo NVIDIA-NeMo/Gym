@@ -24,7 +24,7 @@ services:
     health_check:
       timeout_seconds: 1200
     mounts:
-      - ./datasets:/data
+      - /path/to/datasets:/data
 
 driver:
   policy_model: vllm_model
@@ -39,4 +39,4 @@ driver:
           - benchmarks/gpqa/config.yaml
 
 job:
-  output_path: ./outputs
+  output_path: /path/to/outputs

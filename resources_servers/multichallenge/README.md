@@ -309,8 +309,8 @@ The LLM judge analyzes the model's response and returns `[[YES]]` or `[[NO]]`.
 
 ---
 
-**Note**: The default raw data path is `data/multichallenge`:
+**Note**: The default raw data path is the placeholder `/path/to/multichallenge`:
 ```
-data/multichallenge
+/path/to/multichallenge
 ```
-Use `--data-dir` or `MULTICHALLENGE_DATA_DIR` to specify a different location.
+Replace the placeholder with your local raw data path using `--data-dir` or `MULTICHALLENGE_DATA_DIR`.

@@ -284,8 +284,8 @@ inverse_if/
 
 ---
 
-**Note**: The default raw data path is `data/inverse_if`:
+**Note**: The default raw data path is the placeholder `/path/to/inverse_if`:
 ```
-data/inverse_if
+/path/to/inverse_if
 ```
-Use `--data-dir` or `INVERSE_IF_DATA_DIR` to specify a different location.
+Replace the placeholder with your local raw data path using `--data-dir` or `INVERSE_IF_DATA_DIR`.

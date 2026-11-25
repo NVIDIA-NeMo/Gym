@@ -23,7 +23,7 @@ services:
     health_check:
       timeout_seconds: 1200
     mounts:
-      - ./datasets:/data
+      - /path/to/datasets:/data
     extra_args: --max-model-len 8192 # optional, appended verbatim to `vllm serve`
     pre_command: |
       export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
@@ -35,7 +35,7 @@ driver:
   gym_install:
     ref: main
   # mounts:
-  #   - /lustre/datasets:/data
+  #   - /path/to/datasets:/data
   benchmarks:
     gpqa:
       prepare:
@@ -52,4 +52,4 @@ driver:
         observability_enabled: true # optional; auto-derives model_call_capture_dir
         # from this benchmark's own real output directory unless set explicitly here
 job:
-  output_path: ./outputs
+  output_path: /path/to/outputs

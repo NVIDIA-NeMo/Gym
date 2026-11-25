@@ -192,54 +192,54 @@ entries:
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
-    data: data/tau_pivot.jsonl
+    data: /path/to/tau_pivot.jsonl
 
   - label: tau_pivot_aq_mms
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
-    data: data/tau_pivot_aq_mms.jsonl
+    data: /path/to/tau_pivot_aq_mms.jsonl
 
   - label: swe_pivot
     agent: swe_pivot_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/swe_pivot_single_step_tool_use_with_argument_comparison.yaml
-    data: data/swe_pivot.jsonl
+    data: /path/to/swe_pivot.jsonl
 
   - label: search_pivot
     agent: search_pivot_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/search_pivot_single_step_tool_use_with_argument_comparison.yaml
-    data: data/search_pivot.jsonl
+    data: /path/to/search_pivot.jsonl
 
   - label: droid_pivot_v1
     agent: droid_pivot_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/droid_pivot_single_step_tool_use_with_argument_comparison.yaml
-    data: data/droid_pivot_v1.jsonl
+    data: /path/to/droid_pivot_v1.jsonl
 
   - label: gdpval_pivot_v1
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
-    data: data/gdpval_pivot_v1.jsonl
+    data: /path/to/gdpval_pivot_v1.jsonl
 
   - label: terminal_pivot
     agent: terminus_judge_string_only_simple_agent
     configs:
       - resources_servers/terminus_judge/configs/terminus_judge_string_only.yaml
-    data: data/terminal_pivot.jsonl
+    data: /path/to/terminal_pivot.jsonl
 
   - label: workbench
     agent: workplace_assistant_simple_agent
     configs:
       - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
-    data: data/workbench.jsonl
+    data: /path/to/workbench.jsonl
 
   - label: calendar_v2
     agent: calendar_simple_agent
     configs:
       - resources_servers/calendar/configs/calendar.yaml
-    data: data/calendar_v2.jsonl
+    data: /path/to/calendar_v2.jsonl
 
 
   # ==========================================================================
@@ -249,43 +249,43 @@ entries:
     agent: code_gen_simple_agent
     configs:
       - resources_servers/code_gen/configs/code_gen.yaml
-    data: data/comp_coding.jsonl
+    data: /path/to/comp_coding.jsonl
 
   - label: comp_coding_nemotronx
     agent: code_gen_simple_agent
     configs:
       - resources_servers/code_gen/configs/code_gen.yaml
-    data: data/comp_coding_nemotronx.jsonl
+    data: /path/to/comp_coding_nemotronx.jsonl
 
   - label: stem_mcqa_ultra_0
     agent: mcqa_simple_agent
     configs:
       - resources_servers/mcqa/configs/mcqa.yaml
-    data: data/stem_mcqa_ultra_0.jsonl
+    data: /path/to/stem_mcqa_ultra_0.jsonl
 
   - label: reasoning_gym
     agent: reasoning_gym_simple_agent
     configs:
       - resources_servers/reasoning_gym/configs/reasoning_gym.yaml
-    data: data/reasoning_gym.jsonl
+    data: /path/to/reasoning_gym.jsonl
 
   - label: nvarc_inductive
     agent: nvarc_inductive_simple_agent
     configs:
       - resources_servers/nvarc/configs/inductive.yaml
-    data: data/nvarc_inductive.jsonl
+    data: /path/to/nvarc_inductive.jsonl
 
   - label: nvarc_transductive
     agent: nvarc_transductive_simple_agent
     configs:
       - resources_servers/nvarc/configs/transductive.yaml
-    data: data/nvarc_transductive.jsonl
+    data: /path/to/nvarc_transductive.jsonl
 
   - label: ether0
     agent: ether0_simple_agent
     configs:
       - resources_servers/ether0/configs/ether0.yaml
-    data: data/ether0.jsonl
+    data: /path/to/ether0.jsonl
 
 
   # ==========================================================================
@@ -295,7 +295,7 @@ entries:
     agent: lc_equivalence_rule_simple_agent
     configs:
       - resources_servers/equivalence_rule/configs/lc.yaml
-    data: data/equivalence_rule.jsonl
+    data: /path/to/equivalence_rule.jsonl
 
 
   # ==========================================================================
@@ -305,55 +305,55 @@ entries:
     agent: instruction_following_simple_agent
     configs:
       - resources_servers/instruction_following/configs/instruction_following.yaml
-    data: data/instruction_following.jsonl
+    data: /path/to/instruction_following.jsonl
 
   - label: toolcall_schema
     agent: toolcall_schema_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
-    data: data/toolcall_schema.jsonl
+    data: /path/to/toolcall_schema.jsonl
 
   - label: structured_outputs
     agent: structured_outputs_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
-    data: data/structured_outputs.jsonl
+    data: /path/to/structured_outputs.jsonl
 
   - label: structured_outputs_v2
     agent: structured_outputs_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml
-    data: data/structured_outputs_v2.jsonl
+    data: /path/to/structured_outputs_v2.jsonl
 
   - label: structured_outputs_v4
     agent: structured_outputs_v4_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_v4.yaml
-    data: data/structured_outputs_v4.jsonl
+    data: /path/to/structured_outputs_v4.jsonl
 
   - label: ds1_augmented
     agent: structured_outputs_v3_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
-    data: data/ds1_augmented.jsonl
+    data: /path/to/ds1_augmented.jsonl
 
   - label: ds1_basic
     agent: structured_outputs_v3_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
-    data: data/ds1_basic.jsonl
+    data: /path/to/ds1_basic.jsonl
 
   - label: ds2_freeform
     agent: freeform_formatting_simple_agent
     configs:
       - resources_servers/format_verification/configs/freeform_formatting.yaml
-    data: data/ds2_freeform.jsonl
+    data: /path/to/ds2_freeform.jsonl
 
   - label: ds3_citation
     agent: citation_format_simple_agent
     configs:
       - resources_servers/format_verification/configs/citation_format.yaml
-    data: data/ds3_citation.jsonl
+    data: /path/to/ds3_citation.jsonl
 
   # ==========================================================================
   # Security (0)
@@ -373,37 +373,37 @@ entries:
     agent: math_with_judge_simple_agent
     configs:
       - resources_servers/math_with_judge/configs/math_with_judge.yaml
-    data: data/math_cot.jsonl
+    data: /path/to/math_cot.jsonl
 
   - label: long_context
     agent: lc_judge_simple_agent
     configs:
       - resources_servers/equivalence_llm_judge/configs/lc_judge.yaml
-    data: data/long_context.jsonl
+    data: /path/to/long_context.jsonl
 
   - label: multichallenge
     agent: multichallenge_simple_agent
     configs:
       - resources_servers/multichallenge/configs/multichallenge.yaml
-    data: data/multichallenge.jsonl
+    data: /path/to/multichallenge.jsonl
 
   - label: stem_openqa_ultra_0
     agent: equivalence_llm_judge_simple_agent
     configs:
       - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
-    data: data/stem_openqa_ultra_0.jsonl
+    data: /path/to/stem_openqa_ultra_0.jsonl
 
   - label: abstention
     agent: abstention_simple_agent
     configs:
       - resources_servers/abstention/configs/abstention.yaml
-    data: data/abstention.jsonl
+    data: /path/to/abstention.jsonl
 
   - label: inverse_if
     agent: inverse_if_simple_agent
     configs:
       - resources_servers/inverse_if/configs/inverse_if.yaml
-    data: data/inverse_if.jsonl
+    data: /path/to/inverse_if.jsonl
 
   # --- sandbox-backed ----------------------------------------------------------------------
 
@@ -412,7 +412,7 @@ entries:
     configs:
       - resources_servers/ns_tools/configs/ns_tools.yaml
       - resources_servers/math_with_judge/configs/math_with_judge.yaml
-    data: data/math_tir.jsonl
+    data: /path/to/math_tir.jsonl
 
   - label: stem_mcqa_tools_ultra_0
     agent: ns_tools_simple_agent
@@ -420,7 +420,7 @@ entries:
       - resources_servers/ns_tools/configs/ns_tools.yaml
       - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
       - resources_servers/mcqa/configs/mcqa.yaml
-    data: data/stem_mcqa_tools_ultra_0.jsonl
+    data: /path/to/stem_mcqa_tools_ultra_0.jsonl
 
   - label: stem_openqa_tools_ultra_0
     agent: ns_tools_simple_agent
@@ -428,10 +428,10 @@ entries:
       - resources_servers/ns_tools/configs/ns_tools.yaml
       - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
       - resources_servers/mcqa/configs/mcqa.yaml
-    data: data/stem_openqa_tools_ultra_0.jsonl
+    data: /path/to/stem_openqa_tools_ultra_0.jsonl
 
   - label: lean
     agent: math_formal_lean_refinement_agent
     configs:
       - resources_servers/math_formal_lean/configs/math_formal_lean_multi_turn.yaml
-    data: data/lean.jsonl
+    data: /path/to/lean.jsonl

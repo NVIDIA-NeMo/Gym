@@ -57,4 +57,4 @@ entries:
     agent: lc_judge_simple_agent
     configs:
       - resources_servers/equivalence_llm_judge/configs/lc_judge.yaml
-    data: data/long_context.jsonl
+    data: /path/to/long_context.jsonl

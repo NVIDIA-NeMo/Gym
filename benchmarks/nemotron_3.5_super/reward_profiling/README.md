@@ -29,7 +29,7 @@ To contribute an environment, see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 The checked-in manifests use placeholder paths for datasets, models, containers, and Slurm
 accounts. Replace those values with resources available to your environment before running the
-commands below. Each dataset entry uses `data/<entry-label>.jsonl` as its local path by default.
+commands below. Each dataset entry uses `/path/to/<entry-label>.jsonl` as a placeholder path.
 
 Three commands, from the repo root. Everything else on this page is a variation on them.
 
@@ -95,9 +95,10 @@ only when an entry pulls in a server the image does not have — see
 ## 02 - Create a Manifest
 
 Before running a manifest, replace its portable placeholders with local paths. The full sweep
-expects one dataset file per entry label under `data/`; edit the `data:` fields if your files live
-elsewhere. Set `vllm.model`, `srun.container`, `srun.sandbox_container`, and `sbatch.account` to
-resources available in your environment.
+expects one dataset file per entry label; replace each `/path/to/...` value in the `data:` fields
+with the matching dataset path available in your environment. Set `vllm.model`,
+`srun.container`, `srun.sandbox_container`, and `sbatch.account` to resources available in your
+environment.
 
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
 Every block but `nickname`, `num_shards` and `entries` is named for the command it configures, so
@@ -202,8 +203,8 @@ sbatch:                          # optional; each key becomes SBATCH_<KEY>
   timelimit: "04:00:00"          # so a sharded run fails at submit rather than queueing
 
 srun:                            # optional
-  container: /lustre/.../eval.sqsh
-  sandbox_container: /lustre/.../nemo-skills-sandbox-0.7.1-arm64.sqsh
+  container: /path/to/eval.sqsh
+  sandbox_container: /path/to/nemo-skills-sandbox.sqsh
 
 gym_eval_run:
   num_repeats: 8

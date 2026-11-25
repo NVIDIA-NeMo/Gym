@@ -38,8 +38,8 @@ from pathlib import Path
 from typing import Any
 
 
-# Override this default when the source data lives elsewhere.
-DEFAULT_RAW_DATA_DIR = Path(os.environ.get("INVERSE_IF_DATA_DIR", "data/inverse_if"))
+# Set INVERSE_IF_DATA_DIR to the source data directory before preprocessing.
+DEFAULT_RAW_DATA_DIR = Path(os.environ.get("INVERSE_IF_DATA_DIR", "/path/to/inverse_if"))
 
 
 # ---------------------------------------------------------------------------
