@@ -264,6 +264,8 @@ CONTROL_PORTS = frozenset({44772, 18080})
 BACKEND_CONNECTION_FAILED_CODE = "BACKEND_CONNECTION_FAILED"
 # How often a sidecar's service ports are asked again while its service starts.
 SIDECAR_PORT_POLL_INTERVAL_S = 1.0
+# How much of a sidecar service's answer the readiness wait reads.
+SIDECAR_ANSWER_READ_BYTES = 4096
 # How long a sidecar's service may take to listen when the spec names no ``ready_timeout_s``.
 DEFAULT_SIDECAR_READY_TIMEOUT_S = 120.0
 PENDING_SANDBOX_STATES = {"PENDING"}
@@ -746,6 +748,13 @@ def _to_network_policy(network_policy: Mapping[str, Any]) -> Any:
     from opensandbox.models.sandboxes import NetworkPolicy
 
     return NetworkPolicy.model_validate(network_policy)
+
+
+def _sdk_keeps_rule_ports() -> bool:
+    """Whether the installed SDK's network rule has ``ports``; an SDK without the field drops it without an error."""
+    from opensandbox.models.sandboxes import NetworkRule as SdkNetworkRule
+
+    return "ports" in SdkNetworkRule.model_fields
 
 
 def _check_hostname(name: str) -> None:
@@ -3168,6 +3177,12 @@ class OpenSandboxProvider:
                     "networking.rule_ports_enforced=true where the deployment does. Without it the rule would open "
                     "every port of the sidecar, its exec daemon included."
                 )
+            if policy is not None and not _sdk_keeps_rule_ports():
+                raise ValueError(
+                    f"Sidecar {sidecar.name!r} names ports a sandbox with a network policy may reach, but the "
+                    "installed opensandbox SDK drops a network rule's ports, so the rule would open every port of "
+                    "the sidecar; upgrade the SDK."
+                )
         # A sidecar is no task sandbox: it carries the labels that attribute and place it, not what grants the main
         # sandbox shared storage, and one that names it.
         sidecar_metadata = {
@@ -3246,28 +3261,29 @@ class OpenSandboxProvider:
         """Wait until the sidecar's service answers on each of ``ports``, or fail the create as a setup failure.
 
         Each port is asked over HTTP through the sidecar's own endpoint, the way the SDK reaches its exec daemon, so
-        nothing runs in the sidecar's image. Any answer of the service counts, whatever its status.
+        nothing runs in the sidecar's image. Any answer of the service counts, whatever its status. ``timeout_s``
+        bounds the whole wait, a request in flight included: a service that never finishes its answer does not
+        hold the create.
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
         waiting = list(ports)
-        while waiting:
-            waiting = [port for port in waiting if not await self._sidecar_port_answers(handle, port)]
-            if not waiting:
-                return
-            if loop.time() >= deadline:
-                raise opensandbox_failure(
-                    operation="sidecar ready",
-                    sandbox_id=handle.sandbox_id,
-                    failure_kind=PROVIDER_SETUP_FAILED,
-                    reason=f"Sidecar {name!r} did not answer on port(s) {waiting} within {timeout_s:g}s",
-                )
-            await asyncio.sleep(SIDECAR_PORT_POLL_INTERVAL_S)
+        try:
+            async with asyncio.timeout(timeout_s):
+                while True:
+                    waiting = [port for port in waiting if not await self._sidecar_port_answers(handle, port)]
+                    if not waiting:
+                        return
+                    await asyncio.sleep(SIDECAR_PORT_POLL_INTERVAL_S)
+        except TimeoutError:
+            raise opensandbox_failure(
+                operation="sidecar ready",
+                sandbox_id=handle.sandbox_id,
+                failure_kind=PROVIDER_SETUP_FAILED,
+                reason=f"Sidecar {name!r} did not answer on port(s) {waiting} within {timeout_s:g}s",
+            ) from None
 
     async def _sidecar_port_answers(self, handle: SandboxHandle, port: int) -> bool:
         """Whether a service in the sandbox answers an HTTP request on ``port``."""
         from opensandbox.adapters.factory import AdapterFactory
-        from opensandbox.api.execd.api.health import ping
 
         try:
             endpoint = await handle.raw.get_endpoint(port)
@@ -3275,11 +3291,21 @@ class OpenSandboxProvider:
             health = AdapterFactory(self._connection_config().with_transport_if_missing()).create_health_service(
                 endpoint
             )
-            response = await ping.asyncio_detailed(client=await health._get_client())
+            http = (await health._get_client()).get_async_httpx_client()
+            head = b""
+            async with http.stream("GET", "/ping") as response:
+                # Only a server error can be the management API's own, and the start of its body tells; the rest
+                # of an answer is not read, so one that never ends does not hold the wait.
+                if response.status_code < 500:
+                    return True
+                async for chunk in response.aiter_bytes():
+                    head += chunk
+                    if len(head) >= SIDECAR_ANSWER_READ_BYTES:
+                        break
         except Exception as error:
             LOGGER.debug("OpenSandbox sidecar %r does not answer on port %d yet: %r", handle.sandbox_id, port, error)
             return False
-        return BACKEND_CONNECTION_FAILED_CODE.encode() not in response.content
+        return BACKEND_CONNECTION_FAILED_CODE.encode() not in head
 
     async def _restart_sidecar_ttl(self, sidecar: SandboxHandle, spec: SandboxSpec) -> None:
         """Start a sidecar's TTL again once its main sandbox exists, so the sidecar does not end before it."""

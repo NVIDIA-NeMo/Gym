@@ -16,6 +16,7 @@
 """Sidecars on OpenSandbox: each one is a sandbox of its own, in the main sandbox's placement group."""
 
 import asyncio
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,6 +39,10 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxSidecars,
 )
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
+
+
+# The SDK's own conversion, which most tests here replace to compare plain mappings.
+_SDK_NETWORK_POLICY = opensandbox_provider._to_network_policy
 
 
 class FakeSandbox:
@@ -487,6 +492,43 @@ async def test_a_sidecar_the_sandbox_cannot_safely_reach_starts_no_sandbox(
     assert FakeSandbox.created == []
 
 
+async def test_the_sdks_policy_keeps_a_sidecar_rules_ports(provider, monkeypatch) -> None:
+    _peers(provider, monkeypatch)
+    monkeypatch.setattr(opensandbox_provider, "_to_network_policy", _SDK_NETWORK_POLICY)
+    spec = SandboxSpec(
+        image="task:1", provider_options={"network_policy": {"defaultAction": "deny"}}, sidecars=[_SERVICE]
+    )
+
+    await provider.create(spec)
+
+    # What the SDK sends for the main sandbox: the sidecar's declared port and no other, so no control port.
+    sent = FakeSandbox.created[-1]["network_policy"].model_dump(by_alias=True, exclude_none=True)
+    assert sent == {"defaultAction": "deny", "egress": _reach("10.0.0.1", 8080)}
+
+
+async def test_an_sdk_that_drops_a_rules_ports_starts_no_sandbox(provider, monkeypatch) -> None:
+    from pydantic import BaseModel
+
+    class RuleWithoutPorts(BaseModel):
+        action: str
+        target: str
+
+    _peers(provider, monkeypatch)
+    monkeypatch.setattr("opensandbox.models.sandboxes.NetworkRule", RuleWithoutPorts)
+    spec = SandboxSpec(
+        image="task:1", provider_options={"network_policy": {"defaultAction": "deny"}}, sidecars=[_SERVICE]
+    )
+
+    # Such an SDK would send the rule without its ports, which opens every port of the sidecar.
+    with pytest.raises(ValueError, match="installed opensandbox SDK drops a network rule's ports"):
+        await provider.create(spec)
+    assert FakeSandbox.created == []
+
+    # A sandbox without a policy gets no rule, so the same SDK still creates it.
+    await provider.create(SandboxSpec(image="task:1", sidecars=[_SERVICE]))
+    assert [created["image"] for created in FakeSandbox.created] == ["tools:2", "task:1"]
+
+
 async def test_a_create_waits_for_a_sidecars_service_to_answer_on_its_ports(provider, monkeypatch) -> None:
     _peers(provider, monkeypatch)
     asked: list[tuple[str, int]] = []
@@ -530,43 +572,78 @@ async def test_a_sidecar_whose_service_never_answers_fails_the_create_as_a_setup
     assert FakeSandbox.killed == ["sandbox-1"]
 
 
+async def _endless() -> Any:
+    while True:
+        yield b"heartbeat\n"
+
+
+async def _once(body: bytes) -> Any:
+    yield body
+
+
+async def test_a_sidecar_request_that_never_finishes_ends_at_the_readiness_deadline(provider, monkeypatch) -> None:
+    _peers(provider, monkeypatch)
+
+    async def never_answers(_handle: Any, _port: int) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(provider, "_sidecar_port_answers", never_answers)
+    spec = SandboxSpec(image="task:1", ready_timeout_s=0.05, sidecars=[_SERVICE, {**_SERVICE, "name": "proxy"}])
+
+    with pytest.raises(NgFailureEvent) as raised:
+        # The budget is the spec's; the outer bound only keeps a regression from hanging the suite.
+        await asyncio.wait_for(provider.create(spec), timeout=5)
+
+    assert raised.value.failure_kind == PROVIDER_SETUP_FAILED
+    assert "did not answer on port(s) [8080] within 0.05s" in raised.value.failure_reason
+    # Every member already started is deleted, and the main sandbox never starts.
+    assert [created["image"] for created in FakeSandbox.created] == ["tools:2", "tools:2"]
+    assert sorted(FakeSandbox.killed) == ["sandbox-1", "sandbox-2"]
+
+
 @pytest.mark.parametrize(
-    ("answer", "listening"),
+    ("status", "answer", "listening"),
     [
-        # Any answer of the service counts, whatever its status.
-        (SimpleNamespace(status_code=404, content=b"<html>not found</html>"), True),
+        # Any answer of the service counts, whatever its status, and its body is not read.
+        (404, lambda: _once(b"<html>not found</html>"), True),
+        (200, _endless, True),
         # The management API's own answer when nothing listens on the port it proxies to.
-        (SimpleNamespace(status_code=502, content=b'{"code":"BACKEND_CONNECTION_FAILED","message":"..."}'), False),
-        (ConnectionError("refused"), False),
+        (502, lambda: _once(b'{"code":"BACKEND_CONNECTION_FAILED","message":"..."}'), False),
+        # A server error of the service's own; only the start of its body is read.
+        (502, lambda: _once(b"upstream down"), True),
+        (500, _endless, True),
+        (None, ConnectionError("refused"), False),
     ],
 )
 async def test_a_sidecar_port_answers_once_its_service_does(
-    provider, monkeypatch, answer: Any, listening: bool
+    provider, monkeypatch, status: int | None, answer: Any, listening: bool
 ) -> None:
     from opensandbox.adapters.factory import AdapterFactory
-    from opensandbox.api.execd.api.health import ping
-
-    async def get_client() -> str:
-        return "client"
-
-    async def asyncio_detailed(*, client: str) -> Any:
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
 
     asked: list[Any] = []
+
+    @contextlib.asynccontextmanager
+    async def stream(method: str, url: str) -> Any:
+        asked.append((method, url))
+        if isinstance(answer, Exception):
+            raise answer
+        yield SimpleNamespace(status_code=status, aiter_bytes=answer)
+
+    async def get_client() -> Any:
+        return SimpleNamespace(get_async_httpx_client=lambda: SimpleNamespace(stream=stream))
+
     monkeypatch.setattr(
         AdapterFactory,
         "create_health_service",
         lambda _self, endpoint: asked.append(endpoint) or SimpleNamespace(_get_client=get_client),
     )
-    monkeypatch.setattr(ping, "asyncio_detailed", asyncio_detailed)
     handle = await provider.create(SandboxSpec(image="tools:2"))
     handle.raw.get_endpoint = lambda port: _endpoint(handle.sandbox_id, port)
 
     assert await provider._sidecar_port_answers(handle, 8080) is listening
     # Asked at the sidecar's own endpoint for that port.
-    assert asked == ["sandbox-1:8080"]
+    assert asked == ["sandbox-1:8080", ("GET", "/ping")]
 
 
 async def _endpoint(sandbox_id: str, port: int) -> str:

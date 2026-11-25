@@ -466,8 +466,10 @@ SandboxSpec(
   with the image, the entrypoint and the exit code in the reason, and is not tried again.
 - The provider waits until the sidecar's service answers an HTTP request on each of its `ports`, for up to
   `ready_timeout_s` (120 seconds without one). It asks through the sidecar's own endpoint, so nothing runs in the
-  sidecar's image, and any answer of the service counts. A service that does not answer in time fails the create as
-  `provider_setup_failed` and deletes every member already started.
+  sidecar's image, and any answer of the service counts; its body is not read. The time limit covers the whole
+  wait, a request in flight included, so a service that accepts a connection and never answers does not hold the
+  create. A service that does not answer in time fails the create as `provider_setup_failed` and deletes every
+  member already started.
 - `ports` needs `networking.enabled: true`; without it the create is refused before anything starts, because nothing
   in the main sandbox could reach the service. The main sandbox resolves each sidecar by its name through
   `/etc/hosts`, which needs root in the main sandbox. The two do not share a loopback interface.
@@ -506,6 +508,8 @@ SandboxSpec(
     the deployment does. It is off by default, and the create is then refused before anything starts: an egress layer
     that drops `ports` would turn the rule into one for every port of the sidecar, and code in the main sandbox could
     run commands in the sidecar and read the environment it was given.
+  - The rule also needs an `opensandbox` SDK whose network rule has `ports`. An SDK without the field sends the rule
+    without them, so the create is refused before anything starts; upgrade the SDK.
   - A sidecar under a deny-by-default policy cannot open a connection to the main sandbox.
 
   A main sandbox without an egress policy is not restricted, and neither are its sidecars: it reaches every port of
