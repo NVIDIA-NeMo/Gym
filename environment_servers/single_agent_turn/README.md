@@ -144,7 +144,7 @@ The agent's side is derived:
 | has no tools | cannot run its loop without a sandbox (a CLI harness, or an agent server that does not say) | borrows a group started at seed |
 | has no tools | runs its loop in its own process when lent nothing (Simple Agent) | is lent nothing and runs in the Agent Server process |
 
-The agent says which it is on `GET /v1/agent_sessions/capabilities` (`runs_loop_without_sandbox`, set by the agent class), which this server asks once per process, only for a task without tools. An agent server without the route is lent a group, so an undeclared agent fails closed.
+The agent says which it is on `GET /v1/agent_sessions/capabilities` (`runs_loop_without_sandbox`, set by the agent class; DeepAgents answers by tool profile, since its `builtin` profile runs in a sandbox), which this server asks once per process, only for a task without tools. An agent server without the route is lent a group, so an undeclared agent fails closed.
 
 The verifier's side is the pairing's `verifier.mode` (Harbor's words). Unset, it is the mode the Resources Server declares at seed, as `verifier_mode` next to its `sandbox_group`. Either way, the mode must be one the Resources Server says its `/verify` can run in (`supported_verifier_modes`):
 
@@ -162,7 +162,11 @@ Refused at startup:
 - `verifier.sandbox` without `mode: separate`;
 - `mode: shared` without a `sandbox_config`, since no agent group can exist;
 - `mode: separate` without a `sandbox_config` and without `image` and `ttl_s` in `verifier.sandbox`;
-- `mode: separate` on a provider that cannot apply its rule: Docker and OpenSandbox apply `no_network`, Enroot does not.
+- `mode: separate` on a provider that cannot apply `no_network`, or its configured rule: Docker and OpenSandbox apply
+  `no_network`, Enroot does not. Setting `verifier.sandbox.network` does not lift this: no fallback to an open network
+  is decided for a verifier that may run model output;
+- granted tools (`resources_tool_transports`, `tool_servers`) without a `sandbox_config`: they put the agent in a group
+  that only `sandbox_config` starts.
 
 Refused at seed for good (a terminal seed failure, before the agent's turn), since every attempt would fail alike:
 - a verifier mode the Resources Server says its `/verify` cannot run in;

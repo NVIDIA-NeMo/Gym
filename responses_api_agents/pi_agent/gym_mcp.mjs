@@ -179,7 +179,8 @@ async function discoverTools(serverName, server, registered, terminal, replyCutO
         parameters: tool.inputSchema,
         async execute(_callId, params, signal) {
           if (terminal.has(tool.name) && replyCutOff()) {
-            // Pi runs the calls of a reply cut at the output limit with whatever arguments it could parse,
+            // Pi runs none of the calls of a `length` reply, but vLLM reports `tool_calls` for a reply cut at the
+            // output limit that it parsed a call from. Pi runs that call with whatever arguments it could parse,
             // and a finish call gives the model no turn to correct them.
             throw new Error(
               "Not run: the reply with this call hit the output limit, so its arguments may be cut off. " +

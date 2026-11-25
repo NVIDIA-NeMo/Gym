@@ -37,6 +37,7 @@ from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExec
 from responses_api_agents.simple_agent import sandbox as sandbox_module
 from responses_api_agents.simple_agent import sandbox_runner
 from responses_api_agents.simple_agent.app import (
+    _SANDBOX_LOOP_CONFIG,
     ModelServerRef,
     SimpleAgent,
     SimpleAgentConfig,
@@ -79,14 +80,15 @@ def _reply(text: str) -> dict[str, Any]:
 
 
 @asynccontextmanager
-async def _model_server(replies: list[tuple[int, dict[str, Any]]]) -> AsyncIterator[tuple[int, list[Any]]]:
-    """A model server on loopback that answers each request with the next reply and records what it was sent."""
+async def _model_server(replies: list[tuple[Any, ...]]) -> AsyncIterator[tuple[int, list[Any]]]:
+    """A model server on loopback that answers each request with the next reply, ``(status, body)`` or
+    ``(status, body, headers)``, and records what it was sent."""
     seen: list[tuple[str, dict[str, Any], str | None]] = []
 
     async def respond(request: web.Request) -> web.Response:
         seen.append((request.path, await request.json(), request.headers.get("x-session-id")))
-        status, body = replies[min(len(seen), len(replies)) - 1]
-        return web.json_response(body, status=status)
+        status, body, *headers = replies[min(len(seen), len(replies)) - 1]
+        return web.json_response(body, status=status, headers=headers[0] if headers else None)
 
     app = web.Application()
     app.router.add_post("/{tail:.*}", respond)
@@ -218,19 +220,54 @@ async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(repli
     # The sandbox runs the loop in process there, with the agent's own settings.
     (payload,) = loop.payloads
     assert payload["config"]["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
-    # Only the settings the loop reads are staged in the sandbox.
-    assert set(payload["config"]) == {
-        "name",
-        "host",
-        "port",
-        "entrypoint",
-        "model_server",
-        "max_model_retries",
-    }
+    # Only the settings the loop reads are staged in the sandbox, with their defaults but no unset ones.
+    assert set(payload["config"]) == _SANDBOX_LOOP_CONFIG - {"resources_server", "max_steps"}
+    assert payload["config"]["max_model_retries"] == 0
     assert payload["model_server"] == {"host": "127.0.0.1", "port": port}
     assert payload["body"] == {"input": "Which option?", "temperature": 0.2, "metadata": {"task": "quiz"}}
     assert body.metadata == metadata
     assert "activation" not in payload["loop"]
+
+
+class _OneStepConfig(SimpleAgentConfig):
+    max_steps: int | None = 1
+
+
+class _OneStepAgent(SimpleAgent):
+    config: _OneStepConfig
+
+
+async def test_a_subclass_config_default_reaches_the_sandboxed_loop() -> None:
+    # The runner validates the staged settings as SimpleAgentConfig, so an unset field the subclass gives another
+    # default must be staged with it, or the loop in the sandbox would run without a step limit.
+    config = _OneStepConfig.model_validate(_config().model_dump(exclude_unset=True))
+    agent = _OneStepAgent(config=config, server_client=_client(1))
+    loop = _LoopInProcess()
+    state = SimpleAgentSessionState(
+        request=_seed(sandbox_access=ACCESS),
+        tool_access=None,
+        resources_cookies=None,
+        sandbox_loop=loop,
+        model_server_endpoint=("127.0.0.1", 1),
+    )
+
+    async def run(payload: dict[str, Any], *, timeout: float, close_timeout: float) -> dict[str, Any]:
+        loop.payloads.append(payload)
+        return {
+            "response": _reply("done"),
+            "trajectory": None,
+            "model_server_cookies": {},
+            "resources_server_cookies": None,
+        }
+
+    loop.run = run  # type: ignore[method-assign]
+    await agent._create_session_episode(
+        state, NeMoGymResponseCreateParamsNonStreaming(input="hi"), **_loop_arguments()
+    )
+
+    (payload,) = loop.payloads
+    assert payload["config"]["max_steps"] == 1
+    assert SimpleAgentConfig.model_validate(payload["config"]).max_steps == 1
 
 
 async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_path: Path) -> None:
@@ -281,6 +318,8 @@ async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_pa
 
     output = json.loads((tmp_path / "output.json").read_text())
     assert output["response"]["output"][0]["content"][0]["text"] == "42"
+    # The input, which holds the grants' cookies, is gone once the runner read it.
+    assert not (tmp_path / "input.json").exists()
     assert [path for path, _, _ in seen] == [MODEL_PATH]
     check = subprocess.run(
         [
@@ -297,6 +336,59 @@ async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_pa
         timeout=60,
     )
     assert check.stdout.strip().startswith(str(tmp_path)), check.stdout
+
+
+async def test_the_runner_reports_the_failures_its_loop_recovered_from(tmp_path: Path) -> None:
+    """A failure the model server recovered from and forwarded with its reply is observed in the sandbox as it is in
+    process, and comes back with the output."""
+    sandbox_module._harness_bytes.cache_clear()
+    with tarfile.open(sandbox_module.harness_archive()) as members:
+        members.extractall(tmp_path, filter="data")
+    runner = tmp_path / "responses_api_agents/simple_agent/sandbox_runner.py"
+    recovered = FailureEvent(boundary="model", failure_kind="model_request_error", http_status=503)
+    forwarded = FailureHeader.encode(FailureReport(events={recovered.event_id: recovered}))
+    async with _model_server([(200, _reply("42"), forwarded)]) as (port, seen):
+        payload = {
+            "config": _config().model_dump(mode="json", exclude_none=True),
+            "model_server": {"host": "127.0.0.1", "port": port},
+            "body": {"input": "What is 6 * 7?"},
+            "loop": {key: value for key, value in _loop_arguments().items() if key != "activation"},
+        }
+        (tmp_path / "input.json").write_text(json.dumps(payload))
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-E",
+            "-s",
+            str(runner),
+            str(tmp_path / "input.json"),
+            str(tmp_path / "output.json"),
+            cwd="/",
+            env=SANDBOX_ENV,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+        assert process.returncode == 0, stderr.decode(errors="replace")
+
+    assert len(seen) == 1
+    output = json.loads((tmp_path / "output.json").read_text())
+    assert output["response"]["output"][0]["content"][0]["text"] == "42"
+    assert list(FailureReport.model_validate(output["failure_log"]).events) == [recovered.event_id]
+
+
+async def test_the_failures_the_sandboxed_loop_observed_join_the_agents_request(monkeypatch) -> None:
+    loop = sandbox_module.SandboxLoop.borrowed(_FakeSandbox(), workdir="/workspace")
+    event = FailureEvent(boundary="model", failure_kind="model_request_error", http_status=503)
+    saved = FailureReport(events={event.event_id: event}).model_dump(mode="json")
+
+    async def execute(*, stage_activation, collect, timeout: float, close_timeout: float) -> dict[str, Any]:
+        return {"response": {"answer": 1}, "failure_log": saved}
+
+    monkeypatch.setattr(loop.session, "execute", execute)
+    with RequestFailureLog.capture() as log:
+        output = await loop.run({}, timeout=10, close_timeout=5)
+
+    assert output == {"response": {"answer": 1}}
+    assert list(log.report.events) == [event.event_id]
 
 
 def test_the_runner_reports_what_the_loop_raised(tmp_path: Path) -> None:

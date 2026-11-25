@@ -12,6 +12,8 @@ from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
+from nemo_gym.core import MODEL_REQUEST_ERROR
+from responses_api_agents.pi_agent.app import PiAgent
 from responses_api_agents.pi_agent.tests.test_sandbox import _pinned_pi_package
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -71,7 +73,6 @@ def test_pinned_pi_classifies_model_server_http_error(
     monkeypatch: pytest.MonkeyPatch, status: int, message: str, context_overflow: bool, delayed: bool
 ) -> None:
     node, package = _pinned_pi_package()
-    sdk = package / "node_modules/@earendil-works/pi-ai/dist"
     server = SimpleModelServer(
         config=SimpleModelServerConfig(
             host="127.0.0.1",
@@ -112,8 +113,8 @@ const wire = JSON.parse(fs.readFileSync(0, 'utf8'));
 globalThis.fetch = async () => new Response(wire.body, {
   status: wire.status, headers: {'content-type': wire.content_type},
 });
-const {streamSimple} = await import(process.argv[1]);
-const {isContextOverflow} = await import(process.argv[2]);
+const {streamSimple} = await import("@earendil-works/pi-ai/api/openai-completions");
+const {isContextOverflow} = await import("@earendil-works/pi-ai");
 const model = {id: 'test', name: 'test', api: 'openai-completions', provider: 'openai',
   baseUrl: 'http://gym.invalid/v1', reasoning: false, input: ['text'],
   cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}, contextWindow: 262144, maxTokens: 32768};
@@ -124,16 +125,11 @@ assert.ok(result.errorMessage.includes(wire.message), result.errorMessage);
 assert.deepEqual(result.content, []);
 assert.equal(result.usage.input + result.usage.output, 0);
 assert.equal(isContextOverflow(result, model.contextWindow), wire.context_overflow);
+process.stdout.write(JSON.stringify({stopReason: result.stopReason, errorMessage: result.errorMessage}));
 """
     result = subprocess.run(
-        [
-            node,
-            "--input-type=module",
-            "-e",
-            script,
-            (sdk / "api/openai-completions.js").as_uri(),
-            (sdk / "index.js").as_uri(),
-        ],
+        [node, "--input-type=module", "-e", script],
+        cwd=package,
         input=json.dumps(
             {
                 "status": response.status_code,
@@ -149,3 +145,6 @@ assert.equal(isContextOverflow(result, model.contextWindow), wire.context_overfl
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+    # The adapter types the pinned Pi's message by its status, which the episode outcome policy reads.
+    outcome = PiAgent.classify_outcome(MagicMock(spec=PiAgent), json.loads(result.stdout))
+    assert (outcome.failure_kind, outcome.status_code) == (MODEL_REQUEST_ERROR, status)

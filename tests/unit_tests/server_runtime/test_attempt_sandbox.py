@@ -268,6 +268,9 @@ class _SidecarProvider(_Provider):
     ) -> None:
         pass
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        return sidecar
+
 
 class _TaskInput(BaseModel):
     value: str = "task"
@@ -501,12 +504,14 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
     assert (spec.image, spec.workdir, spec.ttl_s) == ("task:1", "/task", 3600)
     assert spec.env == {"FROM_CONFIG": "1", "SHARED": "group"}
     assert spec.files == {"task.txt": "2+2"}
-    # Each sidecar starts with its own rule, never the main container's: the weather API only, or nothing.
+    # Each sidecar starts with its own rule, never the main container's: the weather API only, or nothing. The
+    # tools port is the one port of a sidecar the main container may reach.
     assert spec.sidecars == (
         SandboxSidecarSpec(
             name="weather",
             image="weather:1",
             provider_options={"network_policy": {"rule": "hosts_only", "allow": ["api.weather.example"]}},
+            ports=(8080,),
         ),
         SandboxSidecarSpec(
             name="db", image="db:1", provider_options={"network_policy": {"rule": "no_network", "allow": []}}
@@ -519,7 +524,10 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
         "sandbox_id": "sb-1",
         "scope": "operate",
         "workdir": "/task",
-        "sidecars": [{"name": "weather", "image": "weather:1"}, {"name": "db", "image": "db:1"}],
+        "sidecars": [
+            {"name": "weather", "image": "weather:1", "ports": [8080]},
+            {"name": "db", "image": "db:1", "ports": []},
+        ],
     }
     assert access.connection.provider_config_ref == "attempt_sandboxes"
     assert access.connection.descriptor == descriptor
@@ -575,6 +583,40 @@ async def test_a_separate_verifier_after_an_agent_group_gets_a_fresh_group_once_
     assert verifier_spec.provider_options["network_policy"] == {"rule": "no_network", "allow": []}
     # The task was prepared once, in the agent's group.
     assert prepared == [["sb-1"]]
+    await server.stop_attempt_sandbox(attempt.key)
+    assert provider.running() == []
+
+
+class _StuckProvider(_Provider):
+    """A provider whose close of ``stuck`` keeps failing."""
+
+    stuck = "sb-1"
+
+    async def close(self, handle: SandboxHandle) -> None:
+        if handle.sandbox_id == self.stuck:
+            raise RuntimeError("provider close failed")
+        await super().close(handle)
+
+
+async def test_a_separate_verifiers_group_stops_even_while_the_agents_group_fails_to_stop() -> None:
+    provider = _StuckProvider()
+    server = _server(provider)
+
+    attempt, _ = await server.seed_attempt_sandbox(
+        _request(), key="a", verifier_mode="separate", task_tools=["run_python"]
+    )
+    # The agent's group fails to stop when it is released for the verifier; the verifier's group starts anyway.
+    lent = await server.verifier_sandbox_access(_request(), attempt)
+    assert lent.connection.descriptor["sandbox_id"] == "sb-2"
+    assert provider.running() == ["sb-1", "sb-2"]
+
+    # Released after /verify and stopped in cleanup: the agent's failed stop never keeps the verifier's running.
+    await server.release_attempt_sandbox(attempt.key)
+    assert provider.running() == ["sb-1"]
+    with pytest.raises(RuntimeError, match="provider close failed"):
+        await server.stop_attempt_sandbox(attempt.key)
+    assert provider.running() == ["sb-1"]
+    provider.stuck = ""
     await server.stop_attempt_sandbox(attempt.key)
     assert provider.running() == []
 
@@ -835,18 +877,25 @@ def test_a_separate_verifiers_image_is_its_own_then_the_declared_one_then_the_ta
         AttemptSandbox(key="a", lend_to_agent=True)
 
 
-@pytest.mark.parametrize("provider, refused", [(_OpenProvider(), True), (_Provider(), False)])
+@pytest.mark.parametrize(
+    "provider, verifier, refused",
+    [
+        (_OpenProvider(), {"mode": "separate"}, True),
+        (_Provider(), {"mode": "separate"}, False),
+        # An open network in verifier.sandbox does not get a separate verifier onto a provider that cannot cut it.
+        (_OpenProvider(), {"mode": "separate", "sandbox": {"network": "inherit"}}, True),
+        (_Provider(), {"mode": "separate", "sandbox": {"network": "inherit"}}, False),
+    ],
+)
 def test_startup_refuses_a_configured_separate_verifier_on_a_provider_that_cannot_apply_its_rule(
-    provider: _Provider, refused: bool
+    provider: _Provider, verifier: dict[str, Any], refused: bool
 ) -> None:
-    server = _server(provider, verifier={"mode": "separate"})
+    server = _server(provider, verifier=verifier)
     # A provider block whose class passes the base checks, so the started provider's own capabilities decide.
     server.server_client.global_config_dict = {"attempt_sandboxes": {"docker": {}}}
 
     if refused:
-        with pytest.raises(
-            ValueError, match="sets verifier.mode separate, whose group starts with network 'no_network'"
-        ):
+        with pytest.raises(ValueError, match="sets verifier.mode separate, whose group starts with network '.*', but"):
             server.check_sandbox_provider()
     else:
         server.check_sandbox_provider()
