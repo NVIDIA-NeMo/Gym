@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# VoiceBench SD-QA judge prompt: meta_prompt_qa of api_judge.py in https://github.com/MatthewCYM/VoiceBench
+# at commit 0842845a532af34396b173f92f304aa9e2b3c4ab (Apache-2.0), unchanged.
+system: "You are a helpful assistant who tries to help answer the user's question."
+user: "### Question\n\
+  {prompt}\n\
+  \n\
+  ### Reference answer\n\
+  {reference}\n\
+  \n\
+  ### Candidate answer\n\
+  {response}\n\
+  \n\
+  Is the candidate answer correct based on the question and reference answer?\x20\n\
+  Please only output a single \"Yes\" or \"No\". Do not output anything else."

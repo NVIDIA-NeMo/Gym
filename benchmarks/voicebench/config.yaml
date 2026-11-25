@@ -1,0 +1,71 @@
+config_paths:
+  - resources_servers/voicebench/configs/voicebench.yaml
+
+# The judge for the open-ended subsets and SD-QA; set judge_base_url, judge_api_key and judge_model_name in env.yaml.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,http://unset.local/v1}
+      openai_api_key: ${oc.select:judge_api_key,unset}
+      openai_model: ${oc.select:judge_model_name,unset}
+
+voicebench_benchmark_resources_server:
+  _inherit_from: voicebench
+  resources_servers:
+    voicebench:
+      # Every subset in one runtime; the rows' `verifier_metadata.subset` selects the scorer. `all` takes
+      # `expected_rows` and neither `scoring_type` nor `expected_num_rows` (both default to null).
+      subset: all
+      expected_rows:
+        advbench: 520
+        alpacaeval: 199
+        alpacaeval_full: 636
+        alpacaeval_speaker: 6996
+        bbh: 1000
+        commoneval: 200
+        ifeval: 345
+        mmsu: 3074
+        openbookqa: 455
+        sd-qa: 6083
+        wildvoice: 1000
+      seed: 0
+      # A response that never reached its final message is scored as empty.
+      answer_extraction: message
+      sdqa_pedant: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_prompt_files:
+        open: benchmarks/voicebench/prompts/judge_open.yaml
+        reference_qa: benchmarks/voicebench/prompts/judge_reference_qa.yaml
+      # Audio is carried in responses_create_params.metadata and must be translated by a vLLM-based Gym adapter.
+      allowed_model_types:
+      - vllm_model
+      - local_vllm_model
+      - local_vllm_model_proxy
+
+voicebench_benchmark_simple_agent:
+  _inherit_from: voicebench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: voicebench_benchmark_resources_server
+      datasets:
+      - name: voicebench
+        type: benchmark
+        jsonl_fpath: benchmarks/voicebench/data/voicebench_benchmark.jsonl
+        prepare_script: benchmarks/voicebench/prepare.py
+        prepare_dependencies:
+        - pyarrow
+        license: Apache 2.0
+
+voicebench_benchmark_environment_server:
+  _inherit_from: voicebench_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: voicebench_benchmark_resources_server
+      agent_server:
+        name: voicebench_benchmark_simple_agent

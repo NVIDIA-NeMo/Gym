@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# VoiceBench open-ended judge prompt: meta_prompt_open of api_judge.py in https://github.com/MatthewCYM/VoiceBench
+# at commit 0842845a532af34396b173f92f304aa9e2b3c4ab (Apache-2.0), unchanged.
+system: "You are a helpful assistant who tries to help answer the user's question."
+user: |
+
+  I need your help to evaluate the performance of several models in the speech interaction scenario. The models will receive a speech input from the user, which they need to understand and respond to with a speech output.
+  Your task is to rate the model’s responses based on the provided user input transcription [Instruction] and the model’s output transcription [Response].
+
+  Please evaluate the response on a scale of 1 to 5:
+  1 point: The response is largely irrelevant, incorrect, or fails to address the user’s query. It may be off-topic or provide incorrect information.
+  2 points: The response is somewhat relevant but lacks accuracy or completeness. It may only partially answer the user’s question or include extraneous information.
+  3 points: The response is relevant and mostly accurate, but it may lack conciseness or include unnecessary details that don’t contribute to the main point.
+  4 points: The response is relevant, accurate, and concise, providing a clear answer to the user’s question without unnecessary elaboration.
+  5 points: The response is exceptionally relevant, accurate, and to the point. It directly addresses the user’s query in a highly effective and efficient manner, providing exactly the information needed.
+
+  Below are the transcription of user’s instruction and models’ response:
+  ### [Instruction]: {prompt}
+  ### [Response]: {response}
+
+  After evaluating, please output the score only without anything else.
+  You don’t need to provide any explanations.
