@@ -811,8 +811,22 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         and isinstance(result.get(NG_FAILURE_CLASS_KEY), str)
         else set()
     )
+    # A verifier with its own ``<server>:<kind>`` failure kind, such as GDPVal, also sets the routing class to the
+    # ``<kind>`` part and marks the failure terminal. Accept only that complete masked form, so the failure reaches
+    # the failures file instead of aborting the whole batch.
+    verifier_markers = (
+        {NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY}
+        if isinstance(kind, str)
+        and is_namespaced(kind)
+        and result.get(NG_FAILURE_CLASS_KEY) == kind.partition(":")[2]
+        and result.get("mask_sample") is True
+        and result.get(NG_TERMINAL_KEY) is True
+        else set()
+    )
     reserved = sorted(
-        key for key in result if _is_collector_key(key) and key not in judge_markers | final_zero_markers
+        key
+        for key in result
+        if _is_collector_key(key) and key not in judge_markers | final_zero_markers | verifier_markers
     )
     if reserved:
         raise ValueError(
