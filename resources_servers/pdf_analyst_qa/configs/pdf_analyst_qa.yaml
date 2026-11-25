@@ -6,7 +6,6 @@ pdf_analyst_qa_resources_server:
       domain: agent
       verified: false
       description: Synthetic document QA with selected read-only PDF workspaces
-      dataset_root: ${pdf_analyst_qa_dataset_root}
       document_image: ${pdf_analyst_qa_document_image}
       model_server:
         type: responses_api_models

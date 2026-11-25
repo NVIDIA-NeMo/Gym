@@ -22,13 +22,13 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import anyio
 
@@ -38,6 +38,7 @@ from nemo_gym.sandbox.observability import span_attributes as default_span_attri
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
@@ -48,6 +49,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxBackgroundServices,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
+    SupportsSandboxExecArgv,
     SupportsSandboxIndependentUploads,
     SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
@@ -499,6 +501,26 @@ def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -
     return [name for name in keywords if name not in parameters]
 
 
+def _exec_argv(command: Sequence[str]) -> list[str]:
+    """``command`` as an argv list: a program name first, then any arguments, all strings without NUL.
+
+    The messages name no item, since a command can carry task content or secrets.
+    """
+    if not isinstance(command, Sequence):
+        raise TypeError(f"exec() takes shell text or a sequence of strings, got {type(command).__name__}")
+    argv = list(command)
+    if not argv:
+        raise ValueError("exec() got an empty argument list")
+    for item in argv:
+        if not isinstance(item, str):
+            raise TypeError(f"exec() argument list items must be strings, got {type(item).__name__}")
+        if "\0" in item:
+            raise ValueError("exec() argument list items must not contain NUL")
+    if not argv[0]:
+        raise ValueError("exec() argument list must start with a program name")
+    return argv
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider.
 
@@ -718,7 +740,7 @@ class AsyncSandbox:
 
     async def exec(
         self,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -729,11 +751,31 @@ class AsyncSandbox:
     ) -> SandboxExecResult:
         """Run a command, optionally preserving services needed by later commands.
 
+        ``command`` is shell text, which a shell in the sandbox runs, or an
+        argument list (any sequence of strings but a string), which runs as
+        the process's argv without a shell: the sandbox's shell takes no part
+        and no value needs quoting. ``AsyncSandboxSidecar.exec`` runs sidecar
+        commands the same way, because sidecar images can be distroless. The
+        list names the program first and holds only strings without NUL. It
+        needs a provider that implements ``SupportsSandboxExecArgv``; with any
+        other provider, or for an option the provider can honor only through
+        a shell, this raises ``SandboxExecArgvUnsupportedError`` before
+        anything runs. An argument list cannot preserve background services.
+
         ``preserve_background_services`` selects a provider's service-preserving
         execution when available; other providers use ordinary exec. Services
         must redirect stdout and stderr. Per-command ``env`` and ``user``
         overrides apply to the service-preserving execution too.
         """
+        if not isinstance(command, str):
+            command = _exec_argv(command)
+            if preserve_background_services:
+                raise ValueError("preserve_background_services takes shell text, not an argument list")
+            if not (isinstance(self._provider, SupportsSandboxExecArgv) and self._provider.exec_takes_argv()):
+                raise SandboxExecArgvUnsupportedError(
+                    f"Sandbox provider {self._telemetry_provider_name()!r} cannot run an argument list "
+                    "without a shell; pass shell text instead"
+                )
         if not is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
                 command,
@@ -778,7 +820,7 @@ class AsyncSandbox:
 
     async def _exec_uninstrumented(
         self,
-        command: str,
+        command: str | list[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -786,7 +828,12 @@ class AsyncSandbox:
         user: str | int | None = None,
         preserve_background_services: bool = False,
     ) -> SandboxExecResult:
-        if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
+        # exec() refuses an argument list that would preserve background services, so only shell text gets here.
+        if (
+            preserve_background_services
+            and isinstance(command, str)
+            and isinstance(self._provider, SupportsSandboxBackgroundServices)
+        ):
             overrides = {name: value for name, value in (("env", env), ("user", user)) if value is not None}
             # Older custom providers implement only cwd and timeout_s. They still serve a command without
             # overrides; one with them is refused by name here rather than by a TypeError from inside the call.
@@ -805,14 +852,14 @@ class AsyncSandbox:
                 timeout_s=timeout_s,
                 **overrides,
             )
-        return await self._provider.exec(
-            self._require_handle(),
-            command,
-            cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
-            env=env,
-            timeout_s=timeout_s,
-            user=user if user is not None else self.default_user,
-        )
+        handle = self._require_handle()
+        cwd = cwd if cwd is not None else self.default_workdir
+        user = user if user is not None else self.default_user
+        if isinstance(command, str):
+            return await self._provider.exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        # exec() lets an argument list through only for a provider whose exec takes one.
+        argv_provider = cast(SupportsSandboxExecArgv, self._provider)
+        return await argv_provider.exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
     @property
     def default_user(self) -> str | int | None:
@@ -1237,7 +1284,7 @@ class Sandbox:
 
     def exec(
         self,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -1245,6 +1292,7 @@ class Sandbox:
         user: str | int | None = None,
         preserve_background_services: bool = False,
     ) -> SandboxExecResult:
+        """Blocking ``AsyncSandbox.exec``: ``command`` is shell text or an argument list run without a shell."""
         return self._runner.run(
             "exec",
             lambda: self._async_sandbox.exec(

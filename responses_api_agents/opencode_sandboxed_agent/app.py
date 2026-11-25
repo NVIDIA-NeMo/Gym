@@ -38,7 +38,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field, FilePath
+from pydantic import BaseModel, ConfigDict, Field, FilePath, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -545,6 +545,32 @@ def parse_opencode_observations(
     )
 
 
+# Task images can carry their builder's proxy settings (gitingest's points HTTP(S)_PROXY at
+# sys-proxy-rd-relay.byted.org:8118, unresolvable here). OpenCode runs on Bun, which honours them, so every model call
+# failed at once and was retried every 30 s for the whole rollout: gitingest never finished in any no-internet run.
+# Dropped only when opencode_unset_proxy_env is set, for benchmarks whose agent commands have no internet anyway.
+UNSET_PROXY_ENV = "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy"
+
+
+class IdleNudgeConfig(BaseModel):
+    """After OpenCode exits cleanly with time left, and its last assistant turn made no tool call, continue the same
+    session with ``text``, up to ``max_nudges`` times, unless that turn's text contains ``stop_on_text`` (the model's
+    explicit "done"). A turn cut off at the output token limit gets LENGTH_NOTE before the text. A turn that ended on an
+    API/provider error is not continued. Mirrors responses_api_agents/opencode_agent's IdleNudgeConfig."""
+
+    text: str
+    max_nudges: int = Field(default=3, ge=1)
+    stop_on_text: Optional[str] = None
+    # Put LENGTH_NOTE before `text` when the stopped turn hit the output token limit. False sends `text` alone every
+    # time, as OpenHands' headless auto-continue does.
+    length_note: bool = True
+    # Appended to the task prompt (after a blank line) on the FIRST run, so the model knows how to finish from turn 1.
+    # OpenHands' `finish` tool is in its tool list from the start; OpenCode has no such tool, so without this the model
+    # learns `stop_on_text` only from the first nudge (measured 2026-11-04: 99% of NL2Repo traces carried exactly one
+    # nudge, the finish handshake). The task prompt itself is left as the benchmark wrote it.
+    finish_instruction: Optional[str] = None
+
+
 # OpenCode's `attachment.image` limits (config schema packages/core/src/v1/config/attachment.ts at v1.17.11):
 # an image within all three is forwarded unchanged. 2**31 - 1 is the largest value its PositiveInt accepts
 # without a JSON precision caveat and is far above any image a chat-completions request can carry.
@@ -568,6 +594,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_max_context_window: int
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
+    # For sandboxes with no egress: refuse to start unless the OpenCode runtime is supplied (preinstalled_opencode, or
+    # both remote_opencode_install_script_path and remote_opencode_binary_path), so a run never reaches the installer's
+    # download fallback and fails there, after the sandbox is already seeded, before its first model call.
+    require_opencode_runtime: bool = False
     execution_failure_reward_zero: bool = False
     # Opt-in mode gives setup and agent execution separate sandbox_timeout budgets.
     report_agent_sandbox_oom: bool = False
@@ -576,6 +606,24 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    # Keep OpenCode's data dir (XDG_DATA_HOME) under /tmp even when observations are off. For task images that run as a
+    # user without a writable home (NL2RepoBench more-itertools runs as `appuser`), where the default $HOME/.local/share
+    # fails with EACCES before the agent's first turn. Off by default: unchanged command line for everyone else.
+    opencode_data_home_in_tmp: bool = False
+    # Drop HTTP(S)_PROXY/ALL_PROXY before `opencode run` (see UNSET_PROXY_ENV). Off by default: the command line is
+    # unchanged for every other benchmark, whose agent commands may need the proxy to reach the internet.
+    opencode_unset_proxy_env: bool = False
+    # Continue the session when the model stops with budget left (same model and semantics as the ProgramBench
+    # opencode_agent's IdleNudgeConfig). `opencode run` exits on ANY reply without a tool call, which is also how it
+    # says it is done; mini-swe-agent answers a reply without a command with a correction, and OpenHands with a
+    # corrective message. Without this, a turn cut off at max_tokens mid-reasoning ends the task with an empty workspace
+    # (NL2RepoBench, Super 3.5 at max_tokens 32000: 5 of 63 rollouts, 2026-11-02). Off unless configured.
+    idle_nudge: Optional["IdleNudgeConfig"] = None
+    # OpenHands 0.56's StuckDetector (NL2RepoBench's harness ends a run when its agent loops): stuck_detector.mjs, an
+    # OpenCode plugin, checks the repeat/error/alternation/compaction scenarios after every tool call and ends the run
+    # when one fires; the monologue scenario (3 identical replies with no tool call between) is checked here before a
+    # nudge. The row's `opencode_stuck` names the scenario. Off by default.
+    stuck_detector: bool = False
     opencode_provider_id: str = "nemo_gym"
     opencode_model_id: str = "dummy_model"
     sandbox_upload_roots: List[str] = Field(default_factory=list)
@@ -626,6 +674,19 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 
     debug: bool = False
 
+    @model_validator(mode="after")
+    def _runtime_is_supplied_when_required(self) -> "OpenCodeSandboxedAgentConfig":
+        supplied = self.preinstalled_opencode or (
+            self.remote_opencode_install_script_path and self.remote_opencode_binary_path
+        )
+        if self.require_opencode_runtime and not supplied:
+            raise ValueError(
+                "require_opencode_runtime is set but no OpenCode runtime is configured: set preinstalled_opencode, or "
+                "both remote_opencode_install_script_path and remote_opencode_binary_path, to a pinned runtime the sandbox "
+                "can read. Nothing is downloaded when this option is set."
+            )
+        return self
+
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
@@ -657,6 +718,113 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("The newest OpenCode session does not have a valid ID")
     return session_id
+
+
+# Put before the idle-nudge text when the stopped turn was cut off at the output token limit (OpenCode records finish
+# "length"), the case mini-swe-agent's ProgramBench format_error_template calls out on its own.
+LENGTH_NOTE = (
+    "Your previous response reached the output token limit before you produced a tool call, so it was cut off. "
+    "Respond more concisely."
+)
+
+
+def _steps_used(opencode_export: Dict[str, Any]) -> int:
+    """Agentic steps the session has taken: one `step-finish` part per step, as OpenCode records them."""
+    return sum(
+        1
+        for m in opencode_export.get("messages") or []
+        if (m.get("info") or {}).get("role") == "assistant"
+        for p in m.get("parts") or []
+        if p.get("type") == "step-finish"
+    )
+
+
+def _idle_reason(opencode_export: Dict[str, Any], stop_on_text: Optional[str] = None) -> Optional[str]:
+    """Why the session should be continued, or None.
+
+    "length": the last assistant turn was cut off at the output token limit without a tool call.
+    "idle":   it stopped without a tool call for any other reason (reasoning only, empty, or text), unless its text
+              ends with ``stop_on_text`` (trailing punctuation allowed).
+    None:     it called a tool, ended on an API/provider error, said ``stop_on_text``, or there is no assistant turn."""
+    messages = opencode_export.get("messages") or []
+    assistant = [m for m in messages if (m.get("info") or {}).get("role") == "assistant"]
+    if not assistant:
+        return None
+    last = assistant[-1]
+    info = last.get("info") or {}
+    if info.get("error"):
+        return None  # an API/provider error is a failure to report, not a turn to continue
+    parts = last.get("parts") or []
+    if any(p.get("type") == "tool" for p in parts):
+        return None
+    text = " ".join(str(p.get("text") or "") for p in parts if p.get("type") == "text")
+    if stop_on_text and re.search(re.escape(stop_on_text) + r"\W*$", text):
+        return None  # said only at the end: a mention mid-reply ("I will say X when done") is not "done"
+    if info.get("finish") == "length" or any(
+        p.get("type") == "step-finish" and p.get("reason") == "length" for p in parts
+    ):
+        return "length"
+    return "idle"
+
+
+STUCK_DIR = "/tmp/nemo_gym_stuck"
+STUCK_PLUGIN = Path(__file__).with_name("stuck_detector.mjs")
+
+
+def _monologue_stuck(opencode_export: Dict[str, Any]) -> bool:
+    """OpenHands' monologue scenario: the last 3 agent messages (steps with no tool call) are identical, with nothing
+    observed (no tool call, no compaction) between them. User messages (the nudges) are left out, as OpenHands does."""
+    history: List[Optional[str]] = []  # an agent message's text, or None for an observation
+    for message in opencode_export.get("messages") or []:
+        parts = message.get("parts") or []
+        if (message.get("info") or {}).get("role") != "assistant":
+            history.extend(None for p in parts if p.get("type") == "compaction")
+            continue
+        step: Optional[List[Dict[str, Any]]] = None
+        for part in parts + [{"type": "step-finish"}]:
+            if part.get("type") == "step-start":
+                step = []
+            elif part.get("type") == "step-finish":
+                if step is not None:
+                    if any(p.get("type") == "tool" for p in step):
+                        history.append(None)
+                    else:
+                        history.append("".join(str(p.get("text") or "") for p in step if p.get("type") == "text"))
+                step = None
+            elif step is not None:
+                step.append(part)
+    agent = [i for i, h in enumerate(history) if h is not None]
+    if len(agent) < 3:
+        return False
+    first, *_, last = agent[-3:]
+    return len({history[i] for i in agent[-3:]}) == 1 and all(h is not None for h in history[first:last])
+
+
+async def _read_stuck_marker(sandbox: Any) -> Optional[str]:
+    """The scenario stuck_detector.mjs recorded, or None."""
+    try:
+        res = await sandbox.exec(command=f"cat {STUCK_DIR}/stuck.json 2>/dev/null || true")
+        return json.loads(res.stdout).get("scenario") if (res.stdout or "").strip() else None
+    except Exception:
+        print("Reading the stuck marker failed", format_exc(), file=sys.stderr)
+        return None
+
+
+class _CombinedExecResult:
+    """Stdout/stderr of several `opencode run` execs (the first run plus nudged resumes), shaped like an exec result."""
+
+    def __init__(self, first: Any) -> None:
+        self.stdout = getattr(first, "stdout", "") or ""
+        self.stderr = getattr(first, "stderr", "") or ""
+        self.return_code = getattr(first, "return_code", None)
+        self.error_type = getattr(first, "error_type", None)
+        self.stuck: Optional[str] = None  # the OpenHands stuck scenario that ended the session, if any
+
+    def add(self, nxt: Any) -> None:
+        self.stdout += "\n" + (getattr(nxt, "stdout", "") or "")
+        self.stderr += "\n" + (getattr(nxt, "stderr", "") or "")
+        self.return_code = getattr(nxt, "return_code", None)
+        self.error_type = getattr(nxt, "error_type", None)
 
 
 def _read_opencode_child_messages(db_path: Path, root_session_id: str) -> list[dict[str, Any]]:
@@ -1144,6 +1312,136 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         env["NEMO_GYM_OPENCODE_PROVIDER_ID"] = self.config.opencode_provider_id
         return env
 
+    def _require_resume_evidence(self, resumed: Any) -> None:
+        """A resume that exited cleanly is accepted on its own output, not on the first launch's: the combined text would
+        otherwise carry the first run's completion marker and plugin receipts over a resume that printed nothing."""
+        if getattr(resumed, "return_code", None) != 0 or getattr(resumed, "error_type", None) is not None:
+            return
+        stdout, stderr = getattr(resumed, "stdout", "") or "", getattr(resumed, "stderr", "") or ""
+        if "OpenCode run finished" not in stdout:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.capture",
+                failure_reason="An OpenCode resume reported exit 0 without a trustworthy completion marker",
+            )
+        output = stdout + stderr
+        missing = [
+            name
+            for enabled, receipt, name in (
+                (self.config.stuck_detector, "[stuck_detector] loaded", "stuck_detector"),
+                (bool(self.config.opencode_plugins), "[nemo-gym-plugin] loaded", "configured plugins"),
+            )
+            if enabled and receipt not in output
+        ]
+        if missing:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.plugin",
+                stage="agent",
+                failure_reason=f"An OpenCode resume ran without its {', '.join(missing)} receipt; "
+                "refusing to score a rollout that ran without them.",
+            )
+
+    async def _nudge_idle_turns(
+        self,
+        *,
+        sandbox: Any,
+        first_result: Any,
+        config_content: str,
+        env_suffix: str,
+        run_flags: str,
+        session_env: Optional[Dict[str, str]],
+        deadline: float,
+    ) -> tuple[Any, int]:
+        """Continue the session per ``idle_nudge`` while its last assistant turn made no tool call.
+
+        Returns the combined exec result and the number of nudges sent. Stops at the configured limit, when an
+        `opencode run` does not exit cleanly, when the session cannot be read, when under a minute of the
+        sandbox_timeout budget is left, or when the session has used OpenCode's step cap (`agent.build.steps` in
+        `config_content`): each `opencode run --session` would otherwise start a fresh cap, so a resume gets only the
+        steps left, which makes the cap one budget for the whole task (as OpenHands' max_iterations is)."""
+        base_config = json.loads(config_content)
+        step_cap = ((base_config.get("agent") or {}).get("build") or {}).get("steps")
+        combined = _CombinedExecResult(first_result)
+        latest_stdout = combined.stdout
+        unset_proxy_str = f"{UNSET_PROXY_ENV} && " if self.config.opencode_unset_proxy_env else ""
+        nudges = 0
+        check_remote = "/tmp/opencode_idle_check.json"
+        nudge_config = self.config.idle_nudge
+        assert nudge_config is not None
+        while nudges < nudge_config.max_nudges:
+            if self.config.stuck_detector:
+                combined.stuck = await _read_stuck_marker(sandbox)
+                if combined.stuck:
+                    break  # the plugin ended the run, as OpenHands ends a stuck agent
+            if "OpenCode run finished" not in latest_stdout:
+                break
+            remaining = deadline - time()
+            if remaining < 60:
+                break
+            try:
+                listed = await sandbox.exec(
+                    command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                    env=session_env,
+                )
+                session_id = _extract_opencode_session_id(listed.stdout or "")
+                exported = await sandbox.exec(
+                    command=(
+                        "export PATH=$HOME/.opencode/bin:$PATH "
+                        f"&& opencode export {quote(session_id)} > {quote(check_remote)}"
+                    ),
+                    env=session_env,
+                )
+                if exported.return_code != 0:
+                    break
+                with tempfile.TemporaryDirectory(prefix="nemo-gym-opencode-nudge-") as tmp:
+                    local = Path(tmp) / "export.json"
+                    await sandbox.download(check_remote, local)
+                    session_export = json.loads(local.read_text().strip() or "{}")
+            except NgFailureEvent:
+                raise  # a typed provider failure is reported (ungraded, retried), not graded as a short clean run
+            except Exception:
+                print("Idle check failed; not nudging", format_exc(), file=sys.stderr)
+                break
+            reason = _idle_reason(session_export, nudge_config.stop_on_text)
+            if reason is None:
+                break
+            if self.config.stuck_detector and _monologue_stuck(session_export):
+                combined.stuck = "monologue"
+                break
+            config = base_config
+            if isinstance(step_cap, int) and step_cap > 0:
+                used = _steps_used(session_export)
+                if used >= step_cap:
+                    break  # the whole-task step budget is spent, as OpenHands stops at max_iterations
+                config = json.loads(config_content)
+                config.setdefault("agent", {}).setdefault("build", {})["steps"] = step_cap - used
+            nudges += 1
+            print(
+                f"OpenCode session {session_id} stopped without a tool call ({reason}); nudge {nudges}",
+                file=sys.stderr,
+            )
+            nudge = (
+                f"{LENGTH_NOTE}\n{nudge_config.text}"
+                if reason == "length" and nudge_config.length_note
+                else nudge_config.text
+            )
+            resume = (
+                f"export PATH=$HOME/.opencode/bin:$PATH && {unset_proxy_str}"
+                f"printf '%s' {quote(nudge)} | OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
+                f"opencode run --session {quote(session_id)} {run_flags} "
+                f'&& echo "OpenCode run finished"'
+            )
+            # A provider failure here propagates like the first launch's: the row is an attributed failure and is not
+            # graded as a short attempt. A timeout is a result, not an exception, and keeps its partial-work path.
+            resumed = await sandbox.exec(command=resume, timeout_s=remaining)
+            combined.add(resumed)
+            latest_stdout = getattr(resumed, "stdout", "") or ""
+            self._require_resume_evidence(resumed)
+        return combined, nudges
+
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
         for message in opencode_export["messages"]:
@@ -1289,6 +1587,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         # Fails before anything is uploaded or run, so an unsupported image fails the row explicitly.
         query, attachments = _parse_user_turn(body.input)
+        if self.config.idle_nudge is not None and self.config.idle_nudge.finish_instruction:
+            query = f"{query}\n\n{self.config.idle_nudge.finish_instruction}"
         # Empty without images, so a text-only turn produces exactly the launch command it always did.
         opencode_attachment_str = "".join(f" -f {quote(attachment.remote_path)}" for attachment in attachments)
 
@@ -1349,15 +1649,34 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     # sandbox user can open the file.
                     local_path.chmod(0o644)
                     await sandbox.upload(local_path, attachment.remote_path)
+        stuck_setup = ""
+        if self.config.stuck_detector:
+            # Rides in the run command (base64) and loads from a file:// URL, outside the verified plugin uploads.
+            plugin_b64 = base64.b64encode(STUCK_PLUGIN.read_bytes()).decode()
+            stuck_setup = (
+                f"mkdir -p {STUCK_DIR} && rm -f {STUCK_DIR}/stuck.json "
+                f"&& echo {plugin_b64} | base64 -d > {STUCK_DIR}/stuck_detector.mjs && "
+            )
+            effective_config = {
+                **effective_config,
+                "plugin": [*effective_config.get("plugin", []), f"file://{STUCK_DIR}/stuck_detector.mjs"],
+            }
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
-        xdg_home_str = ""
+        xdg_env: Dict[str, str] = {}
         remote_data_home = None
-        if collect_observations:
+        # Observations read OpenCode's session database, so it goes to a known /tmp path; opencode_data_home_in_tmp does
+        # the same for images whose user has no writable home (see the config field), and also moves OpenCode's state,
+        # cache and config dirs there: with only XDG_DATA_HOME moved, it next fails on mkdir $HOME/.local/state.
+        if collect_observations or self.config.opencode_data_home_in_tmp:
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
-            xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
+            xdg_env["XDG_DATA_HOME"] = remote_data_home
+            if self.config.opencode_data_home_in_tmp:
+                for name in ("STATE", "CACHE", "CONFIG"):
+                    xdg_env[f"XDG_{name}_HOME"] = f"{remote_data_home}-{name.lower()}"
+        xdg_home_str = " ".join(f"{key}={value}" for key, value in xdg_env.items())
 
         # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
         ripgrep_remote_path = None
@@ -1373,6 +1692,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
 
         extra_env_str = " ".join(f"{k}={quote(v)}" for k, v in sorted(self._resolve_opencode_env(query).items()))
+        # The environment of the first `opencode run`, reused unchanged by every idle-nudge resume: the extra env
+        # (`opencode_env`) and the required-MCP list (the plugin that fails the run when a required server is down).
+        required_mcp_str = (
+            f"NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))}"
+        )
+        run_env_str = f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str}"
+        unset_proxy_str = f"{UNSET_PROXY_ENV} && " if self.config.opencode_unset_proxy_env else ""
 
         # Query delivery. argv is the default and preserves today's behaviour exactly; stdin is
         # opt-in (see `opencode_query_via_stdin`).
@@ -1408,7 +1734,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
         setup_command = f"""
         echo "Shell: $SHELL" \
-        && {install_str} \
+        && {stuck_setup}{install_str} \
         {ripgrep_install_str} \
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
@@ -1416,7 +1742,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
         agent_command = f"""
-        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
+        {unset_proxy_str}{query_seed_str}{required_mcp_str} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} {run_env_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """
@@ -1451,11 +1777,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
         run_error_type = None
+        run_started = time()
+        idle_nudges, stuck = 0, None
         try:
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
             )
+            if self.config.idle_nudge is not None:
+                result, idle_nudges = await self._nudge_idle_turns(
+                    sandbox=sandbox,
+                    first_result=result,
+                    config_content=opencode_config_content,
+                    env_suffix=f"{required_mcp_str} {run_env_str}",
+                    run_flags=f"{opencode_debug_str} {opencode_thinking_str}",
+                    session_env=dict(xdg_env) or None,
+                    deadline=run_started + self.config.sandbox_timeout,
+                )
+                stuck = result.stuck
         except NgFailureEvent as exc:
             if not (
                 self.config.report_agent_sandbox_oom
@@ -1527,6 +1866,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 operation="opencode.execute",
                 stage="agent",
             ) from error
+
+        if self.config.stuck_detector and stuck is None:
+            stuck = await _read_stuck_marker(sandbox)
 
         if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
             # The provider returned a result that does not say how the command ended: an error type, or the -1
@@ -1609,7 +1951,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_local_fpath = results_dir / export_fname
         # A previous attempt's transcript must never stand in for this run's export.
         results_local_fpath.unlink(missing_ok=True)
-        session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
+        session_env = dict(xdg_env) or None
         try:
             session_list_result = await sandbox.exec(
                 command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
@@ -1847,6 +2189,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # makes the check independent of that.
         run_output = (result_stdout or "") + (result_stderr or "")
         plugins_loaded = "[nemo-gym-plugin] loaded" in run_output
+        if self.config.stuck_detector and "[stuck_detector] loaded" not in run_output and run_output.strip():
+            # The stuck detector is registered outside the verified plugin uploads, so the sentinel above does not
+            # attest to it, and OpenCode swallows a plugin load failure: without its own receipt the run would be
+            # accepted with the requested stuck policy silently absent. Same rule as the sentinel: ungraded.
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.plugin",
+                stage="agent",
+                failure_reason="The stuck_detector plugin did not load (no receipt in the run output); "
+                "refusing to score a rollout that ran without it.",
+            )
         if self.config.opencode_plugins and not plugins_loaded and run_output.strip():
             # Hard-fail only when we actually captured a transcript and the marker is still absent
             # — that is a genuine silent plugin failure and must never be scored.
@@ -1887,6 +2241,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_idle_nudges": idle_nudges,
+            "opencode_stuck": stuck,
             "opencode_plugins_loaded": plugins_loaded,
             # Terminal reason the turn-budget plugin reported, if any. Stock emits nothing here,
             # so an empty string means the run ended some other way (answered, or infra failure).

@@ -5,6 +5,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,7 +33,7 @@ class TestPrepareDependencies:
 
     def test_declared_dependencies_are_installed_into_the_running_interpreter(self, monkeypatch) -> None:
         calls = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: calls.append(cmd))
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
 
         benchmark_preparation._install_prepare_dependencies(
@@ -47,7 +48,7 @@ class TestPrepareDependencies:
     def test_an_editable_install_is_made_importable_without_a_restart(self, monkeypatch) -> None:
         """An editable install only drops a .pth file, which `site` reads at startup."""
         added = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda cmd, **kw: None)
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: None)
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: added.append(path))
 
         benchmark_preparation._install_prepare_dependencies(
@@ -58,17 +59,51 @@ class TestPrepareDependencies:
 
     def test_nothing_runs_when_no_dependencies_are_declared(self, monkeypatch) -> None:
         calls = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: calls.append(cmd))
 
         benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=[]))
 
         assert calls == []
 
+    def test_the_install_is_given_the_time_limit(self, monkeypatch) -> None:
+        seen = []
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda cmd, **kw: seen.append(kw))
+        monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
+
+        benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["tqdm"]), 90)
+
+        assert seen == [{"timeout_s": 90}]
+
+    def test_an_install_that_outlasts_the_time_limit_is_reported_against_the_dataset(self, monkeypatch) -> None:
+        def hang(cmd, **kw):
+            raise benchmark_preparation.subprocess.TimeoutExpired(cmd, kw["timeout_s"])
+
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", hang)
+
+        with pytest.raises(ConfigError, match="prepare_dependencies for dataset 'b' did not finish within 5 s"):
+            benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["tqdm"]), 5)
+
+    def test_an_install_that_outlasts_the_time_limit_takes_its_own_subprocesses_with_it(self, tmp_path, monkeypatch):
+        late_output = tmp_path / "late.txt"
+        fake_uv = tmp_path / "bin" / "uv"
+        fake_uv.parent.mkdir()
+        # A `uv` that starts a build subprocess, which would write after the failure is reported, and then hangs.
+        fake_uv.write_text(f"#!/bin/bash\n(sleep 3; echo late > {late_output}) &\nsleep 30\n")
+        fake_uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_uv.parent}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
+
+        with pytest.raises(ConfigError, match="did not finish within 1 s"):
+            benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["tqdm"]), 1)
+        time.sleep(4)
+
+        assert not late_output.exists()
+
     def test_a_failed_install_is_reported_against_the_dataset(self, monkeypatch) -> None:
         def boom(cmd, **kw):
             raise benchmark_preparation.subprocess.CalledProcessError(1, cmd)
 
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", boom)
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", boom)
 
         with pytest.raises(ConfigError, match="prepare_dependencies for dataset 'b'"):
             benchmark_preparation._install_prepare_dependencies(self._benchmark(dependencies=["nope"]))
@@ -98,12 +133,12 @@ class TestPrepareDependencies:
     @pytest.mark.parametrize("dependencies", [["tqdm"], ["-e", "benchmarks/automationbench"], ["-r", "deps.txt"]])
     def test_dependency_arguments_retain_install_and_import_behavior(self, dependencies, monkeypatch):
         calls = []
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", lambda *a, **kw: calls.append((a, kw)))
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda *a, **kw: calls.append((a, kw)))
         monkeypatch.setattr(benchmark_preparation.importlib, "invalidate_caches", lambda: calls.append("invalidate"))
         monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: calls.append(("site", path)))
         assert benchmark_preparation._prepare_environment(self._benchmark(dependencies=dependencies)) is None
         assert calls == [
-            ((["uv", "pip", "install", "--python", sys.executable, *dependencies],), {"check": True}),
+            ((["uv", "pip", "install", "--python", sys.executable, *dependencies],), {"timeout_s": None}),
             "invalidate",
             ("site", benchmark_preparation.sysconfig.get_paths()["purelib"]),
         ]
@@ -121,7 +156,7 @@ class TestPrepareDependencies:
         )
         calls = []
         monkeypatch.setattr(
-            benchmark_preparation, "_install_prepare_dependencies", lambda config: calls.append(config)
+            benchmark_preparation, "_install_prepare_dependencies", lambda config, timeout_s=None: calls.append(config)
         )
         benchmark = SimpleNamespace(name="training", dataset=dataset)
         assert benchmark_preparation._prepare_environment(benchmark) is None
@@ -135,7 +170,7 @@ class TestPrepareDependencies:
         calls = []
         benchmark = self._benchmark(tmp_path, ["tqdm"])
         monkeypatch.setattr(
-            benchmark_preparation, "_install_prepare_dependencies", lambda config: calls.append(config)
+            benchmark_preparation, "_install_prepare_dependencies", lambda config, timeout_s=None: calls.append(config)
         )
         assert benchmark_preparation._prepare_environment(benchmark) is None
         assert calls == [benchmark]
@@ -145,7 +180,7 @@ class TestPrepareDependencies:
         def fail(*args, **kwargs):
             raise error
 
-        monkeypatch.setattr(benchmark_preparation.subprocess, "run", fail)
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", fail)
         monkeypatch.setattr(
             benchmark_preparation.site, "addsitedir", lambda *a: pytest.fail("unexpected import update")
         )
@@ -154,9 +189,7 @@ class TestPrepareDependencies:
         assert exc.value.__cause__ is error
 
     def test_dependency_helper_without_arguments_does_not_install(self, monkeypatch):
-        monkeypatch.setattr(
-            benchmark_preparation.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected install")
-        )
+        monkeypatch.setattr(benchmark_preparation, "_run_checked", lambda *a, **kw: pytest.fail("unexpected install"))
         assert benchmark_preparation._install_prepare_dependencies(self._benchmark()) is None
 
     def test_nothing_runs_without_project(self, monkeypatch):
@@ -317,6 +350,113 @@ class TestPrepareDependencies:
             )
         assert isinstance(stopped.value.__cause__, subprocess.CalledProcessError)
 
+    def test_a_worker_that_outlasts_the_time_limit_fails_the_preparation(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # Sleeps for 30 s, so a limit that is ignored ends in a different failure after far longer than the limit.
+        (tmp_path / "slow_preparer.py").write_text("import time\ndef prepare():\n    time.sleep(30)\n")
+
+        started = time.monotonic()
+        with pytest.raises(benchmark_preparation.PreparationFailedError, match="did not finish within 1 s") as stopped:
+            benchmark_preparation._run_isolated_prepare(
+                Path(sys.executable), "slow_preparer", "prepare", tmp_path / "expected", {}, timeout_s=1
+            )
+
+        assert isinstance(stopped.value.__cause__, subprocess.TimeoutExpired)
+        assert time.monotonic() - started < 20
+
+    def test_a_worker_that_outlasts_the_time_limit_takes_its_own_subprocesses_with_it(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        late_output = tmp_path / "late.txt"
+        # The preparer starts a subprocess that would write after the failure is reported, and then hangs itself.
+        (tmp_path / "forking_preparer.py").write_text(
+            "import subprocess, time\n"
+            "def prepare():\n"
+            f"    subprocess.Popen(['bash', '-c', 'sleep 3; echo late > {late_output}'])\n"
+            "    time.sleep(30)\n"
+        )
+
+        with pytest.raises(benchmark_preparation.PreparationFailedError, match="did not finish within 1 s"):
+            benchmark_preparation._run_isolated_prepare(
+                Path(sys.executable), "forking_preparer", "prepare", tmp_path / "expected", {}, timeout_s=1
+            )
+        time.sleep(4)
+
+        assert not late_output.exists()
+
+    def test_the_configured_limit_reaches_every_preparation_stage(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "limited_preparer.py").write_text("def prepare():\n    pass\n")
+        seen = {"environment": [], "worker": []}
+        monkeypatch.setattr(
+            benchmark_preparation,
+            "_prepare_environment",
+            lambda config, venv_root=None, timeout_s=None: seen["environment"].append(timeout_s) or Path("python"),
+        )
+
+        def worker(python, module, action, expected, args, *, config=None, timeout_s=None):
+            seen["worker"].append((action, timeout_s))
+            return {"has_prepare": True, "cache_current": False}
+
+        monkeypatch.setattr(benchmark_preparation, "_run_isolated_prepare", worker)
+        benchmark = SimpleNamespace(
+            name="b",
+            dataset=SimpleNamespace(prepare_script="limited_preparer.py", jsonl_fpath=tmp_path / "out.jsonl"),
+        )
+
+        benchmark_preparation.prepare_datasets(
+            [benchmark],
+            benchmark_preparation.PrepareBenchmarkConfig(prepare_timeout_seconds=7, num_prepare_benchmark_processes=1),
+        )
+
+        assert seen == {"environment": [7], "worker": [("inspect", 7), ("prepare", 7)]}
+
+    def test_the_configured_limit_reaches_the_dependency_install(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "limited_preparer.py").write_text("def prepare():\n    pass\n")
+        limits = []
+        monkeypatch.setattr(
+            benchmark_preparation, "_run_checked", lambda cmd, **kwargs: limits.append(kwargs["timeout_s"])
+        )
+        monkeypatch.setattr(benchmark_preparation.site, "addsitedir", lambda path: None)
+        monkeypatch.setattr(
+            "nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer",
+            lambda module: SimpleNamespace(prepare=lambda **kwargs: tmp_path / "out.jsonl"),
+        )
+        benchmark = SimpleNamespace(
+            name="b",
+            dataset=SimpleNamespace(
+                prepare_script="limited_preparer.py",
+                jsonl_fpath=tmp_path / "out.jsonl",
+                prepare_dependencies=["tqdm"],
+                prepare_project=None,
+            ),
+        )
+
+        benchmark_preparation.prepare_datasets(
+            [benchmark],
+            benchmark_preparation.PrepareBenchmarkConfig(prepare_timeout_seconds=7, num_prepare_benchmark_processes=1),
+        )
+
+        assert limits == [7]
+
+    def test_the_time_limit_reaches_the_isolated_worker_of_each_benchmark(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            benchmark_preparation, "_run_isolated_prepare", lambda *args, **kwargs: seen.append(kwargs)
+        )
+        benchmark = SimpleNamespace(name="b", dataset=SimpleNamespace(jsonl_fpath="out.jsonl"))
+
+        benchmark_preparation._multiprocess_benchmark_prepare_fn((benchmark, "mod.py", {}, Path("python"), None, 45))
+        benchmark_preparation._multiprocess_benchmark_prepare_fn((benchmark, "mod.py", {}, Path("python"), None))
+
+        assert [kwargs["timeout_s"] for kwargs in seen] == [45, None]
+
+    def test_the_time_limit_is_off_by_default_and_must_be_positive(self):
+        assert benchmark_preparation.PrepareBenchmarkConfig().prepare_timeout_seconds is None
+        assert benchmark_preparation.PrepareBenchmarkConfig(prepare_timeout_seconds=600).prepare_timeout_seconds == 600
+        with pytest.raises(ValueError):
+            benchmark_preparation.PrepareBenchmarkConfig(prepare_timeout_seconds=0)
+
 
 class TestLockedPrepareSearchRoots:
     def test_project_resolves_from_extra_root(self, tmp_path, monkeypatch):
@@ -389,7 +529,7 @@ def test_a_failed_isolated_preparer_is_a_typed_terminal_stop(tmp_path, monkeypat
     def failing_worker(*args, **kwargs):
         raise subprocess.CalledProcessError(1, args[0])
 
-    monkeypatch.setattr(preparation.subprocess, "run", failing_worker)
+    monkeypatch.setattr(preparation, "_run_checked", failing_worker)
 
     with pytest.raises(preparation.PreparationFailedError) as stopped:
         preparation._run_isolated_prepare(
