@@ -142,14 +142,11 @@ def test_terminate_properly_reward_adds_bonus(status: str) -> None:
         )
         == 0.1
     )
-    assert (
-        cuagym_browser_worker._apply_terminate_properly_reward(
-            0.7,
-            status=status,
-            terminate_properly_reward=0.1,
-        )
-        == pytest.approx(0.8)
-    )
+    assert cuagym_browser_worker._apply_terminate_properly_reward(
+        0.7,
+        status=status,
+        terminate_properly_reward=0.1,
+    ) == pytest.approx(0.8)
 
 
 def test_terminate_properly_reward_requires_valid_terminate() -> None:

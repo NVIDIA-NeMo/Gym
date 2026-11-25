@@ -19,7 +19,7 @@ import os
 from typing import Any
 
 
-HUB_COMMIT = "b8207bfc1838f69b971986e9c489c8aa5d0460c1"
+HUB_COMMIT = "b8207bfc1838f69b971986e9c489c8aa5d0460c1"  # pragma: allowlist secret
 
 ENDPOINTS_YAML_ENV = "CUA_GYM_ENDPOINTS_YAML"
 

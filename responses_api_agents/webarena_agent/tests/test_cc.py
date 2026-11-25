@@ -147,7 +147,9 @@ def _two_action_episode():
 
 
 def _function_call_ids(result):
-    return [item["call_id"] for item in result.model_dump(mode="json")["output"] if item.get("type") == "function_call"]
+    return [
+        item["call_id"] for item in result.model_dump(mode="json")["output"] if item.get("type") == "function_call"
+    ]
 
 
 def test_config_rejects_legacy_screenshot_pruning_with_context_history():

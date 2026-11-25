@@ -78,7 +78,7 @@ class WebArenaTaskRow(BaseModel):
     task_id: str
     dataset: str = "webarena"
     dataset_version: str = "classic"
-    dataset_hash: str = "6a6dae6809c84a08881ac37cadbfd4d50eac66e3578ebdb6ba8a308eebe1e0a3"
+    dataset_hash: str = "6a6dae6809c84a08881ac37cadbfd4d50eac66e3578ebdb6ba8a308eebe1e0a3"  # pragma: allowlist secret
     sites: list[str]
     start_urls: list[str]
     intent: str

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import logging
 from enum import Enum
 from typing import Any, Literal
@@ -17,14 +16,14 @@ from fastapi import Body, HTTPException, Request, Response
 from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Self
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.agents.context_management import (
     ContextGuardRejected,
     ContextHistoryConfig,
     ContextManagedResponsesClient,
 )
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import TOKEN_CAPTURE_BLOCK
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
