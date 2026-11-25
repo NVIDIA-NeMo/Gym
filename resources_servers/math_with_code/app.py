@@ -19,7 +19,7 @@ sandbox, never in this server. This server only grades, comparing answers withou
 """
 
 import json
-from typing import Optional
+from typing import ClassVar, Optional
 
 from fastapi import Request
 
@@ -31,6 +31,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    VerifierMode,
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -56,6 +57,8 @@ class PythonMathVerifyResponse(BaseVerifyResponse):
 
 class MathWithCodeResourcesServer(SimpleResourcesServer):
     config: MathWithCodeResourcesServerConfig
+    # verify normalizes the boxed answer and compares strings and floats; it executes nothing.
+    verifier_mode: ClassVar[VerifierMode] = "none"
 
     # The server holds no state for a session, but implements the session hooks, so verify keeps masking a sample
     # whose session already closed instead of scoring it.

@@ -82,6 +82,7 @@ from nemo_gym.server_runtime.attempt_sandbox import (
     ResourcesPrepareSandboxRequest,
     ResourcesPrepareSandboxResponse,
     SandboxGroupSpec,
+    VerifierMode,
 )
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
@@ -410,6 +411,8 @@ class ResourcesSeedSessionResponse(BaseModel):
     # What the attempt's sandbox group holds; the Environment Server starts it. A seed declares a group or lends a
     # sandbox (sandbox_access), never both.
     sandbox_group: SandboxGroupSpec | None = None
+    # Where /verify runs (VerifierMode); "none", the default, keeps it in the Resources Server with no sandbox.
+    verifier_mode: VerifierMode = "none"
 
     @model_validator(mode="after")
     def _lend_or_declare(self) -> "ResourcesSeedSessionResponse":
@@ -420,12 +423,14 @@ class ResourcesSeedSessionResponse(BaseModel):
     # A return annotation would replace the model's serialization schema with that container schema.
     @model_serializer(mode="wrap")
     def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server sets no observation field and declares no sandbox group."""
+        """Preserve the seed wire shape when the server sets no observation field and declares no sandbox fields."""
         result = handler(self)
         if "observation" not in self.model_fields_set:
             result.pop("observation", None)
         if self.sandbox_group is None:
             result.pop("sandbox_group", None)
+        if self.verifier_mode == "none":
+            result.pop("verifier_mode", None)
         return result
 
 
@@ -705,6 +710,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # as openai or anthropic). Its verifier then saves no grading record of its own, so its trials are observed only
     # through a recorded grading operation or a saved grading artifact.
     grading_may_use_uninstrumented_model: ClassVar[bool] = False
+    # Where this server's /verify runs, which its seed reply declares (VerifierMode): "none", in this server with no
+    # sandbox, for a verifier that executes nothing (rules, a judge call); "shared", in the group the agent borrowed;
+    # "separate", in a fresh group with no network. A verifier that runs model output, or hands it to an evaluating
+    # parser such as SymPy's, declares "shared" or "separate".
+    verifier_mode: ClassVar[VerifierMode] = "none"
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
@@ -1210,16 +1220,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def sandbox_declaration(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
         """The seed reply's sandbox fields: ``sandbox_group``'s declaration, with ``prepare`` set when the class
-        overrides ``prepare_sandbox``.
+        overrides ``prepare_sandbox``, and the class's ``verifier_mode``.
 
         The inherited ``seed_session`` puts them on its reply. A server that overrides ``seed_session`` and builds its
         own reply passes them on: ``ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))``; one that
-        does not declares no group.
+        does not declares no group, and its verifier runs with no sandbox.
         """
         group = self.sandbox_group(body)
         if self._prepares_sandbox():
             group = (group or SandboxGroupSpec()).model_copy(update={"prepare": True})
-        return {"sandbox_group": group}
+        return {"sandbox_group": group, "verifier_mode": self.verifier_mode}
 
     async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
         """Prepare the task in the attempt's sandbox group, which the Environment Server started from this seed's

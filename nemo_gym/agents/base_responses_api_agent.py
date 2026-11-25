@@ -247,13 +247,16 @@ class AgentSessionCapabilitiesResponse(BaseModel):
 
     An environment server reads it to refuse a run before provisioning anything: a multi-step task whose turns
     must continue one harness session needs ``continuation``, as Harbor's multi-step trial refuses
-    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend.
+    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend. An environment
+    server that owns the attempt's sandbox reads ``runs_loop_without_sandbox`` to decide whether the agent of a task
+    without tools needs the sandbox at seed.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     supports_task_tool_context: bool = False
     continuation: AgentContinuationCapabilities | None = None
+    runs_loop_without_sandbox: bool = False
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -763,6 +766,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # The seed reply says so, and an environment server then continues an episode with tool grants after a restore
     # instead of starting it over.
     rebinds_tool_accesses: ClassVar[bool] = False
+    # Whether this agent runs its loop in its own process when its seed lends no sandbox, as Simple Agent does. An
+    # environment server that owns the attempt's sandbox then lends the agent of a task without tools nothing and
+    # starts the sandbox for the verifier alone. A harness that needs a container, such as a CLI, leaves it False and
+    # is lent the sandbox at seed.
+    runs_loop_without_sandbox: ClassVar[bool] = False
     _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
     _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)
 
@@ -1002,10 +1010,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
         """Declare the session capabilities a seed would confirm, without seeding: the task-tool context and the
         multi-turn continuation this adapter supports (``None`` for one-activation adapters and for agents that
-        implement no sessions at all)."""
+        implement no sessions at all), and whether its loop runs without a sandbox."""
         return AgentSessionCapabilitiesResponse(
             supports_task_tool_context=self.supports_task_tool_context(),
             continuation=self._agent_continuation_capabilities(),
+            runs_loop_without_sandbox=self.runs_loop_without_sandbox,
         )
 
     async def seed_agent_session(

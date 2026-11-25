@@ -64,7 +64,3 @@ math_with_code_environment_server:
         resources: {cpu: 2, memory_mib: 4096}
         network: model_only
         model_server: policy_model
-      # The verifier compares boxed answers and runs nothing, so it grades in the Resources Server and the sandbox
-      # stops once the agent closes. The task has a tool, so it cannot opt out.
-      sandbox_opt_out:
-        verifier: true

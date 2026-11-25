@@ -152,9 +152,14 @@ defines for the next call. Errors and timeouts come back to the model as `succes
 when this server ran the code. The sandbox gets 2 CPUs and 4 GiB on every provider, and the worker may allocate
 at most 2 GiB: code that asks for more gets a `MemoryError` instead of stopping the agent loop.
 
-The verifier only compares answers (string rules and `float()`) and runs nothing, so the environment server's config
-opts it out of the sandbox (`sandbox_opt_out.verifier`): the sandbox stops once the agent closes, and `/verify` runs
-here. This server keeps the session contract for `math_with_code_environment_server` (`single_agent_turn_legacy`): a
+### Where it runs
+
+| Agent | Verifier | Why |
+|---|---|---|
+| Borrows the attempt's group, started at seed | `none`: in this Resources Server, lent nothing | The task has the `execute_python` Python tool, which runs in the agent's container; the verifier normalizes the boxed answer and compares strings and floats, so it executes nothing |
+
+See [Where the agent and the verifier run](../../environment_servers/single_agent_turn/README.md#where-the-agent-and-the-verifier-run).
+This server keeps the session contract for `math_with_code_environment_server` (`single_agent_turn_legacy`): a
 `/verify` for a closed session returns a masked sample instead of a reward of 0.
 
 ### Additional Details
