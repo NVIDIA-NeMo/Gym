@@ -30,6 +30,8 @@ FILESYSTEM_ROOT = Path("/filesystem")
 APPS_DATA_ROOT = Path("/.apps_data")
 MCP_ROOT = Path("/app/mcp_servers")
 MCP_TOOL_TIMEOUT_SECONDS = 60
+# How long the gateway gets to answer its health check once a rollout has returned.
+TOOL_PLANE_HEALTH_TIMEOUT_SECONDS = 10.0
 TOOL_OUTPUT_TOKEN_BUDGET = 24_000
 TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN = 4
 TOOL_OUTPUT_HEAD_CHARACTERS = 20_000
@@ -834,6 +836,89 @@ async def configure_gateway(config: dict[str, Any], gateway_url: str) -> None:
         response.raise_for_status()
 
 
+class ToolPlaneHealth:
+    """Counts MCP calls that timed out or raised, and how many of them ended the run with no answered call after.
+
+    The counts are diagnostics. A slow command the policy started times out the same way as a dead server, so they
+    never fail a rollout on their own; they only decide whether the tool plane is probed once the run has ended.
+    """
+
+    def __init__(self) -> None:
+        self.unanswered_calls = 0
+        self.trailing_unanswered_calls = 0
+
+    def answered(self) -> None:
+        self.trailing_unanswered_calls = 0
+
+    def unanswered(self) -> None:
+        self.unanswered_calls += 1
+        self.trailing_unanswered_calls += 1
+
+    def fields(self) -> dict[str, int]:
+        return {
+            "n_mcp_unanswered_calls": self.unanswered_calls,
+            "n_mcp_trailing_unanswered_calls": self.trailing_unanswered_calls,
+        }
+
+
+async def mcp_tools_respond(gateway_url: str, timeout_seconds: float = MCP_TOOL_TIMEOUT_SECONDS) -> bool:
+    """Whether a new MCP session through the gateway still gets its tool listing within one tool call's timeout.
+
+    This is the handshake and listing the rollout's own tool session started with. It runs in a task of its own, so
+    whatever the MCP client raises while it unwinds a dead connection stays in that task.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async def list_tools() -> None:
+        async with streamablehttp_client(
+            f"{gateway_url}/mcp/", timeout=timeout_seconds, sse_read_timeout=timeout_seconds
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                await session.list_tools()
+
+    probe = asyncio.create_task(list_tools())
+    try:
+        await asyncio.wait({probe}, timeout=timeout_seconds)
+    finally:
+        if not probe.done():
+            probe.cancel()
+        await asyncio.gather(probe, return_exceptions=True)
+    return not probe.cancelled() and probe.exception() is None
+
+
+async def require_live_tool_plane(
+    process: Any | None,
+    gateway_url: str,
+    result: dict[str, Any],
+    *,
+    health_timeout_seconds: float = TOOL_PLANE_HEALTH_TIMEOUT_SECONDS,
+    probe: Callable[[str], Any] | None = None,
+) -> None:
+    """Raise when the tools the policy depended on were gone by the end of its run.
+
+    A rollout that returns normally is scored. One whose gateway process exited, whose gateway stopped answering its
+    health check, or whose last MCP calls went unanswered while a new MCP session can no longer list the tools did
+    not lose on the policy's merits, so it fails here: the sandbox exits non-zero and the host retries the rollout
+    instead of recording a zero. Unanswered calls alone never fail it: when the probe answers, they were the tools'
+    own slowness. ``process`` is the gateway's own process when the caller holds it, or None when the gateway
+    outlives the script that started it.
+    """
+    if process is not None and process.returncode is not None:
+        raise RuntimeError(f"the MCP gateway exited with status {process.returncode} during the rollout")
+    try:
+        await wait_for_gateway(gateway_url, timeout_seconds=health_timeout_seconds)
+    except TimeoutError as exc:
+        raise RuntimeError("the MCP gateway stopped answering its health check during the rollout") from exc
+    trailing = int(result.get("n_mcp_trailing_unanswered_calls") or 0)
+    if trailing and not await (probe or mcp_tools_respond)(gateway_url):
+        raise RuntimeError(
+            f"the last {trailing} MCP tool call(s) of the rollout went unanswered and the MCP endpoint no longer "
+            "lists its tools"
+        )
+
+
 def _serialize_history(history: list[list[Any]]) -> list[dict[str, Any]]:
     trajectory: list[dict[str, Any]] = []
     for group in history:
@@ -908,20 +993,25 @@ def write_partial_result_checkpoint(
 async def _checkpoint_partial_result(
     session: Any,
     destination: Path,
-    extra: dict[str, Any] | None = None,
+    extra: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
     checkpointer: Any = None,
 ) -> None:
+    """Keep the partial result current. ``extra`` may be a callable, read again each time, for fields that change
+    between turns: the file is rewritten when the turn state or those fields change."""
     checkpointed_state: Any = None
+    checkpointed_fields: dict[str, Any] | None = None
     next_heartbeat = 0.0
     while True:
         current_state = getattr(session, "_current_run_state", None)
-        if current_state is not None and current_state is not checkpointed_state:
+        fields = extra() if callable(extra) else extra
+        if current_state is not None and (current_state is not checkpointed_state or fields != checkpointed_fields):
             try:
-                if write_partial_result_checkpoint(session, destination, extra=extra):
+                if write_partial_result_checkpoint(session, destination, extra=fields):
                     checkpointed_state = current_state
+                    checkpointed_fields = dict(fields) if fields is not None else None
             except Exception:
                 pass
-        if checkpointer is not None and checkpointer.checkpoints_written and time.monotonic() >= next_heartbeat:
+        if checkpointer is not None and checkpointer.heartbeat_ready and time.monotonic() >= next_heartbeat:
             with suppress(Exception):
                 checkpointer.heartbeat()
             next_heartbeat = time.monotonic() + RESUME_HEARTBEAT_INTERVAL_SECONDS
@@ -1007,11 +1097,15 @@ class ResumeCheckpoint:
         self.turn = int(manifest.get("turn") or 0)
         self.segments = int(manifest.get("segments") or 1)
         self.generation = int(manifest.get("generation") or 0)
+        self.run_id = manifest.get("run_id")
         self.elapsed_seconds = float(apex_state.get("elapsed_seconds") or 0.0)
         # The heartbeat charges time spent after the last checkpoint (the turn
         # that was interrupted) so a resumed rollout cannot outlive its budget.
+        # It names the manifest generation it extends: the segment that wrote
+        # this manifest and every later segment resumed from it charge here,
+        # and a heartbeat left by any other manifest is ignored.
         heartbeat = _read_heartbeat(self.directory)
-        if heartbeat is not None and int(heartbeat.get("segments") or 0) == self.segments:
+        if heartbeat is not None and self.generation > 0 and heartbeat.get("generation") == self.generation:
             self.elapsed_seconds = max(self.elapsed_seconds, float(heartbeat.get("elapsed_seconds") or 0.0))
 
     def path(self, role: str) -> Path:
@@ -1044,13 +1138,14 @@ def _read_heartbeat(directory: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def write_resume_heartbeat(directory: Path, *, elapsed_seconds: float, segments: int) -> None:
-    """Record time spent since the last checkpoint; best effort, validated only for shape on load."""
+def write_resume_heartbeat(
+    directory: Path, *, elapsed_seconds: float, segments: int, generation: int | None = None
+) -> None:
+    """Record time spent since the checkpoint of ``generation``; best effort, matched to its manifest on load."""
+    payload = {"elapsed_seconds": float(elapsed_seconds), "segments": int(segments), "generation": generation}
     _replace_atomically(
         directory / RESUME_HEARTBEAT_FILENAME,
-        lambda temporary: temporary.write_text(
-            json.dumps({"elapsed_seconds": float(elapsed_seconds), "segments": int(segments)}), encoding="utf-8"
-        ),
+        lambda temporary: temporary.write_text(json.dumps(payload), encoding="utf-8"),
     )
 
 
@@ -1133,8 +1228,10 @@ class ResumeCheckpointer:
         resumed_turn: int | None = None,
         segment_started_at: float | None = None,
         clock: Callable[[], float] = time.monotonic,
+        run_id: str | None = None,
     ) -> None:
         self.directory = Path(directory)
+        self.run_id = run_id
         self._snapshot_world = snapshot_world
         self._apex_state = apex_state
         self._initial_snapshot = Path(initial_snapshot) if initial_snapshot is not None else None
@@ -1160,6 +1257,11 @@ class ResumeCheckpointer:
         for child in self.directory.iterdir():
             if child.is_file() and child.name.startswith(".") and child.name.endswith(".tmp"):
                 child.unlink(missing_ok=True)
+
+    @property
+    def heartbeat_ready(self) -> bool:
+        """Whether a manifest exists for a heartbeat to extend: one this segment wrote, or the one it resumed from."""
+        return self.checkpoints_written > 0 or self.resumed_turn is not None
 
     def elapsed_seconds(self) -> float:
         return self.prior_elapsed_seconds + (self._clock() - self._segment_started_at)
@@ -1197,7 +1299,13 @@ class ResumeCheckpointer:
                 self._generate_seen_state = state
 
     def heartbeat(self) -> None:
-        write_resume_heartbeat(self.directory, elapsed_seconds=self.elapsed_seconds(), segments=self.segments)
+        """Charge the time spent since the last committed manifest: this segment's, or the one it resumed from."""
+        write_resume_heartbeat(
+            self.directory,
+            elapsed_seconds=self.elapsed_seconds(),
+            segments=self.segments,
+            generation=self.generation,
+        )
 
     def write(self, state: Any) -> int:
         """Persist ``state`` plus the world and Apex state; returns the checkpointed turn."""
@@ -1212,7 +1320,13 @@ class ResumeCheckpointer:
             "initial": RESUME_INITIAL_FILENAME,
         }
         initial = self.directory / names["initial"]
-        if not initial.is_file():
+        # A fresh execution never trusts what an abandoned checkpoint left in the directory. Its initial snapshot may
+        # be the damaged file that got it rejected, and would be hashed into the new manifest; its heartbeat carries
+        # a generation number the new manifests reuse. A resumed execution keeps the verified snapshot.
+        fresh_first_write = self.checkpoints_written == 0 and self.resumed_turn is None
+        if fresh_first_write:
+            (self.directory / RESUME_HEARTBEAT_FILENAME).unlink(missing_ok=True)
+        if not initial.is_file() or fresh_first_write:
             if self._initial_snapshot is None or not self._initial_snapshot.is_file():
                 raise FileNotFoundError("the segment-1 initial snapshot is required for a resume checkpoint")
             _replace_atomically(initial, lambda temporary: shutil.copy2(self._initial_snapshot, temporary))
@@ -1236,6 +1350,7 @@ class ResumeCheckpointer:
             "turn": turn,
             "segments": self.segments,
             "generation": generation,
+            "run_id": self.run_id,
             "written_at": time.time(),
             "files": {
                 role: {
@@ -1578,6 +1693,7 @@ async def run_stirrup_rollout(
             self.catalog: dict[str, Any] = {}
             self.core_names = {"list_tools", "inspect_tool", "add_tool", "remove_tool", "todo_write", "finish"}
             self.checkpointer: Any = None
+            self.health = ToolPlaneHealth()
 
         def attach(self, agent: Any) -> None:
             self.agent = agent
@@ -1601,6 +1717,7 @@ async def run_stirrup_rollout(
                             timeout=MCP_TOOL_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError:
+                        self.health.unanswered()
                         # The server side may still be writing; keep the next
                         # world snapshot away from a half-written file.
                         if self.checkpointer is not None:
@@ -1610,6 +1727,11 @@ async def run_stirrup_rollout(
                             success=False,
                             metadata=ToolUseCountMetadata(),
                         )
+                    except Exception:
+                        # A transport or protocol error still ends the rollout; it is counted on the way out.
+                        self.health.unanswered()
+                        raise
+                    self.health.answered()
                     content = replace_tool_images_for_text_only_model(
                         content,
                         supports_vision=bool(config.get("supports_vision", True)),
@@ -1753,6 +1875,7 @@ async def run_stirrup_rollout(
                 prior_generation=resume_checkpoint.generation if resume_checkpoint is not None else 0,
                 resumed_turn=resume_checkpoint.turn if resume_checkpoint is not None else None,
                 segment_started_at=segment_started_at,
+                run_id=config.get("run_id"),
             )
             client.on_generate_start = lambda: checkpointer.on_generate_start(
                 getattr(agent, "_current_run_state", None)
@@ -1770,6 +1893,10 @@ async def run_stirrup_rollout(
             "resume_segments": checkpointer.segments if checkpointer is not None else 1,
             "resumed_from_turn": resumed_from_turn,
         }
+
+        def partial_fields() -> dict[str, Any]:
+            # Read again at every write, so a rollout killed by its timeout still reports its unanswered calls.
+            return segment_fields | managed_tools.health.fields()
 
         async with agent.session(resume=resume_checkpoint is not None) as session:
             if resume_checkpoint is not None:
@@ -1790,7 +1917,7 @@ async def run_stirrup_rollout(
                     restored["todos"],
                 )
             checkpoint_task = (
-                asyncio.create_task(_checkpoint_partial_result(session, checkpoint_path, segment_fields, checkpointer))
+                asyncio.create_task(_checkpoint_partial_result(session, checkpoint_path, partial_fields, checkpointer))
                 if checkpoint_path is not None
                 else None
             )
@@ -1804,7 +1931,7 @@ async def run_stirrup_rollout(
                             checkpoint_path,
                             completion_status="error",
                             error=f"{type(exc).__name__}: {exc}",
-                            extra=segment_fields,
+                            extra=partial_fields(),
                         )
                 raise
             finally:
@@ -1826,6 +1953,7 @@ async def run_stirrup_rollout(
         "n_truncation_recovery_turns": client.recovery_turns,
         "trajectory": _serialize_history(history),
         "tool_metadata": metadata,
+        **managed_tools.health.fields(),
         **segment_fields,
         "n_resume_checkpoints": checkpointer.checkpoints_written if checkpointer is not None else 0,
         "elapsed_seconds": checkpointer.elapsed_seconds() if checkpointer is not None else None,

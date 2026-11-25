@@ -9,9 +9,11 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -83,6 +85,9 @@ _STIRRUP_REQUIREMENTS_PATH = Path(__file__).with_name("stirrup-requirements.txt"
 _GUEST_ROOT = "/app/apex-gym"
 _STIRRUP_ROOT = "/app/stirrup-runtime"
 _GUEST_PARTIAL_RESULT_PATH = "/sandbox/partial_result.json"
+# The copy of it, cut at the size limit inside the sandbox, that the host downloads.
+_GUEST_BOUNDED_PARTIAL_RESULT_PATH = f"{_GUEST_PARTIAL_RESULT_PATH}.bounded"
+_PARTIAL_RESULT_COPY_TIMEOUT_SECONDS = 60
 # Prebuilt-world logs kept for failed rollouts; the failure message only carries their last few kilobytes.
 _GUEST_WORLD_LOGS = {
     "environment.log": f"{_GUEST_ROOT}/output/environment.log",
@@ -93,6 +98,9 @@ NG_FAILURE_TERMINAL_KEY = "_ng_failure_terminal"
 # The policy did not finish: a scored zero, as in upstream Pass@1, where a task counts as solved only when the agent
 # finishes and meets every rubric criterion.
 AGENT_INCOMPLETE = "apex_agents:agent_incomplete"
+# The policy left more in the world than the configured snapshot limit: its own result, a scored zero.
+FINAL_SNAPSHOT_TOO_LARGE = "apex_agents:final_snapshot_too_large"
+NG_RUN_ID_KEY = "_ng_run_id"
 _WORLD_ID_RE = re.compile(r"^world_[0-9a-f]{32}$")
 
 
@@ -125,6 +133,8 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
 
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
     max_world_bytes: Optional[int] = Field(default=None, gt=0)
+    # The partial result recovered from a failed rollout holds one trajectory; a larger file is not read.
+    max_partial_result_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
     artifact_output_dir: Optional[str] = None
     prebuilt_world_manifest: Optional[str] = None
     prebuilt_startup_timeout_seconds: int = Field(default=1800, gt=0)
@@ -195,6 +205,33 @@ def _safe_id(value: str) -> str:
     return cleaned[:128] or "unknown"
 
 
+def _read_sandbox_written_file(path: Path, max_bytes: int) -> bytes:
+    """Read a regular file from a place the sandbox can write, without trusting what it left there.
+
+    The open does not follow a symlink at ``path`` and does not wait for a FIFO's writer. Anything that is not a
+    regular file, or is larger than ``max_bytes``, is refused. It blocks on file I/O, so call it off the event loop.
+    """
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            raise ValueError(f"{path} is not a regular file")
+        if status.st_size > max_bytes:
+            raise ValueError(f"{path} is {status.st_size} bytes; limit is {max_bytes}")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            # One byte past the limit shows a file that grew after the size check.
+            data = stream.read(max_bytes + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > max_bytes:
+        raise ValueError(f"{path} grew past the {max_bytes}-byte limit while it was read")
+    return data
+
+
+def _load_sandbox_written_json(path: Path, max_bytes: int) -> Any:
+    return json.loads(_read_sandbox_written_file(path, max_bytes).decode("utf-8"))
+
+
 class PolicyEgressRelay:
     """Unix socket on the host that forwards sandbox connections to the model server."""
 
@@ -240,6 +277,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
     _stirrup_archive: Any = None
     _host_stirrup_runtime: Any = None
     _prebuilt_worlds: Any = None
+    _warned_no_run_id: Any = False
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -547,6 +585,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
             "task_slug": body.task_slug,
             "resume_checkpoint_dir": self.config.resume_checkpoint_mount if resume_dir is not None else None,
             "resume_allowed": resume_checkpoint is not None,
+            # Written into every checkpoint manifest, so a checkpoint is restored only for the run that wrote it.
+            "run_id": self._run_id(body),
             "resume_checkpoint_interval_seconds": self.config.resume_checkpoint_interval_seconds,
         }
         if prebuilt_world:
@@ -624,6 +664,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         response.apex_resume_segments = result.get("resume_segments")
         response.apex_resumed_from_turn = result.get("resumed_from_turn")
         response.apex_resume_checkpoints = result.get("n_resume_checkpoints")
+        response.apex_mcp_unanswered_calls = result.get("n_mcp_unanswered_calls")
         return response
 
     def _failure(
@@ -659,7 +700,8 @@ class ApexAgent(SimpleResponsesAPIAgent):
         return_code: int | None = None,
         partial_result: Optional[dict[str, Any]] = None,
     ) -> ApexAgentVerifyResponse:
-        """A scored zero for an ending the policy caused: it ran out of its time or context, or did not finish.
+        """A scored zero for an ending the policy caused: it ran out of its time or context, did not finish, or left a
+        final snapshot over the configured limit.
 
         A result row, not a failure row, so the task stays in the mean. Gym still retries an ``agent_timeout`` whose
         window held server faults.
@@ -691,16 +733,42 @@ class ApexAgent(SimpleResponsesAPIAgent):
             "apex_completion_status": partial_result.get("completion_status"),
         }
 
-    @staticmethod
     async def _recover_partial_result(
+        self,
         sandbox: AsyncSandbox,
         destination: Path,
     ) -> dict[str, Any] | None:
+        # The sandbox can write this path, so anything may be waiting there, a file of any size included. A download
+        # copies the whole file to the host, so a copy cut at the limit is made inside the sandbox first, and only
+        # from a regular file that is not a link. When that command ran and refused the path, there is no partial
+        # result. When it could not run, because the sandbox is gone or the command timed out or raised, the file
+        # is downloaded as it is: the provider's download refuses what is not a regular file, but copies one of
+        # any size. Either way the host copy is checked again, bounded, and read off the event loop.
+        limit = self.config.max_partial_result_bytes
+        source, bounded = shlex.quote(_GUEST_PARTIAL_RESULT_PATH), shlex.quote(_GUEST_BOUNDED_PARTIAL_RESULT_PATH)
+        guest_path = _GUEST_BOUNDED_PARTIAL_RESULT_PATH
         try:
-            await sandbox.download(_GUEST_PARTIAL_RESULT_PATH, destination)
-            recovered = json.loads(destination.read_text(encoding="utf-8"))
+            copied = await sandbox.exec(
+                f"rm -f -- {bounded} && [ -f {source} ] && [ ! -L {source} ] && "
+                f"head -c {limit + 1} -- {source} > {bounded}",
+                timeout_s=_PARTIAL_RESULT_COPY_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            LOG.debug("Could not run the bounded copy of the partial result; downloading the file itself: %s", exc)
+            guest_path = _GUEST_PARTIAL_RESULT_PATH
+        else:
+            if copied.return_code != 0:
+                if copied.error_type not in ("timeout", "sandbox"):
+                    LOG.debug("No recoverable Apex trajectory checkpoint was available")
+                    return None
+                guest_path = _GUEST_PARTIAL_RESULT_PATH
+        try:
+            await sandbox.download(guest_path, destination)
+            recovered = await asyncio.to_thread(_load_sandbox_written_json, destination, limit)
         except Exception as exc:
             LOG.debug("No recoverable Apex trajectory checkpoint was available: %s", exc)
+            # A copy that was refused, for its size or anything else, is not kept on the host.
+            await asyncio.to_thread(destination.unlink, True)
             return None
         return recovered if isinstance(recovered, dict) else None
 
@@ -752,7 +820,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _rollout_key(body: ApexAgentRunRequest) -> tuple[int, int, int] | None:
-        """Gym's (task index, rollout index, attempt index) for this request.
+        """Gym's (task index, rollout index, attempt index) for this request, within its collector run.
 
         The attempt index counts prior classed failures and is absent on the first
         attempt. A request without Gym's dispatch stamps has no stable identity
@@ -775,28 +843,46 @@ class ApexAgent(SimpleResponsesAPIAgent):
             root = PARENT_DIR / root
         return root.resolve()
 
-    def _resume_checkpoint_dir(self, body: ApexAgentRunRequest) -> Path | None:
-        """One directory per (task, rollout, attempt).
+    @staticmethod
+    def _run_id(body: ApexAgentRunRequest) -> str | None:
+        """The collector run that dispatched this request, which owns the rollout's checkpoints."""
+        value = (body.__pydantic_extra__ or {}).get(NG_RUN_ID_KEY)
+        return value if isinstance(value, str) and value else None
 
-        A rollout killed mid-flight is re-dispatched with the same three indices and
-        finds its checkpoint here; a retry after a classed failure carries the next
-        attempt index and therefore starts in an empty directory.
+    def _resume_checkpoint_dir(self, body: ApexAgentRunRequest) -> Path | None:
+        """One directory per collector run and (task, rollout, attempt): ``<root>/<run>/<task>/t_r_a``.
+
+        A request sent again with the same run id and three indices finds its
+        checkpoint here; a dispatch under another attempt index, such as a retry after
+        a classed failure, starts in an empty directory. Another
+        evaluation that shares the root has another run id, so it never sees these
+        files. A request without a run id has no owner to resume under and gets none.
         """
         root = self._resume_root()
         key = self._rollout_key(body)
-        if root is None or key is None:
+        run_id = self._run_id(body)
+        if root is not None and key is not None and run_id is None and not self._warned_no_run_id:
+            self._warned_no_run_id = True
+            LOG.warning(
+                "Mid-rollout checkpoints are disabled for requests without %s: task %s and any later such request "
+                "run without them and restart from turn zero when re-dispatched",
+                NG_RUN_ID_KEY,
+                body.task_id,
+            )
+        if root is None or key is None or run_id is None:
             return None
         task_index, rollout_index, attempt_index = key
-        return root / _safe_id(body.task_id) / f"t{task_index}_r{rollout_index}_a{attempt_index}"
+        return root / _safe_id(run_id) / _safe_id(body.task_id) / f"t{task_index}_r{rollout_index}_a{attempt_index}"
 
-    async def _prepare_resume(self, directory: Path | None) -> ResumeCheckpoint | None:
-        """Return the verified checkpoint in ``directory``, or None for a fresh start.
+    async def _prepare_resume(self, directory: Path | None, run_id: str | None) -> ResumeCheckpoint | None:
+        """Return the verified checkpoint of run ``run_id`` in ``directory``, or None for a fresh start.
 
         Verification hashes the world snapshot, so it runs off the event loop. A
         manifest that is present but fails to verify is retried once: shared
         filesystems return transient errors, and a wrong "no checkpoint" costs the
-        whole rollout. Nothing is deleted here; new checkpoint files carry a fresh
-        generation and the next manifest supersedes whatever is left.
+        whole rollout. A checkpoint whose manifest names another run is not restored.
+        Nothing is deleted here; new checkpoint files carry a fresh generation and
+        the next manifest supersedes whatever is left.
         """
         if directory is None:
             return None
@@ -805,12 +891,21 @@ class ApexAgent(SimpleResponsesAPIAgent):
             await asyncio.sleep(2.0)
             checkpoint = await asyncio.to_thread(load_resume_checkpoint, directory)
         directory.mkdir(parents=True, exist_ok=True)
+        if checkpoint is not None and (run_id is None or checkpoint.run_id != run_id):
+            LOG.warning(
+                "Ignoring the resume checkpoint in %s: it belongs to run %r, not %r",
+                directory,
+                checkpoint.run_id,
+                run_id,
+            )
+            return None
         return checkpoint
 
     async def _discard_resume_checkpoint(self, directory: Path | None) -> None:
-        """Remove one rollout's checkpoint directory; never anything outside the configured root."""
+        """Remove one rollout's checkpoint directory; never another run's, or anything outside the configured root."""
         root = self._resume_root()
-        if directory is None or root is None or directory.parent.parent != root:
+        # The layout is <root>/<run>/<task>/<rollout>; only a directory at exactly that depth is one rollout's.
+        if directory is None or root is None or directory.parent.parent.parent != root:
             return
         await asyncio.to_thread(shutil.rmtree, directory, True)
 
@@ -856,7 +951,9 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     if prebuilt_world and self._sandbox_uses_fakeroot()
                     else None
                 )
-                resume_checkpoint = None if prebuilt_world else await self._prepare_resume(resume_dir)
+                resume_checkpoint = (
+                    None if prebuilt_world else await self._prepare_resume(resume_dir, self._run_id(body))
+                )
                 timeout_s = self.config.timeout
                 if resume_checkpoint is not None:
                     remaining = self.config.timeout - resume_checkpoint.elapsed_seconds
@@ -1003,16 +1100,24 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     initial_snapshot = initial_snapshot_path.read_bytes()
                     snapshot = snapshot_path.read_bytes()
                     if self.config.max_snapshot_bytes is not None:
-                        for name, data in {"initial": initial_snapshot, "final": snapshot}.items():
-                            if len(data) > self.config.max_snapshot_bytes:
-                                return self._failure(
-                                    body,
-                                    f"{name} artifact snapshot is {len(data)} bytes; "
-                                    f"limit is {self.config.max_snapshot_bytes}",
-                                    failure_class="snapshot_too_large",
-                                    failure_terminal=True,
-                                    partial_result=result,
-                                )
+                        limit = self.config.max_snapshot_bytes
+                        if len(initial_snapshot) > limit:
+                            # The pre-agent world is the dataset's: no retry changes it, and the policy did not.
+                            return self._failure(
+                                body,
+                                f"initial artifact snapshot is {len(initial_snapshot)} bytes; limit is {limit}",
+                                failure_class="snapshot_too_large",
+                                failure_terminal=True,
+                                partial_result=result,
+                            )
+                        if len(snapshot) > limit:
+                            # The policy wrote the final world, so going over the limit is its result.
+                            return self._model_outcome(
+                                body,
+                                f"final artifact snapshot is {len(snapshot)} bytes; limit is {limit}",
+                                FINAL_SNAPSHOT_TOO_LARGE,
+                                partial_result=result,
+                            )
                     if not result.get("completed"):
                         output_dir = self._persist_ungraded_snapshots(body, result, initial_snapshot, snapshot)
                         failure = self._model_outcome(

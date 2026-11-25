@@ -24,6 +24,7 @@ try:
         load_resume_checkpoint,
         overlay_task_files,
         populate_world,
+        require_live_tool_plane,
         run_stirrup_rollout,
         wait_for_gateway,
         write_snapshot,
@@ -38,6 +39,7 @@ except ImportError:  # Imported as a Gym package during host-side tests.
         load_resume_checkpoint,
         overlay_task_files,
         populate_world,
+        require_live_tool_plane,
         run_stirrup_rollout,
         wait_for_gateway,
         write_snapshot,
@@ -166,6 +168,8 @@ async def main() -> None:
             initial_snapshot_path=OUTPUT / "initial.zip",
             segment_started_at=segment_started_at,
         )
+        # A normal return is scored, so tools that died under the policy must end the rollout as a sandbox fault.
+        await require_live_tool_plane(gateway, gateway_url, result)
         final_manifest = write_snapshot(OUTPUT / "final.zip")
         result.update(
             {

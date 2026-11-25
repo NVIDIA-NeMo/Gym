@@ -243,6 +243,154 @@ def test_heartbeat_charges_time_spent_after_the_last_checkpoint(tmp_path: Path) 
     assert loaded is not None and loaded.elapsed_seconds == pytest.approx(110.0)
 
 
+def _resumed_checkpointer(
+    directory: Path, world: _World, clock: _Clock, initial: Path | None = None
+) -> ResumeCheckpointer:
+    """The checkpointer a re-dispatched segment builds from the checkpoint it verified, as run_stirrup_rollout does."""
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None
+    return ResumeCheckpointer(
+        directory,
+        snapshot_world=world.snapshot,
+        apex_state=lambda: {"active_tools": [], "todos": []},
+        initial_snapshot=initial,
+        prior_elapsed_seconds=loaded.elapsed_seconds,
+        prior_segments=loaded.segments,
+        prior_generation=loaded.generation,
+        resumed_turn=loaded.turn,
+        clock=clock,
+    )
+
+
+def test_a_resumed_segment_charges_its_time_before_it_writes_a_checkpoint(tmp_path: Path) -> None:
+    checkpointer, world, clock = _checkpointer(tmp_path)
+    clock.now += 100.0
+    checkpointer.write(_turn_state(1))
+    directory = checkpointer.directory
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None and loaded.elapsed_seconds == pytest.approx(100.0)
+
+    # Segment 2 is interrupted during its first model call, 500 seconds in, before any new turn.
+    second = _resumed_checkpointer(directory, world, clock)
+    assert second.heartbeat_ready, "the restored manifest is there to extend"
+    assert not second.eligible(_turn_state(1)), "the restored turn is still not rewritten to start the segment"
+    clock.now += 500.0
+    second.heartbeat()
+    assert second.checkpoints_written == 0
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None and loaded.turn == 1 and loaded.segments == 1
+    assert loaded.elapsed_seconds == pytest.approx(600.0)
+
+    # Segment 3 is interrupted the same way: the charge accumulates instead of replaying from 100 seconds.
+    third = _resumed_checkpointer(directory, world, clock)
+    clock.now += 250.0
+    third.heartbeat()
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None and loaded.elapsed_seconds == pytest.approx(850.0)
+
+    # Segment 4 makes a turn: its manifest takes over, and its heartbeats extend that manifest.
+    fourth = _resumed_checkpointer(directory, world, clock)
+    clock.now += 50.0
+    fourth.write(_turn_state(2))
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None and loaded.turn == 2 and loaded.segments == 2
+    assert loaded.elapsed_seconds == pytest.approx(900.0)
+    clock.now += 30.0
+    fourth.heartbeat()
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None and loaded.elapsed_seconds == pytest.approx(930.0)
+
+    # A heartbeat that names another manifest, or none, is still ignored.
+    stirrup_runtime.write_resume_heartbeat(directory, elapsed_seconds=9999.0, segments=2, generation=1)
+    assert load_resume_checkpoint(directory).elapsed_seconds == pytest.approx(900.0)
+    stirrup_runtime.write_resume_heartbeat(directory, elapsed_seconds=9999.0, segments=2)
+    assert load_resume_checkpoint(directory).elapsed_seconds == pytest.approx(900.0)
+
+
+def test_a_fresh_segment_has_no_manifest_to_charge_until_it_writes_one(tmp_path: Path) -> None:
+    checkpointer, _world, clock = _checkpointer(tmp_path)
+    assert not checkpointer.heartbeat_ready
+    clock.now += 10.0
+    checkpointer.write(_turn_state(1))
+    assert checkpointer.heartbeat_ready
+
+
+def test_a_fresh_execution_drops_the_heartbeat_of_the_checkpoint_it_replaces(tmp_path: Path) -> None:
+    """Generation numbers restart with a fresh execution, so an old heartbeat could match the new manifest."""
+    checkpointer, world, clock = _checkpointer(tmp_path)
+    checkpointer.write(_turn_state(1))
+    clock.now += 5000.0
+    checkpointer.heartbeat()
+    assert load_resume_checkpoint(checkpointer.directory).elapsed_seconds == pytest.approx(5000.0)
+
+    fresh, _world2, fresh_clock = _checkpointer(tmp_path, world=world)
+    fresh_clock.now += 20.0
+    # Stop the fresh execution's own heartbeat from covering for the old one.
+    fresh.heartbeat = lambda: None
+    fresh.write(_turn_state(1))
+
+    loaded = load_resume_checkpoint(fresh.directory)
+    assert loaded is not None and loaded.generation == 1
+    assert loaded.elapsed_seconds == pytest.approx(20.0)
+
+
+def _write_initial(path: Path, content: str) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("filesystem/report.txt", content)
+    return path
+
+
+def test_a_fresh_execution_replaces_a_damaged_initial_snapshot(tmp_path: Path) -> None:
+    checkpointer, world, _clock = _checkpointer(tmp_path)
+    checkpointer.write(_turn_state(1))
+    directory = checkpointer.directory
+    # The stored initial snapshot is replaced by another valid ZIP: the manifest hash no longer matches.
+    _write_initial(directory / RESUME_INITIAL_FILENAME, "not the pre-agent world")
+    assert load_resume_checkpoint(directory) is None
+
+    # The rejected checkpoint means a fresh execution, which brings the correct initial snapshot with it.
+    fresh, _world2, _clock2 = _checkpointer(tmp_path, world=world)
+    fresh.write(_turn_state(1))
+
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None
+    with zipfile.ZipFile(loaded.initial_zip) as archive:
+        assert archive.read("filesystem/report.txt") == b"pristine"
+
+    # Later writes of the same execution leave it alone.
+    _write_initial(tmp_path / "initial-src.zip", "the source changed after the first checkpoint")
+    fresh._last_written_at = None
+    fresh.write(_turn_state(2))
+    with zipfile.ZipFile(load_resume_checkpoint(directory).initial_zip) as archive:
+        assert archive.read("filesystem/report.txt") == b"pristine"
+
+
+def test_a_verified_resume_keeps_the_first_segments_initial_snapshot(tmp_path: Path) -> None:
+    checkpointer, world, clock = _checkpointer(tmp_path)
+    checkpointer.write(_turn_state(1))
+    directory = checkpointer.directory
+
+    # A resumed segment's own "initial" source is not the pre-agent world, and must never replace it.
+    resumed = _resumed_checkpointer(
+        directory, world, clock, initial=_write_initial(tmp_path / "segment-2.zip", "segment 2 start")
+    )
+    resumed.write(_turn_state(2))
+
+    loaded = load_resume_checkpoint(directory)
+    assert loaded is not None and loaded.turn == 2
+    with zipfile.ZipFile(loaded.initial_zip) as archive:
+        assert archive.read("filesystem/report.txt") == b"pristine"
+
+
+def test_the_manifest_names_the_run_that_wrote_the_checkpoint(tmp_path: Path) -> None:
+    checkpointer, _world, _clock = _checkpointer(tmp_path, run_id="run-a")
+    checkpointer.write(_turn_state(1))
+
+    loaded = load_resume_checkpoint(checkpointer.directory)
+    assert loaded is not None and loaded.run_id == "run-a"
+    assert json.loads((checkpointer.directory / RESUME_MANIFEST_FILENAME).read_text())["run_id"] == "run-a"
+
+
 def test_stale_temporaries_from_a_hard_kill_are_removed_at_segment_start(tmp_path: Path) -> None:
     checkpointer, _world, _clock = _checkpointer(tmp_path)
     checkpointer.write(_turn_state(1))
@@ -414,6 +562,7 @@ def test_run_stirrup_rollout_wires_the_checkpointer_and_resume_flag() -> None:
     assert "resumed_turn=resume_checkpoint.turn" in source
     assert "managed_tools.checkpointer = checkpointer" in source
     assert "self.checkpointer.defer(RESUME_SETTLE_AFTER_TOOL_TIMEOUT_SECONDS)" in source
+    assert 'run_id=config.get("run_id")' in source
 
 
 # ---------------------------------------------------------------------------

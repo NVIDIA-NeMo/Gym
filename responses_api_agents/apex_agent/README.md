@@ -28,6 +28,26 @@ length to summarize at 70% of the real window instead; requests keep `max_output
 progress. A max-turn exit or `status="incomplete"` does not call the grader; its initial/final snapshots are still
 saved under the configured artifact output directory for inspection.
 
+A run that returns normally is scored only when its tools were still there at the end. After Stirrup returns, the
+runner fails the rollout when the gateway process has exited (ZIP worlds) or the gateway no longer answers
+`/health`. When the run's last MCP calls timed out or raised, with no answered call after them, it also opens a new
+MCP session through the gateway and lists the tools; the rollout fails only if that does not answer within 60
+seconds. Timed-out calls alone never fail it, because a slow command the policy started times out the same way. A
+failed rollout exits the sandbox non-zero and the row is a retried `sandbox_error` instead of the policy's zero. The
+number of MCP calls that timed out or raised is reported as `apex_mcp_unanswered_calls` on the response, also for a
+rollout that ended on its timeout.
+
+On a failed or timed-out rollout the agent recovers the trajectory from a partial result the sandbox can write. It
+first makes a copy inside the sandbox, cut at `max_partial_result_bytes` (256 MiB by default), and downloads only
+that copy. When the sandbox can no longer run that command, as after a timeout with `direct_exec`, the agent
+downloads the file itself. The download refuses anything that is not a regular file, but it copies a file of any
+size to the host before the limit is applied; a copy over the limit is then deleted and the row carries no partial
+trajectory. This is the same exposure the final snapshot has while `max_snapshot_bytes` is unset.
+
+`max_snapshot_bytes` (off by default) bounds both snapshots. A final snapshot over it is the policy's own output and
+is scored 0 as `apex_agents:final_snapshot_too_large` without calling the grader. An initial snapshot over it is a
+dataset problem and stays a terminal `snapshot_too_large` failure.
+
 The Archipelago image is reused when present. If it is missing and automatic building is enabled, Gym exports the
 configured pinned Archipelago commit and builds the SIF once. The lightweight Stirrup runtime is pinned in
 `stirrup-requirements.txt`, built once inside that image, and cached under `deps/`; it does not vendor either source
@@ -47,9 +67,13 @@ A rollout can outlive a cluster allocation. Gym's own resume only skips rows tha
 mid-flight is re-dispatched from turn zero. Set `apex_agent_resume_checkpoint_dir` to a host directory that
 outlives the node (a shared filesystem) to continue such rollouts instead:
 
-- The agent bind-mounts `<dir>/<task_id>/t<task_index>_r<rollout_index>_a<attempt_index>` into the sandbox at
-  `/checkpoint` (apptainer provider). Requests without Gym's dispatch stamps have no identity to resume under and
-  run without checkpoints.
+- The agent bind-mounts `<dir>/<run_id>/<task_id>/t<task_index>_r<rollout_index>_a<attempt_index>` into the sandbox
+  at `/checkpoint` (apptainer provider), where `<run_id>` is the collector's `_ng_run_id`. Evaluations that share a
+  checkpoint directory therefore never see each other's checkpoints, and each manifest also names the run that
+  wrote it: a checkpoint of another run is not restored. Requests without Gym's dispatch stamps, the run id
+  included, have no identity to resume under and run without checkpoints; the agent logs one warning the first time
+  a request arrives with indices but no run id. Checkpoints written under an earlier directory layout, without the
+  run id level or without a run id in the manifest, are not picked up.
 - At the start of a turn's model call, the one point where every tool call of the previous turn has landed, the
   runtime writes Stirrup's cache state (messages, history groups, per-turn tool metadata), the Apex state Stirrup does
   not track (active toolbelt, todo list, model-client counters), a world snapshot of `/filesystem` and
@@ -58,11 +82,16 @@ outlives the node (a shared filesystem) to continue such rollouts instead:
   crash mid-write keeps the previous checkpoint. Writes are throttled to one per
   `resume_checkpoint_interval_seconds` (default 60) and held back for two minutes after an MCP tool call times out
   client-side, since the server may still be writing. A heartbeat every 30 seconds records time spent since the last
-  checkpoint.
-- Gym re-dispatches a killed rollout with the same task, rollout, and attempt indices, so it lands in the same
-  directory: the world is restored from the checkpoint, Stirrup continues from the recorded turn, and the initial
-  snapshot is carried forward so grading still diffs against the pre-agent world. A retry after a classed failure
-  carries the next attempt index and starts clean in its own directory.
+  checkpoint. It names the manifest it extends, so a resumed segment keeps charging its time against the checkpoint
+  it started from until it writes a new one. A fresh execution replaces the stored initial snapshot on its first
+  checkpoint; a resumed one keeps the verified snapshot of the first segment.
+- A request that arrives again with the same run id and the same task, rollout, and attempt indices lands in the
+  same directory: the world is restored from the checkpoint, Stirrup continues from the recorded turn, and the
+  initial snapshot is carried forward so grading still diffs against the pre-agent world. A retry after a classed
+  failure carries the next attempt index and starts clean in its own directory.
+- Known limit: a collector that is restarted reserves a new execution number for a rollout it had dispatched but
+  got no row for, so that dispatch carries a new attempt index, looks in a new directory, and starts from turn zero
+  with a full time budget. The checkpoint of the interrupted execution is left unused under its old index.
 - Time already spent, including the heartbeat, is subtracted from the per-task `timeout`. When less than
   `resume_min_remaining_seconds` remains, the rollout is scored 0 as `agent_timeout` with its checkpointed
   trajectory instead of starting a segment.

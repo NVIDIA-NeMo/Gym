@@ -4,7 +4,9 @@
 import asyncio
 import io
 import json
+import os
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,12 +21,14 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from responses_api_agents.apex_agent import prebuilt_world_entrypoint
 from responses_api_agents.apex_agent.app import (
     AGENT_INCOMPLETE,
+    FINAL_SNAPSHOT_TOO_LARGE,
     NG_FAILURE_CLASS_KEY,
     NG_FAILURE_TERMINAL_KEY,
     ApexAgent,
     ApexAgentConfig,
     ApexAgentRunRequest,
     PolicyEgressRelay,
+    _read_sandbox_written_file,
     instruction_from_input,
     load_prebuilt_runner_source,
     load_runner_source,
@@ -212,6 +216,8 @@ async def test_run_classifies_sandbox_exit(
                     stdout=None,
                     error_type=error_type,
                 ),
+                # The bounded copy of the partial result, made in the sandbox before it is downloaded.
+                MagicMock(return_code=0),
             ]
 
         async def __aenter__(self):
@@ -670,8 +676,8 @@ def _body_with(**extra) -> ApexAgentRunRequest:
 
 
 def _gym_body(**extra) -> ApexAgentRunRequest:
-    """A request as Gym dispatches it, with the row's task and rollout indices stamped."""
-    return _body_with(_ng_task_index=0, _ng_rollout_index=0, **extra)
+    """A request as Gym dispatches it, with the collector's run id and the row's task and rollout indices stamped."""
+    return _body_with(**({"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_run_id": "run-a"} | extra))
 
 
 class _State:
@@ -691,7 +697,7 @@ class _State:
         }
 
 
-def _write_checkpoint(directory: Path, *, elapsed_seconds: float, turns: int = 3) -> None:
+def _write_checkpoint(directory: Path, *, elapsed_seconds: float, turns: int = 3, run_id: str = "run-a") -> None:
     directory.parent.mkdir(parents=True, exist_ok=True)
     initial = directory.parent / "initial-src.zip"
     with zipfile.ZipFile(initial, "w") as archive:
@@ -709,6 +715,7 @@ def _write_checkpoint(directory: Path, *, elapsed_seconds: float, turns: int = 3
         initial_snapshot=initial,
         prior_elapsed_seconds=elapsed_seconds,
         clock=lambda: 0.0,
+        run_id=run_id,
     ).write(_State(turns))
 
 
@@ -721,13 +728,15 @@ def test_resume_is_off_unless_a_checkpoint_dir_is_configured() -> None:
     assert "binds" not in spec.provider_options
 
 
-def test_checkpoint_dir_is_keyed_by_task_rollout_and_attempt(tmp_path: Path) -> None:
+def test_checkpoint_dir_is_keyed_by_run_task_rollout_and_attempt(tmp_path: Path) -> None:
     agent = _agent(resume_checkpoint_dir=str(tmp_path / "ckpt"))
 
-    assert agent._resume_checkpoint_dir(_gym_body()) == tmp_path.resolve() / "ckpt" / "task-1" / "t0_r0_a0"
-    keyed = agent._resume_checkpoint_dir(_body_with(_ng_task_index=7, _ng_rollout_index=2, _ng_attempt_index=1))
+    assert agent._resume_checkpoint_dir(_gym_body()) == tmp_path.resolve() / "ckpt" / "run-a" / "task-1" / "t0_r0_a0"
+    keyed = agent._resume_checkpoint_dir(_gym_body(_ng_task_index=7, _ng_rollout_index=2, _ng_attempt_index=1))
     assert keyed is not None and keyed.name == "t7_r2_a1"
     assert agent._resume_checkpoint_dir(_body()) is None
+    # Without the collector's run id nothing says whose checkpoint a directory holds, so there is none.
+    assert agent._resume_checkpoint_dir(_body_with(_ng_task_index=0, _ng_rollout_index=0)) is None
 
 
 def test_sandbox_spec_mounts_the_checkpoint_dir_and_tells_the_runner(tmp_path: Path) -> None:
@@ -755,12 +764,12 @@ async def test_prepare_resume_verifies_retries_once_and_never_deletes(
     assert directory is not None
     _write_checkpoint(directory, elapsed_seconds=100.0)
 
-    checkpoint = await agent._prepare_resume(directory)
+    checkpoint = await agent._prepare_resume(directory, "run-a")
     assert checkpoint is not None and checkpoint.turn == 3 and checkpoint.elapsed_seconds == 100.0
 
     retry_dir = agent._resume_checkpoint_dir(_gym_body(_ng_attempt_index=1))
     assert retry_dir is not None and retry_dir != directory
-    assert await agent._prepare_resume(retry_dir) is None
+    assert await agent._prepare_resume(retry_dir, "run-a") is None
     assert retry_dir.is_dir() and (directory / "manifest.json").is_file()
 
     (directory / "manifest.json").write_text("{not json")
@@ -772,11 +781,11 @@ async def test_prepare_resume_verifies_retries_once_and_never_deletes(
         return real_load(path)
 
     monkeypatch.setattr("responses_api_agents.apex_agent.app.load_resume_checkpoint", counting_load)
-    assert await agent._prepare_resume(directory) is None
+    assert await agent._prepare_resume(directory, "run-a") is None
     assert loads == [directory, directory]
     assert (directory / "manifest.json").read_text() == "{not json"
 
-    assert await agent._prepare_resume(None) is None
+    assert await agent._prepare_resume(None, "run-a") is None
 
     outside = tmp_path / "elsewhere"
     outside.mkdir()
@@ -855,7 +864,8 @@ async def test_run_resumes_with_the_remaining_budget_and_the_checkpointed_world(
 
         async def exec(self, *_args, **kwargs):
             execs.append(kwargs)
-            if len(execs) < 3:
+            if len(execs) != 3:
+                # Setup before the rollout, and the bounded copy of the partial result after it.
                 return MagicMock(return_code=0)
             return MagicMock(return_code=125, stderr="timed out", stdout=None, error_type="timeout")
 
@@ -871,7 +881,7 @@ async def test_run_resumes_with_the_remaining_budget_and_the_checkpointed_world(
     assert spec.provider_options["binds"] == [f"{directory}:/checkpoint"]
     agent._download_world.assert_not_awaited()
     assert "/app/apex-gym/world.zip" not in uploads
-    assert execs[-1]["timeout_s"] == 2600
+    assert execs[2]["timeout_s"] == 2600
     assert payload["failure_kind"] == "agent_timeout"
     assert payload["response"]["apex_resume_segments"] == 2
     assert not directory.exists()
@@ -1058,3 +1068,385 @@ async def test_run_wires_and_tears_down_the_relay(monkeypatch: MonkeyPatch, tmp_
     assert runner["model_egress_socket"] == "/egress/policy.sock"
     assert result.model_dump()[NG_FAILURE_CLASS_KEY] == "sandbox_error"
     assert not socket_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# The partial result sits on a bind the sandbox can write
+# ---------------------------------------------------------------------------
+
+
+def test_a_sandbox_written_file_is_read_only_when_it_is_a_bounded_regular_file(tmp_path: Path) -> None:
+    regular = tmp_path / "regular.json"
+    regular.write_bytes(b"0123456789")
+    assert _read_sandbox_written_file(regular, 10) == b"0123456789"
+    with pytest.raises(ValueError, match="limit is 9"):
+        _read_sandbox_written_file(regular, 9)
+
+    secret = tmp_path / "host-secret"
+    secret.write_text("host only")
+    link = tmp_path / "link.json"
+    link.symlink_to(secret)
+    with pytest.raises(OSError):
+        _read_sandbox_written_file(link, 1024)
+
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="not a regular file"):
+        _read_sandbox_written_file(fifo, 1024)
+    assert time.monotonic() - started < 5.0, "opening a FIFO without a writer must not wait for one"
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        _read_sandbox_written_file(tmp_path, 1024)
+
+
+class _DownloadingSandbox:
+    """A sandbox whose download leaves ``content`` at the destination, or raises ``error`` as a provider would."""
+
+    def __init__(
+        self, content: bytes | None = None, error: Exception | None = None, copy_result: object | None = None
+    ) -> None:
+        self.content = content
+        self.error = error
+        self.copy_result = copy_result if copy_result is not None else MagicMock(return_code=0)
+        self.commands: list[tuple[str, dict]] = []
+        self.sources: list[str] = []
+
+    async def exec(self, command: str, **kwargs):
+        self.commands.append((command, kwargs))
+        if isinstance(self.copy_result, Exception):
+            raise self.copy_result
+        return self.copy_result
+
+    async def download(self, source: str, destination: Path) -> None:
+        self.sources.append(source)
+        if self.error is not None:
+            raise self.error
+        destination.write_bytes(self.content or b"")
+
+
+async def test_partial_result_recovery_downloads_then_reads_the_copy_off_the_event_loop(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    sandbox = _DownloadingSandbox(json.dumps({"trajectory": [1], "completion_status": "running"}).encode())
+    threads: list[str] = []
+    real_to_thread = asyncio.to_thread
+
+    async def recording_to_thread(func, *args, **kwargs):
+        threads.append(func.__name__)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.asyncio.to_thread", recording_to_thread)
+
+    recovered = await _agent()._recover_partial_result(sandbox, tmp_path / "copy.json")
+
+    assert recovered == {"trajectory": [1], "completion_status": "running"}
+    # Only the copy cut at the limit inside the sandbox reaches the host, never the file the sandbox left.
+    assert sandbox.sources == ["/sandbox/partial_result.json.bounded"]
+    assert threads == ["_load_sandbox_written_json"]
+
+
+async def test_partial_result_is_cut_at_the_limit_inside_the_sandbox_before_it_is_downloaded(tmp_path: Path) -> None:
+    agent = _agent()
+    agent.config.max_partial_result_bytes = 1000
+    sandbox = _DownloadingSandbox(b"{}")
+
+    assert await agent._recover_partial_result(sandbox, tmp_path / "copy.json") == {}
+
+    [(command, kwargs)] = sandbox.commands
+    assert command == (
+        "rm -f -- /sandbox/partial_result.json.bounded && [ -f /sandbox/partial_result.json ] && "
+        "[ ! -L /sandbox/partial_result.json ] && "
+        "head -c 1001 -- /sandbox/partial_result.json > /sandbox/partial_result.json.bounded"
+    )
+    # A FIFO left at the path blocks the copy, so the command is bounded in time and runs as the default user.
+    assert kwargs == {"timeout_s": 60}
+
+
+async def test_nothing_is_downloaded_when_the_bounded_copy_ran_and_refused_the_path(tmp_path: Path) -> None:
+    """The trusted command found no regular file there: a missing path, a link, a FIFO or a directory."""
+    refused = MagicMock(return_code=1, stderr="", stdout="", error_type=None)
+    sandbox = _DownloadingSandbox(b'{"trajectory": []}', copy_result=refused)
+
+    assert await _agent()._recover_partial_result(sandbox, tmp_path / "copy.json") is None
+    assert sandbox.sources == [], "a path the copy refused is never downloaded"
+
+
+@pytest.mark.parametrize(
+    "copy_result",
+    [
+        RuntimeError("Sandbox has not been started"),
+        MagicMock(return_code=125, stderr="the sandbox has stopped", stdout=None, error_type="sandbox"),
+        MagicMock(return_code=125, stderr="timed out", stdout=None, error_type="timeout"),
+    ],
+    ids=["exec_raises", "sandbox_stopped", "copy_timed_out"],
+)
+async def test_the_file_itself_is_downloaded_when_the_bounded_copy_could_not_run(tmp_path: Path, copy_result) -> None:
+    """A direct-exec sandbox is gone after its rollout timed out; its partial trajectory is still on the bind."""
+    content = json.dumps({"trajectory": [{"role": "assistant", "content": "partial"}]}).encode()
+    sandbox = _DownloadingSandbox(content, copy_result=copy_result)
+
+    recovered = await _agent()._recover_partial_result(sandbox, tmp_path / "copy.json")
+
+    assert recovered == {"trajectory": [{"role": "assistant", "content": "partial"}]}
+    assert sandbox.sources == ["/sandbox/partial_result.json"]
+
+
+async def test_an_oversized_file_downloaded_without_the_bounded_copy_is_removed_from_the_host(tmp_path: Path) -> None:
+    agent = _agent()
+    content = json.dumps({"trajectory": ["x" * 64]}).encode()
+    agent.config.max_partial_result_bytes = len(content) - 1
+    sandbox = _DownloadingSandbox(content, copy_result=RuntimeError("Sandbox has not been started"))
+    destination = tmp_path / "copy.json"
+
+    assert await agent._recover_partial_result(sandbox, destination) is None
+    assert sandbox.sources == ["/sandbox/partial_result.json"]
+    assert not destination.exists(), "the oversized copy does not stay on the host"
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"[1, 2]", b"\xff\xfe"])
+async def test_partial_result_recovery_returns_nothing_for_a_file_that_is_not_a_json_object(
+    tmp_path: Path, content: bytes
+) -> None:
+    assert await _agent()._recover_partial_result(_DownloadingSandbox(content), tmp_path / "copy.json") is None
+
+
+async def test_partial_result_recovery_refuses_a_file_over_the_configured_size(tmp_path: Path) -> None:
+    agent = _agent()
+    assert agent.config.max_partial_result_bytes == 256 * 1024 * 1024
+    content = json.dumps({"trajectory": ["x" * 64]}).encode()
+
+    # The host reader holds the limit on its own, whatever the sandbox-side copy let through.
+    agent.config.max_partial_result_bytes = len(content) - 1
+    assert await agent._recover_partial_result(_DownloadingSandbox(content), tmp_path / "copy.json") is None
+    agent.config.max_partial_result_bytes = len(content)
+    assert await agent._recover_partial_result(_DownloadingSandbox(content), tmp_path / "copy.json") is not None
+
+
+async def test_partial_result_recovery_returns_nothing_when_the_download_is_refused(tmp_path: Path) -> None:
+    """The provider refuses a symlink, a FIFO or a missing file by raising; the rollout then has no partial result."""
+    sandbox = _DownloadingSandbox(error=ValueError("refusing to download a path that is not a regular file"))
+
+    assert await _agent()._recover_partial_result(sandbox, tmp_path / "copy.json") is None
+    assert not (tmp_path / "copy.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Snapshot size limit: the final snapshot is the policy's, the initial one the dataset's
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("initial_bytes", "final_bytes", "expected_class", "expected_kind"),
+    [
+        (10, 2000, None, FINAL_SNAPSHOT_TOO_LARGE),
+        (2000, 10, "snapshot_too_large", "apex_agents:snapshot_too_large"),
+    ],
+)
+async def test_a_snapshot_over_its_limit_is_the_policys_zero_only_when_the_policy_wrote_it(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+    initial_bytes: int,
+    final_bytes: int,
+    expected_class: str | None,
+    expected_kind: str,
+) -> None:
+    agent = _agent()
+    agent.config.max_snapshot_bytes = 1000
+    agent._ensure_runtime_setup = AsyncMock(return_value=tmp_path / "stirrup-runtime.tar.gz")
+    agent._download_world = AsyncMock()
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.raise_for_status", AsyncMock())
+    result = {
+        "final_answer": "done",
+        "completed": True,
+        "completion_status": "completed",
+        "trajectory": [{"role": "assistant", "content": "wrote a large file"}],
+    }
+    outputs = {
+        "/app/apex-gym/output/result.json": json.dumps(result).encode(),
+        "/app/apex-gym/output/initial.zip": b"i" * initial_bytes,
+        "/app/apex-gym/output/final.zip": b"f" * final_bytes,
+    }
+
+    class FakeSandbox:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def start(self) -> None:
+            return None
+
+        async def upload(self, *_args) -> None:
+            return None
+
+        async def download(self, source: str, destination: Path) -> None:
+            destination.write_bytes(outputs[source])
+
+        async def exec(self, *_args, **_kwargs):
+            return MagicMock(return_code=0)
+
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.AsyncSandbox", MagicMock(return_value=FakeSandbox()))
+
+    payload = (await agent.run(MagicMock(cookies={}), _body())).model_dump()
+
+    assert payload["reward"] == 0.0
+    assert payload["failure_kind"] == expected_kind
+    assert payload.get(NG_FAILURE_CLASS_KEY) == expected_class
+    assert payload["apex_trajectory"] == result["trajectory"]
+    # Neither outcome is graded: the only request to the resources server is the session seed.
+    assert [call.kwargs["url_path"] for call in agent.server_client.post.await_args_list] == ["/seed_session"]
+    if expected_class is None:
+        # A result row that stays in the mean, with the policy's answer kept.
+        assert payload["mask_sample"] is False
+        assert not any(key.startswith("_ng_failure") for key in payload)
+        assert payload["response"].get("metadata") != NG_NO_GENERATION_METADATA
+        assert "final artifact snapshot is 2000 bytes; limit is 1000" in payload["failure_reason"]
+    else:
+        # The dataset's world is over the limit: no retry changes that, and it is not the policy's zero.
+        assert payload[NG_FAILURE_TERMINAL_KEY] is True
+        assert payload["response"]["metadata"] == NG_NO_GENERATION_METADATA
+
+
+# ---------------------------------------------------------------------------
+# Checkpoints belong to the collector run that wrote them
+# ---------------------------------------------------------------------------
+
+
+async def test_two_evaluations_sharing_a_checkpoint_root_never_restore_each_others_checkpoints(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(resume_checkpoint_dir=str(tmp_path))
+    first, second = _gym_body(_ng_run_id="run-a"), _gym_body(_ng_run_id="run-b")
+    first_dir, second_dir = agent._resume_checkpoint_dir(first), agent._resume_checkpoint_dir(second)
+    assert first_dir is not None and second_dir is not None
+    assert first_dir != second_dir and first_dir.name == second_dir.name == "t0_r0_a0"
+    _write_checkpoint(first_dir, elapsed_seconds=100.0, run_id="run-a")
+
+    # The second evaluation dispatches the same task and indices: it starts fresh.
+    assert await agent._prepare_resume(second_dir, agent._run_id(second)) is None
+    # A redispatch by the first evaluation restores its own checkpoint.
+    restored = await agent._prepare_resume(agent._resume_checkpoint_dir(first), agent._run_id(first))
+    assert restored is not None and restored.turn == 3 and restored.run_id == "run-a"
+
+    # The second evaluation's row ends its own lineage and leaves the first's checkpoint alone.
+    await agent._discard_resume_checkpoint(second_dir)
+    assert not second_dir.exists()
+    assert (first_dir / "manifest.json").is_file()
+    await agent._discard_resume_checkpoint(first_dir)
+    assert not first_dir.exists()
+
+
+async def test_a_checkpoint_written_by_another_run_is_not_restored_even_from_this_runs_directory(
+    tmp_path: Path,
+) -> None:
+    """Run ids are shortened and sanitized into directory names, so the manifest, not the path, names the owner."""
+    agent = _agent(resume_checkpoint_dir=str(tmp_path))
+    body = _gym_body(_ng_run_id="run-b")
+    directory = agent._resume_checkpoint_dir(body)
+    assert directory is not None
+    _write_checkpoint(directory, elapsed_seconds=100.0, run_id="run-a")
+
+    assert await agent._prepare_resume(directory, "run-b") is None
+    assert (directory / "manifest.json").is_file(), "nothing is deleted on a refused restore"
+    assert await agent._prepare_resume(directory, None) is None
+    assert await agent._prepare_resume(directory, "run-a") is not None
+
+
+async def test_discarding_a_checkpoint_only_removes_a_rollout_directory_of_the_configured_root(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(resume_checkpoint_dir=str(tmp_path / "root"))
+    run_dir = tmp_path / "root" / "run-a"
+    task_dir = run_dir / "task-1"
+    rollout_dir = task_dir / "t0_r0_a0"
+    other_run = tmp_path / "root" / "run-b" / "task-1" / "t0_r0_a0"
+    outside = tmp_path / "elsewhere" / "run-a" / "task-1" / "t0_r0_a0"
+    for directory in (rollout_dir, other_run, outside):
+        directory.mkdir(parents=True)
+
+    for not_a_rollout in (tmp_path / "root", run_dir, task_dir, outside):
+        await agent._discard_resume_checkpoint(not_a_rollout)
+        assert not_a_rollout.is_dir()
+    assert rollout_dir.is_dir()
+
+    await agent._discard_resume_checkpoint(rollout_dir)
+    assert not rollout_dir.exists()
+    assert task_dir.is_dir() and other_run.is_dir()
+
+
+def test_the_runner_is_told_which_run_owns_its_checkpoints(tmp_path: Path) -> None:
+    agent = _agent(resume_checkpoint_dir=str(tmp_path))
+
+    runner = json.loads(agent._sandbox_spec(_gym_body(), "Do the work").files["/app/apex-gym/runner_config.json"])
+
+    assert runner["run_id"] == "run-a"
+
+
+async def test_a_rollout_killed_by_its_timeout_still_reports_its_unanswered_tool_calls(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    agent = _agent()
+    agent._ensure_runtime_setup = AsyncMock(return_value=tmp_path / "stirrup-runtime.tar.gz")
+    agent._download_world = AsyncMock()
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.raise_for_status", AsyncMock())
+    partial = {"trajectory": [], "n_mcp_unanswered_calls": 4, "n_mcp_trailing_unanswered_calls": 4}
+    execs: list[str] = []
+
+    class FakeSandbox:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def start(self) -> None:
+            return None
+
+        async def upload(self, *_args) -> None:
+            return None
+
+        async def download(self, _source: str, destination: Path) -> None:
+            destination.write_text(json.dumps(partial), encoding="utf-8")
+
+        async def exec(self, command: str, **_kwargs):
+            execs.append(command)
+            if command.endswith("sandbox_entrypoint.py"):
+                return MagicMock(return_code=125, stderr="timed out", stdout=None, error_type="timeout")
+            return MagicMock(return_code=0)
+
+    monkeypatch.setattr("responses_api_agents.apex_agent.app.AsyncSandbox", MagicMock(return_value=FakeSandbox()))
+
+    payload = (await agent.run(MagicMock(cookies={}), _body())).model_dump()
+
+    # The count is recorded; the timeout is still the policy's scored zero.
+    assert payload["response"]["apex_mcp_unanswered_calls"] == 4
+    assert payload["failure_kind"] == "agent_timeout"
+    assert NG_FAILURE_CLASS_KEY not in payload
+    assert (payload["reward"], payload["mask_sample"]) == (0.0, False)
+
+
+def test_requests_without_a_run_id_say_once_that_checkpoints_are_off(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = _agent(resume_checkpoint_dir=str(tmp_path))
+    unstamped = _body_with(_ng_task_index=0, _ng_rollout_index=0)
+
+    with caplog.at_level("WARNING", logger="responses_api_agents.apex_agent.app"):
+        assert agent._resume_checkpoint_dir(_gym_body()) is not None
+        assert agent._resume_checkpoint_dir(unstamped) is None
+        assert agent._resume_checkpoint_dir(unstamped) is None
+        # A request with no dispatch stamps at all was never resumable, and is not what the warning is about.
+        assert agent._resume_checkpoint_dir(_body()) is None
+
+    warnings = [record.getMessage() for record in caplog.records if "checkpoints are disabled" in record.getMessage()]
+    assert len(warnings) == 1 and "_ng_run_id" in warnings[0]
+
+    # With the feature off there is nothing to warn about.
+    with caplog.at_level("WARNING", logger="responses_api_agents.apex_agent.app"):
+        caplog.clear()
+        assert _agent()._resume_checkpoint_dir(unstamped) is None
+    assert not caplog.records

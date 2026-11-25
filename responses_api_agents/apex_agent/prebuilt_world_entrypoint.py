@@ -19,9 +19,13 @@ from typing import Any
 
 
 try:
-    from stirrup_runtime import run_stirrup_rollout, wait_for_gateway
+    from stirrup_runtime import require_live_tool_plane, run_stirrup_rollout, wait_for_gateway
 except ImportError:  # Imported as a Gym package during host-side tests.
-    from responses_api_agents.apex_agent.stirrup_runtime import run_stirrup_rollout, wait_for_gateway
+    from responses_api_agents.apex_agent.stirrup_runtime import (
+        require_live_tool_plane,
+        run_stirrup_rollout,
+        wait_for_gateway,
+    )
 
 
 ROOT = Path("/app/apex-gym")
@@ -188,6 +192,9 @@ async def main() -> None:
             GATEWAY_URL,
             checkpoint_path=PARTIAL_RESULT_PATH,
         )
+        # A normal return is scored, so tools that died under the policy must end the rollout as a sandbox fault.
+        # The start script is not the gateway's process, so only the gateway's own answers are checked.
+        await require_live_tool_plane(None, GATEWAY_URL, result)
         final_manifest = await asyncio.to_thread(capture_snapshot, OUTPUT / "final.zip")
         result.update(
             {
