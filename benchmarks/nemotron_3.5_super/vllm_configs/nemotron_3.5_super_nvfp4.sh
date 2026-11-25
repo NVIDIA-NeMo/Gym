@@ -10,11 +10,11 @@ GYM_MODEL_PARAMS=(
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
-# V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
+# @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
-# `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
-# --kernel-config '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}' is not supported in vLLM 2a02f6efe319c885e3ccbcecde402e0028f9ec1e
+# @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
+# @bxyu-nvidia: --kernel-config '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}' is not supported in vLLM 2a02f6efe319c885e3ccbcecde402e0028f9ec1e
 # So we add the `--linear-backend torch` flag instead
 VLLM_COMMON_ARGS=(
     --trust-remote-code

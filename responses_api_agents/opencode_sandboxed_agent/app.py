@@ -791,11 +791,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             raise ValueError("sandbox_provider_options.network_policy cannot be set when network_access is restricted")
 
         resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
-        # TODO Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
+        # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
         env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
         env |= dict(self.config.sandbox_config.get("env", {}))  # explicit keys win over the derived caps
 
-        # TODO Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
             image=self.config.sandbox_config.get("image", "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907"),
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
@@ -1011,7 +1011,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "$schema": "https://opencode.ai/config.json",
             "provider": {
                 self.config.opencode_provider_id: {
-                    # TODO We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
+                    # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
                         "baseURL": base_url,
@@ -1219,17 +1219,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         messages.append(
                             NeMoGymFunctionCallOutput(
                                 call_id=part["callID"],
-                                # Somehow the output here may be missing...
+                                # @bxyu-nvidia: Somehow the output here may be missing...
                                 output=part["state"].get("output", ""),
                             )
                         )
                     elif part["type"] in ("step-finish", "step-start", "patch"):
                         pass
                     else:
-                        # Defensive raise in case we're missing something.
+                        # @bxyu-nvidia: Defensive raise in case we're missing something.
                         raise NotImplementedError(part)
             else:
-                # Defensive raise in case we're missing something.
+                # @bxyu-nvidia: Defensive raise in case we're missing something.
                 raise NotImplementedError(message)
 
         return messages
@@ -1401,7 +1401,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             query_seed_str = f"printf '%s' {quote(query)} | "
             query_arg_str = ""
 
-        # Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
+        # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
@@ -1938,7 +1938,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
 
-        # "sandbox_handle" comes from resources_servers/swebench/app.py
+        # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
         sandbox = await self._start_sandbox(

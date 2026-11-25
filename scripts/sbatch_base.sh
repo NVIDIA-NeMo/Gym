@@ -71,4 +71,4 @@ srun --nodes=$SLURM_JOB_NUM_NODES --ntasks=$SLURM_JOB_NUM_NODES \
         -- "$@"
     ' bash "${command[@]}"
 
-# TODO Currently with ray symmetric-run, there are some unwanted/dirty prints at the end of the job. The job itself can succeed.
+# TODO @bxyu-nvidia: Currently with ray symmetric-run, there are some unwanted/dirty prints at the end of the job. The job itself can succeed.

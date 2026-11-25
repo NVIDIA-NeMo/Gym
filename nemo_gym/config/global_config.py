@@ -1762,7 +1762,7 @@ For example, on the command line:
         cli_global_config_dict = (
             DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
-        # Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
+        # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
         OmegaConf.set_struct(cli_global_config_dict, False)
 
         # The config `--agent-type` loaded. Its LangGraph agent is the one composition puts in place of the workload's
@@ -1851,7 +1851,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # NOTE(martas): this is for catching agents not attached to an environment server
         self._front_agents_without_environment_server(global_config_dict)
 
-        # TODO We need a better way of handling dummy model configs
+        # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
             for top_level_value in global_config_dict.values():
                 if not (

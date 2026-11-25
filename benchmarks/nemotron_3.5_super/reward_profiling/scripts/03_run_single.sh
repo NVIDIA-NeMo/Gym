@@ -501,7 +501,7 @@ this_node_hostname=\$(hostname)
 if (( SLURM_PROCID == 0 )); then
     read -r -a nodes <<< "\$ALL_NODES"
 
-    # for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
+    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Request timeout is deliberately finite now (ROUTER_REQUEST_TIMEOUT_S, 3600) rather than the
     # 86400 this line used to argue for: inside a 4 h job 'never' means a wedged request holds a
     # driver concurrency slot until the walltime kills it.
@@ -602,7 +602,7 @@ trap cleanup_server EXIT INT TERM
 
 # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
-    # Put the Gym servers on a separate node than the PREFILL_HEAD which is also running the vllm-router
+    # @bxyu-nvidia: Put the Gym servers on a separate node than the PREFILL_HEAD which is also running the vllm-router
     # This helps relieve so much network traffic on one node.
     if [[ -v 'nodes[1]' ]]; then
         EVAL_NODE=\${nodes[1]}
@@ -739,7 +739,7 @@ trap cleanup_server EXIT INT TERM
         export NEMO_SKILLS_SANDBOX_PORT="\$SANDBOX_ENDPOINT_PORT"
     fi
 
-    # We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
+    # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     ROUTER_NODE="\${nodes[0]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \

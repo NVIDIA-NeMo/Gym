@@ -341,10 +341,10 @@ export VLLM_USE_FASTOKENS=1
 export VLLM_CACHE_INVENTORY_INTERVAL=$VLLM_CACHE_INVENTORY_INTERVAL
 export VLLM_ENGINE_READY_TIMEOUT_S="$VLLM_ENGINE_READY_TIMEOUT_S"
 
-# This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
+# @bxyu-nvidia: This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
 export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
 
-# TODO Unfortunately there's an accuracy issue with the rust frontend in vLLM 0.29.0, around 1-2% delta on SWE Verified.
+# TODO @bxyu-nvidia: Unfortunately there's an accuracy issue with the rust frontend in vLLM 0.29.0, around 1-2% delta on SWE Verified.
 # export VLLM_USE_RUST_FRONTEND=1
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
@@ -637,7 +637,7 @@ if (( ENABLE_MOONCAKE )); then
 }
 MOONCAKE_CONFIG
 
-    # Specific to OCI-HSG, as with the device_names above. Otherwise we get errors like:
+    # @bxyu-nvidia: Specific to OCI-HSG, as with the device_names above. Otherwise we get errors like:
     # W0924 18:25:48.906106 1830563 worker_pool.cpp:477] Worker: Cannot make connection for endpoint: 10.109.24.46:15741@mlx5_2, pausing peer rail and retrying through an alternate peer RNIC
     export MC_TE_FILTERS=mlx5_0,mlx5_1,mlx5_3,mlx5_4
 
@@ -652,7 +652,7 @@ MOONCAKE_CONFIG
     fi
     python3 -c 'from mooncake.engine import TransferEngine; from mooncake.store import MooncakeDistributedStore'
 
-    # Need these for mooncake connector on GB200 https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md#environment-variables
+    # @bxyu-nvidia: Need these for mooncake connector on GB200 https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md#environment-variables
     export WITH_NVIDIA_PEERMEM=0
 
     if (( SLURM_PROCID == 0 )); then
@@ -1237,7 +1237,7 @@ fi
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
 
-    # Put the Gym servers on a separate node from the one running vllm-router.
+    # @bxyu-nvidia: Put the Gym servers on a separate node from the one running vllm-router.
     # This helps relieve so much network traffic on one node.
     if [[ -v 'nodes[1]' ]]; then
         EVAL_NODE=\${nodes[1]}
@@ -1245,7 +1245,7 @@ if (( $should_run_eval )); then
         EVAL_NODE=\${nodes[0]}
     fi
 
-    # We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
+    # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     ROUTER_NODE="\${nodes[0]}" \
     ALL_NODES="\${nodes[*]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
@@ -1321,7 +1321,7 @@ main_job_id=$(
 main_job_id=${main_job_id%%;*}
 
 if (( should_run_eval )); then
-    # Don't run cleanup job in reservation
+    # @bxyu-nvidia: Don't run cleanup job in reservation
     unset SBATCH_RESERVATION
     # Run the cleanup with the Gym venv's interpreter when there is one: through its "#!/usr/bin/env python3" shebang
     # the script got the CPU node's system Python, which is too old for its type hints and lacks aiohttp/yaml, so every
