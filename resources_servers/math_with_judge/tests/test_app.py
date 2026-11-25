@@ -15,6 +15,7 @@
 import asyncio
 import json
 import multiprocessing as mp
+import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -29,6 +30,9 @@ from sympy.parsing import sympy_parser
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    PROVIDER_REQUEST_FAILED,
+    PROVIDER_UNAVAILABLE,
+    VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
@@ -38,6 +42,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NgFailureEvent,
 )
+from nemo_gym.sandbox import SandboxAccess, SandboxExecResult
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.telemetry import ResourcesOperation
 from nemo_gym.verification import is_judge_failure
@@ -1572,3 +1577,207 @@ async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
     assert metrics["pass@1[avg-of-16]/symbolic_accuracy"] == 50
     assert metrics["pass@1[avg-of-8]/symbolic_accuracy"] == 0
     assert not grader._verify_answer_with_judge.called
+
+
+class _FakeLentSandbox:
+    """A lent sandbox whose files live under ``root`` and whose check runs with this test's Python.
+
+    ``error_type`` and ``return_code`` replace the check command's outcome, to stand in for a sandbox that fails.
+    """
+
+    def __init__(self, root: Path, *, error_type: str | None = None, return_code: int | None = None) -> None:
+        self.root = root
+        self.error_type = error_type
+        self.return_code = return_code
+        self.commands: list[Any] = []
+        self.disconnected = False
+
+    def local(self, path: str) -> Path:
+        return self.root / path.lstrip("/")
+
+    async def upload(self, source: Path, path: str) -> None:
+        self.local(path).parent.mkdir(parents=True, exist_ok=True)
+        self.local(path).write_bytes(Path(source).read_bytes())
+
+    async def exec(self, command: Any, *, cwd: str, timeout_s: float, **kwargs: Any) -> SandboxExecResult:
+        self.commands.append(command)
+        if isinstance(command, str):
+            assert command.startswith("mkdir -p ")
+            self.local(command.removeprefix("mkdir -p ").strip("'")).mkdir(parents=True, exist_ok=True)
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+        if self.error_type is not None:
+            return SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type=self.error_type)
+        python, flag, script, request = command
+        completed = subprocess.run(
+            [sys.executable, flag, str(self.local(script)), str(self.local(request))],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        return SandboxExecResult(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            return_code=completed.returncode if self.return_code is None else self.return_code,
+        )
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+class _InstalledRuntime:
+    directory = "/tmp/nemo-gym-math_with_judge_verifier-runtime-test"
+    python = "/tmp/nemo-gym-math_with_judge_verifier-runtime-test/python/bin/python3"
+
+    def __init__(self, *, installed: bool = True, install_error: Exception | None = None) -> None:
+        self.installed = installed
+        self.install_error = install_error
+
+    async def is_installed(self, sandbox: Any) -> bool:
+        return self.installed
+
+    async def install(self, sandbox: Any, *, timeout_s: float) -> None:
+        if self.install_error is not None:
+            raise self.install_error
+        self.installed = True
+
+
+class TestLentSandboxCheck:
+    @fixture
+    def server(self) -> LibraryJudgeMathResourcesServer:
+        server = LibraryJudgeMathResourcesServer(
+            config=LibraryJudgeMathResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                should_use_judge=False,
+                judge_model_server=ModelServerRef(type="responses_api_models", name="math_judge"),
+                judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        # A lent sandbox replaces this server's own child process; it must never run here.
+        server._wait_for_library_verifier_process = AsyncMock(side_effect=AssertionError("checked in this server"))
+        return server
+
+    @staticmethod
+    def _request(answer: str) -> LibraryJudgeMathVerifyRequest:
+        access = SandboxAccess.model_validate(
+            {"connection": {"provider_config_ref": "sandbox", "descriptor": {"id": "lent"}}, "workdir": "/workspace"}
+        )
+        return LibraryJudgeMathVerifyRequest(
+            question="What is 2 + 2?",
+            expected_answer="4",
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse(
+                id="r",
+                created_at=0.0,
+                model="m",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id="m",
+                        content=[NeMoGymResponseOutputText(annotations=[], text=answer, type="output_text")],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+            ng_sandbox_access=access,
+        )
+
+    @mark.parametrize(("answer", "reward"), [("2 + 2 = \\boxed{4}", 1.0), ("\\boxed{5}", 0.0)])
+    async def test_the_check_runs_in_the_lent_sandbox(
+        self, server: LibraryJudgeMathResourcesServer, tmp_path: Path, monkeypatch: MonkeyPatch, answer: str, reward
+    ) -> None:
+        sandbox = _FakeLentSandbox(tmp_path)
+        monkeypatch.setattr(math_with_judge_app, "borrow", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(math_with_judge_app, "LIBRARY_CHECK_RUNTIME", _InstalledRuntime())
+
+        response = await server.verify(self._request(answer))
+
+        assert (response.reward, response.library_reward, response.mask_sample) == (reward, reward, False)
+        assert response.extracted_answer == ("4" if reward else "5")
+        python, flag, script, request = sandbox.commands[-1]
+        assert (python, flag) == (_InstalledRuntime.python, "-I")
+        assert (
+            sandbox.local(script).read_text()
+            == Path(math_with_judge_app.__file__).with_name("library_check.py").read_text()
+        )
+        assert (
+            json.loads(sandbox.local(request).read_text())["timeout_s"]
+            == server.config.library_verifier_timeout_seconds
+        )
+        assert sandbox.disconnected
+        assert "ng_sandbox_access" not in response.model_dump()
+
+    async def test_the_runtime_is_installed_when_the_sandbox_lacks_it(
+        self, server: LibraryJudgeMathResourcesServer, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        runtime = _InstalledRuntime(installed=False)
+        monkeypatch.setattr(math_with_judge_app, "borrow", AsyncMock(return_value=_FakeLentSandbox(tmp_path)))
+        monkeypatch.setattr(math_with_judge_app, "LIBRARY_CHECK_RUNTIME", runtime)
+
+        response = await server.verify(self._request("\\boxed{4}"))
+
+        assert runtime.installed and response.reward == 1.0
+
+    @mark.parametrize(
+        ("borrow_error", "sandbox_kwargs", "install_error", "failure_kind"),
+        [
+            (RuntimeError("gone"), {}, None, PROVIDER_UNAVAILABLE),
+            (None, {}, RuntimeError("no wheel"), VERIFIER_ERROR),
+            (None, {"error_type": "timeout"}, None, PROVIDER_REQUEST_FAILED),
+            (None, {"return_code": 1}, None, VERIFIER_ERROR),
+        ],
+    )
+    async def test_a_sandbox_that_cannot_check_masks_the_sample(
+        self,
+        server: LibraryJudgeMathResourcesServer,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+        borrow_error: Exception | None,
+        sandbox_kwargs: dict[str, Any],
+        install_error: Exception | None,
+        failure_kind: str,
+    ) -> None:
+        sandbox = _FakeLentSandbox(tmp_path, **sandbox_kwargs)
+        borrow = AsyncMock(side_effect=borrow_error) if borrow_error else AsyncMock(return_value=sandbox)
+        monkeypatch.setattr(math_with_judge_app, "borrow", borrow)
+        monkeypatch.setattr(
+            math_with_judge_app,
+            "LIBRARY_CHECK_RUNTIME",
+            _InstalledRuntime(installed=install_error is None, install_error=install_error),
+        )
+
+        response = await server.verify(self._request("\\boxed{4}"))
+
+        assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, True, failure_kind)
+        assert sandbox.disconnected == (borrow_error is None)
+
+    async def test_an_unresolvable_provider_fails_the_request(
+        self, server: LibraryJudgeMathResourcesServer, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Masking would hide a configuration error in every sample; the Environment Server retries the request.
+        monkeypatch.setattr(math_with_judge_app, "borrow", AsyncMock(side_effect=ValueError("no provider block")))
+
+        with raises(ValueError, match="no provider block"):
+            await server.verify(self._request("\\boxed{4}"))
+
+    def test_the_check_script_times_out_like_the_server_check(self, tmp_path: Path) -> None:
+        request = tmp_path / "request.json"
+        request.write_text(
+            json.dumps(
+                {"expected_answer": "4", "generated_answer": "\\boxed{4}", "timeout_s": 1e-6, "memory_limit_mb": None}
+            )
+        )
+        script = Path(math_with_judge_app.__file__).with_name("library_check.py")
+
+        completed = subprocess.run([sys.executable, "-I", str(script), str(request)], capture_output=True, text=True)
+
+        assert completed.returncode == 0, completed.stderr
+        assert json.loads(completed.stdout) == {"reward": 0.0, "extracted_answer": None, "outcome": "timeout"}

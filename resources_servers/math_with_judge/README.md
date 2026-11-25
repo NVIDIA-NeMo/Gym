@@ -54,8 +54,22 @@ gym dataset collate \
 
 # Sandbox
 
-The verifier runs nothing from the answer, so a config may let `/verify` run in this server instead of in the
-attempt's sandbox group (`sandbox_opt_out.verifier: true`):
+Math-Verify parses the model's answer with SymPy, so the verifier grades in a sandbox. When the Environment Server
+lends one to `/verify` (`sandbox_opt_out.verifier: false`, as in `benchmarks/aime25/config.yaml`), the Math-Verify
+check runs there instead of in this server:
+
+- `library_check.py` holds the check. It imports only the standard library and Math-Verify, so the same file runs in
+  this server and, uploaded, in the lent sandbox.
+- On the first check in a sandbox, the check's private Python runtime is installed there: a pinned CPython with
+  Math-Verify at this server's versions, built on this host (`sandbox_install_timeout_seconds` bounds it). The
+  sandbox needs no network.
+- The check scores an answer that times out or crashes its child 0, as this server's own check does. When the sandbox
+  cannot run the check (it cannot be borrowed, the runtime does not install, the command fails), the sample is masked
+  (`mask_sample`, with a `failure_kind`) instead of scored, and nothing falls back to this server.
+- With `should_use_judge: true`, an answer Math-Verify rejects still goes to a judge model from this server: a model
+  call, not code.
+
+A config that lends no sandbox to `/verify` keeps the check in this server. What reaches code there:
 
 - Math-Verify reads a LaTeX answer with latex2sympy2_extended's ANTLR parser, which builds SymPy objects. Names it
   dispatches on come from fixed lists in its grammar and code; any other name becomes an undefined SymPy function.
@@ -64,16 +78,13 @@ attempt's sandbox group (`sandbox_opt_out.verifier: true`):
   through `nsimplify`), and the text Math-Verify's plain-expression regex admits: digits, a decimal point, whitespace
   and `+ - * × / ^ ( ) ÷`. None of these characters can start a Python identifier, so that text names nothing that
   could be called.
-- With `should_use_judge: true`, an answer Math-Verify rejects goes to a judge model: a model call, not code.
 
 Each check runs in a forked child that is killed after `library_verifier_timeout_seconds`, which bounds the time an
 answer can take, such as `9^9^9`. On Linux the child may also map at most `library_verifier_memory_limit_mb` (default
-4096) beyond what it inherits from the server, so an answer that asks for a huge object, such as
-`\operatorname{eye}(1000000000)`, fails in its child and scores 0 instead of exhausting the host; `null` removes the
-cap. The child is not otherwise isolated: it runs as this server's user, with its files and network.
-
-`test_verifier_does_not_run_code_in_the_answer` checks this for the pinned `math-verify`; check it again when you
-upgrade `math-verify` or `latex2sympy2_extended`.
+4096) beyond what it inherits, so an answer that asks for a huge object, such as `\operatorname{eye}(1000000000)`,
+fails in its child and scores 0; `null` removes the cap. In this server the child is not otherwise isolated: it runs
+as this server's user, with its files and network. `test_verifier_does_not_run_code_in_the_answer` checks the
+in-server path for the pinned `math-verify`; check it again when you upgrade `math-verify` or `latex2sympy2_extended`.
 
 # Licensing information
 Code: Apache 2.0<br>

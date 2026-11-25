@@ -29,22 +29,21 @@ aime25_math_with_judge_environment_server:
         name: aime25_math_with_judge_resources_server
       agent_server:
         name: aime25_math_with_judge_simple_agent
-      # AIME is answer-only and its verifier executes nothing, so both opt out (below) and no sandbox starts. To run
-      # each attempt's agent loop in a sandbox instead, set `task: false`, add a provider config named `sandbox` that
-      # can apply `model_only` (E2B, or OpenSandbox with `networking.enforces_network_policy: true`), and set
-      # `use_absolute_ip: true` with `absolute_ip_server_types: [responses_api_models]` so the sandbox reaches the model
-      # server. A provider that cannot apply `model_only` (Docker, Enroot) refuses to start; nothing falls back to the
-      # host.
+      # Math-Verify parses the model's answer with SymPy, so it grades in a sandbox: for each attempt this server starts
+      # one with no network for /verify alone, and the Math-Verify check runs there (see the math_with_judge README).
+      # The task calls no tools, so it opts out and the agent loop runs in the Agent Server's process. Add a provider
+      # config named `sandbox` that can apply `no_network` (Docker, E2B, or OpenSandbox with
+      # `networking.enforces_network_policy: true`). To run the agent loop in that sandbox too, set `task: false` and
+      # `network: model_only` with `model_server: policy_model`, use a provider that can apply `model_only` (E2B or that
+      # OpenSandbox), and set `use_absolute_ip: true` with `absolute_ip_server_types: [responses_api_models]` so the
+      # sandbox reaches the model server. A provider that cannot apply the rule refuses to start; nothing falls back to
+      # the host.
       sandbox_provider: sandbox
       sandbox_config:
         image: python:3.13-slim
         workdir: /workspace
         ttl_s: 25200  # above the episode timeout plus the cleanup timeout
-        network: model_only
-        model_server: policy_model
+        network: no_network
       sandbox_opt_out:
-        # The task calls no tools, so the agent loop runs in the Agent Server's process.
         task: true
-        # Math-Verify runs nothing from the answer (see the math_with_judge README), so /verify runs in the
-        # Resources Server.
-        verifier: true
+        verifier: false
