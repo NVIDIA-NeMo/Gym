@@ -107,8 +107,9 @@ class RepoTaskSessionResourcesServer(CheckpointedSandboxSessionResourcesServer):
 
         The saved rule allows the model server of the job that took the checkpoint. A job resubmitted on other
         nodes serves its model from another host, which that rule would block for the rest of the episode.
+        A server whose config has no ``AgentNetworkConfig`` puts no rule on its agent's sandbox.
         """
-        if self.config.enforce_agent_no_network:
+        if getattr(self.config, "enforce_agent_no_network", False):
             provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
             policy = self.config.sandbox_provider_options(provider_config, for_agent=True)["network_policy"]
             states = {session_id: _with_network_policy(state, policy) for session_id, state in states.items()}
