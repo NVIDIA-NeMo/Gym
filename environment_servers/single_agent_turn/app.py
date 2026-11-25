@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Sequence
+from time import time
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -107,11 +108,16 @@ LOGGER = logging.getLogger(__name__)
 
 # end_on_task_state for an agent that runs its own loop: how long one watching read of the task state waits for the
 # task to end (GET /task_state's wait_s), and the least time between two reads, for a resources server that answers at
-# once. Once the run of an ended task is stopped, how long its activation is waited for before the call that ended the
-# task is answered anyway: the stop's own bound (ROLLOUT_STOP_TIMEOUT_SECONDS) and the harness's grace after it.
+# once. Once the run of an ended task is stopped, how long its activation is waited for, from the time the stop is
+# sent, before the call that ended the task is answered anyway: the stop's own bound (ROLLOUT_STOP_TIMEOUT_SECONDS)
+# and the harness's grace after it.
 TASK_STATE_WAIT_SECONDS = 30.0
 TASK_STATE_POLL_SECONDS = 1.0
 RUN_STOP_WAIT_SECONDS = 120.0
+# The reply metadata of a run whose stop was not confirmed: its activation still ran when the call that ended its task
+# was answered, RUN_STOP_WAIT_SECONDS after the stop was sent, so the run may have gone on after its task ended.
+TASK_END_STOP_METADATA_KEY = "ng_task_end_stop"
+TASK_END_STOP_UNCONFIRMED = "unconfirmed"
 
 
 class ToolSession(BaseModel):
@@ -238,6 +244,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             raise ValueError(
                 f"Environment Server {self.config.name!r} drives {name!r} one step per activation "
                 f"(max_episode_steps: {self.config.max_episode_steps}), but " + "; ".join(problems)
+            )
+        if config.get("max_steps") is not None:
+            # The agent's own step limit loads but bounds nothing here, so an override that raises it says so.
+            LOGGER.warning(
+                "Environment Server %r drives %r one step per activation, so its max_steps (%s) is not used: "
+                "max_episode_steps (%s) bounds the episode",
+                self.config.name,
+                name,
+                config.get("max_steps"),
+                self.config.max_episode_steps,
             )
 
     def _check_stoppable_agent(self) -> None:
@@ -857,21 +873,49 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         activation has answered, the run over: the agent never reads that call's answer while its run could go on, so
         no model call follows the call that ended the task. A run that ends first leaves nothing to stop. A failed read
         or stop fails the episode, as a failed read fails a step-driven one.
+
+        A task that has already ended, or a session the resources server no longer holds, when the session is first
+        watched starts no run: the episode goes on to verification with a reply that has no output. The call is
+        released at most ``RUN_STOP_WAIT_SECONDS`` after the stop is sent; a run still going then is logged, and its
+        reply's metadata says the stop was not confirmed (``TASK_END_STOP_METADATA_KEY``).
         """
-        await self._read_task_state(handles, watch=True)
+        if await self._read_task_state(handles, watch=True):
+            await self._release_task_end(handles)
+            return _reply_without_run(params)
         activation = asyncio.create_task(self._activate_agent(request, handles, params, activation=1))
         watcher = asyncio.create_task(self._wait_for_task_end(handles, activation))
         released = False
+        unconfirmed = False
         try:
             await asyncio.wait({activation, watcher}, return_when=asyncio.FIRST_COMPLETED)
             if not activation.done() and watcher.result():
                 try:
+                    loop = asyncio.get_running_loop()
+                    deadline = loop.time() + RUN_STOP_WAIT_SECONDS
                     if await self._stop_run(request):
-                        await asyncio.wait({activation}, timeout=RUN_STOP_WAIT_SECONDS)
+                        await asyncio.wait({activation}, timeout=max(0.0, deadline - loop.time()))
+                        unconfirmed = not activation.done()
+                        if unconfirmed:
+                            LOGGER.warning(
+                                "The run of rollout %s still runs %ss after its stop was sent; the call that ended its "
+                                "task is answered anyway, so the run may go on",
+                                request.episode_id.capture_key,
+                                RUN_STOP_WAIT_SECONDS,
+                            )
                 finally:
                     released = True
                     await self._release_task_end(handles)
-            return await activation
+            response = await activation
+            if unconfirmed:
+                response = response.model_copy(
+                    update={
+                        "metadata": {
+                            **(response.metadata or {}),
+                            TASK_END_STOP_METADATA_KEY: TASK_END_STOP_UNCONFIRMED,
+                        }
+                    }
+                )
+            return response
         finally:
             for task in (watcher, activation):
                 task.cancel()
@@ -893,30 +937,42 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     async def _stop_run(self, request: SingleAgentTurnRequest) -> bool:
         """Stop the agent's run of the episode as completed, its task having ended (``POST /rollouts/{rollout_id}/stop``
-        with the episode's rollout): whether a run was stopped. A 404, no run of the rollout open there any more, stops
-        nothing; any other failure fails the episode."""
+        with the episode's rollout): whether the agent server holds a run of the rollout, which the caller then waits
+        for. A run it did not stop (``stopped: false``, such as one a stop already ends) is still waited for.
+
+        A 404, no run of the rollout open there any more, stops nothing. A 501, a sandbox whose provider cannot stop a
+        running harness, fails the episode for good, since every attempt would fail the same way; any other failure
+        fails the episode. The stop goes over the reserved control pool, so it never waits for a connection that a
+        running activation holds.
+        """
+        stop_http_response = None
         try:
             stop_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path=f"/rollouts/{request.episode_id.capture_key}/stop",
                 json=RolloutStopRequest(reason="task_ended", completed=True),
+                _control=True,
             )
             content = await stop_http_response.read()
             if stop_http_response.status == 404:
                 return False
             await raise_boundary_failure(stop_http_response, content=content)
-            return RolloutStopResponse.model_validate_json(content).stopped
+            RolloutStopResponse.model_validate_json(content)
+            return True
         except Exception as error:
-            raise dependency_failure(error, stage="agent") from error
+            unsupported = stop_http_response is not None and stop_http_response.status == 501
+            raise dependency_failure(error, stage="agent", terminal=True if unsupported else None) from error
 
     async def _release_task_end(self, handles: "SessionHandles") -> None:
         """Release the call that ended the task, if one waits, and stop watching the session
-        (``RESOURCES_TASK_STATE_RELEASE_PATH``). A failure is logged: verification and close release it too."""
+        (``RESOURCES_TASK_STATE_RELEASE_PATH``), over the reserved control pool, as the stop goes. A failure is logged:
+        verification and close release it too."""
         try:
             release_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path=RESOURCES_TASK_STATE_RELEASE_PATH,
                 cookies=handles.resources_cookies,
+                _control=True,
             )
             await release_http_response.read()
         except Exception:
@@ -1248,6 +1304,23 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
 def _cookies(response: Any) -> dict[str, str]:
     return {str(name): str(morsel.value) for name, morsel in response.cookies.items()}
+
+
+def _reply_without_run(params: Any) -> NeMoGymResponse:
+    """The reply of an episode whose task ended, or whose resources session was lost, before its run started: no
+    output, and metadata that says why (``ng_termination_reason: task_ended_before_run``)."""
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time()),
+        object="response",
+        model=params.model or "",
+        output=[],
+        status="completed",
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        metadata={"ng_termination_reason": "task_ended_before_run"},
+    )
 
 
 def _names_lost_session(content: bytes) -> bool:

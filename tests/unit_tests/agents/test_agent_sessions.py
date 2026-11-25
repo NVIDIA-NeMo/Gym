@@ -35,7 +35,13 @@ from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.server_runtime.agent_context import AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTurn
+from nemo_gym.trajectory.trajectory_record import (
+    AgentInvocation,
+    AgentObservationBundle,
+    SandboxObservation,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 
 
 class _Agent(SimpleResponsesAPIAgent):
@@ -594,6 +600,48 @@ def test_rollout_stop_after_close_is_unknown() -> None:
         return closed.value.status_code
 
     assert asyncio.run(scenario()) == 404
+
+
+@pytest.mark.parametrize(("expired", "completed", "root"), [(True, True, "completed"), (True, False, "incomplete")])
+def test_the_close_of_a_run_stopped_as_completed_says_its_invocation_completed(
+    expired: bool, completed: bool, root: str
+) -> None:
+    """A run whose stop said its task had ended answers as completed (report_rollout_stop), and its close says the same
+    of its top-level invocation; the sandbox keeps the supervisor's timeout, and a child invocation its own status."""
+    observations = AgentObservationBundle(
+        source="harness",
+        records=[
+            AgentInvocation(invocation_id="rollout-a2", status="incomplete", error_type="timeout"),
+            AgentInvocation(invocation_id="child", parent_invocation_id="rollout-a2", status="incomplete"),
+            SandboxObservation(role="agent", provider="local", sandbox_id="box", outcome="timeout"),
+        ],
+    )
+
+    class Agent(_StoppableAgent):
+        async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+            return AgentCloseSessionResponse(
+                agent_session_id=state.request.agent_session_id, agent_observations=observations
+            )
+
+    async def scenario() -> AgentCloseSessionResponse:
+        agent = Agent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        agent._installed = asyncio.Event()
+        agent._installed.set()
+        agent._sandbox_session = MagicMock(expired=expired, expire_completed=completed)
+        await agent.seed_agent_session(MagicMock(session={}), _seed_request())
+        return await agent.close_agent_session(
+            MagicMock(session={}),
+            AgentCloseSessionRequest(
+                agent_session_id="agent-session", episode_id=EpisodeId(rollout_id="rollout", attempt=2)
+            ),
+        )
+
+    records = asyncio.run(scenario()).agent_observations.records
+    assert [(record.status, record.error_type) for record in records[:2]] == [
+        (root, None if root == "completed" else "timeout"),
+        ("incomplete", None),
+    ]
+    assert records[2].outcome == "timeout"
 
 
 @pytest.mark.parametrize(

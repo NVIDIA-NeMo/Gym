@@ -3,9 +3,11 @@
 """simple_agent in an episode whose steps a caller drives: one step per activation whatever its max_steps, the
 steps counted by their activation's index, one invocation kept for the episode, and one model server session."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -73,15 +75,10 @@ def _model_reply(step: int, cookies: dict[str, str] | None = None) -> MagicMock:
     return reply
 
 
-def _session(
-    monkeypatch: pytest.MonkeyPatch,
-    replies: list,
-    *,
-    max_steps: int | None = None,
-    raise_server_exceptions: bool = True,
-    continuation: bool = False,
-) -> tuple[TestClient, AsyncMock]:
-    """A simple agent with an open session whose tool calls answer ``{}``, and its model's replies in order."""
+def _agent(
+    monkeypatch: pytest.MonkeyPatch, replies: list, *, max_steps: int | None = None
+) -> tuple[SimpleAgent, AsyncMock, AsyncMock]:
+    """A simple agent whose tool calls answer ``{}``, its model's replies in order, and the model and tool calls."""
     config = SimpleAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -96,25 +93,37 @@ def _session(
     server_client.post = AsyncMock(side_effect=replies)
     tool_reply = MagicMock(status=200, ok=True, cookies={})
     tool_reply.content.read = AsyncMock(return_value=b"{}")
-    monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", AsyncMock(return_value=tool_reply))
-    client = TestClient(
-        SimpleAgent(config=config, server_client=server_client).setup_webserver(),
-        raise_server_exceptions=raise_server_exceptions,
-    )
-    seed = client.post(
-        "/v1/agent_sessions",
-        json=AgentSeedSessionRequest(
-            agent_session_id="agent-session",
-            episode_id=EPISODE,
-            task_id=TaskId(taskset="example", task_id="0"),
-            tool_accesses=[
-                DirectHTTPToolAccess(name="weather.direct_http", required=True, base_url="http://resources:8000")
-            ],
-            continuation=AgentContinuationRequirements() if continuation else None,
-        ).model_dump(mode="json"),
-    )
+    tool_calls = AsyncMock(return_value=tool_reply)
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", tool_calls)
+    return SimpleAgent(config=config, server_client=server_client), server_client.post, tool_calls
+
+
+def _seed_body(continuation: bool = False) -> dict:
+    return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=EPISODE,
+        task_id=TaskId(taskset="example", task_id="0"),
+        tool_accesses=[
+            DirectHTTPToolAccess(name="weather.direct_http", required=True, base_url="http://resources:8000")
+        ],
+        continuation=AgentContinuationRequirements() if continuation else None,
+    ).model_dump(mode="json")
+
+
+def _session(
+    monkeypatch: pytest.MonkeyPatch,
+    replies: list,
+    *,
+    max_steps: int | None = None,
+    raise_server_exceptions: bool = True,
+    continuation: bool = False,
+) -> tuple[TestClient, AsyncMock]:
+    """A simple agent with an open session whose tool calls answer ``{}``, and its model's replies in order."""
+    agent, model_calls, _ = _agent(monkeypatch, replies, max_steps=max_steps)
+    client = TestClient(agent.setup_webserver(), raise_server_exceptions=raise_server_exceptions)
+    seed = client.post("/v1/agent_sessions", json=_seed_body(continuation))
     assert seed.status_code == 200
-    return client, server_client.post
+    return client, model_calls
 
 
 def _step(client: TestClient, conversation: list, step: int, limit: int) -> list:
@@ -235,8 +244,8 @@ def test_the_episodes_one_invocation_is_incomplete_only_when_its_last_step_reach
 
 
 def test_a_step_sent_again_keeps_its_number(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A step the caller sends again, as after a dropped connection, runs again but is not counted as the next one,
-    so the episode's second step still completes below its limit of three."""
+    """A step the caller sends again, as after a dropped connection, is not counted as the next one, so the episode's
+    second step still completes below its limit of three."""
     client, _ = _session(monkeypatch, [_model_reply(step) for step in (1, 2, 3)])
 
     conversation = _step(client, TASK, 1, limit=3)
@@ -245,6 +254,105 @@ def test_a_step_sent_again_keeps_its_number(monkeypatch: pytest.MonkeyPatch) -> 
 
     [invocation] = _invocations(client)
     assert invocation["status"] == "completed"
+
+
+def test_a_step_sent_again_after_it_answered_gets_its_reply_without_running_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without checkpointing, a step sent again after its reply was lost, as after a dropped connection, does not call
+    the model or run its tool calls a second time (a second email, say): it gets the reply the step gave."""
+    agent, model_calls, tool_calls = _agent(monkeypatch, [_model_reply(1, {"model_session": "m1"}), _model_reply(2)])
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 200
+    headers = {AGENT_ACTIVATION_HEADER: "1", AGENT_EPISODE_STEP_LIMIT_HEADER: "3"}
+
+    first = client.post(ACTIVATION_PATH, json={"input": TASK}, headers=headers)
+    again = client.post(ACTIVATION_PATH, json={"input": TASK}, headers=headers)
+
+    assert first.status_code == again.status_code == 200
+    assert again.json() == first.json()
+    assert again.cookies.get("model_session") == first.cookies.get("model_session") == "m1"
+    assert (model_calls.await_count, tool_calls.await_count) == (1, 1)
+
+
+async def test_a_step_sent_again_while_it_runs_shares_its_run_after_the_first_caller_went_away(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A step whose first request goes away while the step runs (a dropped connection cancels its handler) keeps
+    running, and the step sent again gets its reply: one model call and one tool call."""
+    model_called, answer = asyncio.Event(), asyncio.Event()
+
+    async def model(*args: object, **kwargs: object) -> MagicMock:
+        model_called.set()
+        await answer.wait()
+        return _model_reply(1)
+
+    agent, model_calls, tool_calls = _agent(monkeypatch, [])
+    model_calls.side_effect = model
+    headers = {AGENT_ACTIVATION_HEADER: "1", AGENT_EPISODE_STEP_LIMIT_HEADER: "3"}
+    transport = httpx.ASGITransport(app=agent.setup_webserver())
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
+        assert (await client.post("/v1/agent_sessions", json=_seed_body())).status_code == 200
+        first = asyncio.create_task(client.post(ACTIVATION_PATH, json={"input": TASK}, headers=headers))
+        await model_called.wait()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        again = asyncio.create_task(client.post(ACTIVATION_PATH, json={"input": TASK}, headers=headers))
+        answer.set()
+        reply = await again
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["output"][0]["call_id"] == "call-1"
+    assert (model_calls.await_count, tool_calls.await_count) == (1, 1)
+
+
+async def test_closing_the_session_cancels_a_step_whose_caller_went_away(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A step that runs on after its caller went away ends when the session closes, as it ended with its request."""
+    model_called, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def model(*args: object, **kwargs: object) -> MagicMock:
+        model_called.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    agent, model_calls, tool_calls = _agent(monkeypatch, [])
+    model_calls.side_effect = model
+    headers = {AGENT_ACTIVATION_HEADER: "1", AGENT_EPISODE_STEP_LIMIT_HEADER: "3"}
+    transport = httpx.ASGITransport(app=agent.setup_webserver())
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent") as client:
+        assert (await client.post("/v1/agent_sessions", json=_seed_body())).status_code == 200
+        first = asyncio.create_task(client.post(ACTIVATION_PATH, json={"input": TASK}, headers=headers))
+        await model_called.wait()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        assert not cancelled.is_set()
+        close = await client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=EPISODE).model_dump(
+                mode="json"
+            ),
+        )
+
+    assert close.status_code == 200, close.text
+    assert cancelled.is_set()
+    assert tool_calls.await_count == 0
+
+
+def test_a_step_older_than_the_sessions_latest_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, model_calls = _session(monkeypatch, [_model_reply(1), _model_reply(2)], raise_server_exceptions=False)
+    conversation = _step(client, TASK, 1, limit=3)
+    _step(client, conversation, 2, limit=3)
+
+    late = client.post(
+        ACTIVATION_PATH,
+        json={"input": TASK},
+        headers={AGENT_ACTIVATION_HEADER: "1", AGENT_EPISODE_STEP_LIMIT_HEADER: "3"},
+    )
+
+    assert late.status_code == 409
+    assert model_calls.await_count == 2
 
 
 @pytest.mark.parametrize(("driven", "sent"), [(True, [{}, {"model_session": "m1"}]), (False, [None, None])])

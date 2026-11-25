@@ -171,8 +171,8 @@ ends that session's task is then answered only after the environment server rele
 at most `task_end_hold_seconds` (180) later, so no model call follows it; `wait_s` makes a read wait for the end.
 Seeding the same ID again for the same episode returns the same session,
 and `/close_session` releases a world that verification has not. After a close, a seed of the same
-ID is refused for `session_close_retry_window_seconds`. These seeds carry no tool list, so they
-report no `tool_drift`.
+ID is refused for `session_close_retry_window_seconds`. These seeds carry the task's
+`responses_create_params`, so they report `tool_drift` as a seed of the whole row does.
 
 With `expose_tools_over_mcp: true`, Gym's MCP endpoint serves every tool of OfficeEnv's `tools`
 exposure under its tool name, and each episode's MCP token (in the seed response) admits only
@@ -202,7 +202,9 @@ guarded weighted mean by default), it returns:
 - `officeenv_server_version`: the OfficeEnv version that graded the rollout.
 
 Checks on the policy's replies read every message it sent, including any it sent after completing
-the task. A rollout without a session to grade (never seeded, verified already, closed, or lost
+the task, unless `close_tools_on_task_end` refused the call. This configuration turns that setting
+on, so a call after the one that completed the task gets 409 and changes nothing. A rollout without
+a session to grade (never seeded, verified already, closed, or lost
 to a server restart) gets reward 0 with `mask_sample: true` and `failure_kind: session_lost`, and
 a tool call without a session answers 404 with the same `failure_kind`.
 

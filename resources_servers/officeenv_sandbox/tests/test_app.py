@@ -44,6 +44,7 @@ from fastapi.testclient import TestClient
 pytest.importorskip("officeenv", reason="OfficeEnv is not installed (README.md, 'The OfficeEnv version')")
 
 from officeenv import __version__ as officeenv_version
+from officeenv.emit import gym_row
 from officeenv.files import FileApp, FileCallError, FileContent, ReadPlan
 from officeenv.service import Reply
 
@@ -393,6 +394,25 @@ def test_tool_names_fit_pis_limit_with_the_configured_server_name() -> None:
 
 
 # Lending a sandbox per episode.
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_an_episode_seed_reports_the_tool_drift_of_its_rows_tools(sandboxes, stale: bool) -> None:
+    # The seed carries the task's responses_create_params, as on the OfficeEnv server, so a row whose tools differ
+    # from the ones the server serves is still flagged.
+    params = gym_row(SPEC, "Total the ledger by vendor")["responses_create_params"]
+    tools = [dict(tool) for tool in params["tools"]]
+    if stale:
+        tools[0]["description"] = "An old description of the tool"
+    seed = seed_request().model_copy(update={"responses_create_params": {**params, "tools": tools}})
+    with mcp_client(make_server()) as client:
+        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+
+        verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies)
+
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["tool_drift"] == (1.0 if stale else 0.0)
 
 
 def test_a_seed_lends_a_sandbox_with_the_episode_file_api_and_close_stops_it(sandboxes) -> None:
