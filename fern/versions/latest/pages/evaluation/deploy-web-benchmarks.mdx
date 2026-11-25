@@ -56,7 +56,7 @@ export WEBARENA_JUDGE_BASE_URL WEBARENA_JUDGE_MODEL WEBARENA_JUDGE_API_KEY
 
 If vLLM listens on another machine, set `POLICY_BASE_URL` to the reachable endpoint, including the `/v1` path. For a remote loopback listener, forward its port in another terminal with `ssh -N -L 127.0.0.1:8000:127.0.0.1:8000 operator@gpu-host.example` and keep the local URL above.
 
-WebVoyager needs `/responses` with inline images and enough capacity for its configured screenshot window. WebArena uses text `/chat/completions`. VisualWebArena also uses `/chat/completions` with inline images for visual question answering. A browser smoke with a deterministic evaluator may never call the judge. If you are setting up your own evaluation, one public option for the endpoint probe is `https://api.openai.com/v1` with [GPT-4.1](https://developers.openai.com/api/docs/models/gpt-4.1). Changing the judge can change the score on the same rollout.
+WebVoyager needs `/responses` with inline images and enough capacity for its configured screenshot window. WebArena uses text `/chat/completions`. VisualWebArena also uses `/chat/completions` with inline images for visual question answering. A browser smoke with a deterministic evaluator may never call the judge. Changing the judge can change the score on the same rollout.
 
 Before starting Gym, check both endpoints with this probe for the Nano Omni profile. It sends a small image from the public Gym repository. Change `webvoyager` to `webarena` or `visualwebarena` to exercise the matching judge request.
 
