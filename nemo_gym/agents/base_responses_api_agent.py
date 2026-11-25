@@ -118,7 +118,7 @@ from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, AgentObservationBundle, TrajectoryRecord
 
 
 LOG = logging.getLogger(__name__)
@@ -1192,11 +1192,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if participant is not None and not await participant.close_session(agent_session_id):
             raise StaleAttemptError(f"agent session {agent_session_id!r} was retired while it closed")
         self._require_current_session(agent_session_id, record)
+        sandbox_session = self._rollout_sandbox_session(record.state)
         if record.state.request.continuation is None:
             result = await self._close_agent_session_state(record.state)
         else:
             result = await self._close_continuation_session(record)
         self._require_current_session(agent_session_id, record)
+        # A run a stop ended as completed closes as completed (report_completed_rollout_stop), as it answered.
+        if getattr(sandbox_session, "expired", False) and getattr(sandbox_session, "expire_completed", False):
+            result = report_completed_rollout_stop(result)
         if self._restart_only is not None and record.episode_id is not None:
             self._restart_only.close_session(agent_session_id, record.episode_id)
         return result
@@ -1695,6 +1699,24 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 },
             }
         )
+
+
+def report_completed_rollout_stop(result: AgentCloseSessionResponse) -> AgentCloseSessionResponse:
+    """The close of a run that a stop ended as completed, its task having ended: its top-level invocations that the
+    stop left ``incomplete`` say ``completed``, as ``report_rollout_stop`` makes its response say. The sandbox's own
+    records keep the supervisor's timeout, and an invocation that a top-level one started keeps its status."""
+    observations = result.agent_observations
+    if observations is None:
+        return result
+    records = [
+        record.model_copy(update={"status": "completed", "error_type": None})
+        if isinstance(record, AgentInvocation)
+        and record.parent_invocation_id is None
+        and record.status == "incomplete"
+        else record
+        for record in observations.records
+    ]
+    return result.model_copy(update={"agent_observations": observations.model_copy(update={"records": records})})
 
 
 # Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
