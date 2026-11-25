@@ -122,7 +122,10 @@ fails it as a retryable infrastructure failure. No tool call falls back to the R
 The Resources Server refuses every tool call itself (HTTP 409), and the tool host answers its seed and state routes
 only from inside the sidecar. Code in the agent container can still reach the sidecar's other ports, such as the
 provider's exec daemon on OpenSandbox, so a tool sidecar holds no secret: a config that would copy a credential there is
-refused, and a server keeps what only grading reads out of the tool host's seed (`tool_host_task_data`).
+refused, and a server keeps what only grading reads out of the tool host's seed (`tool_host_task_data`). For the same
+reason, until the provider limits the agent container to the sidecar's tools port, pair a tool sidecar only with an
+agent that runs no model-written code in the agent container, such as Simple Agent: such code could change the tool
+state the grader reads.
 
 ### Opting out
 

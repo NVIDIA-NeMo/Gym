@@ -19,7 +19,7 @@ import tarfile
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import aiohttp
 import pytest
@@ -27,17 +27,21 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client.server_client import ServerClient, rollout_path_prefix
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.environment import tool_sidecar
-from nemo_gym.environment.tool_sidecar import _SidecarShell, secret_paths
+from nemo_gym.environment.tool_sidecar import ToolSidecarResources, _SidecarShell, secret_paths
 from nemo_gym.environment.tool_sidecar_host import build_app
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxStatus
-from nemo_gym.server_runtime.attempt_sandbox import ResourcesPrepareSandboxRequest
-from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.attempt_sandbox import ResourcesPrepareSandboxRequest, SandboxGroupSpec
+from nemo_gym.server_runtime.base_resources_server import (
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    SimpleResourcesServer,
+)
 from tests.unit_tests.environment.fixtures.tool_server.app import LedgerConfig, LedgerResourcesServer
 
 
@@ -84,7 +88,17 @@ def test_a_config_that_holds_a_credential_cannot_serve_its_tools_from_a_sidecar(
     # The same credential is fine while the tools run in process, and a flag named like a credential is no credential.
     assert SecretConfig.model_validate(_config().model_dump() | {"judge_api_key": "sk-123", "tool_sidecar": None})
     assert SecretConfig.model_validate(_config().model_dump() | {"refresh_token": True})
-    assert secret_paths({"judge": {"API_KEY": "x"}, "tokens": ["a"], "passwords": ""}) == ["judge.API_KEY"]
+    assert secret_paths(
+        {
+            "judge": {"API_KEY": "x", "private_key": "k"},
+            "tokens": ["a"],
+            "passwords": "",
+            "aws_secret_access_key": "s",
+            "auth": {"user": "u"},
+            "base_url": "https://user:pass@example.com/v1",
+            "plain_url": "https://example.com/v1",
+        }
+    ) == ["judge.API_KEY", "judge.private_key", "tokens", "aws_secret_access_key", "auth", "base_url"]
 
 
 def test_the_tool_host_serves_the_tools_and_their_state_but_not_grading() -> None:
@@ -106,8 +120,12 @@ def test_the_tool_host_serves_the_tools_and_their_state_but_not_grading() -> Non
         agent.cookies.clear()
         agent.cookies.update(dict(local.cookies))
         assert agent.post("/pay", json={"value": 3}).text == "pay #1"
-        # Only the Resources Server reads the state, and the catch-all tool route does not answer for that route.
+        # Only the Resources Server reads the state, and the catch-all tool route does not answer for that route. A
+        # rollout prefix, which the server strips before routing, does not get around that.
         assert agent.post("/_tool_sidecar/state").status_code == 403
+        prefix = rollout_path_prefix("rollout-1")
+        assert agent.post(f"{prefix}/_tool_sidecar/state").status_code == 403
+        assert agent.post(f"{prefix}/seed_session", json=_seed()).status_code == 403
         assert local.post("/_tool_sidecar/state").json() == {"state": {"ledger": ["opening:hi", "pay:3"]}}
         # The session's lifecycle and grading stay with the Resources Server: these reach the tool route as unknown
         # tools, so nothing is scored or closed.
@@ -355,7 +373,8 @@ async def test_a_tool_host_that_exits_fails_the_prepare_with_its_log(
 async def test_a_seed_the_tool_host_refuses_fails_the_prepare(local_sidecar: Any) -> None:
     server = _server(_config(_free_port()))
 
-    with pytest.raises(RuntimeError, match="refused the seed with HTTP 422"):
+    # No retry changes a refused seed, so it fails the attempt for good.
+    with pytest.raises(ResourcesSeedRejectedError, match="refused the seed with HTTP 422"):
         await server.prepare_sandbox(_prepare(opening=["not", "a", "string"]))
 
 
@@ -377,3 +396,44 @@ async def test_a_server_whose_tools_run_in_process_declares_no_group_and_serves_
     assert "/tool_sidecar/import_state" in {
         getattr(route, "path", None) for route in _server(_config()).setup_webserver().router.routes
     }
+
+
+class _ServerThatPrepares(SimpleResourcesServer):
+    """A server that declares a file of its own and prepares the group itself."""
+
+    prepared: ClassVar[list[str]] = []
+
+    def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
+        return SandboxGroupSpec(files={"/task/README": "ledger"})
+
+    async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
+        type(self).prepared.append(body.resources_session_id)
+
+    async def verify(self, body: Any) -> Any:
+        raise AssertionError("not graded here")
+
+
+class _ToolsInASidecarToo(ToolSidecarResources, _ServerThatPrepares):
+    config: LedgerConfig
+
+
+def _mixed(config: LedgerConfig) -> _ToolsInASidecarToo:
+    return _ToolsInASidecarToo(config=config, server_client=_server(config).server_client)
+
+
+def test_the_tool_sidecar_joins_the_group_the_server_declares() -> None:
+    group = _mixed(_config()).sandbox_declaration(ResourcesSeedSessionRequest.model_validate(_seed()))["sandbox_group"]
+
+    assert group.files == {"/task/README": "ledger"}
+    assert [sidecar.name for sidecar in group.sidecars] == ["tools"]
+    assert group.prepare is True
+
+
+async def test_a_server_that_prepares_the_group_itself_still_does_so_without_a_tool_sidecar() -> None:
+    _ServerThatPrepares.prepared = []
+    server = _mixed(_config().model_copy(update={"tool_sidecar": None}))
+
+    assert server._prepares_sandbox() is True
+    await server.prepare_sandbox(_prepare())
+
+    assert _ServerThatPrepares.prepared == [SESSION]

@@ -45,7 +45,12 @@ from nemo_gym.environment.tool_sidecar_host import STATE_PATH
 from nemo_gym.sandbox.api import AsyncSandboxSidecar
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_runtime.attempt_sandbox import ResourcesPrepareSandboxRequest, SandboxGroupSpec
-from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    SimpleResourcesServer,
+)
 from nemo_gym.server_runtime.sandbox_borrow import borrow
 from nemo_gym.server_runtime.tool_sidecar import (
     TOOL_SIDECAR_IMPORT_STATE_PATH,
@@ -84,23 +89,40 @@ _ROOT = "/tmp/nemo-gym-tool-sidecar"
 _HOST = f"{_ROOT}/tool_host/nemo_gym/environment/tool_sidecar_host.py"
 # A config key that names a credential. Code in the agent container can read a tool sidecar's files and environment
 # (the provider's exec daemon is reachable from it), so no such value may go there.
-_SECRET_KEY = re.compile(r"(api_?key|token|secret|password|credential)s?$", re.IGNORECASE)
+_SECRET_KEY = re.compile(
+    r"(api_?key|token|secret|password|passwd|credential|private_?key|access_?key|auth|authorization)s?$", re.IGNORECASE
+)
+# A URL that carries a user name or password.
+_URL_CREDENTIALS = re.compile(r"^[a-z][a-z0-9+.-]*://[^/@\s]+@", re.IGNORECASE)
 
 
 def secret_paths(value: Any, path: str = "") -> list[str]:
-    """The dotted paths of ``value``'s keys that name a credential and hold a string, such as an API key."""
+    """The dotted paths in ``value`` that hold a credential: a string, or strings, under a key that names one, such as
+    an API key, and a URL with a user name or password in it."""
     found: list[str] = []
     if isinstance(value, Mapping):
         for key, item in value.items():
             child = f"{path}.{key}" if path else str(key)
-            if isinstance(key, str) and _SECRET_KEY.search(key) and isinstance(item, str) and item:
+            if isinstance(key, str) and _SECRET_KEY.search(key) and _holds_text(item):
                 found.append(child)
             else:
                 found.extend(secret_paths(item, child))
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             found.extend(secret_paths(item, f"{path}[{index}]"))
+    elif isinstance(value, str) and _URL_CREDENTIALS.match(value):
+        found.append(path)
     return found
+
+
+def _holds_text(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value)
+    if isinstance(value, (list, tuple)):
+        return any(_holds_text(item) for item in value)
+    if isinstance(value, Mapping):
+        return any(_holds_text(item) for item in value.values())
+    return False
 
 
 class ToolSidecarResourcesConfig(BaseResourcesServerConfig):
@@ -196,6 +218,11 @@ class ToolSidecarResources:
     """Serve this Resources Server's tools from a sidecar of the attempt's group, when its config sets
     ``tool_sidecar``. List it before the Resources Server class among the bases.
 
+    The tool host gets the Python files of the server's own directory and of ``tool_sidecar_sources``, not their data
+    files. Until the provider limits the agent container to the sidecar's tools port, pair a tool sidecar only with an
+    agent that runs no model-written code in the agent container, such as Simple Agent: code there can reach the
+    sidecar's exec daemon on OpenSandbox and change the tool state the grader reads.
+
     Attributes:
         tool_sidecar_requirements: Packages the server's own module needs beyond Gym's, as requirement strings.
         tool_sidecar_sources: Packages the server imports that are not installed from an index, such as a benchmark's
@@ -243,19 +270,43 @@ class ToolSidecarResources:
             app.post(TOOL_SIDECAR_IMPORT_STATE_PATH)(self.import_tool_sidecar_state)
 
     def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
-        """The attempt's group holds the tool sidecar, which serves this server's tools."""
+        """The group the server declares, if any, with the tool sidecar that serves this server's tools added."""
+        group = super().sandbox_group(body)  # type: ignore[misc]
         config = self.config.tool_sidecar  # type: ignore[attr-defined]
         if config is None:
-            return super().sandbox_group(body)  # type: ignore[misc]
-        return SandboxGroupSpec(sidecars=[config.group_sidecar()])
+            return group
+        group = group or SandboxGroupSpec()
+        return group.model_copy(update={"sidecars": [*group.sidecars, config.group_sidecar()]})
+
+    def _own_prepare_sandbox(self) -> Any:
+        """The ``prepare_sandbox`` a class after this mixin among the server's bases defines, which this one runs
+        first; None if none. A subclass that overrides it calls ``super()`` as usual."""
+        mro = type(self).__mro__
+        for cls in mro[mro.index(ToolSidecarResources) + 1 :]:
+            if cls is not SimpleResourcesServer and "prepare_sandbox" in vars(cls):
+                return vars(cls)["prepare_sandbox"]
+        return None
 
     def _prepares_sandbox(self) -> bool:
-        # Only a server whose tools run in a sidecar prepares the group: with them in process, its seed declares none.
-        overridden = type(self).prepare_sandbox is not ToolSidecarResources.prepare_sandbox
-        return self.config.tool_sidecar is not None or overridden  # type: ignore[attr-defined]
+        # Only a server whose tools run in a sidecar, or that prepares the group itself, serves /prepare_sandbox: with
+        # the tools in process, its seed declares nothing to prepare.
+        overrides = any(
+            "prepare_sandbox" in vars(cls)
+            for cls in type(self).__mro__
+            if cls not in (ToolSidecarResources, SimpleResourcesServer)
+        )
+        return self.config.tool_sidecar is not None or overrides  # type: ignore[attr-defined]
 
     async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
-        """Start the tool host in the group's sidecar unless it runs, and seed the episode's session in it."""
+        """Prepare the group as the server does, if it does, then start the tool host in the group's sidecar unless it
+        runs, and seed the episode's session in it.
+
+        Raises:
+            ResourcesSeedRejectedError: If the tool host refuses the seed, as no retry can change.
+        """
+        own = self._own_prepare_sandbox()
+        if own is not None:
+            await own(self, body)
         config = self.config.tool_sidecar  # type: ignore[attr-defined]
         if config is None:
             return
@@ -273,8 +324,12 @@ class ToolSidecarResources:
             reply = await _call(sidecar, python, config.port, "POST", "/seed_session", seed, cookies={})
         finally:
             await sandbox.disconnect()
+        if 400 <= reply["status"] < 500:
+            raise ResourcesSeedRejectedError(
+                f"The tool host refused the seed with HTTP {reply['status']}: {reply['body'][:2000]}"
+            )
         if reply["status"] != 200:
-            raise RuntimeError(f"The tool host refused the seed with HTTP {reply['status']}: {reply['body'][:2000]}")
+            raise RuntimeError(f"The tool host failed the seed with HTTP {reply['status']}: {reply['body'][:2000]}")
 
     async def import_tool_sidecar_state(
         self, request: Request, body: ToolSidecarImportStateRequest
@@ -372,6 +427,8 @@ class ToolSidecarResources:
         deadline = time.monotonic() + config.ready_timeout_seconds
         while not await _ready(sidecar, runtime.python, config.port):
             alive = await shell.exec(f"kill -0 $(cat {_ROOT}/host.pid)", timeout_s=30)
+            if alive.error_type is not None:
+                raise RuntimeError(f"The tool host's process could not be checked: {alive.error_type}")
             if alive.return_code != 0 or time.monotonic() > deadline:
                 log = await shell.exec(f"tail -c 4000 {_ROOT}/host.log", timeout_s=30)
                 state = (

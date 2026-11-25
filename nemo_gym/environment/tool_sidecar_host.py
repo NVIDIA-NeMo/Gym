@@ -39,15 +39,14 @@ _DROPPED_ROUTES = frozenset(
         "/tool_sidecar/import_state",
     }
 )
-# Routes only the Resources Server calls, from inside the sidecar (``--call``).
-_LOCAL_ROUTES = frozenset({"/seed_session", STATE_PATH})
+_SEED_PATH = "/seed_session"
 _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 
 
 def build_app(spec: dict[str, Any]) -> Any:
     """The Resources Server's app as the tool host serves it."""
-    from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse
+    from fastapi import Depends, FastAPI, HTTPException, Request
+    from fastapi.routing import APIRoute
     from omegaconf import OmegaConf
 
     from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
@@ -67,24 +66,32 @@ def build_app(spec: dict[str, Any]) -> Any:
         route for route in app.router.routes if getattr(route, "path", None) not in _DROPPED_ROUTES
     ]
 
+    async def from_inside_the_sidecar(request: Request) -> None:
+        # Checked on the route, after any rollout prefix is stripped. The agent container reaches this host by its
+        # address, never as loopback; the Resources Server calls from inside the sidecar (``--call``).
+        if request.client is None or request.client.host not in _LOOPBACK:
+            raise HTTPException(
+                status_code=403, detail="only the Resources Server seeds this tool host or reads its state"
+            )
+
     async def ready() -> dict[str, bool]:
         return {"ready": True}
 
     async def state(request: Request) -> dict[str, Any]:
         return {"state": server.export_tool_state(request.session[SESSION_ID_KEY])}
 
-    @app.middleware("http")
-    async def only_local_callers_seed_or_read_state(request: Request, call_next: Any) -> Any:
-        # The agent container reaches this host by its address, never as loopback.
-        if request.url.path in _LOCAL_ROUTES and (request.client is None or request.client.host not in _LOOPBACK):
-            return JSONResponse({"detail": "only the Resources Server seeds this tool host or reads its state"}, 403)
-        return await call_next(request)
-
-    # First, so no catch-all tool route of the server answers for them.
-    existing = list(app.router.routes)
+    local_only = [Depends(from_inside_the_sidecar)]
+    existing = [route for route in app.router.routes if getattr(route, "path", None) != _SEED_PATH]
+    seeds = [route for route in app.router.routes if isinstance(route, APIRoute) and route.path == _SEED_PATH]
+    app.router.routes[:] = []
     app.get(READY_PATH)(ready)
-    app.post(STATE_PATH)(state)
-    app.router.routes[:] = [route for route in app.router.routes if route not in existing] + existing
+    app.post(STATE_PATH, dependencies=local_only)(state)
+    for seed in seeds:
+        app.add_api_route(
+            seed.path, seed.endpoint, methods=list(seed.methods), name=seed.name, dependencies=local_only
+        )
+    # First, so no catch-all tool route of the server answers for them.
+    app.router.routes.extend(existing)
     return app
 
 
