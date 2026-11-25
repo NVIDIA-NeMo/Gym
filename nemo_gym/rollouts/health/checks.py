@@ -979,15 +979,19 @@ def _rollout_tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int
     """One finding per rollout, counting the tool outputs that open with a harness tool-failure marker.
 
     A marker counts only from a tool that returns it (``_TOOL_FAILURE_MARKERS``), and a call recorded as ``completed``
-    is not counted: a command that succeeded can print the same text, for example when it reads a log."""
+    is not counted: a command that succeeded can print the same text, for example when it reads a log. A marker is
+    also not counted when one of its tools completed a call in the same rollout: the harness tool could run there, so
+    the failed call is about its own input, for example a search path that does not exist."""
+    calls = [call for call in trajectory.get("tool_calls") or [] if isinstance(call, dict)]
+    completed_tools = {call.get("tool_name") for call in calls if call.get("status") == "completed"}
     failed = 0
-    for call in trajectory.get("tool_calls") or []:
-        if not isinstance(call, dict) or call.get("status") == "completed":
+    for call in calls:
+        if call.get("status") == "completed":
             continue
         text = _tool_output_text(call.get("output"))
         opening = text.lstrip().lower() if text is not None else ""
         if any(
-            opening.startswith(marker) and call.get("tool_name") in tools
+            opening.startswith(marker) and call.get("tool_name") in tools and not tools & completed_tools
             for marker, tools in _TOOL_FAILURE_MARKERS.items()
         ):
             failed += 1
