@@ -192,7 +192,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if self.config.sandbox_opt_out.task and granted:
             raise ValueError(
                 f"sandbox_opt_out.task is only for a pure QA task, but every episode grants the tools of "
-                f"{sorted(granted)}"
+                f"{sorted(granted)}; drop resources_tool_transports for a Resources Server that serves no tools"
             )
         if config is None:
             return
@@ -564,8 +564,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             for tool in request.task.task_input.responses_create_params.tools
         ]
         names = [str(tool.get("name") or tool.get("type") or "tool") for tool in declared]
+        # A grant counts even when its server serves no tools, so its name says how to drop it.
         names += [
-            f"{self.config.resources_server.name} {transport}" for transport in self.config.resources_tool_transports
+            f"resources_tool_transports {transport} (drop it for a Resources Server that serves no tools)"
+            for transport in self.config.resources_tool_transports
         ]
         names += [access.name for access in tool_accesses]
         return names

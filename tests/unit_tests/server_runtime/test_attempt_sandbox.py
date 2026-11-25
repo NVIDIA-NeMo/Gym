@@ -184,17 +184,17 @@ def test_a_group_refuses_two_sidecars_of_one_name_and_starts_each_from_its_own_s
 
 
 class _Provider:
-    """A provider that lends sandboxes to other processes and applies the model-only rule."""
+    """A provider that lends sandboxes to other processes and applies the restricted network rules."""
 
     name = "fake"
-    capabilities = SandboxCapabilities(network_rules=frozenset({"inherit", "model_only"}))
+    capabilities = SandboxCapabilities(network_rules=frozenset({"inherit", "no_network", "model_only", "hosts_only"}))
 
     def __init__(self) -> None:
         self.boxes: dict[str, dict[str, Any]] = {}
         self.fail_create: Exception | None = None
 
     def network_options(self, rule: str, hosts: Sequence[str], provider_options: Mapping[str, Any]) -> dict[str, Any]:
-        return {**provider_options, "network_policy": {"allow": list(hosts)}}
+        return {**provider_options, "network_policy": {"rule": rule, "allow": list(hosts)}}
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         if self.fail_create is not None:
@@ -229,6 +229,12 @@ class _Provider:
 
     def running(self) -> list[str]:
         return [sandbox_id for sandbox_id, box in self.boxes.items() if box["state"] == "running"]
+
+
+class _OpenProvider(_Provider):
+    """A provider that applies no restricted network rule."""
+
+    capabilities = SandboxCapabilities(network_rules=frozenset({"inherit"}))
 
 
 class _SidecarProvider(_Provider):
@@ -304,7 +310,11 @@ def _server(
     server = server_type(config=settings, server_client=MagicMock(spec=ServerClient))
     if provider is not None:
         server._owned_sandboxes["sandbox_provider"] = OwnedSandboxes(
-            provider, state_dir=None, server_name="environment", provider_config_ref="attempt_sandboxes"
+            provider,
+            state_dir=None,
+            server_name="environment",
+            provider_config_ref="attempt_sandboxes",
+            global_config={},
         )
     return server
 
@@ -378,12 +388,21 @@ def test_nothing_starts_when_both_opt_out_or_the_server_starts_no_sandboxes() ->
             {"group": SandboxGroupSpec(sidecars=[SandboxGroupSidecar(name="db", image="db")])},
             "declares sidecars, which provider _Provider of 'attempt_sandboxes' cannot start",
         ),
+        (
+            {
+                "provider": type("_OpenSidecarProvider", (_SidecarProvider, _OpenProvider), {})(),
+                "group": SandboxGroupSpec(
+                    sidecars=[SandboxGroupSidecar(name="api", image="api", egress_hosts=["a.b"])]
+                ),
+            },
+            "sidecar 'api' reaches only its own hosts, but sandbox provider",
+        ),
     ],
 )
 def test_a_refused_opt_out_or_an_unstartable_group_fails_the_attempt_at_seed_for_good(
     plan: dict[str, Any], reason: str
 ) -> None:
-    provider = _Provider()
+    provider = plan.pop("provider", _Provider())
     config = {"sandbox_config": plan.pop("sandbox_config")} if "sandbox_config" in plan else {}
     server = _server(
         provider, configured=plan.pop("configured", True), sandbox_opt_out=plan.pop("opt_out", {}), **config
@@ -409,7 +428,12 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
         workdir="/task",
         env={"SHARED": "group"},
         files={"task.txt": "2+2"},
-        sidecars=[SandboxGroupSidecar(name="weather", image="weather:1")],
+        sidecars=[
+            SandboxGroupSidecar(
+                name="weather", image="weather:1", egress_hosts=["api.weather.example"], tools_port=8080
+            ),
+            SandboxGroupSidecar(name="db", image="db:1"),
+        ],
     )
     prepared: list[SandboxAccess] = []
 
@@ -422,7 +446,17 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
     assert (spec.image, spec.workdir, spec.ttl_s) == ("task:1", "/task", 3600)
     assert spec.env == {"FROM_CONFIG": "1", "SHARED": "group"}
     assert spec.files == {"task.txt": "2+2"}
-    assert spec.sidecars == (SandboxSidecarSpec(name="weather", image="weather:1"),)
+    # Each sidecar starts with its own rule, never the main container's: the weather API only, or nothing.
+    assert spec.sidecars == (
+        SandboxSidecarSpec(
+            name="weather",
+            image="weather:1",
+            provider_options={"network_policy": {"rule": "hosts_only", "allow": ["api.weather.example"]}},
+        ),
+        SandboxSidecarSpec(
+            name="db", image="db:1", provider_options={"network_policy": {"rule": "no_network", "allow": []}}
+        ),
+    )
     assert (spec.metadata["task_id"], spec.metadata["rollout_id"]) == ("task", "rollout-a1")
     # Lent with operate scope, through the provider block a borrower resolves, with the declared sidecars, so the
     # borrower reaches each one with sidecar(name); prepare was not declared.
@@ -430,7 +464,7 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
         "sandbox_id": "sb-1",
         "scope": "operate",
         "workdir": "/task",
-        "sidecars": [{"name": "weather", "image": "weather:1"}],
+        "sidecars": [{"name": "weather", "image": "weather:1"}, {"name": "db", "image": "db:1"}],
     }
     assert access.connection.provider_config_ref == "attempt_sandboxes"
     assert access.connection.descriptor == descriptor
@@ -442,6 +476,30 @@ async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_
     await server.release_attempt_sandbox(attempt.key)
     await server.stop_attempt_sandbox(attempt.key)
     assert provider.running() == []
+
+
+async def test_a_group_for_the_verifier_alone_starts_with_no_egress() -> None:
+    provider = _Provider()
+    model_only = SANDBOX_CONFIG | {"network": "model_only", "model_server": "policy_model"}
+    server = _server(sandbox_config=model_only)
+    server._owned_sandboxes["sandbox_provider"] = OwnedSandboxes(
+        provider,
+        state_dir=None,
+        server_name="environment",
+        provider_config_ref="attempt_sandboxes",
+        global_config={"policy_model": {"responses_api_models": {"vllm_model": {"host": "10.0.0.5", "port": 8000}}}},
+    )
+
+    await server.seed_attempt_sandbox(_request(), key="agent", verifier_executes_nothing=True)
+    task_opted_out = server.plan_attempt_sandbox(key="verifier").model_copy(update={"lend_to_agent": False})
+    await server.verifier_sandbox_access(_request(), task_opted_out)
+
+    # The agent's group keeps the configured rule; the verifier's own group reaches nothing.
+    assert provider.boxes["sb-1"]["spec"].provider_options["network_policy"] == {
+        "rule": "model_only",
+        "allow": ["10.0.0.5"],
+    }
+    assert provider.boxes["sb-2"]["spec"].provider_options["network_policy"] == {"rule": "no_network", "allow": []}
 
 
 async def test_a_declared_prepare_runs_once_the_group_has_started() -> None:
@@ -544,6 +602,25 @@ async def test_a_failed_release_is_left_to_the_episodes_cleanup() -> None:
     assert provider.running() == ["sb-1"]
     await server.stop_attempt_sandbox(attempt.key)
     assert provider.running() == []
+
+
+def test_a_server_whose_task_and_verifier_both_opt_out_checks_and_builds_no_provider_at_startup() -> None:
+    # The provider block is not even defined: nothing of this server's would ever start on it.
+    server = _server(sandbox_opt_out={"task": True, "verifier": True})
+    server.server_client.global_config_dict = {}
+
+    server.check_sandbox_provider()
+
+    assert server.starts_attempt_sandboxes is False
+    assert server._owned_sandboxes == {}
+
+
+def test_startup_refuses_a_task_opt_out_on_a_provider_that_cannot_cut_the_verifiers_egress() -> None:
+    server = _server(_OpenProvider(), sandbox_opt_out={"task": True})
+    server.server_client.global_config_dict = {"attempt_sandboxes": {"docker": {}}}
+
+    with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+        server.check_sandbox_provider()
 
 
 async def test_stopping_an_attempt_that_started_nothing_builds_no_provider() -> None:
