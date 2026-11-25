@@ -1,5 +1,87 @@
 # Arena Proxy v3 validation
 
+## Config composition and system messages (November 25, 2026)
+
+Sampling defaults now use Gym's `responses_create_params`; model-specific top-k
+and context come from the composed model profile. Context is required in both
+YAML and the model-server schema, with no 163,840-token fallback. Judge credentials,
+endpoint, model, and the shared prepared-population path use `judge_api_key`,
+`judge_base_url`, `judge_model_name`, and `input_jsonl` config keys. The legacy
+environment variables no longer configure the benchmark. The README documents
+explicit CLI overrides and protected configuration for credentials.
+
+System text messages now pass through to tokenization and generation with their
+content and message fields preserved. The reference generator already forwards
+these roles. Existing prepared conversations contain only user/assistant turns,
+and their outgoing reference payloads are unchanged. Adding a system prompt can
+change answers; the reference must receive the same prompt for comparison.
+
+Benchmark-local `submit/` files and their orchestration tests were removed.
+External deployments own scheduling, containers, model serving, and parsers;
+the README uses `gym eval run` followed by `gym eval reverify`. Preparation,
+source checksums, judge templates, verdict parsing, scoring, final-answer
+extraction, the 120,000-token maximum, and the 64-token reserve are unchanged.
+
+The focused benchmark/configuration/generation/metrics/judge/English suite passed
+**259 tests**. The new configuration tests run Gym's actual config parser and
+collector preprocessing before checking outgoing requests, including temperature
+1.0 and 0.6, the Gemma profile, and context-limited budgets. They also check
+environment isolation, shared generation/judge populations, protected judge-key
+loading and redaction, profile ordering, and missing-context rejection. System
+messages are covered through Chat Completions, Responses input, and Responses
+instructions, with identical tokenization and generation messages.
+
+Against the previous model implementation, all 12 existing reference-payload
+cases still pass and all five core system-message/required-context regressions
+fail. This distinguishes the compatibility fixes from the preserved reference
+request behavior. The actual CLI resolves the documented explicit profile and
+`++input_jsonl` override; README Bash blocks also pass `bash -n`.
+
+A fresh five-task Hindi run used the documented `gym eval run` / `gym eval reverify`
+path, an explicit Gemma profile, and config-based judge credentials. These were
+five multi-turn information/advice tasks. The model,
+checkpoint, vLLM, sampling, context, budget, and judge settings match the full Hindi
+run below; generation and judging concurrency were both five. All five policy
+answers completed and were preserved for judging, with no empty answers, policy
+truncations, or leaked thinking delimiters. Nine of ten positional verdicts were
+valid; one judge reply omitted the required verdict and was retained under the
+unchanged scoring protocol. All 29 available scalar metrics match across server,
+repeat, and offline outputs; undefined values are omitted from Gym metrics and
+no official headline is emitted.
+This subset checks execution and configuration, not full-population scores or
+score equivalence. Its run identifier is `gemma31b-config-smoke-20261125162303Z`.
+
+Two additional synthetic requests against the same Gemma checkpoint passed through
+the actual Gym model client: a Chat Completions system message and Responses
+instructions. Tokenization and generation received identical system text, including
+whitespace, and both returned completed, nonempty final answers. These probes used
+a 2,048-token output cap and were excluded from benchmark scoring. The initial
+probe incorrectly expected raw Chat Completions output to omit reasoning markers;
+it was corrected to apply the existing final-answer extraction and rerun, with no
+application-code change. Probe run: `gemma31b-system-probes-20261125T162915Z`.
+
+```bash
+RAY_TMPDIR=/tmp OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  .venv/bin/python -m pytest -o addopts= --no-cov -q \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_config.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_generation.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py \
+  resources_servers/arena_judge/tests/test_app.py \
+  benchmarks/lmarena_v3/tests/test_lmarena_v3_subsets.py
+
+.venv/bin/pre-commit run --all-files
+git diff --check
+```
+
+All-file pre-commit passed. The private guardword catalog was unavailable, so its
+content scan was skipped; the other configured checks passed.
+
+The full Hindi score comparison below remains evidence for revision `2197986`;
+it is not relabeled as a fresh full run of this configuration follow-up.
+Historical sections retain the commands and deployment files used at their
+named revisions, including the subsequently removed submission configs.
+
 ## Full Hindi comparison (November 25, 2026)
 
 Validation head: `2197986` (`21979867381558c35409b3b92ee009eb595dd17c`).

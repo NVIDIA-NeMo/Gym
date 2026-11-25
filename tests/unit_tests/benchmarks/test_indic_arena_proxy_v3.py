@@ -322,7 +322,14 @@ def test_manifest_and_config_keep_prepared_messages_and_shared_gym_components() 
     assert agent["max_steps"] == 1
     assert "prompt_config" not in agent["datasets"][0]
     judge = yaml.safe_load((module.DIRECTORY / "judge.yaml").read_text())
-    assert set(judge) == {"indic_arena_proxy_v3_judge_model", "indic_arena_proxy_v3_resources_server"}
+    assert set(judge) == {
+        "judge_api_key",
+        "judge_base_url",
+        "judge_model_name",
+        "input_jsonl",
+        "indic_arena_proxy_v3_judge_model",
+        "indic_arena_proxy_v3_resources_server",
+    }
     resources = judge["indic_arena_proxy_v3_resources_server"]["resources_servers"]["arena_judge"]
     assert resources["judge_chat_completions_create_params"] == {
         "messages": [],

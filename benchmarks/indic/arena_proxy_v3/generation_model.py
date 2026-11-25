@@ -28,7 +28,7 @@ def _validate_budget(value: object, field: str) -> int:
 class ArenaProxyGenerationConfig(VLLMModelConfig):
     """Reference chat generation with explicit rejection of incompatible profiles."""
 
-    context_length: PositiveInt = 163840
+    context_length: PositiveInt
     forward_request_chat_template_kwargs: bool = True
     chat_template_kwargs: dict[str, Any] = Field(default_factory=lambda: {"enable_thinking": True})
 
@@ -126,8 +126,8 @@ class ArenaProxyGenerationModel(VLLMModel):
                 content = "".join(part["text"] for part in content)
             if content is None and message["role"] == "assistant":
                 content = ""
-            if message["role"] not in ("user", "assistant") or not isinstance(content, str):
-                raise HTTPException(422, "Arena Proxy generation requires user/assistant text messages")
+            if message["role"] not in ("system", "user", "assistant") or not isinstance(content, str):
+                raise HTTPException(422, "Arena Proxy generation requires system/user/assistant text messages")
             messages.append({**message, "content": content})
         outbound["messages"] = messages
         for name, cast in (("temperature", float), ("top_p", float), ("top_k", int), ("seed", int)):

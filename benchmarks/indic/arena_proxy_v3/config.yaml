@@ -17,7 +17,7 @@ indic_arena_proxy_v3_agent:
       datasets:
         - name: indic_arena_proxy_v3
           type: benchmark
-          jsonl_fpath: benchmarks/indic/arena_proxy_v3/data/arena_proxy_v3_benchmark.jsonl
+          jsonl_fpath: ${input_jsonl}
           prepare_script: benchmarks/indic/arena_proxy_v3/prepare.py
           # Prepared inputs contain the full conversation.
           num_repeats: 1

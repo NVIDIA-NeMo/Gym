@@ -176,6 +176,106 @@ async def test_responses_preserves_profile_fields_and_metadata_precedence(monkey
     assert ArenaJudgeServer._extract_response_output_text(response) == "Final answer."
 
 
+@pytest.mark.parametrize("api", ["chat", "responses", "instructions"])
+async def test_system_prompt_is_preserved_in_tokenization_and_generation(
+    monkeypatch: pytest.MonkeyPatch, api: str
+) -> None:
+    model, endpoint = _model(monkeypatch, context_length=131072, prompt_tokens=12000)
+    endpoint.create_chat_completion.return_value = _completion(content="Final answer.", finish_reason="stop")
+    system_prompt = "  Explain your reasoning in Hindi.\nPreserve this spacing. "
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "पहला प्रश्न?"},
+        {"role": "assistant", "content": "पिछला उत्तर।"},
+        {"role": "user", "content": "क्यों?"},
+    ]
+    original = deepcopy(messages)
+    request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "test"}})
+    if api == "chat":
+        await model.chat_completions(
+            request, NeMoGymChatCompletionCreateParamsNonStreaming(messages=messages, max_tokens=120000)
+        )
+    else:
+        params = {"input": messages, "max_output_tokens": 120000}
+        if api == "instructions":
+            params.update(input=messages[1:], instructions=system_prompt)
+        await model.responses(request, NeMoGymResponseCreateParamsNonStreaming(**params))
+    measured = endpoint.create_tokenize.call_args.kwargs
+    generated = endpoint.create_chat_completion.call_args.kwargs
+    assert measured["messages"] == generated["messages"] == original
+    assert generated["max_tokens"] == 119008
+    assert messages == original
+    endpoint.create_tokenize.assert_awaited_once()
+    endpoint.create_chat_completion.assert_awaited_once()
+
+
+async def test_system_text_parts_preserve_content_and_message_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    model, endpoint = _model(monkeypatch, context_length=131072, prompt_tokens=100)
+    endpoint.create_chat_completion.return_value = _completion(content="Final answer.", finish_reason="stop")
+    messages = [
+        {
+            "role": "system",
+            "name": "reasoning_control",
+            "content": [{"type": "text", "text": " पहला निर्देश।\n"}, {"type": "text", "text": "Second instruction. "}],
+        },
+        {"role": "user", "content": "Question"},
+    ]
+    original = deepcopy(messages)
+    await model.chat_completions(
+        Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "test"}}),
+        NeMoGymChatCompletionCreateParamsNonStreaming(messages=messages, max_tokens=120000),
+    )
+    expected = [
+        {"role": "system", "name": "reasoning_control", "content": " पहला निर्देश।\nSecond instruction. "},
+        {"role": "user", "content": "Question"},
+    ]
+    assert endpoint.create_tokenize.call_args.kwargs["messages"] == expected
+    assert endpoint.create_chat_completion.call_args.kwargs["messages"] == expected
+    assert messages == original
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "developer", "content": "Unsupported role without profile remapping."},
+        {"role": "tool", "content": "Tool result", "tool_call_id": "call-test"},
+        {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}}],
+        },
+    ],
+)
+async def test_unsupported_message_roles_and_nontext_parts_fail_before_model_calls(
+    monkeypatch: pytest.MonkeyPatch, message: dict
+) -> None:
+    model, endpoint = _model(monkeypatch, context_length=131072, prompt_tokens=100)
+    with pytest.raises(HTTPException) as error:
+        await model.chat_completions(
+            Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "test"}}),
+            NeMoGymChatCompletionCreateParamsNonStreaming(messages=[message], max_tokens=120000),
+        )
+    assert error.value.status_code == 422
+    endpoint.create_tokenize.assert_not_called()
+    endpoint.create_chat_completion.assert_not_called()
+
+
+def test_generation_requires_an_explicit_context_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    model, _ = _model(monkeypatch, context_length=131072, prompt_tokens=100)
+    config = model.config.model_dump()
+    del config["context_length"]
+    with pytest.raises(ValidationError) as error:
+        ArenaProxyGenerationConfig.model_validate(config)
+    assert any(item["loc"] == ("context_length",) and item["type"] == "missing" for item in error.value.errors())
+
+
+@pytest.mark.parametrize("context_length", [None, 0, -1])
+def test_generation_rejects_invalid_context_window(monkeypatch: pytest.MonkeyPatch, context_length: object) -> None:
+    with pytest.raises(ValidationError, match="context_length"):
+        _model(
+            monkeypatch, context_length=131072, prompt_tokens=100, config_overrides={"context_length": context_length}
+        )
+
+
 async def test_chat_preserves_request_fields_and_the_budget_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     model, endpoint = _model(monkeypatch, context_length=32768, prompt_tokens=2000)
     endpoint.create_chat_completion.return_value = _completion(content="Final answer.", finish_reason="stop")
@@ -350,6 +450,7 @@ def test_gym_resolves_benchmark_entrypoint_inside_vllm_component() -> None:
                     "policy_base_url": "http://127.0.0.1:8000/v1",
                     "policy_api_key": "EMPTY",
                     "policy_model_name": "candidate",
+                    "policy_model": {"responses_api_models": {"vllm_model": {"context_length": 131072}}},
                 }
             ),
             skip_load_from_cli=True,

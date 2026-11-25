@@ -7,7 +7,7 @@ policy_model:
       base_url: ${policy_base_url}
       api_key: ${policy_api_key}
       model: ${policy_model_name}
-      context_length: ${oc.env:CONTEXT,163840}
+      context_length: ???
       return_token_id_information: false
       uses_reasoning_parser: true
       preserve_reasoning_in_assistant_content: true
@@ -19,7 +19,10 @@ policy_model:
       chat_template_kwargs:
         enable_thinking: true
       extra_body:
-        temperature: ${oc.env:TEMPERATURE,1.0}
-        top_p: ${oc.env:TOP_P,0.95}
-        top_k: ${oc.env:TOP_K,-1}
+        top_k: -1
         seed: 42
+
+responses_create_params:
+  temperature: 1.0
+  top_p: 0.95
+  max_output_tokens: 120000
