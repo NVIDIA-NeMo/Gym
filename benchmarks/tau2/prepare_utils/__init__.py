@@ -96,10 +96,26 @@ def ensure_nemo_gym_data_dir(
         if not dump_script.exists():
             raise RuntimeError(f"Tau2 data dump script not found at {dump_script}")
 
+        # The dump imports the tau2 package, whose __init__ eagerly imports
+        # tau2.runner.batch, which has a top-level `import nemo_gym`. The dump
+        # script's own `uv sync --extra knowledge` venv carries tau2's deps but
+        # not nemo_gym, so build the venv here (tau2[knowledge] + the local
+        # editable nemo_gym) and run the dump against it with TAU2_SKIP_UV_SYNC=1.
+        import nemo_gym
+
+        venv_dir = checkout_dir / ".venv"
+        venv_python = venv_dir / "bin" / "python"
+        gym_root = Path(nemo_gym.__file__).resolve().parents[1]
+        venv_env = {**os.environ, "VIRTUAL_ENV": str(venv_dir)}
+        run(["uv", "venv", "--python", "3.12", str(venv_dir), "--allow-existing"], cwd=checkout_dir, check=True)
+        run(["uv", "sync", "--active", "--extra", "knowledge"], cwd=checkout_dir, check=True, env=venv_env)
+        run(["uv", "pip", "install", "--python", str(venv_python), "-e", str(gym_root)], cwd=checkout_dir, check=True, env=venv_env)
+
         command = ["bash", str(dump_script)]
         for dataset in datasets:
             command.extend(["--dataset", dataset])
-        run(command, cwd=checkout_dir, check=True)
+        dump_env = {**os.environ, "TAU2_SKIP_UV_SYNC": "1", "TAU2_DUMP_PYTHON": str(venv_python)}
+        run(command, cwd=checkout_dir, check=True, env=dump_env)
 
         source_data_dir = checkout_dir / "nemo_gym_data"
         if not source_data_dir.exists():
