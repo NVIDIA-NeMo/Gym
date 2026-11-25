@@ -517,7 +517,7 @@ def rule_hosts(config: SandboxConfig, global_config: Mapping[str, Any]) -> list[
             sandbox cannot reach, such as a loopback.
     """
     hosts = []
-    for server in [*([config.model_server] if config.model_server else []), *config.tool_servers]:
+    for server in [*([config.model_server] if config.model_server is not None else []), *config.tool_servers]:
         try:
             server_config = get_first_server_config_dict(global_config, server)
             url = f"http://{server_config['host']}:{server_config['port']}"
@@ -551,7 +551,7 @@ def sandbox_blocks(value: Any, path: str = "config") -> Iterator[tuple[str, Sand
 def servers_sharing_hosts(config: SandboxConfig, global_config: Mapping[str, Any]) -> dict[str, list[str]]:
     """For each host ``config``'s rule allows for its model and tool servers, the other servers in ``global_config``
     that listen on that host too: a rule allows a whole host, so a sandbox reaches them as well."""
-    named = {*([config.model_server] if config.model_server else []), *config.tool_servers}
+    named = {*([config.model_server] if config.model_server is not None else []), *config.tool_servers}
     if not named:
         return {}
     hosts_of: dict[str, str] = {}

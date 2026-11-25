@@ -257,8 +257,7 @@ def validate_volume_sources(sources: Any, source: str = "the sandbox block") -> 
     return dict(sources)
 
 
-# provider_options entries that set a sandbox's network themselves, which a typed ``network`` rule replaces. Today
-# only OpenSandbox reads one (network_policy); the other providers set their network in the provider block.
+# Provider options replaced by a typed network rule. OpenSandbox and E2B both consume network_policy.
 PROVIDER_NETWORK_OPTIONS = ("network_policy", "network")
 
 
@@ -323,7 +322,7 @@ class SandboxConfig(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, Any] = Field(default_factory=dict)
     network: NetworkRule | None = None
-    model_server: str | None = None
+    model_server: str | None = Field(default=None, pattern=r"\S")
     tool_servers: list[str] = Field(default_factory=list)
     allowed_hosts: list[str] = Field(default_factory=list)
 
