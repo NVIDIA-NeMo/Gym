@@ -71,15 +71,6 @@ class _Client(ServerClient):
     fail_path: str | None = None
     slow_path: str | None = None
     rollout_ids: list[str | None] = []
-    # What GET /v1/agent_sessions/capabilities answers, and how often it was asked; not recorded in ``calls``.
-    capabilities: dict = {}
-    capability_requests: int = 0
-
-    async def get(self, server_name: str, url_path: str, **kwargs) -> _Response:
-        if url_path != "/v1/agent_sessions/capabilities":
-            raise AssertionError(f"unexpected GET {url_path}")
-        self.capability_requests += 1
-        return _Response(self.capabilities)
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
         body = kwargs.get("json")

@@ -68,6 +68,7 @@ if TYPE_CHECKING:
         ResourcesPrepareSandboxResponse,
         SandboxGroupSidecar,
         SandboxGroupSpec,
+        SandboxOptOut,
     )
     from nemo_gym.server_runtime.base_environment_server import (
         ATTEMPT_SANDBOX_BLOCKS,
@@ -195,6 +196,7 @@ _PUBLIC_API = {
     "ResourcesPrepareSandboxResponse": "attempt_sandbox",
     "SandboxGroupSidecar": "attempt_sandbox",
     "SandboxGroupSpec": "attempt_sandbox",
+    "SandboxOptOut": "attempt_sandbox",
     "BaseEnvironmentServer": "base_environment_server",
     "BaseEnvironmentServerConfig": "base_environment_server",
     "BaseEnvironmentServerWithTools": "base_environment_server",
