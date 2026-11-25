@@ -52,6 +52,27 @@ gym dataset collate \
     --download
 ```
 
+# Sandbox
+
+The verifier runs nothing from the answer, so this server declares `verifier_executes_nothing`, and an Environment
+Server may let `/verify` run here instead of in the attempt's sandbox group (`sandbox_opt_out.verifier: true`):
+
+- Math-Verify reads a LaTeX answer with latex2sympy2_extended's ANTLR parser, which builds SymPy objects. Names it
+  dispatches on come from fixed lists in its grammar and code; any other name becomes an undefined SymPy function.
+- SymPy's evaluating parser (`parse_expr`, which `sympify` and `Number` also call on a string) receives only numerals
+  and the text Math-Verify's plain-expression regex admits: digits, a decimal point, whitespace and
+  `+ - * × / ^ ( ) ÷`. None of these characters is part of a valid Python identifier, so that text names nothing that
+  could be called.
+- With `should_use_judge: true`, an answer Math-Verify rejects goes to a judge model: a model call, not code.
+
+Each check runs in a forked child that is killed after `library_verifier_timeout_seconds`. That bounds the time an
+answer can take, such as `9^9^9`, but the child is not isolated: it runs as this server's user, with its files and
+network, and its memory is not capped. An answer can still ask for a large object, such as
+`\operatorname{eye}(1000000000)`, which allocates until the timeout.
+
+`test_verifier_does_not_run_code_in_the_answer` checks this for the pinned `math-verify`; check it again when you
+upgrade `math-verify` or `latex2sympy2_extended`.
+
 # Licensing information
 Code: Apache 2.0<br>
 Data:

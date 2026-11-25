@@ -16,12 +16,14 @@ import asyncio
 import json
 import multiprocessing as mp
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from math_verify.errors import TimeoutException
-from pytest import approx, fixture, mark, raises, skip
+from pytest import MonkeyPatch, approx, fixture, mark, raises, skip
 from sympy import sympify
+from sympy.parsing import sympy_parser
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -38,6 +40,7 @@ from nemo_gym.core import (
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.telemetry import ResourcesOperation
 from nemo_gym.verification import is_judge_failure
+from resources_servers.math_with_judge import app as math_with_judge_app
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -776,6 +779,102 @@ class TestApp:
             approx(1.0),
             "3",
         )
+
+    @staticmethod
+    def _code_that_touches(path: Path) -> str:
+        return f"__import__('pathlib').Path({str(path)!r}).touch()"
+
+    @fixture
+    def evaluated_texts(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
+        """A file that records every text SymPy's evaluating parser receives, also in the verifier's forked child.
+
+        ``parse_expr``, and ``sympify`` and ``Number`` on a string, all turn the text into code with
+        ``stringify_expr`` before they evaluate it.
+        """
+        record = tmp_path / "evaluated.jsonl"
+        stringify_expr = sympy_parser.stringify_expr
+
+        def recording_stringify_expr(text: str, *args: Any) -> str:
+            with record.open("a") as file:
+                file.write(json.dumps(text) + "\n")
+            return stringify_expr(text, *args)
+
+        monkeypatch.setattr(sympy_parser, "stringify_expr", recording_stringify_expr)
+        return record
+
+    @staticmethod
+    def _tolerant_server(config: LibraryJudgeMathResourcesServerConfig) -> LibraryJudgeMathResourcesServer:
+        return LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+    def test_sympy_string_parsing_runs_code(self, tmp_path: Path) -> None:
+        # The control for the tests below: SymPy's evaluating parser runs its input, so a verifier that passed the
+        # answer text to it would run this code.
+        sentinel = tmp_path / "ran"
+        sympify(self._code_that_touches(sentinel))
+        assert sentinel.exists()
+
+    async def test_the_record_sees_what_the_verifier_child_evaluates(
+        self, config: LibraryJudgeMathResourcesServerConfig, evaluated_texts: Path
+    ) -> None:
+        # The harmless twin of the answers below reaches the evaluating parser, so an empty record means something.
+        library_reward, _ = await self._tolerant_server(config)._verify_answer_with_library_async(
+            "7", "Final answer is 1+2*3"
+        )
+
+        assert library_reward == approx(1.0)
+        assert "1+2*3" in [text.replace(" ", "") for text in map(json.loads, evaluated_texts.read_text().splitlines())]
+
+    @mark.parametrize(
+        "template",
+        [
+            "\\boxed{{{code}}}",
+            "\\boxed{{\\operatorname{{rank}}({code})}}",
+            "\\boxed{{\\gcd({code}, 2)}}",
+            "$${code}$$",
+            "The final answer is {code}",
+            "Final answer is 1+{code}",
+            "Final answer is 1+({code} or 0)",
+            "Final answer is ３+{code}",
+            "Answer: 0+({code})",
+            "x = 2*({code})",
+            "{code}",
+        ],
+    )
+    async def test_verifier_does_not_run_code_in_the_answer(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        tmp_path: Path,
+        evaluated_texts: Path,
+        monkeypatch: MonkeyPatch,
+        template: str,
+    ) -> None:
+        # The verifier may run in the Resources Server instead of a sandbox only because it runs nothing from the
+        # answer: no text of the answer other than numerals and arithmetic reaches SymPy's evaluating parser.
+        sentinel = tmp_path / "ran"
+        answer = template.format(code=self._code_that_touches(sentinel))
+        # A child that timed out or crashed also scores 0, so record that Math-Verify returned on this answer.
+        verified = tmp_path / "verified"
+        run_math_verify = math_with_judge_app._run_math_verify
+
+        def recording_run_math_verify(*args: Any) -> tuple[float, str | None]:
+            result = run_math_verify(*args)
+            with verified.open("a") as file:
+                file.write("returned\n")
+            return result
+
+        monkeypatch.setattr(math_with_judge_app, "_run_math_verify", recording_run_math_verify)
+        server = self._tolerant_server(config)
+
+        await server._verify_answer_with_library_async("\\pi^{e}", answer)
+        await server._verify_answer("question", "\\pi^{e}", answer)
+
+        assert verified.read_text().count("returned") >= 1
+        assert not sentinel.exists()
+        evaluated = evaluated_texts.read_text() if evaluated_texts.exists() else ""
+        assert "pathlib" not in evaluated
 
     def test_run_math_verify_handles_timeout_exception(self) -> None:
         timeout_mock = MagicMock(side_effect=TimeoutException())
