@@ -364,6 +364,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     # (``model_sampling_segment``). The default fails closed: such an episode is refused, because the agents it trains
     # would sample with other values.
     applies_model_sampling: ClassVar[bool] = False
+    # Whether this protocol grants the agent the HTTP tools a sandbox group's sidecar serves on its tools_port, and
+    # brings their state to /verify. The default fails closed: a group whose sidecar serves tools is refused, since
+    # its agent would never reach them and its verifier would grade an untouched state.
+    grants_tool_sidecars: ClassVar[bool] = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -786,7 +790,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             NgFailureEvent: A terminal seed failure, which no retry changes: a refused opt-out (a task opt-out with
                 tools; a verifier opt-out the Resources Server does not declare ``verifier_executes_nothing`` for), a
                 declared group without a ``sandbox_provider`` to start it, a group without an image or a working
-                directory, sidecars on a provider that cannot start them, or a Resources Server that lends a sandbox
+                directory, sidecars on a provider that cannot start them, a sidecar that serves tools on a server
+                that does not grant them (``grants_tool_sidecars``), or a Resources Server that lends a sandbox
                 although this server owns the attempt's.
         """
         settings = self._attempt_sandbox_settings()
@@ -846,6 +851,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 raise self._attempt_sandbox_refusal(
                     f"sidecar {sidecar.name!r} reaches only its own hosts, but {error}"
                 ) from error
+        serving = [sidecar.name for sidecar in declared.sidecars if sidecar.tools_port is not None]
+        if serving and not self.grants_tool_sidecars:
+            raise self._attempt_sandbox_refusal(
+                f"sidecars {serving} serve tools on a tools_port, but {type(self).__name__} does not grant a "
+                "sidecar's tools to the agent (grants_tool_sidecars), so the verifier would grade an untouched state"
+            )
         return AttemptSandbox(
             key=key,
             lend_to_agent=lend_to_agent,

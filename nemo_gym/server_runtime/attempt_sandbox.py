@@ -80,7 +80,8 @@ class SandboxGroupSidecar(BaseModel):
     Attributes:
         egress_hosts: The only hosts the sidecar reaches, such as the API its tool calls (``hosts_only``); empty, it
             reaches none (``no_network``). The main container's network rule never applies to a sidecar.
-        tools_port: The port on which the sidecar serves the Resources Server's HTTP tools, if it does.
+        tools_port: The port on which the sidecar serves the Resources Server's HTTP tools, if it does. Only an
+            Environment Server that grants them to the agent (``grants_tool_sidecars``) starts such a sidecar.
     """
 
     model_config = ConfigDict(extra="forbid")

@@ -293,6 +293,12 @@ class _Server(BaseEnvironmentServer[_Request, _Response]):
         return AggregateMetrics()
 
 
+class _ToolGrantingServer(_Server):
+    """A server whose protocol grants the agent the tools a sidecar serves."""
+
+    grants_tool_sidecars = True
+
+
 SANDBOX_CONFIG = {
     "image": "python:3.13-slim",
     "workdir": "/workspace",
@@ -393,6 +399,13 @@ def test_nothing_starts_when_both_opt_out_or_the_server_starts_no_sandboxes() ->
         ),
         (
             {
+                "provider": _SidecarProvider(),
+                "group": SandboxGroupSpec(sidecars=[SandboxGroupSidecar(name="tools", image="t", tools_port=8080)]),
+            },
+            "sidecars ['tools'] serve tools on a tools_port, but _Server does not grant a sidecar's tools",
+        ),
+        (
+            {
                 "provider": type("_OpenSidecarProvider", (_SidecarProvider, _OpenProvider), {})(),
                 "group": SandboxGroupSpec(
                     sidecars=[SandboxGroupSidecar(name="api", image="api", egress_hosts=["a.b"])]
@@ -425,7 +438,7 @@ def test_a_sandbox_the_resources_seed_lends_is_lent_on_by_a_server_that_starts_n
 
 async def test_the_group_starts_from_the_config_with_the_declared_group_over_it_and_stops_on_every_repeat() -> None:
     provider = _SidecarProvider()
-    server = _server(provider)
+    server = _server(provider, server_type=_ToolGrantingServer)
     group = SandboxGroupSpec(
         image="task:1",
         workdir="/task",
