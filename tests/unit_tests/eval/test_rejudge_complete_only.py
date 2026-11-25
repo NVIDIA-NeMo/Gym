@@ -3,6 +3,7 @@
 """After its re-judge pass, a strict run that was rejected as incomplete recomputes no metrics until it is complete,
 and a run whose metrics are recomputed refreshes or removes its per-agent completion files."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -160,6 +161,67 @@ def test_a_strict_run_left_incomplete_by_the_pass_removes_the_files_it_regraded(
     assert pass_settles_one_row == []
     assert removed == ([before] if isinstance(before, dict) else [])
     assert complete_dir.exists() is isinstance(before, dict)
+
+
+def test_a_strict_pass_that_saves_one_regrade_and_then_disconnects_keeps_the_other_servers_file(
+    tmp_path, monkeypatch, pass_settles_one_row
+) -> None:
+    """The agents and their environment servers have different names, and the local config holds only collector
+    options (as with --no-serve), so only the server stamped on the saved re-grade can name the file to remove."""
+    from aiohttp import ServerDisconnectedError
+
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
+    from nemo_gym.rollouts.rollout_store import RolloutStore
+    from tests.unit_tests.eval.test_rejudge_saved_judge_failures import ANSWER, _settle
+
+    agents = ("lmarena_v2_benchmark_agent", "aime_benchmark_agent")
+    servers = [agent.replace("_agent", "_environment_server") for agent in agents]
+    rows = [
+        {"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": agent}} for i, agent in enumerate(agents)
+    ]
+    source = tmp_path / "source.jsonl"
+    source.write_text("".join(f"{json.dumps(row)}\n" for row in rows))
+    output = tmp_path / "rollouts.jsonl"
+    failures = []
+    with RolloutStore.start_or_resume(
+        output,
+        lambda: (rows, RunManifest.create(source, rows, {}, {name: {"responses_api_agents": {}} for name in agents})),
+        resume=False,
+    ) as store:
+        for row, server in zip(store.pending(), servers):
+            store.record_dispatch(row)
+            failure = row | {
+                "_ng_environment_server": server,
+                "_ng_failure_class": "judge_failed",
+                "_ng_failure_id": f"judge-{row['_ng_task_index']}",
+                "failure_kind": "judge_failed",
+                "mask_sample": True,
+                "reward": 0.0,
+                "response": ANSWER,
+            }
+            store.record_outcome(failure)
+            failures.append(failure)
+    complete_dir = tmp_path / "rollouts_agent_complete"
+    complete_dir.mkdir()
+    for agent, server in zip(agents, servers):
+        (complete_dir / f"{server}.json").write_text(
+            json.dumps({"agent_ref": {"name": agent}, "_ng_environment_server": server})
+        )
+
+    async def rejudge(run_config, output_fpath):
+        _settle(output_fpath, failures[0], 1.0)  # LMArena's re-grade is saved
+        raise ServerDisconnectedError()  # the other verifier disconnects before its re-grade is saved
+
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.rejudge_saved_judge_failures", rejudge)
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda path: False)
+    monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: {})
+
+    eval_cli._rejudge_saved_judge_failures(
+        {"num_samples_in_parallel": 4}, output, SimpleNamespace(disable_aggregation=False), complete_only=True
+    )
+
+    assert sorted(path.name for path in complete_dir.iterdir()) == ["aime_benchmark_environment_server.json"]
+    assert pass_settles_one_row == []
 
 
 @pytest.mark.parametrize(
