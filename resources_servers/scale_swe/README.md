@@ -135,7 +135,8 @@ names the session for `/verify`, and `/close_session` ends it.
   A task sandbox that does not stop after verify captured its patch fails that verify, and a retry grades the
   captured patch.
 - **Expiry.** A session that is never closed is closed by the server once its sandbox's `ttl_s` has passed
-  (24 hours without one). A verify after that is masked with `failure_kind: session_expired`.
+  (24 hours without one). A verify after that is masked with `failure_kind: session_expired`, or `session_lost`
+  once the close retry window has passed.
 - **Shutdown.** When the server shuts down, it stops every sandbox its episode sessions still hold,
   with the same bounded wait per stop. A session with a request still in
   progress gets that long to finish, and then its sandboxes are stopped anyway. A stop that fails is logged,
