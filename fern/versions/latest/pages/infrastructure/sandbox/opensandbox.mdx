@@ -435,41 +435,100 @@ A public sandbox therefore cannot be switched to a restricted policy once it run
 
 OpenSandbox has no second container in a sandbox, so the provider creates each entry of `SandboxSpec.sidecars` as a
 separate sandbox from the sidecar's image, environment, resources and its own `provider_options`. It is created before
-the main sandbox, with the same `ttl_s`, `ready_timeout_s` and metadata, none of the main sandbox's other provider
-options, and the default keep-alive entrypoint. Closing the main sandbox deletes its sidecars.
+the main sandbox, with the same `ttl_s` and `ready_timeout_s` and none of the main sandbox's other provider options.
+Closing the main sandbox deletes its sidecars.
+
+A sidecar that serves the main sandbox names its service: `entrypoint` starts it, and `ports` lists the TCP ports
+the main sandbox may reach. A sidecar without `ports` is one the main sandbox may not reach, such as a grader.
+
+```python
+SandboxSpec(
+    image="task:1",
+    sidecars=[
+        {"name": "tools", "image": "tools:2", "entrypoint": ["tool-server", "--port", "8080"], "ports": [8080]},
+        {"name": "grader", "image": "grader:3"},
+    ],
+)
+```
 
 - The main sandbox and its sidecars carry one `nemo.nvidia.com/placement-group` label, so a
   [multi-cell front end](#multi-cell-front-ends) creates them on one cell. A group the spec's metadata already names
   is kept; otherwise the provider makes one per sandbox.
-- With `networking.enabled: true`, the main sandbox resolves each sidecar by its name through `/etc/hosts`, which
-  needs root in the main sandbox. The two do not share a loopback interface. Without it the sidecar is reachable only
-  through `sandbox.sidecar(name)`.
-- A sidecar has the main sandbox's [egress policy](#network-policy) unless its own `provider_options` name a
-  `network_policy`. Give each sidecar its own policy to let it reach only its own hosts, for example a tool sidecar
-  that alone reaches its API while the main sandbox reaches only the model:
+- A sidecar carries the main sandbox's metadata without the `shared_storage.metadata` labels, and a
+  `<attribution prefix>sidecar` label with its name (`nemo-gym.nvidia.com/sidecar` by default), so cleanup and
+  dashboards that list by run label can tell it from a task sandbox. The name is that label's value and the sidecar's
+  hostname, so it is a hostname of at most 63 characters.
+- A sidecar gets none of the deployment's setup: no `setup.env`, no `setup.commands` and no create probe. Those are
+  written for task images and run a shell.
+- Without an `entrypoint` the sidecar idles on the keep-alive entrypoint, which runs `sh`. A deployment's own
+  bootstrap can need a shell in the image too: on the deployment probed, an image without one exited at start even
+  with its own `entrypoint`. A sidecar whose container exits at start fails the create as `provider_setup_failed`,
+  with the image, the entrypoint and the exit code in the reason, and is not tried again.
+- The provider waits until the service an `entrypoint` starts answers an HTTP request on each of the sidecar's
+  `ports`, for up to `ready_timeout_s` (120 seconds without one). It asks through the sidecar's own endpoint, so
+  nothing runs in the sidecar's image, and any answer of the service counts; its body is not read. The time limit
+  covers the whole wait, a request in flight included, so a service that accepts a connection and never answers does
+  not hold the create. A service that does not answer in time fails the create as `provider_setup_failed` and deletes
+  every member already started.
+- A sidecar that names `ports` without an `entrypoint` starts no service, so the create does not wait for one. The
+  main sandbox may reach those ports as soon as the create returns; start the service with
+  `sandbox.sidecar(name).exec(...)` and wait for it yourself, for example a service installed into a stock image
+  after the sandbox starts.
+- `ports` needs `networking.enabled: true`; without it the create is refused before anything starts, because nothing
+  in the main sandbox could reach the service. The main sandbox resolves each sidecar by its name through
+  `/etc/hosts`, which needs root in the main sandbox. The two do not share a loopback interface.
+- `sandbox.sidecar("tools").url()` is the URL at which the main sandbox reaches the service, here
+  `http://tools:8080`. Pass the port when the sidecar declares several. Take the URL from this call instead of
+  writing a host name into a task: a provider whose sidecars share the sandbox's loopback answers with a loopback
+  address. The URL is for code inside the main sandbox and does not resolve on the Gym host.
+- Each sandbox reaches only what it was granted. When the main sandbox has an [egress policy](#network-policy):
+  - A sidecar whose `provider_options` name no `network_policy` gets a deny-by-default policy with no rules. It does
+    not inherit the main sandbox's grants, so a tool sidecar does not reach the Model Server. Give a sidecar its own
+    policy to let it reach its own hosts:
 
-  ```python
-  def only(host: str) -> dict:
-      return {"defaultAction": "deny", "egress": [{"action": "allow", "target": host}]}
+    ```python
+    def only(host: str) -> dict:
+        return {"defaultAction": "deny", "egress": [{"action": "allow", "target": host}]}
 
-  SandboxSpec(
-      image="task:1",
-      provider_options={"network_policy": only("models.example.com")},
-      sidecars=[{"name": "tools", "image": "tools:2", "provider_options": {"network_policy": only("api.example.com")}}],
-  )
-  ```
+    SandboxSpec(
+        image="task:1",
+        provider_options={"network_policy": only("models.example.com")},
+        sidecars=[
+            {
+                "name": "tools",
+                "image": "tools:2",
+                "entrypoint": ["tool-server", "--port", "8080"],
+                "ports": [8080],
+                "provider_options": {"network_policy": only("api.example.com")},
+            }
+        ],
+    )
+    ```
 
-  With `networking.enabled: true`, the main sandbox's policy also gets a leading allow rule for each sidecar's IP, so a
-  deny-by-default main sandbox still reaches its sidecars. That rule opens every port of the sidecar, including its
-  exec daemon (44772) and egress API (18080): code in the main sandbox can run commands in a sidecar, read the
-  environment it was given and change its egress policy. Do not give a sidecar a secret that the main sandbox's code
-  must not read, and do not rely on a sidecar's own policy against code in the main sandbox. A sidecar under a
-  deny-by-default policy cannot open a connection to the main sandbox.
+  - The main sandbox's policy gets one leading allow rule per sidecar with `ports`, for that sidecar's IP and those
+    ports only. A sidecar without `ports` gets no rule. A sidecar's exec daemon (44772) and egress API (18080) are
+    never among them: naming one in `ports` is refused.
+  - That rule needs an egress layer that applies a rule's `ports`. Set `networking.rule_ports_enforced: true` where
+    the deployment does. It is off by default, and the create is then refused before anything starts: an egress layer
+    that drops `ports` would turn the rule into one for every port of the sidecar, and code in the main sandbox could
+    run commands in the sidecar and read the environment it was given.
+  - The rule also needs an `opensandbox` SDK whose network rule has `ports`. An SDK without the field sends the rule
+    without them, so the create is refused before anything starts; upgrade the SDK.
+  - A sidecar under a deny-by-default policy cannot open a connection to the main sandbox.
+
+  A main sandbox without an egress policy is not restricted, and neither are its sidecars: it reaches every port of
+  every sandbox on the cell that it finds an address for. Give the main sandbox a policy when a sidecar holds a secret
+  or must stay out of its reach.
+- A sidecar's TTL starts again once the main sandbox exists, so a sidecar does not end before its main sandbox. With
+  a sandbox lease (`create.renew_ttl_s`), the sidecar's renewals count the spec's lifetime from that moment.
 - A sidecar that does not start, or that the main sandbox cannot reach by IP, fails the create as a provider failure
   (`provider_setup_failed` when its address is not peer-reachable) and deletes every member already started.
 - `sandbox.sidecar(name).exec(*argv)` sends the argv to execd without a shell, so the sidecar image can be
-  distroless; like any [argument list](#user-and-runtime-notes), it needs `opensandbox>=1.1.0`. `on_stdout` receives stdout one line at a time from the streamed request. With
-  `operations.background_exec`, it receives what each poll finds new, stdout and stderr together.
+  distroless; like any [argument list](#user-and-runtime-notes), it needs `opensandbox>=1.1.0`. `on_stdout` receives
+  stdout one line at a time from the streamed request. With `operations.background_exec`, it receives what each poll
+  finds new, stdout and stderr together, and the rest once the command has ended, also past the amount execd returns
+  in one read. An exception that `on_stdout` raises ends the forwarding and is raised to the caller unchanged once the
+  command has ended; with `operations.background_exec` the command is interrupted first.
 - `sandbox.sidecar(name).upload(local, remote)` and `.download(remote, local)` move one file through the sidecar's
   own file API, as they do for the main sandbox.
 - A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.

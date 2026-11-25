@@ -110,6 +110,10 @@ class SidecarProvider(PlainProvider):
     ) -> None:
         self.sidecar_calls.append(("upload", handle.sandbox_id, sidecar, source_path.read_text(), target_path))
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        # This provider's sidecars share the sandbox's loopback.
+        return "127.0.0.1"
+
 
 _RECORDER = {
     "name": "recorder",
@@ -118,6 +122,9 @@ _RECORDER = {
     "resources": {"cpu": 0.5},
     "provider_options": {"image_auth": {"username": "robot", "password": "secret"}},
 }
+
+
+_RECORDER_SPEC = SandboxSidecarSpec(name="recorder", image="recorder:1")
 
 
 def test_spec_coerces_sidecar_mappings_and_keeps_specs() -> None:
@@ -145,6 +152,28 @@ def test_spec_rejects_invalid_sidecars() -> None:
         SandboxSpec(sidecars=[{"name": "recorder", "image": "recorder:1", "resources": {"cores": 1}}])
     with pytest.raises(TypeError, match="list or tuple"):
         SandboxSpec(sidecars=_RECORDER)
+
+
+def test_a_sidecar_names_its_service_and_the_ports_the_sandbox_may_reach() -> None:
+    service = SandboxSidecarSpec(name="tools", image="tools:2", entrypoint=["tool-server"], ports=[8080, "9000"])
+
+    assert service.entrypoint == ["tool-server"] and service.ports == (8080, 9000)
+    # Without them the sidecar idles, and the sandbox may not reach it.
+    assert (_RECORDER_SPEC.entrypoint, _RECORDER_SPEC.ports) == (None, ())
+
+
+@pytest.mark.parametrize(
+    ("ports", "error", "message"),
+    [
+        ([0], ValueError, "between 1 and 65535"),
+        ([8080, 8080], ValueError, "Duplicate sandbox sidecar TCP port: 8080"),
+        ([True], ValueError, "Invalid sandbox sidecar TCP port"),
+        (8080, TypeError, "Sandbox sidecar ports must be a list or tuple"),
+    ],
+)
+def test_a_sidecar_refuses_ports_that_are_no_tcp_ports(ports: Any, error: type[Exception], message: str) -> None:
+    with pytest.raises(error, match=message):
+        SandboxSidecarSpec(name="tools", image="tools:2", ports=ports)
 
 
 def test_spec_without_sidecars_is_unchanged() -> None:
@@ -218,19 +247,52 @@ async def test_sidecar_exec_and_file_transfers_delegate_to_provider(tmp_path: Pa
     await sandbox.stop()
 
 
+async def test_a_sidecar_url_is_where_the_sandbox_reaches_a_declared_port() -> None:
+    tools = {"name": "tools", "image": "tools:2", "ports": [8080]}
+    proxy = {"name": "proxy", "image": "proxy:3", "ports": [8080, 9090]}
+    sandbox = await AsyncSandbox(SidecarProvider(), SandboxSpec(image="task:1", sidecars=[tools, proxy])).start()
+
+    # The provider names the host; the only declared port is the default.
+    assert sandbox.sidecar("tools").url() == sandbox.sidecar("tools").url(8080) == "http://127.0.0.1:8080"
+    assert sandbox.sidecar("proxy").url(9090) == "http://127.0.0.1:9090"
+    await sandbox.stop()
+
+
+@pytest.mark.parametrize(
+    ("ports", "port", "message"),
+    [
+        ([], None, r"declared ports \[\], got None"),
+        ([8080, 9090], None, r"declared ports \[8080, 9090\], got None"),
+        ([8080], 9090, r"declared ports \[8080\], got 9090"),
+    ],
+)
+async def test_a_sidecar_has_no_url_for_a_port_it_does_not_declare(
+    ports: list[int], port: int | None, message: str
+) -> None:
+    sidecar = {"name": "tools", "image": "tools:2", "ports": ports}
+    sandbox = await AsyncSandbox(SidecarProvider(), SandboxSpec(image="task:1", sidecars=[sidecar])).start()
+
+    with pytest.raises(ValueError, match=message):
+        sandbox.sidecar("tools").url(port)
+    await sandbox.stop()
+
+
 async def test_serialize_and_connect_carry_declared_sidecars(tmp_path: Path) -> None:
     owner_provider = SidecarProvider()
-    owner = await AsyncSandbox(owner_provider, SandboxSpec(image="task:1", sidecars=[_RECORDER])).start()
+    owner = await AsyncSandbox(
+        owner_provider, SandboxSpec(image="task:1", sidecars=[{**_RECORDER, "ports": [9000]}])
+    ).start()
 
     # The descriptor crosses a process boundary as JSON.
     descriptor = json.loads(json.dumps(await owner.serialize()))
-    # Only name and image travel; the sidecar's environment, resources and provider options (which may hold
-    # registry credentials) stay with the owner.
-    assert descriptor["sidecars"] == [{"name": "recorder", "image": _RECORDER["image"]}]
+    # Only name, image and ports travel; the sidecar's environment, resources and provider options (which may
+    # hold registry credentials) stay with the owner.
+    assert descriptor["sidecars"] == [{"name": "recorder", "image": _RECORDER["image"], "ports": [9000]}]
 
     borrower_provider = SidecarProvider()
     borrower = await AsyncSandbox.connect(descriptor, provider=borrower_provider, owns_provider=False)
     assert [(s.name, s.image) for s in borrower._spec.sidecars] == [("recorder", _RECORDER["image"])]
+    assert borrower.sidecar("recorder").url() == "http://127.0.0.1:9000"
 
     result = await borrower.sidecar("recorder").exec("status", timeout_s=5)
     assert result.return_code == 0
