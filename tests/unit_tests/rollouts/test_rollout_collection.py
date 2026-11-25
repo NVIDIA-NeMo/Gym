@@ -15028,7 +15028,9 @@ class TestFailureExportMetrics:
             )
         )
         identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
-        metrics = _failure_export_metrics([sidecar], identity, {(0, 0)}, rows=[attempt(0, 1, 2, reward=1.0)])
+        metrics = _failure_export_metrics(
+            [sidecar], identity, {(0, 0)}, rows={tmp_path / "rollouts.jsonl": [attempt(0, 1, 2, reward=1.0)]}
+        )
 
         assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (6, 3)
 

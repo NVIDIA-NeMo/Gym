@@ -3434,7 +3434,7 @@ def _failure_export_metrics(
     landed: set,
     *,
     histories: Sequence[RolloutStore] = (),
-    rows: Iterable[Mapping[str, Any]] = (),
+    rows: Optional[Mapping[Path, Iterable[Mapping[str, Any]]]] = None,
 ) -> Dict[str, int]:
     """Failure, retry and transport resend counts for exporters, read from the failures sidecars.
 
@@ -3448,8 +3448,9 @@ def _failure_export_metrics(
     left out when the rollouts were collected with different caps. A ``record_omitted_rollouts`` row is no failed
     attempt; an interrupted one is still the rollout's latest execution, so an older failure's class is not counted.
     ``transport/resends`` and ``transport/attempts_counted`` add up the counts that the sidecars and ``rows`` (the
-    shards' own rows) carry, one per saved attempt, as ``RolloutStore.failure_export_metrics`` does for a shard with
-    attempt history; both are left out when no row carries one.
+    shards' own rows, by shard) carry, one per saved attempt, as ``RolloutStore.failure_export_metrics`` does for a
+    shard with attempt history; both are left out when no row carries one. Runs number their tasks from 0, so an
+    attempt belongs to its row's run, or to its shard for a row without a run id.
     """
     if histories:
         parts = [history.failure_export_metrics() for history in histories]
@@ -3471,6 +3472,12 @@ def _failure_export_metrics(
     # By saved attempt. A failed /run kept as evidence counts only for an attempt no other row saved.
     resends: Dict[Any, Optional[int]] = {}
     evidence_resends: Dict[Any, Optional[int]] = {}
+
+    def saved_attempt(row: Mapping[str, Any], failures_fpath: Path) -> tuple:
+        run_id = row.get(RUN_ID_KEY)
+        scope = run_id if isinstance(run_id, str) else failures_fpath
+        return scope, identity(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0)
+
     for fpath in failures_fpaths:
         if not fpath.exists():
             continue
@@ -3480,7 +3487,7 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                attempt = (identity(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0))
+                attempt = saved_attempt(row, fpath)
                 if is_non_superseding_rollout_row(row):
                     evidence_resends[attempt] = _transport_resends(row)
                     continue
@@ -3499,8 +3506,9 @@ def _failure_export_metrics(
         if key not in landed and not is_omitted_rollout_row(row)
     )
     recorded_caps = set(caps.values()) or {current_cap}
-    for row in rows:
-        resends[(identity(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0))] = _transport_resends(row)
+    for shard, shard_rows in (rows or {}).items():
+        for row in shard_rows:
+            resends[saved_attempt(row, failures_path_for(shard))] = _transport_resends(row)
     counted = [count for count in {**evidence_resends, **resends}.values() if count is not None]
     return {
         "retries/attempts": sum(attempts.values()),
@@ -7029,6 +7037,7 @@ class RolloutAggregationHelper(BaseModel):
         health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
         legacy_results: List[Dict] = []
+        legacy_results_by_shard: Dict[Path, List[Dict]] = {}
         history_results: Dict[str, List[Dict]] = {}
         shard_keys: Dict[str, set] = {}
         run_ids: set[str] = set()
@@ -7057,6 +7066,7 @@ class RolloutAggregationHelper(BaseModel):
                 continue
             legacy_paths.append(shard)
             keys = shard_keys[str(shard)] = set()
+            shard_results = legacy_results_by_shard[shard] = []
             digest = hashlib.sha256()
             with open(shard_path, "rb") as f:
                 for line_no, line in enumerate(f, 1):
@@ -7068,6 +7078,7 @@ class RolloutAggregationHelper(BaseModel):
                     keys.add((result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)))
                     results.append(result)
                     legacy_results.append(result)
+                    shard_results.append(result)
                 shard_digests[shard_path] = (f.tell(), digest.hexdigest())
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
@@ -7319,7 +7330,7 @@ class RolloutAggregationHelper(BaseModel):
                 lambda row: _identity_key(row, group),
                 {_identity_key(r, group) for r in results} if failures_fpaths else set(),
                 histories=histories,
-                rows=legacy_results,
+                rows=legacy_results_by_shard,
             )
             metrics = {
                 **failure_metrics,
