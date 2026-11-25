@@ -39,10 +39,13 @@ from nemo_gym.rollouts.service_declaration import SERVICE_DECLARATION_SCHEMA_VER
 
 PoolRole = Literal["prefill", "decode", "router"]
 
-# Seconds the GPU listing may take across all nodes before the job goes on without it.
+# Seconds the GPU listing may take across all nodes before the job goes on without it, and the seconds after that
+# TERM before a listing step that has not stopped is killed.
 GPU_LISTING_TIMEOUT_SECONDS = 120
+GPU_LISTING_KILL_AFTER_SECONDS = 5
 GPUS_UNLISTED_REASON = "nvidia-smi listed no GPUs in a job step on this node"
-GPU_LISTING_TIMED_OUT_REASON = f"the GPU listing step timed out after {GPU_LISTING_TIMEOUT_SECONDS} s"
+GPU_LISTING_TIMED_OUT_REASON = "the GPU listing step timed out after"
+GPU_LISTING_KILLED_REASON = "the GPU listing step did not stop at its timeout and was killed after"
 GPU_LISTING_FAILED_REASON = "the GPU listing step failed with exit status"
 NVIDIA_SMI_FAILED_REASON = "nvidia-smi failed on this node with exit status"
 
@@ -116,7 +119,8 @@ def render_declaration_writer(
     nodelist = f' --nodelist="{",".join(hosts[index] for index in nodes)}"' if pin_nodes else ""
     listing = (
         # --wait=0: Slurm's WaitTime must not kill slower nodes' listings once the first node finishes.
-        f"_gym_decl_gpus=$(timeout {GPU_LISTING_TIMEOUT_SECONDS} srun --overlap --wait=0{nodelist}"
+        f"_gym_decl_gpus=$(timeout -k {GPU_LISTING_KILL_AFTER_SECONDS} {GPU_LISTING_TIMEOUT_SECONDS}"
+        f" srun --overlap --wait=0{nodelist}"
         f" --nodes={len(nodes)} --ntasks={len(nodes)}"
         f"{f' --account={shlex.quote(account)}' if account else ''}"
         f" bash -c {shlex.quote(_LIST_GPUS)} 2>>logs/service_declaration-$SLURM_JOB_ID.log)"
@@ -143,7 +147,7 @@ def render_declaration_writer(
             "# service declaration: which model service runs on which node and GPUs",
             listing,
             "_gym_decl_status=$?",
-            _LISTING_REASON,
+            _listing_reason(),
             _NODE_FUNCTION,
             *node_calls,
             f"mkdir -p {shlex.quote(str(declaration_path.parent))}",
@@ -187,13 +191,18 @@ _gym_decl_node() {
     fi
 }""".replace("NVIDIA_SMI_FAILED", NVIDIA_SMI_FAILED_REASON)
 
-# Why a node has no GPU rows, from the listing step's exit status; the step's stderr is in
-# logs/service_declaration-<job>.log.
-_LISTING_REASON = f"""case "$_gym_decl_status" in
+
+def _listing_reason() -> str:
+    """Why a node has no GPU rows, from the listing step's exit status: `timeout` exits 124 after its TERM ended the
+    step, 137 after its KILL did. The step's stderr is in logs/service_declaration-<job>.log."""
+    killed_after = GPU_LISTING_TIMEOUT_SECONDS + GPU_LISTING_KILL_AFTER_SECONDS
+    return f"""case "$_gym_decl_status" in
     0) _gym_decl_reason="{GPUS_UNLISTED_REASON}" ;;
-    124) _gym_decl_reason="{GPU_LISTING_TIMED_OUT_REASON}" ;;
+    124) _gym_decl_reason="{GPU_LISTING_TIMED_OUT_REASON} {GPU_LISTING_TIMEOUT_SECONDS} s" ;;
+    137) _gym_decl_reason="{GPU_LISTING_KILLED_REASON} {killed_after} s" ;;
     *) _gym_decl_reason="{GPU_LISTING_FAILED_REASON} $_gym_decl_status" ;;
 esac"""
+
 
 _DECLARATION_FORMAT = (
     f'{{"schema_version":{SERVICE_DECLARATION_SCHEMA_VERSION},"status":"available",'

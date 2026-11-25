@@ -21,11 +21,12 @@ gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 export GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"
 export GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"
 # service declaration: which model service runs on which node and GPUs
-_gym_decl_gpus=$(timeout 120 srun --overlap --wait=0 --nodelist="${gym_nodes[0]},${gym_nodes[1]},${gym_nodes[2]},${gym_nodes[3]},${gym_nodes[4]},${gym_nodes[5]},${gym_nodes[6]},${gym_nodes[7]},${gym_nodes[8]},${gym_nodes[9]}" --nodes=10 --ntasks=10 --account=acct bash -c 'out=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader); s=$?; if [ "$s" -ne 0 ]; then echo "$SLURMD_NODENAME, nvidia-smi-exit, $s"; else printf "%s\n" "$out" | sed "s/^/$SLURMD_NODENAME, /"; fi' 2>>logs/service_declaration-$SLURM_JOB_ID.log)
+_gym_decl_gpus=$(timeout -k 5 120 srun --overlap --wait=0 --nodelist="${gym_nodes[0]},${gym_nodes[1]},${gym_nodes[2]},${gym_nodes[3]},${gym_nodes[4]},${gym_nodes[5]},${gym_nodes[6]},${gym_nodes[7]},${gym_nodes[8]},${gym_nodes[9]}" --nodes=10 --ntasks=10 --account=acct bash -c 'out=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader); s=$?; if [ "$s" -ne 0 ]; then echo "$SLURMD_NODENAME, nvidia-smi-exit, $s"; else printf "%s\n" "$out" | sed "s/^/$SLURMD_NODENAME, /"; fi' 2>>logs/service_declaration-$SLURM_JOB_ID.log)
 _gym_decl_status=$?
 case "$_gym_decl_status" in
     0) _gym_decl_reason="nvidia-smi listed no GPUs in a job step on this node" ;;
     124) _gym_decl_reason="the GPU listing step timed out after 120 s" ;;
+    137) _gym_decl_reason="the GPU listing step did not stop at its timeout and was killed after 125 s" ;;
     *) _gym_decl_reason="the GPU listing step failed with exit status $_gym_decl_status" ;;
 esac
 _gym_decl_nodes=()

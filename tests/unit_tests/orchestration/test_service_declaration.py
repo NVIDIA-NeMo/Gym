@@ -17,13 +17,16 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.executors import service_declaration
 from nemo_gym.orchestration.executors.service_declaration import (
     GPU_LISTING_FAILED_REASON,
+    GPU_LISTING_KILLED_REASON,
     GPU_LISTING_TIMED_OUT_REASON,
     GPUS_UNLISTED_REASON,
     NVIDIA_SMI_FAILED_REASON,
@@ -214,19 +217,41 @@ GPU_TABLE_CASES = [
 
 
 @needs_shell
-@pytest.mark.parametrize(
-    "srun_exit, reason",
-    [
-        pytest.param(124, GPU_LISTING_TIMED_OUT_REASON, id="the_listing_step_timed_out"),
-        pytest.param(1, f"{GPU_LISTING_FAILED_REASON} 1", id="the_listing_step_failed"),
-    ],
-)
-def test_a_failed_listing_step_says_why_and_never_fails_the_job(tmp_path, srun_exit, reason):
+def test_a_failed_listing_step_says_why_and_never_fails_the_job(tmp_path):
     """Without a node's own report, the step's exit status says why; a node's nvidia-smi status would come first."""
     declaration = _run_job_start(
-        tmp_path, {"policy": _vllm(node_pool="gpu")}, {"gpu": _pool(1)}, listings={"n0": ""}, srun_exit=srun_exit
+        tmp_path, {"policy": _vllm(node_pool="gpu")}, {"gpu": _pool(1)}, listings={"n0": ""}, srun_exit=1
     )
 
+    assert declaration.status == "available" and declaration.gpus == []
+    assert [(node.gpus_observed, node.gpus_unavailable_reason) for node in declaration.nodes] == [
+        (False, f"{GPU_LISTING_FAILED_REASON} 1")
+    ]
+
+
+@needs_shell
+@pytest.mark.parametrize(
+    "stalled_srun, reason",
+    [
+        # exec: one process, as srun is, so no child outlives it holding the listing's output open.
+        pytest.param("exec sleep 30\n", f"{GPU_LISTING_TIMED_OUT_REASON} 1 s", id="a_step_that_stops_at_the_timeout"),
+        pytest.param(
+            # An ignored signal stays ignored across exec.
+            "trap '' TERM\nexec sleep 30\n",
+            f"{GPU_LISTING_KILLED_REASON} 2 s",
+            id="a_step_that_ignores_the_timeout_is_killed",
+        ),
+    ],
+)
+def test_a_stalled_listing_step_holds_the_job_no_longer_than_its_deadline(tmp_path, monkeypatch, stalled_srun, reason):
+    monkeypatch.setattr(service_declaration, "GPU_LISTING_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(service_declaration, "GPU_LISTING_KILL_AFTER_SECONDS", 1)
+    started = time.monotonic()
+    declaration = _run_job_start(
+        tmp_path, {"policy": _vllm(node_pool="gpu")}, {"gpu": _pool(1)}, srun_prefix=stalled_srun
+    )
+
+    assert time.monotonic() - started < 15
     assert declaration.status == "available" and declaration.gpus == []
     assert [(node.gpus_observed, node.gpus_unavailable_reason) for node in declaration.nodes] == [(False, reason)]
 
@@ -356,11 +381,12 @@ def _declaration_block(script):
     return "# service declaration" + script.split("# service declaration")[1].split("\n\n")[0]
 
 
-def _run_job_start(tmp_path, services, pools, listings=None, srun_exit=None):
+def _run_job_start(tmp_path, services, pools, listings=None, srun_exit=None, srun_prefix=""):
     """Run the script's declaration step against a fake srun and nvidia-smi, and read what it wrote.
 
-    The fake srun runs the listing command once per `--nodelist` host (or once on the batch host),
-    with SLURMD_NODENAME set as Slurm would; the fake nvidia-smi prints `listings[host]`, or fails.
+    The fake srun runs `srun_prefix`, then the listing command once per `--nodelist` host (or once on
+    the batch host), with SLURMD_NODENAME set as Slurm would, and refuses a step whose `--nodes` or
+    `--ntasks` is not one task per host; the fake nvidia-smi prints `listings[host]`, or fails.
     """
     total_nodes = sum(pool["nodes"] for pool in pools.values())
     listings = listings if listings is not None else {f"n{i}": f"0, GPU-{i:04d}" for i in range(total_nodes)}
@@ -372,10 +398,13 @@ def _run_job_start(tmp_path, services, pools, listings=None, srun_exit=None):
         (listing_dir / host).write_text(text + "\n")
     _executable(
         bin_dir / "srun",
-        'nodes="$SLURMD_NODENAME"\n'
-        'while [ $# -gt 0 ]; do case "$1" in --nodelist=*) nodes="${1#--nodelist=}";; bash) cmd="$3"; break;; esac; '
+        srun_prefix + 'nodes="$SLURMD_NODENAME"\n'
+        'while [ $# -gt 0 ]; do case "$1" in --nodelist=*) nodes="${1#--nodelist=}";; '
+        '--nodes=*) n="${1#--nodes=}";; --ntasks=*) t="${1#--ntasks=}";; bash) cmd="$3"; break;; esac; '
         "shift; done\n"
         'IFS=, read -ra hosts <<< "$nodes"\n'
+        '[ "$n" = "${#hosts[@]}" ] && [ "$t" = "${#hosts[@]}" ] '
+        '|| { echo "srun: --nodes=$n --ntasks=$t for ${#hosts[@]} hosts" >&2; exit 2; }\n'
         'for host in "${hosts[@]}"; do SLURMD_NODENAME="$host" bash -c "$cmd"; done\n'
         + (f"exit {srun_exit}\n" if srun_exit is not None else ""),
     )
@@ -385,7 +414,7 @@ def _run_job_start(tmp_path, services, pools, listings=None, srun_exit=None):
     hosts = " ".join(f"n{i}" for i in range(total_nodes))
     block = f"gym_nodes=({hosts})\n{_declaration_block(_script(tmp_path, services, pools))}"
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "SLURM_JOB_ID": JOB_ID}
-    subprocess.run(["bash", "-c", block], env={**env, "SLURMD_NODENAME": "n0"}, cwd=tmp_path, check=True)
+    subprocess.run(["bash", "-c", block], env={**env, "SLURMD_NODENAME": "n0"}, cwd=tmp_path, check=True, timeout=20)
     path = tmp_path / RUN_ID / "bench" / "artifacts" / "rollouts_service_declaration.json"
     return ServiceDeclaration.model_validate_json(path.read_bytes())
 
