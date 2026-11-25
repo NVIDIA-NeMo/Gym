@@ -183,9 +183,8 @@ jobs:
       !cancelled() && !failure() && needs.validate-inputs.result == 'success'
       && needs.release-workflow-tests.result == 'success'
     permissions:
-      contents: write
-      pull-requests: write
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
+      contents: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@5c4f67f882e3ce38f5b3ebd3df5114b4b042da8c
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
@@ -194,10 +193,10 @@ jobs:
       dry-run: ${{ inputs.dry-run || false }}
       version-bump-branch: ${{ inputs.version-bump-branch || github.ref_name }}
       packaging: uv
-      app-id: ${{ vars.BOT_ID }}
+      release-environment: gym-release
       restrict-to-admins: true
     secrets:
-      BOT_KEY: ${{ secrets.BOT_KEY }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   build-wheel:
     needs: [bump, pre-flight, previous-tag]
@@ -242,15 +241,16 @@ jobs:
       && needs.build-wheel.result == 'success'
       && (github.event_name != 'workflow_dispatch' || inputs.dry-run || needs.publish-wheel.result == 'success')
     permissions:
-      contents: write
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
+      contents: read
+      pull-requests: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@5c4f67f882e3ce38f5b3ebd3df5114b4b042da8c
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       library-name: NeMo-Gym
       validate-only: ${{ github.event_name != 'workflow_dispatch' }}
       dry-run: ${{ inputs.dry-run || false }}
       create-gh-release: ${{ github.event_name != 'workflow_dispatch' || inputs.create-gh-release }}
-      app-id: ${{ vars.BOT_ID }}
+      release-environment: gym-release
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
       gh-release-use-changelog-builder: true
@@ -258,7 +258,8 @@ jobs:
       release-version: ${{ needs.bump.outputs.release-version || needs.build-wheel.outputs.version }}
       pypi-name: ${{ needs.build-wheel.outputs.pypi-name }}
     secrets:
-      BOT_KEY: ${{ secrets.BOT_KEY }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
   release-summary:
     needs: [release-workflow-tests, pre-flight, previous-tag, validate-inputs, bump, build-wheel, publish-wheel, finalize]

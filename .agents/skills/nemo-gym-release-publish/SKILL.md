@@ -22,9 +22,9 @@ publish. A PyPI upload cannot be undone or overwritten.
 - The template restricts the run to repository admins.
 - `skip-test-wheel: true` is set, so the workflow never installs the wheel.
   The install check below fills that gap.
-- After publishing, the workflow pushes a version bump to
-  `version-bump-branch`. A run with `release-ref` set to a branch name races
-  that bump, so `release-ref` must be a full 40-character SHA.
+- The release App opens a version bump PR against `version-bump-branch`.
+  Publication uses the selected full 40-character `release-ref` SHA. Maintainers
+  merge the bump PR after its required checks and reviews pass.
 
 ## 1. Resolve the inputs
 
@@ -159,11 +159,13 @@ skipped upload must not finalize the release.
 
 ## 6. Verify the release
 
+Set `BUMP_PR_URL` to the version bump PR in the bump job's step summary.
+
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/nemo-gym/$VERSION/json
 gh release list -R $REPO --limit 2
-gh api "repos/$REPO/contents/nemo_gym/package_info.py?ref=$BRANCH" -q .content \
-  | base64 -d | grep -E '^(PATCH|PRE_RELEASE) ='
+gh pr view "$BUMP_PR_URL" --repo "$REPO" --json baseRefName,headRefName,state,files
+gh pr diff "$BUMP_PR_URL" --repo "$REPO"
 
 uv venv pypi-venv --python $PYTHON -q
 uv pip install --python pypi-venv/bin/python --no-cache "nemo-gym==$VERSION"
@@ -173,7 +175,7 @@ pypi-venv/bin/python -I -c "import nemo_gym; print(nemo_gym.__version__)"
 - PyPI returns `200`. If the install cannot find the version yet, wait a
   minute for the PyPI index to update and retry.
 - The new release uses tag `v$VERSION`.
-- `package_info.py` on `BRANCH` has moved past `VERSION`.
+- The PR targets `BRANCH` and advances the version in `nemo_gym/package_info.py`.
 - The install from PyPI prints `VERSION`.
 
 ## 7. Hand off the remaining steps
@@ -182,6 +184,7 @@ Tell the user which of these are left. They are not automated:
 
 - Review the release page at `https://github.com/$REPO/releases` and the
   package page at https://pypi.org/project/nemo-gym/.
+- Merge the release workflow's bump PR into `BRANCH` after the required checks and reviews pass.
 - Merge the version bump pull request on `main` that was opened when the
   release branch was cut.
 - Announce the release.

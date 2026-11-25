@@ -38,10 +38,9 @@ permissions:
 
 jobs:
   code-freeze:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_code_freeze.yml@0d61798424937415ac281d6fd0ada169d0735c76 # freeze source branch
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_code_freeze.yml@5c4f67f882e3ce38f5b3ebd3df5114b4b042da8c
     with:
-      app-id: ${{ vars.BOT_ID }}
-      environment-name: main
+      release-environment: gym-release
       library-name: NeMo-Gym
       python-package: nemo_gym
       release-type: ${{ inputs.release-type }}
@@ -49,6 +48,6 @@ jobs:
       freeze-commit: ${{ inputs.freeze-commit }}
       dry-run: ${{ inputs.dry-run }}
     secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       SLACK_WEBHOOK: ${{ secrets.SLACK_RELEASE_ENDPOINT }}
       SLACK_WEBHOOK_ADMIN: ${{ secrets.SLACK_WEBHOOK_ADMIN }}
-      BOT_KEY: ${{ secrets.BOT_KEY }}

@@ -219,6 +219,18 @@ gh() {
         self.assertEqual(inputs["freeze-source-branch"], "main")
         self.assertEqual(inputs["freeze-commit"], "${{ inputs.freeze-commit }}")
 
+    def test_release_jobs_use_the_protected_app(self):
+        """Scope GitHub writes to the release environment and declare its key explicitly."""
+        for job in (FREEZE_JOBS["code-freeze"], JOBS["bump"], JOBS["finalize"]):
+            with self.subTest(workflow=job["uses"]):
+                self.assertEqual(job["with"]["release-environment"], "gym-release")
+                self.assertNotIn("app-id", job["with"])
+                self.assertEqual(job["secrets"]["RELEASE_APP_PRIVATE_KEY"], "${{ secrets.RELEASE_APP_PRIVATE_KEY }}")
+                self.assertNotIn("BOT_KEY", job["secrets"])
+                self.assertNotIn("PAT", job["secrets"])
+        self.assertEqual(JOBS["bump"]["permissions"], {"contents": "read"})
+        self.assertEqual(JOBS["finalize"]["permissions"], {"contents": "read", "pull-requests": "read"})
+
 
 if __name__ == "__main__":
     unittest.main()
