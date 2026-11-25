@@ -49,6 +49,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from time import time
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode
 
 import aiohttp
 from fastapi import FastAPI, Request, Response
@@ -353,6 +354,13 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     exa_cache_fuzzy_threshold: float = 0.8
     # Upstream, overridable so a run can be pinned to a frozen mirror.
     exa_upstream_url: str = "https://mcp.exa.ai/mcp"
+    # Exa keys this server holds for its /mcp proxy, ':' or ',' separated; set from an overlay such as
+    # ${oc.env:EXA_API_KEY}, never written in a config file. When set, the proxy replaces whatever key a
+    # request carries with one of these, picked by a stable hash of the request body, and the key never
+    # has to reach a sandbox: opencode_sandboxed_agent and the lent sandbox's environment then leave
+    # EXA_API_KEY out, so a command the model runs cannot read it. Needs exa_cache_root, which is what
+    # routes searches to the proxy. Empty keeps the old behaviour: the sandbox's own key rides along.
+    exa_proxy_api_keys: str = ""
 
     # STATELESS: a verify for a session this server holds no sandbox, earlier verify, seed under way or close for, sent
     # without the close-follows header that an Environment Server sends with an episode's verify, such as gym eval
@@ -780,6 +788,10 @@ class SearchResourcesServer(SimpleResourcesServer):
             env.setdefault(_PLUGIN_LOG_ENV, self.config.plugin_log_path)
         if self.config.exa_cache_root and not env.get("NEMO_GYM_EXA_BASE_URL"):
             env["NEMO_GYM_EXA_BASE_URL"] = self._exa_proxy_url()
+            if self._exa_proxy_key_pool():
+                # The proxy adds the key upstream, so the sandbox, where the model runs commands, gets none.
+                env.pop("EXA_API_KEY", None)
+                env.pop("EXA_API_KEYS", None)
         return env
 
     def _exa_proxy_url(self) -> str:
@@ -1155,9 +1167,23 @@ class SearchResourcesServer(SimpleResourcesServer):
                 print(f"[exa-cache] store failed ({type(e).__name__}): {e}", flush=True)
         return upstream
 
+    def _exa_proxy_key_pool(self) -> List[str]:
+        """exa_proxy_api_keys as a list, empty when unset."""
+        return [k.strip() for k in re.split(r"[:,\s]+", self.config.exa_proxy_api_keys) if k.strip()]
+
     async def _exa_forward(self, request: Request, body: bytes) -> Response:
-        """Forward verbatim to Exa, preserving the query string so the per-row API key rides along."""
+        """Forward to Exa, preserving the query string so the per-row API key rides along.
+
+        With exa_proxy_api_keys set, any exaApiKey the request carries is dropped and one of this server's
+        keys is sent instead, so the sandbox needs no key of its own.
+        """
         qs = request.url.query
+        pool = self._exa_proxy_key_pool()
+        if pool:
+            pairs = [(k, v) for k, v in parse_qsl(qs, keep_blank_values=True) if k != "exaApiKey"]
+            digest = hashlib.sha256(body).digest()
+            pairs.append(("exaApiKey", pool[int.from_bytes(digest[:8], "big") % len(pool)]))
+            qs = urlencode(pairs)
         url = self.config.exa_upstream_url + (f"?{qs}" if qs else "")
         try:
             async with aiohttp.ClientSession() as sess:
@@ -1192,7 +1218,17 @@ class SearchResourcesServer(SimpleResourcesServer):
                 f"left out of the quality metrics",
                 file=sys.stderr,
             )
-        return await super().aggregate_metrics(body)
+        metrics = await super().aggregate_metrics(body)
+        # The same mean reward over every row, masked ones included with their reward: an evaluation's
+        # full-denominator number, which a budget ending does not shrink.
+        rows = body.verify_responses
+        if rows:
+            metrics.agent_metrics["all_rows/mean/reward"] = sum(float(vr.get("reward") or 0.0) for vr in rows) / len(
+                rows
+            )
+            metrics.agent_metrics["all_rows/count"] = len(rows)
+            metrics.agent_metrics["masked/count"] = masked
+        return metrics
 
     async def verify(self, request: Request, body: SearchVerifyRequest) -> SearchVerifyResponse:
         """Grade the final answer, once per session.

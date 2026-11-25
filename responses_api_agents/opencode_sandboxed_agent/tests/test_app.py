@@ -1164,6 +1164,25 @@ class TestOpenCodeSandboxedAgent:
         config.opencode_env = {"EXA_API_KEYS": "  "}
         assert server._resolve_opencode_env("q") == {"NEMO_GYM_OPENCODE_PROVIDER_ID": "nemo_gym"}
 
+    def test_resolve_opencode_env_leaves_the_key_to_a_keyed_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """A search server holding exa_proxy_api_keys adds the key upstream, so the sandbox gets none."""
+        module = "responses_api_agents.opencode_sandboxed_agent.app"
+        config = self._create_config()
+        config.opencode_env = {"EXA_API_KEYS": "k0:k1", "EXA_API_KEY": "pinned", "OPENCODE_ENABLE_EXA": "true"}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        search = {"exa_cache_root": "/cache/exa", "exa_proxy_api_keys": "server-key"}
+        monkeypatch.setattr(f"{module}.get_global_config_dict", lambda: {})
+        monkeypatch.setattr(f"{module}.get_first_server_config_dict", lambda *_: search)
+        monkeypatch.setattr(f"{module}.get_server_url", lambda _: "http://10.0.0.1:1234")
+
+        env = server._resolve_opencode_env("q")
+        assert "EXA_API_KEY" not in env and "EXA_API_KEYS" not in env
+        assert env["NEMO_GYM_EXA_BASE_URL"] == "http://10.0.0.1:1234/mcp"
+
+        # Without server keys the cache route keeps the sandbox's own key, as before.
+        search["exa_proxy_api_keys"] = ""
+        assert server._resolve_opencode_env("q")["EXA_API_KEY"] == "pinned"
+
     @mark.parametrize("via_stdin", [False, True], ids=("argv", "stdin"))
     async def test_responses_builds_opencode_command(
         self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, via_stdin: bool, tmp_path: Path

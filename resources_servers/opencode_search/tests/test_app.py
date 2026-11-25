@@ -461,3 +461,102 @@ class TestSearchCacheProxy:
 
         assert reply.status_code == 502 and reply.content == b""
         assert len(upstream.calls) == 1
+
+
+class TestExaProxyServerKey:
+    """With exa_proxy_api_keys set, the proxy holds the Exa key and the sandbox never gets one."""
+
+    def _keyed(self, monkeypatch, keys: str) -> SearchResourcesServer:
+        server = _server(monkeypatch, 1.0)
+        server.config.exa_cache_root = "/cache/exa"
+        server.config.exa_proxy_api_keys = keys
+        monkeypatch.setattr(server, "_exa_proxy_url", lambda: "http://10.0.0.1:1234/mcp")
+        return server
+
+    def test_episode_env_drops_the_sandbox_key(self, monkeypatch) -> None:
+        server = self._keyed(monkeypatch, "server-key")
+        server.config.episode_sandbox_env = {"EXA_API_KEY": "sandbox-key", "OTHER": "1"}
+        env = server._episode_env()
+        assert "EXA_API_KEY" not in env
+        assert env["NEMO_GYM_EXA_BASE_URL"] == "http://10.0.0.1:1234/mcp"
+        assert env["OTHER"] == "1"
+
+    def test_episode_env_keeps_the_key_without_server_keys(self, monkeypatch) -> None:
+        server = self._keyed(monkeypatch, "")
+        server.config.episode_sandbox_env = {"EXA_API_KEY": "sandbox-key"}
+        assert server._episode_env()["EXA_API_KEY"] == "sandbox-key"
+
+    @pytest.mark.parametrize("keys", ["k0", "k0:k1,k2"])
+    async def test_forward_replaces_the_request_key(self, monkeypatch, keys: str) -> None:
+        server = self._keyed(monkeypatch, keys)
+        seen = []
+
+        class _Resp:
+            status = 200
+            headers = {"content-type": "text/event-stream"}
+
+            async def read(self):
+                return b"data: {}"
+
+        class _Post:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *_):
+                return False
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            def post(self, url, **_):
+                seen.append(url)
+                return _Post()
+
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", _Session)
+        request = SimpleNamespace(url=SimpleNamespace(query="exaApiKey=leaked&tools=web_search_exa"))
+        response = await server._exa_forward(request, b'{"q": 1}')
+        assert response.status_code == 200
+        (url,) = seen
+        assert "leaked" not in url
+        assert "tools=web_search_exa" in url
+        assert any(f"exaApiKey={k}" in url for k in ("k0", "k1", "k2"))
+
+    async def test_forward_passes_the_request_key_without_server_keys(self, monkeypatch) -> None:
+        server = self._keyed(monkeypatch, "")
+        seen = []
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            def post(self, url, **_):
+                seen.append(url)
+                raise RuntimeError("stop")
+
+        monkeypatch.setattr("resources_servers.opencode_search.app.aiohttp.ClientSession", _Session)
+        request = SimpleNamespace(url=SimpleNamespace(query="exaApiKey=row-key"))
+        await server._exa_forward(request, b"{}")
+        assert seen == [server.config.exa_upstream_url + "?exaApiKey=row-key"]
+
+
+async def test_aggregate_metrics_reports_a_mean_over_every_row(monkeypatch) -> None:
+    from nemo_gym.config.config_types import AggregateMetricsRequest
+
+    server = _server(monkeypatch, 1.0)
+    rows = [
+        {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0},
+        {"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 0.0},
+        {"_ng_task_index": 2, "_ng_rollout_index": 0, "reward": 1.0, "mask_sample": True},
+        {"_ng_task_index": 3, "_ng_rollout_index": 0, "reward": 0.0, "mask_sample": True},
+    ]
+    metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+    assert metrics.agent_metrics["all_rows/mean/reward"] == 0.5
+    assert metrics.agent_metrics["all_rows/count"] == 4
+    assert metrics.agent_metrics["masked/count"] == 2
