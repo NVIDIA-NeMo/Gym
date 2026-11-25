@@ -422,7 +422,7 @@ class ResourcesSeedSessionResponse(BaseModel):
     # A return annotation would replace the model's serialization schema with that container schema.
     @model_serializer(mode="wrap")
     def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server supplies no observation field and declares no sandbox fields."""
+        """Preserve the seed wire shape when the server sets no observation field and declares no sandbox fields."""
         result = handler(self)
         if "observation" not in self.model_fields_set:
             result.pop("observation", None)
@@ -1240,8 +1240,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         Override it to set the task up through ``borrow(body.sandbox_access)``, such as starting a sidecar's tool
         service; release the borrowed client before returning and never stop the group. Overriding it serves
-        ``/prepare_sandbox`` and declares ``prepare`` on the seed reply (see ``sandbox_declaration``). Files go in ``SandboxGroupSpec.files``
-        instead, which the group starts with. Raise ``ResourcesSeedRejectedError`` for a task no retry can prepare.
+        ``/prepare_sandbox`` and declares ``prepare`` on the seed reply (see ``sandbox_declaration``). Files go in
+        ``SandboxGroupSpec.files`` instead, which the group starts with. Raise ``ResourcesSeedRejectedError`` for a
+        task no retry can prepare.
         """
         raise NotImplementedError(f"{type(self).__name__} does not prepare sandboxes")
 
