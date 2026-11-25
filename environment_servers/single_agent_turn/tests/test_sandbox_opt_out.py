@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Who borrows the attempt's sandbox group: the sandbox opt-outs, a grader's own sandbox, and what Resources declares."""
+"""Who borrows the attempt's sandbox group: the sandbox opt-outs, a verifier's own sandbox, and what Resources declares."""
 
-import json
 from typing import Any
 
 import pytest
@@ -16,9 +15,12 @@ from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, PREPARE_SANDBOX_PATH,
 from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
 
-def _recording(server: SingleAgentTurnEnvironmentServer, client: Any, provider: _Provider) -> list[tuple[str, list]]:
+AGENT_PATH = "/ng-rollout/rollout-a2/v1/responses"
+
+
+def _recording(client: Any, provider: _Provider) -> list[tuple[str, list[str]]]:
     """Record, at each call the server makes, the sandboxes then running."""
-    seen: list[tuple[str, list]] = []
+    seen: list[tuple[str, list[str]]] = []
     post = type(client).post
 
     async def recording_post(self: Any, server_name: str, url_path: str, **kwargs: Any) -> Any:
@@ -33,50 +35,58 @@ def _seed_reply(**fields: Any) -> _Response:
     return _Response({"resources_session_id": "resources-session"} | fields)
 
 
+# The seed reply of a Resources Server whose verifier only reads the answer.
+ANSWER_READER = {"verifier_executes_nothing": True}
+
+
 def _verify_body(client: Any) -> dict[str, Any]:
     return next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
 
 
-async def test_a_pure_qa_task_runs_its_turn_lent_nothing_and_its_grader_gets_a_sandbox_of_its_own() -> None:
+def _paths(client: Any) -> list[str]:
+    return [path for _, path, _ in client.calls]
+
+
+async def test_a_pure_qa_task_runs_its_turn_lent_nothing_and_its_verifier_gets_a_sandbox_of_its_own() -> None:
     provider = _Provider()
     server, client = _lending_server(provider, sandbox_opt_out={"task": True})
-    seen = _recording(server, client, provider)
+    seen = _recording(client, provider)
 
     result = await server.run_request(_request())
 
     assert result.failure is None, result.failure
     assert result.result.reward == 1.0
     # The agent was lent no sandbox, so its loop runs in the Agent Server process, and none ran during its turn.
-    seed = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
-    assert seed.sandbox_access is None
-    assert dict(seen)["/ng-rollout/rollout-a2/v1/responses"] == []
+    assert AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).sandbox_access is None
+    assert dict(seen)[AGENT_PATH] == []
     assert dict(seen)["/v1/agent_sessions/close"] == []
-    # The grader's sandbox started after the agent closed and was lent to /verify alone.
+    # The verifier's sandbox started after the agent closed, was lent to /verify alone, and stopped once it replied.
     assert dict(seen)["/verify"] == ["sb-1"]
     lent = SandboxAccess.model_validate(_verify_body(client)[NG_SANDBOX_ACCESS_KEY])
-    assert lent.connection.descriptor["sandbox_id"] == "sb-1"
-    assert lent.workdir == "/workspace"
-    assert provider.running() == []
+    assert (lent.connection.descriptor["sandbox_id"], lent.workdir) == ("sb-1", "/workspace")
+    assert seen[-1] == ("/close_session", [])
 
 
-async def test_a_grader_that_executes_nothing_gets_no_sandbox_and_the_agents_stops_before_verify() -> None:
+async def test_a_verifier_that_executes_nothing_gets_no_sandbox_and_the_agents_stops_before_verify() -> None:
     provider = _Provider()
-    server, client = _lending_server(provider, sandbox_opt_out={"grader": True})
-    seen = _recording(server, client, provider)
+    server, client = _lending_server(provider, sandbox_opt_out={"verifier": True})
+    client.responses[0] = _seed_reply(**ANSWER_READER)
+    seen = _recording(client, provider)
 
     result = await server.run_request(_request())
 
     assert result.failure is None, result.failure
     assert AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).sandbox_access is not None
-    assert dict(seen)["/ng-rollout/rollout-a2/v1/responses"] == ["sb-1"]
-    # Nothing borrows the group after the agent closed, so it is stopped before the Resources Server grades.
+    assert dict(seen)[AGENT_PATH] == ["sb-1"]
+    # Nothing borrows the group after the agent closed, so it is stopped before the Resources Server verifies.
     assert dict(seen)["/verify"] == []
     assert NG_SANDBOX_ACCESS_KEY not in _verify_body(client)
     assert list(provider.boxes) == ["sb-1"]
 
 
-async def test_a_task_and_a_grader_that_both_opt_out_start_no_sandbox() -> None:
-    server, client = _lending_server(None, sandbox_opt_out={"task": True, "grader": True})
+async def test_a_task_and_a_verifier_that_both_opt_out_start_no_sandbox() -> None:
+    server, client = _lending_server(None, sandbox_opt_out={"task": True, "verifier": True})
+    client.responses[0] = _seed_reply(**ANSWER_READER)
 
     result = await server.run_request(_request())
 
@@ -100,104 +110,122 @@ async def test_a_task_that_declares_tools_cannot_opt_out_and_no_agent_runs() -> 
     assert (result.failure.stage, result.failure.terminal) == ("seed", True)
     assert "pure QA task" in result.failure.failure_reason
     assert "run_python" in result.failure.failure_reason
-    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+    assert _paths(client) == ["/seed_session", "/close_session"]
 
 
-async def test_a_grader_that_runs_code_cannot_opt_out_and_no_agent_runs() -> None:
+async def test_a_verifier_its_resources_server_does_not_declare_cannot_opt_out_and_no_agent_runs() -> None:
     provider = _Provider()
-    server, client = _lending_server(provider, sandbox_opt_out={"grader": True})
-    client.responses[0] = _seed_reply(sandbox_group={"grader_runs_code": True})
+    server, client = _lending_server(provider, sandbox_opt_out={"verifier": True})
 
     result = await server.run_request(_request())
 
     assert result.result is None
     assert (result.failure.stage, result.failure.terminal) == ("seed", True)
-    assert "declares that its grader runs code" in result.failure.failure_reason
-    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+    assert "does not declare that its verifier does (verifier_executes_nothing)" in result.failure.failure_reason
+    assert _paths(client) == ["/seed_session", "/close_session"]
     assert provider.boxes == {}
 
 
-async def test_a_grader_that_runs_code_of_a_pure_qa_task_grades_in_the_group_it_declared() -> None:
+async def test_the_verifier_of_a_pure_qa_task_verifies_in_the_group_its_resources_server_declared() -> None:
     provider = _Provider()
     server, client = _lending_server(provider, sandbox_opt_out={"task": True})
     client.responses[0] = _seed_reply(
-        sandbox_group={"grader_runs_code": True, "image": "grader:1", "files": {"tests/test_task.py": "assert True"}}
+        sandbox_group={"image": "verifier:1", "files": {"tests/test_task.py": "assert True"}}
     )
 
     result = await server.run_request(_request())
 
     assert result.failure is None, result.failure
     spec = provider.boxes["sb-1"]["spec"]
-    assert (spec.image, spec.files) == ("grader:1", {"tests/test_task.py": "assert True"})
+    assert (spec.image, spec.files) == ("verifier:1", {"tests/test_task.py": "assert True"})
     assert NG_SANDBOX_ACCESS_KEY in _verify_body(client)
     assert provider.running() == []
 
 
-async def test_a_grader_sandbox_that_cannot_start_fails_the_attempt_for_a_retry_with_the_agents_evidence() -> None:
+async def test_a_verifier_sandbox_that_cannot_start_fails_the_attempt_for_a_retry_with_the_agents_evidence() -> None:
     provider = _Provider()
     provider.fail_create = SandboxCreateError("provider unreachable")
     server, client = _lending_server(provider, sandbox_opt_out={"task": True})
 
     result = await server.run_request(_request())
 
-    # An infrastructure failure: masked and retried, never a reward of 0, and never graded on this host.
+    # An infrastructure failure: masked and retried, never a reward of 0, and never verified on this host.
     assert result.result is None
     assert (result.failure.stage, result.failure.terminal) == ("verification", False)
     assert "provider unreachable" in result.failure.failure_reason
-    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert "/verify" not in _paths(client)
     assert result.failure.partial_response is not None
     assert provider.running() == []
 
 
-async def test_the_resources_server_prepares_the_group_before_the_agent_borrows_it() -> None:
+async def test_a_group_no_attempt_can_start_is_refused_at_seed_before_the_agents_turn() -> None:
     provider = _Provider()
-    server, client = _lending_server(provider)
+    server, client = _lending_server(provider, sandbox_opt_out={"task": True})
+    client.responses[0] = _seed_reply(sandbox_group={"image": "verifier:1", "workdir": None})
+    server.config.sandbox_config.workdir = None
+
+    result = await server.run_request(_request())
+
+    assert (result.failure.stage, result.failure.terminal) == ("seed", True)
+    assert "has no workdir" in result.failure.failure_reason
+    assert _paths(client) == ["/seed_session", "/close_session"]
+    assert provider.boxes == {}
+
+
+@pytest.mark.parametrize("opt_out", [{}, {"task": True}])
+async def test_the_resources_server_prepares_the_group_before_anyone_borrows_it(opt_out: dict[str, bool]) -> None:
+    provider = _Provider()
+    server, client = _lending_server(provider, sandbox_opt_out=opt_out)
     client.responses[0] = _seed_reply(sandbox_group={"prepare": True, "env": {"TASK": "1"}})
-    client.responses.insert(1, _Response({"resources_session_id": "resources-session"}))
-    seen = _recording(server, client, provider)
+    borrower = "/verify" if opt_out else "/v1/agent_sessions"
+    client.responses.insert(4 if opt_out else 1, _Response({"resources_session_id": "resources-session"}))
+    seen = _recording(client, provider)
 
     result = await server.run_request(_request())
 
     assert result.failure is None, result.failure
     paths = [path for path, _ in seen]
-    assert paths.index(PREPARE_SANDBOX_PATH) < paths.index("/v1/agent_sessions")
+    assert paths.index(PREPARE_SANDBOX_PATH) < paths.index(borrower)
     assert dict(seen)[PREPARE_SANDBOX_PATH] == ["sb-1"]
     _, _, kwargs = client.calls[paths.index(PREPARE_SANDBOX_PATH)]
     prepare = ResourcesPrepareSandboxRequest.model_validate(kwargs["json"])
     assert prepare.resources_session_id.startswith("resources-session-")
+    assert prepare.task_data == {"instance_id": "task"}
     assert prepare.sandbox_access.connection.descriptor["sandbox_id"] == "sb-1"
-    # The Resources session's cookie names the episode, as on every other Resources call.
-    assert kwargs["cookies"] == {"session": "cookie-value"}
+    # The Resources session's cookie names the episode, as on every other Resources call: after the agent's close,
+    # the one the close returned.
+    assert kwargs["cookies"] == {"session": "updated-cookie" if opt_out else "cookie-value"}
     assert provider.boxes["sb-1"]["spec"].env["TASK"] == "1"
     assert provider.running() == []
 
 
 async def test_a_resources_server_that_declares_a_group_with_no_sandbox_provider_fails_the_attempt_for_good() -> None:
     server, client = _environment_server()
-    client.responses[0] = _seed_reply(sandbox_group={"grader_runs_code": True})
+    client.responses[0] = _seed_reply(sandbox_group={"image": "verifier:1"})
 
     result = await server.run_request(_request())
 
     assert result.result is None
     assert (result.failure.stage, result.failure.terminal) == ("seed", True)
     assert "sets no sandbox_provider" in result.failure.failure_reason
-    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+    assert _paths(client) == ["/seed_session", "/close_session"]
 
 
 def test_startup_refuses_a_task_sandbox_opt_out_for_an_episode_that_grants_tools() -> None:
     server, client = _environment_server(resources_tool_transports=["mcp"])
-    config = server.config.model_copy(
-        update={"sandbox_opt_out": server.config.sandbox_opt_out.model_validate({"task": True})}
+    opt_out = server.config.sandbox_opt_out.model_validate({"task": True})
+    server = SingleAgentTurnEnvironmentServer(
+        config=server.config.model_copy(update={"sandbox_opt_out": opt_out}), server_client=client
     )
-    server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
 
     with pytest.raises(ValueError, match=r"pure QA task, but every episode grants the tools of \['resources'\]"):
         server.check_sandbox_provider()
 
 
-@pytest.mark.parametrize("opt_out", [{}, {"task": True}, {"grader": True}, {"task": True, "grader": True}])
-async def test_without_a_sandbox_provider_the_opt_outs_change_nothing(opt_out: dict[str, bool]) -> None:
+@pytest.mark.parametrize("opt_out", [{}, {"task": True}, {"verifier": True}, {"task": True, "verifier": True}])
+async def test_without_a_sandbox_provider_the_allowed_opt_outs_change_nothing(opt_out: dict[str, bool]) -> None:
     server, client = _environment_server()
+    client.responses[0] = _seed_reply(**ANSWER_READER)
     config = server.config.model_copy(
         update={"sandbox_opt_out": server.config.sandbox_opt_out.model_validate(opt_out)}
     )
@@ -206,7 +234,7 @@ async def test_without_a_sandbox_provider_the_opt_outs_change_nothing(opt_out: d
     result = await server.run_request(_request())
 
     assert result.failure is None, result.failure
+    assert result.result.reward == 1.0
     assert AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).sandbox_access is None
     assert NG_SANDBOX_ACCESS_KEY not in _verify_body(client)
-    assert json.loads(json.dumps(result.result.model_dump(mode="json")))["reward"] == 1.0
     assert server._owned_sandboxes == {}

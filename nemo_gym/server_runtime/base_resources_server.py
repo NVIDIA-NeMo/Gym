@@ -407,9 +407,11 @@ class ResourcesSeedSessionResponse(BaseModel):
     sandbox_access: SandboxAccess | None = None
     # The single_agent_turn Environment Server appends this to the agent's input as one user message.
     observation: str | None = None
-    # What the attempt's sandbox group holds and whether the grader runs code; the Environment Server starts it.
-    # A seed declares a group or lends a sandbox (sandbox_access), never both.
+    # What the attempt's sandbox group holds; the Environment Server starts it. A seed declares a group or lends a
+    # sandbox (sandbox_access), never both.
     sandbox_group: SandboxGroupSpec | None = None
+    # The verifier executes nothing and calls no tools, so /verify may run without a sandbox (SandboxOptOut.verifier).
+    verifier_executes_nothing: bool = False
 
     @model_validator(mode="after")
     def _lend_or_declare(self) -> "ResourcesSeedSessionResponse":
@@ -420,12 +422,14 @@ class ResourcesSeedSessionResponse(BaseModel):
     # A return annotation would replace the model's serialization schema with that container schema.
     @model_serializer(mode="wrap")
     def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server supplies no observation field and declares no group."""
+        """Preserve the seed wire shape when the server supplies no observation field and declares no sandbox fields."""
         result = handler(self)
         if "observation" not in self.model_fields_set:
             result.pop("observation", None)
         if self.sandbox_group is None:
             result.pop("sandbox_group", None)
+        if not self.verifier_executes_nothing:
+            result.pop("verifier_executes_nothing", None)
         return result
 
 
@@ -705,10 +709,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # as openai or anthropic). Its verifier then saves no grading record of its own, so its trials are observed only
     # through a recorded grading operation or a saved grading artifact.
     grading_may_use_uninstrumented_model: ClassVar[bool] = False
-    # True for a server whose grader executes model output or calls tools, such as a verifier that runs unit tests
-    # or passes the answer to eval. Its seed reply declares it (SandboxGroupSpec.grader_runs_code), so an
-    # Environment Server lends /verify a sandbox and refuses a grader sandbox opt-out (SandboxOptOut.grader).
-    grader_runs_code: ClassVar[bool] = False
+    # True for a server whose verifier executes nothing and calls no tools: it only reads the answer, with rules,
+    # math-verify or a judge call. Its seed reply declares it, and only then may an Environment Server run /verify
+    # without a sandbox (SandboxOptOut.verifier). A verifier that runs model output, passes it to eval or to sympy's
+    # parse_expr, or reads state from the sandbox, leaves it False.
+    verifier_executes_nothing: ClassVar[bool] = False
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
@@ -1207,35 +1212,34 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         The Environment Server starts the group from its own ``sandbox_config`` with these fields over it, lends it to
         the agent and to ``/verify``, and stops it. Override it to give the group a task's image or files, or the
-        sidecars that serve its environment tools. ``grader_runs_code`` and ``prepare`` are filled in from the class
-        (see ``declared_sandbox_group``), so an override leaves them unset.
+        sidecars that serve its environment tools. ``prepare`` is set from the class (see ``sandbox_declaration``), so
+        an override leaves it unset. A declared group needs an Environment Server with a ``sandbox_provider``.
         """
         return None
 
-    def declared_sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
-        """The ``sandbox_group`` of this seed's reply: ``sandbox_group``'s declaration, with ``grader_runs_code`` set
-        from the class and ``prepare`` set when the class overrides ``prepare_sandbox``.
+    def sandbox_declaration(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
+        """The seed reply's sandbox fields: ``sandbox_group``'s declaration, with ``prepare`` set when the class
+        overrides ``prepare_sandbox``, and ``verifier_executes_nothing`` from the class.
 
-        The inherited ``seed_session`` puts it on its reply. A server that overrides ``seed_session`` and builds its
-        own ``ResourcesSeedSessionResponse`` sets ``sandbox_group=self.declared_sandbox_group(body)`` on it.
+        The inherited ``seed_session`` puts them on its reply. A server that overrides ``seed_session`` and builds its
+        own reply passes them on: ``ResourcesSeedSessionResponse(..., **self.sandbox_declaration(body))``. One that
+        does not declares nothing, so its verifier cannot opt out of the sandbox.
         """
         group = self.sandbox_group(body)
-        updates = {
-            name: True
-            for name, declared in (("grader_runs_code", self.grader_runs_code), ("prepare", self._prepares_sandbox()))
-            if declared
-        }
-        if not updates:
-            return group
-        return (group or SandboxGroupSpec()).model_copy(update=updates)
+        if self._prepares_sandbox():
+            group = (group or SandboxGroupSpec()).model_copy(update={"prepare": True})
+        declaration: dict[str, Any] = {"sandbox_group": group}
+        if self.verifier_executes_nothing:
+            declaration["verifier_executes_nothing"] = True
+        return declaration
 
     async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
         """Prepare the task in the attempt's sandbox group, which the Environment Server started from this seed's
-        ``sandbox_group``, before the agent or the grader borrows it.
+        ``sandbox_group``, before the agent or the verifier borrows it.
 
         Override it to set the task up through ``borrow(body.sandbox_access)``, such as starting a sidecar's tool
         service; release the borrowed client before returning and never stop the group. Overriding it serves
-        ``/prepare_sandbox`` and declares ``prepare`` on the seed reply. Files go in ``SandboxGroupSpec.files``
+        ``/prepare_sandbox`` and declares ``prepare`` on the seed reply (see ``sandbox_declaration``). Files go in ``SandboxGroupSpec.files``
         instead, which the group starts with. Raise ``ResourcesSeedRejectedError`` for a task no retry can prepare.
         """
         raise NotImplementedError(f"{type(self).__name__} does not prepare sandboxes")
@@ -1275,7 +1279,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if not self._manages_session_state():
             if isinstance(body, ResourcesSeedSessionRequest):
                 return ResourcesSeedSessionResponse(
-                    resources_session_id=body.resources_session_id, sandbox_group=self.declared_sandbox_group(body)
+                    resources_session_id=body.resources_session_id, **self.sandbox_declaration(body)
                 )
             return BaseSeedSessionResponse()
         if request is None:
@@ -1341,9 +1345,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 self._initializing_sessions.pop(session_id, None)
                 self._session_episodes[session_id] = identity
             request.session[SESSION_ID_KEY] = session_id
-        return ResourcesSeedSessionResponse(
-            resources_session_id=session_id, sandbox_group=self.declared_sandbox_group(body)
-        )
+        return ResourcesSeedSessionResponse(resources_session_id=session_id, **self.sandbox_declaration(body))
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Release by ID, then fence the session for the configured close retry window.
