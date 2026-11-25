@@ -4,6 +4,8 @@ agentic_mme:
   resources_servers:
     agentic_mme:
       entrypoint: app.py
+      allowed_agents:
+      - agentic_mme_agent
       domain: other
       verified: false
       description: Agentic-MME atomic visual tools and optional web retrieval, task-only scoring.
@@ -22,6 +24,9 @@ agentic_mme_agent:
       max_rounds: 15
       max_tool_calls: 15
       max_concurrent_rollouts: 8
+      # Input images over max_image_pixels (default 16,000,000) reject the task with HTTP 422. Set true to scale
+      # them down for the image tools instead; see "Input image size" in the README.
+      downscale_oversized_input_images: false
       retrieval:
         mode: disabled
       datasets:

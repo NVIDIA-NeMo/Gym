@@ -44,6 +44,7 @@ def _format_entry(entry: dict, problem_index: int, subject: str) -> dict:
     rubric = (entry.get("answer", "") or "").strip()
     return {
         "id": f"research-{problem_index}",
+        "task_id": f"research-{problem_index}",
         "question": entry.get("problem", ""),
         "expected_answer": rubric,
         "subject": subject,

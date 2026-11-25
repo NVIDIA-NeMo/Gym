@@ -16,6 +16,7 @@ import asyncio
 import logging
 import random
 from contextlib import asynccontextmanager, nullcontext
+from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
@@ -39,7 +40,11 @@ ResponseT = TypeVar("ResponseT")
 
 
 def _normalize_reasoning_content(response: Any) -> Any:
-    """Correct the known provider text shape without relaxing native validation."""
+    """Correct known provider reasoning-item shapes before strict response validation.
+
+    Fills a missing or null ``summary`` with ``[]`` and relabels plain ``output_text`` reasoning content as
+    ``reasoning_text``. Other shapes are left for validation unchanged.
+    """
     if not isinstance(response, dict) or not isinstance(response.get("output"), list):
         return response
     output = response["output"]
@@ -47,27 +52,31 @@ def _normalize_reasoning_content(response: Any) -> Any:
     for item_index, item in enumerate(output):
         if not isinstance(item, dict) or item.get("type") != "reasoning":
             continue
+        corrected_item = item
+        if item.get("summary") is None:
+            corrected_item = corrected_item | {"summary": []}
         content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        corrected_content = None
-        for part_index, part in enumerate(content):
-            if not isinstance(part, dict) or part.get("type") != "output_text":
-                continue
-            if not isinstance(part.get("text"), str) or set(part) not in (
-                {"type", "text"},
-                {"type", "text", "annotations"},
-            ):
-                continue
-            if "annotations" in part and part["annotations"] != []:
-                continue
-            if corrected_content is None:
-                corrected_content = content.copy()
-            corrected_content[part_index] = part | {"type": "reasoning_text"}
-        if corrected_content is not None:
+        if isinstance(content, list):
+            corrected_content = None
+            for part_index, part in enumerate(content):
+                if not isinstance(part, dict) or part.get("type") != "output_text":
+                    continue
+                if not isinstance(part.get("text"), str) or set(part) not in (
+                    {"type", "text"},
+                    {"type", "text", "annotations"},
+                ):
+                    continue
+                if "annotations" in part and part["annotations"] != []:
+                    continue
+                if corrected_content is None:
+                    corrected_content = content.copy()
+                corrected_content[part_index] = part | {"type": "reasoning_text"}
+            if corrected_content is not None:
+                corrected_item = corrected_item | {"content": corrected_content}
+        if corrected_item is not item:
             if corrected_output is None:
                 corrected_output = output.copy()
-            corrected_output[item_index] = item | {"content": corrected_content}
+            corrected_output[item_index] = corrected_item
     return response if corrected_output is None else response | {"output": corrected_output}
 
 
@@ -129,7 +138,12 @@ class UpstreamRetryPolicy(BaseModel):
 
 class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_base_url: str
-    openai_api_key: str
+    openai_api_key: str | list[str] = Field(
+        description=(
+            "API key, or a list of keys used in order: the next key replaces one that is spent "
+            "(budget_exceeded or insufficient_quota) or rejected as invalid."
+        ),
+    )
     openai_model: str
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
@@ -255,9 +269,37 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    request_overrides: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Top-level fields forced onto every upstream /v1/responses and /v1/chat/completions request, over "
+            "what the caller sent (extra_body only fills fields the caller left unset). A value replaces the "
+            "caller's top-level field whole (`reasoning: {effort: high}` drops a caller's `reasoning.summary`). "
+            "Not applied to /v1/embeddings. `model`, `input`, `messages` and `stream` are refused. For harnesses "
+            "that cannot set these fields, e.g. the Codex CLI with a placeholder model name sends no `reasoning` "
+            "or `include`."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_request_overrides(self) -> "SimpleModelServerConfig":
+        # The model is always the configured one, and the payload and streaming mode are the caller's.
+        refused = sorted({"model", "input", "messages", "stream"} & set(self.request_overrides))
+        if refused:
+            raise ValueError(f"request_overrides cannot set {refused}")
+        return self
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
+
+    def _upstream_body(self, body: BaseModel) -> Dict[str, Any]:
+        """extra_body, then the caller's fields, then request_overrides; the model is always the configured one."""
+        body_dict = (
+            self.config.extra_body | body.model_dump(exclude_unset=True) | deepcopy(self.config.request_overrides)
+        )
+        body_dict["model"] = self.config.openai_model
+        return body_dict
 
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
         # OpenAI and subclasses such as LiteLLM retain their opt-in HTTP policy.
@@ -378,8 +420,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         raise UpstreamRetriesExhaustedError(retry_policy.max_attempts, last_error) from last_error
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
         if self.config.drop_input_reasoning_items:
             input_items = body_dict.get("input")
             if isinstance(input_items, list):
@@ -417,8 +458,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
 
         async def create_and_validate() -> NeMoGymChatCompletion:
             response_dict = await self._client.create_chat_completion(**body_dict)

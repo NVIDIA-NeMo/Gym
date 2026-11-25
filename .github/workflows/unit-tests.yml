@@ -179,6 +179,8 @@ jobs:
       - name: Sandbox unit tests
         env:
           COVERAGE_FILE: results/.coverage.sandbox
+          # The real-bwrap tests fail here instead of skipping when bwrap or user namespaces are missing.
+          NEMO_GYM_REQUIRE_BWRAP: "1"
         run: |
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra mlflow --extra wandb
@@ -240,6 +242,11 @@ jobs:
 
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
+
+      - name: Install Node.js for server tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -386,6 +393,11 @@ jobs:
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
 
+      - name: Install Node.js for server tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -451,7 +463,7 @@ jobs:
         timeout-minutes: 20
         run: bash scripts/ci/install_test_dependencies.sh
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh
+        run: curl -LsSf https://astral.sh/uv/0.13.8/install.sh | sh
       - name: Test scoring dependencies on Python 3.12
         env:
           PYTHONPATH: ${{ github.workspace }}/resources_servers/longmt_eval

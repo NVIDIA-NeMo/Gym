@@ -17,6 +17,7 @@ import asyncio
 import builtins
 import functools
 import gc
+import importlib.metadata
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -29,7 +30,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import (
+    SandboxExecArgvUnsupportedError,
+    SandboxResources,
+    SandboxSpec,
+    SandboxStatus,
+)
 
 
 pytestmark = pytest.mark.sandbox
@@ -1769,8 +1775,10 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         def __init__(self) -> None:
             self.writes: list[tuple[str, str | bytes]] = []
 
-        async def write_file(self, target_path: str, data: str | bytes) -> None:
-            self.writes.append((target_path, data))
+        async def write_file(self, target_path: str, data: Any) -> None:
+            if isinstance(data, (str, bytes)):
+                raise TypeError("write_file needs a stream")
+            self.writes.append((target_path, data.read()))
 
         async def read_bytes_stream(self, source_path: str) -> Any:
             async def chunks() -> Any:
@@ -1947,6 +1955,120 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.run_calls[0][1].kwargs["background"] is True
     assert raw.commands.status_calls == ["exec-42", "exec-42"]
     assert raw.commands.log_calls == ["exec-42"]
+
+
+class _ArgvCommands:
+    """The SDK's command service, recording what ``commands.run`` receives and printing its argv's last item."""
+
+    def __init__(self) -> None:
+        self.run_calls: list[tuple[Any, dict[str, Any]]] = []
+
+    async def run(self, command: Any, *, opts: Any, handlers: Any = None) -> Any:
+        self.run_calls.append((command, opts.kwargs))
+        if opts.kwargs.get("background"):
+            return SimpleNamespace(id="exec-argv")
+        return SimpleNamespace(
+            logs=SimpleNamespace(stdout=[SimpleNamespace(text=command[-1])], stderr=[]),
+            error=None,
+            exit_code=0,
+        )
+
+    async def get_command_status(self, execution_id: str) -> Any:
+        return SimpleNamespace(running=False, exit_code=0, error=None)
+
+    async def get_background_command_logs(self, execution_id: str) -> Any:
+        return SimpleNamespace(content=self.run_calls[-1][0][-1], cursor=None)
+
+
+def _argv_provider(
+    monkeypatch: pytest.MonkeyPatch, *, background_exec: bool = False, sdk_sends_argv: bool = True
+) -> tuple[Any, Any, _ArgvCommands]:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, FakeRunCommandOpts, object, object)
+    )
+    monkeypatch.setattr(opensandbox_provider, "_sdk_sends_argv", lambda: sdk_sends_argv)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": background_exec, "background_poll_interval_s": 0.01},
+    )
+    commands = _ArgvCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-argv", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+    return provider, handle, commands
+
+
+@pytest.mark.parametrize("background_exec", [False, True])
+@pytest.mark.parametrize("user, uid", [(None, None), ("root", 0), (0, 0), (1000, 1000)])
+async def test_exec_sends_an_argument_list_to_execd_as_argv(
+    monkeypatch: pytest.MonkeyPatch, background_exec: bool, user: Any, uid: int | None
+) -> None:
+    provider, handle, commands = _argv_provider(monkeypatch, background_exec=background_exec)
+    assert provider.exec_takes_argv()
+
+    result = await provider.exec(handle, ("printf", "%s", "a;b $HOME"), cwd="/repo", timeout_s=2, user=user)
+
+    assert (result.return_code, result.stdout) == (0, "a;b $HOME")
+    [(command, opts)] = commands.run_calls
+    # The SDK gets the list itself (it sends a list as execd's `argv`), never a `bash -c` or `su -c` string.
+    assert command == ["printf", "%s", "a;b $HOME"] and type(command) is list
+    assert opts.get("uid") == uid
+    # A background command's execd timer is a backstop, set half the headroom after Gym's own deadline.
+    execd_timeout_s = 2 + provider._operations.command_timeout_headroom_s / 2 if background_exec else 2
+    assert opts["working_directory"] == "/repo" and opts["timeout"] == timedelta(seconds=execd_timeout_s)
+    assert opts.get("background", False) is background_exec
+
+
+@pytest.mark.parametrize(
+    "sdk_sends_argv, user, message",
+    [
+        (True, "agent", "switches to a user name only through su"),
+        (False, None, r"opensandbox>=1\.1\.0"),
+    ],
+)
+async def test_exec_refuses_an_argument_list_it_cannot_send_without_a_shell(
+    monkeypatch: pytest.MonkeyPatch, sdk_sends_argv: bool, user: Any, message: str
+) -> None:
+    provider, handle, commands = _argv_provider(monkeypatch, sdk_sends_argv=sdk_sends_argv)
+    # The capability answer follows the SDK, so AsyncSandbox.exec hands no list to a provider that would refuse all.
+    assert provider.exec_takes_argv() is sdk_sends_argv
+
+    with pytest.raises(SandboxExecArgvUnsupportedError, match=message):
+        await provider.exec(handle, ["id"], user=user)
+
+    assert commands.run_calls == []
+    # Shell text still switches to a user name through su.
+    await provider.exec(handle, "id", user="agent")
+    assert commands.run_calls[0][0] == "su -s /bin/sh -c id agent"
+
+
+@pytest.mark.parametrize(
+    "installed, sends_argv", [("0.1.15", False), ("1.1.0", True), ("1.2.0", True), ("1.1.2.dev20261020", True)]
+)
+def test_sdk_sends_argv_from_the_first_sdk_that_takes_an_argument_list(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, installed: str, sends_argv: bool
+) -> None:
+    monkeypatch.setattr("importlib.metadata.version", lambda name: installed)
+    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.__name__):
+        assert opensandbox_provider._sdk_sends_argv.__wrapped__() is sends_argv
+    # An older SDK is named with the requirement, which the refusal through AsyncSandbox.exec does not carry.
+    requirement_logged = f"opensandbox {installed} cannot send an exec argument list" in caplog.text
+    assert requirement_logged is not sends_argv
+    assert (opensandbox_provider.ARGV_SDK_REQUIREMENT in caplog.text) is not sends_argv
+
+
+def test_sdk_sends_no_argv_without_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("importlib.metadata.version", missing)
+    assert opensandbox_provider._sdk_sends_argv.__wrapped__() is False
 
 
 # execd reports the kill at a command's timeout like any signal death: exit code -1, "signal: killed".
@@ -3063,6 +3185,33 @@ async def test_file_transfer_request_timeout_is_ungraded_provider_loss(tmp_path:
     assert files.write_file.await_count + files.read_bytes_stream.await_count == (1 if operation == "upload" else 4)
     if operation == "download":
         assert path.read_bytes() == b""
+
+
+async def test_upload_retry_restarts_the_stream_from_byte_zero(tmp_path: Path) -> None:
+    class Backend502Error(Exception):
+        status_code = 502
+
+    writes: list[bytes] = []
+
+    async def write_file(target_path: str, data: Any) -> None:
+        assert hasattr(data, "read")
+        if not writes:
+            writes.append(data.read(2))
+            raise Backend502Error("Failed to write file. Status code: 502")
+        writes.append(data.read())
+
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retry_delay_s": 0})
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="upload-retry",
+        provider_name="opensandbox",
+        raw=SimpleNamespace(files=SimpleNamespace(write_file=write_file)),
+    )
+    path = tmp_path / "artifact"
+    path.write_bytes(b"artifact")
+
+    await provider.upload_file(handle, path, "/artifact")
+
+    assert writes == [b"ar", b"artifact"]
 
 
 async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
