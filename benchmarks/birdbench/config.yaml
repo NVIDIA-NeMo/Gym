@@ -26,7 +26,8 @@ prepare_script_args:
 # file prepare() writes for it and the matching prompt (names as in prepare.output_fpath_for). These tables list every
 # accepted value: anything else, and any dialect or split but SQLite dev, fails while the config is resolved, before
 # the cache is looked up, instead of reusing another file. Another dialect or split also changes the server, so
-# eval.sh handles those; it replaces the whole dataset entry, so these tables don't apply to it.
+# eval.sh handles those; it replaces the whole dataset entry, so these tables don't apply to it. When an error says a
+# key under birdbench_prepared_file is not set, the value isn't supported: use a listed one rather than adding the key.
 birdbench_prepared_file:
   prefix_for_dialect_and_split:
     sqlite:

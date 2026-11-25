@@ -92,13 +92,22 @@ def test_default_prepare_script_args_are_dev_sqlite():
 def test_direct_version_and_prompt_format_select_their_file_and_prompt(version, prompt_format):
     # Without eval.sh, `+prepare_script_args.version=...` / `.prompt_format=...` alone must select the file prepare()
     # writes for them (the path `gym eval prepare` checks its output against and looks up in the cache), never the
-    # default's, and the matching prompt.
-    dataset = _gym_dataset(version=version, prompt_format=prompt_format)
-    assert REPO_ROOT / dataset.jsonl_fpath == birdbench_prepare.output_fpath_for(
-        "sqlite", "dev", version, prompt_format
-    )
-    assert str(dataset.prompt_config) == f"benchmarks/birdbench/prompts/{prompt_format}_sqlite.yaml"
-    assert (REPO_ROOT / dataset.prompt_config).is_file()
+    # default's, and the matching prompt. Checked as `gym eval prepare` reads the dataset, and as collation
+    # (`gym eval run`) reads it.
+    config = _gym_config(prepare_script_args={"version": version, "prompt_format": prompt_format})
+    (benchmark,) = datasets_to_prepare(config)
+    (collated,) = [
+        dataset
+        for server in GlobalConfigDictParser().filter_for_server_instance_configs(config)
+        for dataset in server.datasets or []
+        if dataset.name == "birdbench"
+    ]
+    for dataset in (benchmark.dataset, collated):
+        assert REPO_ROOT / dataset.jsonl_fpath == birdbench_prepare.output_fpath_for(
+            "sqlite", "dev", version, prompt_format
+        )
+        assert str(dataset.prompt_config) == f"benchmarks/birdbench/prompts/{prompt_format}_sqlite.yaml"
+        assert (REPO_ROOT / dataset.prompt_config).is_file()
 
 
 def test_the_file_name_tables_list_exactly_the_accepted_values():

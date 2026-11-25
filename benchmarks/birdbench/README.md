@@ -109,7 +109,8 @@ them run on the same 11 SQLite databases from `dev.zip`, and every other option 
 use that version's file, never the default's. Pass the same override to both commands. This holds on SQLite dev only:
 another dialect or split also changes the server, so use eval.sh for those. Setting `prepare_script_args.dialect` or
 `split` directly to anything but `sqlite` and `dev`, or a version or prompt format not listed here, stops while the
-config is resolved, before anything is prepared or reused.
+config is resolved, before anything is prepared or reused. The error says a key under `birdbench_prepared_file` is not
+set: use a listed value rather than adding the key.
 
 ```bash
 gym eval prepare --benchmark birdbench +use_cached_prepared_benchmarks=true +prepare_script_args.version=minidev_20261028
