@@ -40,6 +40,41 @@ def test_chat_preserves_served_text_and_tools(text):
     assert response == original
 
 
+@pytest.mark.parametrize("answer", ["answer <think>literal</think>", None])
+def test_chat_structured_reasoning_is_exact_and_keeps_visible_content_separate(answer):
+    message = {"role": "assistant", "content": answer, "reasoning_content": "private reasoning"}
+    response = {"choices": [{"message": message}]}
+    original = deepcopy(response)
+    items = completion_items(response)
+    expected = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "private reasoning"}]}
+    assert [item["type"] for item in items] == (["reasoning", "message"] if answer else ["reasoning"])
+    assert output_item_fingerprint(items[0]) == output_item_fingerprint(expected)
+    assert output_validation_item(items[0])["summary"] == [{"text": "private reasoning"}]
+    if answer:
+        assert items[1]["content"][0]["text"] == answer
+    assert response == original
+
+
+def test_chat_structured_reasoning_keeps_tool_call_ids():
+    tool_call = {"id": "call-1", "type": "function", "function": {"name": "check", "arguments": "{}"}}
+    items = completion_items(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": "work",
+                        "tool_calls": [tool_call],
+                    }
+                }
+            ]
+        }
+    )
+    assert [item["type"] for item in items] == ["reasoning", "function_call"]
+    assert items[1]["call_id"] == "call-1"
+
+
 def test_native_responses_reasoning_stays_reasoning_and_is_not_ignored():
     reasoning = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "work"}]}
     answer = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}

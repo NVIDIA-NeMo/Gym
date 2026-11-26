@@ -190,6 +190,20 @@ finish. For example, set `openclaw_agent.responses_api_agents.openclaw_agent.mod
 to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and EnvironmentServer episode
 deadline when a task needs more total time; increasing those alone does not raise the model-idle limit.
 
+
+### Retain reasoning across OpenClaw tool calls
+
+OpenClaw 2026.11.5 can replay structured reasoning with the default `thinking: off`. For an OpenClaw
+agent with a Gym vLLM model server, set `requires_reasoning_content_on_assistant_messages: true`.
+This enables OpenClaw's replay capability and requests `reasoning_content` through the
+`x-ng-chat-reasoning-format: structured` header on its Chat Completions requests. The Gym model
+server must have its reasoning parser enabled. Other callers can use the same model server.
+Chat Completions clients that omit the header continue to receive inline thinking.
+
+The model server's `reasoning_field` option controls the assistant history sent to vLLM. The header
+controls the reply Gym sends to OpenClaw. Tool-call ID replay is handled separately in
+[Gym #5379](https://github.com/NVIDIA-NeMo/Gym/pull/5379).
+
 The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64. The task image needs no Python:
 the supervisor and harness runner are Bash scripts. Session setup installs a missing Bash with apt-get or apk
 when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 24.22.3 and OpenClaw are installed under

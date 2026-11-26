@@ -6,6 +6,7 @@
 from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.core import NeMoGymResponseReasoningItem, NeMoGymSummary
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
@@ -48,7 +49,20 @@ def completion_items(response: dict[str, Any]) -> list[dict]:
         converter = ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=False)
         items = []
         for choice in response["choices"]:
-            for output in converter.postprocess_assistant_message_dict(choice["message"]):
+            message = choice["message"]
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                evidence = NeMoGymResponseReasoningItem(
+                    id="",
+                    type="reasoning",
+                    summary=[NeMoGymSummary(type="summary_text", text=reasoning)],
+                ).model_dump(mode="json")
+                evidence.pop("id")
+                items.append(evidence)
+                if not any(message.get(key) for key in ("content", "tool_calls", "refusal")):
+                    # A reasoning-only reply has no empty visible answer to match.
+                    continue
+            for output in converter.postprocess_assistant_message_dict(message):
                 item = output.model_dump(mode="json")
                 if item.get("type") != "function_call":
                     item.pop("id", None)

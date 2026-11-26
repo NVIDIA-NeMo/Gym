@@ -38,6 +38,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.core.chat_reasoning import CHAT_REASONING_FORMAT_HEADER, CHAT_REASONING_FORMAT_STRUCTURED
 from nemo_gym.trajectory import AgentInvocation, ObservationGap
 from responses_api_agents.openclaw_agent.app import (
     OpenClawAgent,
@@ -443,6 +444,23 @@ class TestBuildOpenclawConfig:
         assert provider["baseUrl"] == "http://model/v1"
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
         assert provider["timeoutSeconds"] == 600
+
+    @pytest.mark.parametrize("required", [False, True])
+    def test_model_server_reasoning_replay_is_opt_in(self, required) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            openclaw_version="2026.11.5",
+            requires_reasoning_content_on_assistant_messages=required,
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+        provider = cfg["models"]["providers"]["nemo"]
+        [model] = provider["models"]
+        expected = CHAT_REASONING_FORMAT_STRUCTURED if required else None
+        assert provider.get("headers", {}).get(CHAT_REASONING_FORMAT_HEADER) == expected
+        assert model["compat"]["supportsUsageInStreaming"] is True
+        assert model["compat"].get("requiresReasoningContentOnAssistantMessages") is (True if required else None)
+        assert agent.config.thinking == "off"
 
     def test_explicit_local_provider_timeout_is_preserved(self) -> None:
         agent = _make_agent(

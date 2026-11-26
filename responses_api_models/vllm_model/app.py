@@ -56,6 +56,7 @@ from nemo_gym.core import (
     current_session_key,
     failure_report_for,
 )
+from nemo_gym.core.chat_reasoning import CHAT_REASONING_FORMAT_HEADER, CHAT_REASONING_FORMAT_STRUCTURED
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
@@ -2221,24 +2222,27 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
         self._verify_generation_prefix(body_dict, chat_completion_dict)
         if self.config.uses_reasoning_parser:
-            # See the TODO wrt reasoning_content above
-            reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
-                "reasoning"
-            )
-            if reasoning_content:
-                choice_dict["message"].pop("reasoning_content", None)
-                # See the TODO wrt reasoning_content above
-                choice_dict["message"].pop("reasoning", None)
-
-                if body_dict.get("continue_final_message", False):
-                    # by default, the response of continue_final_message will split into reasoning.
-                    choice_dict["message"]["content"] = reasoning_content + (choice_dict["message"]["content"] or "")
-                else:
-                    # We wrap this here in think tags for Gym's sake and to return a valid OpenAI Chat Completions response.
-                    choice_dict["message"]["content"] = self._converter._wrap_reasoning_in_think_tags(
-                        [reasoning_content]
-                    ) + (choice_dict["message"].get("content") or "")
-
+            # Responses and Messages run through this method before their own conversion.
+            serve_structured_reasoning = request.url.path.endswith("/chat/completions") and request.headers.getlist(
+                CHAT_REASONING_FORMAT_HEADER
+            ) == [CHAT_REASONING_FORMAT_STRUCTURED]
+            choices = chat_completion_dict["choices"] if serve_structured_reasoning else [choice_dict]
+            for choice in choices:
+                message = choice["message"]
+                reasoning_content = message.get("reasoning_content") or message.get("reasoning")
+                if reasoning_content or serve_structured_reasoning:
+                    message.pop("reasoning_content", None)
+                    message.pop("reasoning", None)
+                if reasoning_content:
+                    if body_dict.get("continue_final_message", False):
+                        # The upstream splits reasoning from a continued assistant message.
+                        message["content"] = reasoning_content + (message.get("content") or "")
+                    elif serve_structured_reasoning:
+                        message["reasoning_content"] = reasoning_content
+                    else:
+                        message["content"] = self._converter._wrap_reasoning_in_think_tags([reasoning_content]) + (
+                            message.get("content") or ""
+                        )
         else:
             # See the TODO wrt reasoning_content above
             assert not (choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")), (
