@@ -55,6 +55,8 @@ class SingularityEnvironment(BaseEnvironment):
         singularity_image_cache_dir: Path to cache .sif files
         singularity_no_mount: Comma-separated mount types to suppress
             (default "home,tmp,bind-paths"). Use "" to allow all Singularity mounts.
+        singularity_server_startup_timeout_sec: Seconds to wait for the container to become ready,
+            including the task's setup.sh (default 60).
         workdir: Container working directory override.
     """
 
@@ -68,6 +70,7 @@ class SingularityEnvironment(BaseEnvironment):
         singularity_image_cache_dir: Path | str | None = None,
         singularity_force_pull: bool = False,
         singularity_no_mount: str | None = None,
+        singularity_server_startup_timeout_sec: float = 60,
         workdir: str | None = None,
         *args,
         **kwargs,
@@ -79,6 +82,13 @@ class SingularityEnvironment(BaseEnvironment):
 
         self._force_pull = singularity_force_pull
         self._singularity_no_mount = singularity_no_mount
+        # Covers the task's setup.sh, which runs before the in-container server starts
+        self._server_startup_timeout_sec = float(singularity_server_startup_timeout_sec)
+        if self._server_startup_timeout_sec <= 0:
+            raise ValueError(
+                "singularity_server_startup_timeout_sec must be positive, "
+                f"got {singularity_server_startup_timeout_sec!r}"
+            )
         self._workdir_override = workdir
 
         super().__init__(
@@ -397,7 +407,7 @@ class SingularityEnvironment(BaseEnvironment):
             self._http_client = httpx.AsyncClient(timeout=30.0)
             server_ready = False
 
-            for i in range(60):  # 60 second timeout for server startup
+            for i in range(int(self._server_startup_timeout_sec)):  # one health check per second
                 try:
                     response = await self._http_client.get(f"http://localhost:{self._server_port}/health")
                     if response.status_code == 200:
@@ -435,6 +445,11 @@ class SingularityEnvironment(BaseEnvironment):
                     break
 
                 await asyncio.sleep(1)
+            else:
+                last_error = RuntimeError(
+                    f"Server on port {self._server_port} was not ready within {self._server_startup_timeout_sec:g}s. "
+                    "Raise singularity_server_startup_timeout_sec if the task's setup.sh needs longer."
+                )
 
             if server_ready:
                 return

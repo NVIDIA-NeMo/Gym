@@ -553,7 +553,7 @@ Replace `opencode` with `openclaw` for OpenClaw.
 
 - The rows, the task tools and the deliverables directory work as for Pi, and these are not AA v2 scores either.
   Each harness installs its pinned runtime in the task sandbox at the start of each episode (OpenCode 1.17.11,
-  OpenClaw 2026.6.11 on Node.js 22).
+  OpenClaw 2026.11.5 on Node.js 24.22.3).
 - The model sees the task tools as `gdpval_resources_server_<tool>` in OpenCode and
   `gdpval_resources_server__<tool>` in OpenClaw. Their built-in web tools are off, and the task's `web_search` and
   `fetch_web_page` are provided instead; the sandbox still has egress, so shell commands can reach the web too.
@@ -618,6 +618,8 @@ gym eval run \
 - OpenHands reports a run that reaches its `timeout` as `stop_reason: timeout`, so GDPVal's `agent_timeout` rule
   (which requires `wall_time`) does not apply, as for Codex. A timed-out run that reaches verification without
   submitting is judged as an empty submission, and so is a run that reaches `max_iterations` (250 here).
+- OpenHands stops each task-tool call after 300 seconds, its own fixed limit, so a slower `web_search` or
+  `fetch_web_page` returns a tool error at 300 s; `mcp_tool_timeout_seconds` (300) can only lower it.
 - Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
 
 ## Multi-judge panel

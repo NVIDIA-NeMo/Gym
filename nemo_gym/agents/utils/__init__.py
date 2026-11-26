@@ -8,8 +8,8 @@ process, collects artifacts, and releases the sandbox. The supervisor client
 implements the shell protocol over session control files. All three run on the
 agent server.
 
-Only process_supervisor.sh, harness_runner.sh and install_python_runtime.sh are copied
-from this package into the task sandbox; they need bash, not Python. The supervisor
+Adapters can copy process_supervisor.sh, harness_runner.sh, install_python_runtime.sh,
+and request_gzip.mjs from this package into the task sandbox. The supervisor
 enforces deadlines, stops the harness process group and writes its termination receipt.
 A forced stop also kills the harness's descendants in other groups and processes that
 inherited its marker; processes that had left the harness before the stop, and detached

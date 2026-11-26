@@ -28,7 +28,8 @@ conversion read, so every reader is shared between the two versions:
 
 Anything else (another message type, content item type, tool or compaction status, or a user message's skill text)
 is not translated, and ``translate_store`` returns a description of it so the adapter can report an observation gap
-instead of losing a turn without a trace. The list matches the 2.2.7 schema (``packages/schema/src/session-message.ts``).
+instead of losing a turn without a trace. The list matches the 2.2.7 and 2.3.2 schema
+(``packages/schema/src/session-message.ts``; 2.3.2 adds only the optional ``time.firstToken``).
 """
 
 import json
@@ -339,8 +340,8 @@ def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
     OpenCode 2 numbers each model step of a prompt from 1 and, from the step at the limit on, adds its maximum-steps
     note to the request and sets ``toolChoice: "none"`` (packages/core/src/session/runner/llm.ts). Each step saves
     one assistant message; a compaction runs inside a step and does not count, and the count restarts with the next
-    prompt. Synthetic user messages (a continuation after an interrupted stream) and compaction records do not
-    start a prompt.
+    prompt. Synthetic user messages (a continuation after an interrupted stream on 2.2.7, a subagent's report from
+    2.3.0) and compaction records do not start a prompt.
     """
     if steps is None:
         return False

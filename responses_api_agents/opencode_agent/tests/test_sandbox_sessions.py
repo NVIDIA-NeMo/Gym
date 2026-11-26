@@ -180,6 +180,9 @@ class Sandbox:
             return await self.launch(command=command, **kwargs)
         if "opencode.db-wal" in command:
             return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
+        if "supervisor.pid" in command and "launch.claim" in command:
+            # The check after a launch command raised: this fake never starts a supervisor of its own.
+            return SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
         if command.startswith("{ [ ! -d /tmp/nemo-gym-media/"):
@@ -260,7 +263,6 @@ def setup():
         entrypoint="app.py",
         num_workers=1,
         model_server={"type": "responses_api_models", "name": "policy"},
-        opencode_version="1.17.11",
         resources_server={"type": "resources_servers", "name": "resources"},
         sandbox_provider="unused",
         sandbox_config={},
@@ -289,6 +291,54 @@ def setup():
 
 def active_sessions(agent):
     return {key: record.state for key, record in agent._session_records.items() if record.state is not None}
+
+
+def test_gzip_rejects_local_execution_before_calling_resources(setup):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = True
+    agent = OpenCodeLegacyAgent(config=agent.config, server_client=agent.server_client)
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert (
+            response.json()["detail"]
+            == "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert (
+            run.json()["detail"]
+            == "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+    agent.server_client.post.assert_not_called()
+    sandbox.exec.assert_not_awaited()
+
+
+def test_gzip_rejects_opencode_2_configuration():
+    with pytest.raises(ValidationError, match="OpenCode 2 is unsupported"):
+        OpenCodeAgentConfig(
+            name="opencode",
+            host="localhost",
+            port=8001,
+            entrypoint="app.py",
+            opencode_version="2.2.7",
+            gzip_requests_enabled=True,
+        )
+
+
+def test_gzip_accepts_latest_opencode_version_at_config_validation():
+    config = OpenCodeAgentConfig(
+        name="opencode",
+        host="localhost",
+        port=8001,
+        entrypoint="app.py",
+        opencode_version="latest",
+        gzip_requests_enabled=True,
+    )
+
+    assert config.opencode_version == "latest"
+    assert config.gzip_requests_enabled is True
 
 
 @pytest.mark.parametrize("stage", ["prepare", "install"])
@@ -398,6 +448,23 @@ def count_media_decodes(monkeypatch):
 
     monkeypatch.setattr(MediaFile, "from_data_uri", classmethod(counting))
     return decodes
+
+
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+def test_gzip_plugin_is_staged_and_configured_only_when_enabled(setup, gzip_enabled):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = gzip_enabled
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        directory = sandbox.directory
+        assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
+        assert (f"{directory}/request_gzip_plugin.mjs" in sandbox.files) is gzip_enabled
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        plugin = (Path(directory) / "request_gzip_plugin.mjs").as_uri()
+        assert (plugin in config["plugin"]) is gzip_enabled
 
 
 def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypatch):
@@ -614,7 +681,7 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert body["usage"]["total_tokens"] == 16
         payload = sandbox.params()
         assert payload["prompt"] == "Fix the code"
-        assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
+        assert payload["command"][0].endswith(f"nemo-gym-opencode-runtime-{OPENCODE_VERSION}/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
@@ -2041,7 +2108,7 @@ def test_malformed_later_artifact_keeps_partial_output(setup):
         "/tmp/",
         "/tmp/../tmp/task",
         "/tmp/nemo-gym-opencode-sessions",
-        "/tmp/nemo-gym-opencode-runtime-1.17.11/repo",
+        f"/tmp/nemo-gym-opencode-runtime-{OPENCODE_VERSION}/repo",
     ],
 )
 async def test_adapter_workdir_overlap_is_rejected_before_connection(setup, workdir):

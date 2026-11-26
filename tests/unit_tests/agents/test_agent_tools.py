@@ -28,6 +28,51 @@ def test_inherited_network_preserves_host_network_connectivity(host, expected, m
     assert agent_tools.sandbox_server_url("model") == f"http://{expected}:8000"
 
 
+def _seed_reply(mcp: dict) -> SimpleNamespace:
+    """A /seed_session reply carrying this MCP metadata."""
+    return SimpleNamespace(ok=True, read=AsyncMock(return_value=json.dumps({"mcp": mcp}).encode()))
+
+
+@pytest.mark.parametrize(("listed_as", "key"), [("company", "company"), (None, "store")])
+async def test_a_seeded_entry_is_named_as_its_server_lists_itself(listed_as, key, monkeypatch):
+    """MCP clients name a server's tools by its entry's key, so the key is the name the seed metadata gives the
+    endpoint, else the server's name. The URL is still the server's, and the headers are the seed's."""
+    # Resolves only the server's own name.
+    monkeypatch.setattr(agent_tools, "get_server_url", {"store": "http://10.0.0.3:8000"}.__getitem__)
+    metadata = {"url_path": "/mcp", "headers": {"Authorization": "Bearer scoped"}}
+    if listed_as is not None:
+        metadata["server_name"] = listed_as
+    client = SimpleNamespace(post=AsyncMock(return_value=_seed_reply(metadata)))
+    store = ResourcesServerRef(type="resources_servers", name="store")
+    body = BaseRunRequest(responses_create_params={"input": "x"})
+
+    # Another episode seeds the same server under the same name.
+    for _ in range(2):
+        entries = await agent_tools.seed_mcp_servers(client, [store], body, {"session": "s"}, timeout_s=600)
+        assert entries == {
+            key: {
+                "url": "http://10.0.0.3:8000/mcp",
+                "headers": {"Authorization": "Bearer scoped"},
+                "enabled": True,
+                "timeout": 600000,
+            }
+        }
+    assert client.post.await_args.kwargs["server_name"] == "store"
+    assert client.post.await_args.kwargs["cookies"] == {"session": "s"}
+
+
+async def test_two_tool_servers_listed_under_one_name_are_refused(monkeypatch):
+    monkeypatch.setattr(agent_tools, "get_server_url", lambda name: f"http://{name}:8000")
+    metadata = {"server_name": "company", "headers": {"Authorization": "Bearer scoped"}}
+    client = SimpleNamespace(post=AsyncMock(side_effect=lambda **_: _seed_reply(metadata)))
+    servers = [ResourcesServerRef(type="resources_servers", name=name) for name in ("store", "shop")]
+
+    with pytest.raises(ValueError, match="'store' and 'shop' both list themselves as 'company'"):
+        await agent_tools.seed_mcp_servers(
+            client, servers, BaseRunRequest(responses_create_params={"input": "x"}), {}, timeout_s=600
+        )
+
+
 @pytest.mark.parametrize("reward,masked", [(1, False), (0, True)])
 async def test_failure_zero_rejects_incompatible_verifier(reward, masked):
     original = NeMoGymResponse.model_validate(

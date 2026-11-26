@@ -115,11 +115,26 @@ LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
-_OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+# Codex's final error when a model response ends at its output-token limit (the output cap), a gradable outcome.
+# Codex 0.144.4 and 0.154.0 retry such a response as a stream disconnect and report the first text; Codex 0.163.0
+# does not retry it and reports the second. An error is the output cap only if it equals one of them in full, so
+# a stream disconnect with another cause after the prefix, such as a transport failure, is never taken for it.
+_OUTPUT_LIMIT_ERRORS = (
+    "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+    "Incomplete response returned, reason: max_output_tokens",
+)
 # Characters of Codex stderr kept in the error of an activation that never started a turn.
 _STDERR_TAIL_CHARS = 2000
 # Codex 0.144.4 rejects MCP server names with other characters.
 _CODEX_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+# An exact Codex version names one release; a tag or a range such as `latest` does not.
+_EXACT_CODEX_VERSION = re.compile(r"\d+\.\d+\.\d+")
+# Codex 0.144.4 stops on the `enabled` key of the [agents] table with a configuration error
+# ("expected struct AgentRoleToml in `agents`"), and Codex 0.163.0 accepts the key. No version
+# between the two is verified. CodexAgentConfig refuses agents_enabled for 0.144.4 and for every
+# older version, which is assumed not to know a key that a later version rejects.
+_AGENTS_ENABLED_REJECTED_UP_TO = "0.144.4"
+_AGENTS_ENABLED_VERIFIED_WITH = "0.163.0"
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -283,6 +298,11 @@ def _redact(text: str, values: list[str]) -> str:
 def _codex_mcp_server_name(name: str) -> bool:
     """Whether Codex accepts ``name`` as an MCP server name."""
     return _CODEX_MCP_SERVER_NAME.fullmatch(name) is not None
+
+
+def _version_numbers(version: str) -> tuple[int, ...]:
+    """Split an exact Codex version such as 0.144.4 into its numbers, which compare in release order."""
+    return tuple(int(part) for part in version.split("."))
 
 
 def _toml_key(key: str) -> str:
@@ -614,6 +634,7 @@ _TOOL_HOST_DETAIL_CHARS = 4000
 
 
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).
@@ -676,6 +697,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
     # extra_config, this also applies to sandbox sessions.
     features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
+    # The base config's `model_catalog_json`: a model catalog file that replaces Codex's bundled one, so
+    # a `model` the bundled catalog does not list gets that file's metadata. The file must exist where
+    # Codex runs (in a sandbox session, inside the sandbox); the adapter does not write it. Absolute,
+    # because Codex resolves a relative path against the per-run CODEX_HOME. None leaves the key out.
+    # Unlike extra_config, this also applies to sandbox sessions.
+    model_catalog_json: str | None = Field(default=None, pattern=r"^/")
+    # The `enabled` key of the base config's [agents] table; false removes Codex's subagent tools.
+    # None leaves the table out, so the CLI applies its own default. Refused for a codex_version up to
+    # the newest one known to reject the key (see validate_agents_enabled_version). Unlike extra_config,
+    # this also applies to sandbox sessions.
+    agents_enabled: bool | None = None
     # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
     # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
     # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
@@ -741,6 +773,22 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         """A tool call cannot outlast the Codex run that makes it."""
         if self.mcp_tool_timeout_seconds is not None and self.mcp_tool_timeout_seconds > self.timeout:
             raise ValueError("mcp_tool_timeout_seconds must not exceed timeout, which bounds the whole Codex run")
+        return self
+
+    @model_validator(mode="after")
+    def validate_agents_enabled_version(self) -> "CodexAgentConfig":
+        """Refuse agents_enabled for a codex_version up to the newest one known to reject the [agents] `enabled` key.
+
+        An older version is assumed not to know the key. Only an exact codex_version is compared. Any other
+        value, such as `latest`, is accepted here.
+        """
+        if self.agents_enabled is None or not _EXACT_CODEX_VERSION.fullmatch(self.codex_version):
+            return self
+        if _version_numbers(self.codex_version) <= _version_numbers(_AGENTS_ENABLED_REJECTED_UP_TO):
+            raise ValueError(
+                f"Codex {self.codex_version} does not support `agents_enabled`. Use a compatible version "
+                f"(verified with {_AGENTS_ENABLED_VERIFIED_WITH}) or omit the setting."
+            )
         return self
 
 
@@ -833,6 +881,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(
                     "Codex network_access applies only to a sandbox it creates, not a borrowed one"
                 )
+            # CODEX_* and OPENAI_* variables could redirect Codex's configuration or model calls, and Gym sets
+            # NEMO_GYM_* variables for the harness itself. The refusal lists names only: a value can be a credential.
+            reserved = sorted(
+                name for name in body.sandbox_access.env if name.startswith(("CODEX_", "OPENAI_", "NEMO_GYM_"))
+            )
+            if reserved:
+                raise AgentSeedRejectedError(
+                    "Codex does not accept SandboxAccess.env variables named CODEX_*, OPENAI_* or NEMO_GYM_*: "
+                    + ", ".join(reserved)
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in PurePosixPath(workdir).parts:
@@ -865,7 +923,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             )
         if self.config.model_server is None:
             raise HTTPException(422, "Codex in the task sandbox requires a sandbox-reachable Gym model_server")
-        if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
+        if not self.config.codex_version or not _EXACT_CODEX_VERSION.fullmatch(self.config.codex_version):
             raise HTTPException(422, "Codex in the task sandbox requires an exact codex_version, for example 0.144.4")
         if self.config.codex_version != TESTED_CODEX_VERSION:
             LOG.warning(
@@ -1163,15 +1221,19 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
+        access = state.request.sandbox_access
         payload = {
             "directory": state.session.session_dir,
             "command": command,
             "model_base_url": base_url,
+            "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "invocation_id": invocation_id,
             "timeout": timeout,
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
+                # SandboxAccess.env; the seed refuses one that holds a CODEX_*, OPENAI_* or NEMO_GYM_* variable.
+                **(access.env if access else {}),
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
@@ -1266,7 +1328,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         errors = usage.get("errors") or []
         output_limited = (
             bool(errors)
-            and all(message == _OUTPUT_LIMIT_ERROR for message in errors)
+            and all(message in _OUTPUT_LIMIT_ERRORS for message in errors)
             and cleanup is not None
             and not cleanup["error"]
             and failure is None
@@ -1729,10 +1791,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
         model = self._effective_model()
         if model:
             config["model"] = model
-        for name in ("model_context_window", "model_auto_compact_token_limit"):
+        for name in ("model_context_window", "model_auto_compact_token_limit", "model_catalog_json"):
             value = getattr(self.config, name)
             if value is not None:
                 config[name] = value
+        if self.config.agents_enabled is not None:
+            config["agents"] = {"enabled": self.config.agents_enabled}
         if self.config.reasoning_effort:
             config["model_reasoning_effort"] = self.config.reasoning_effort
         if developer_instructions:
@@ -1948,6 +2012,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -2050,6 +2118,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
             raise AgentSessionConflictError("Use the agent session responses and close routes")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:
