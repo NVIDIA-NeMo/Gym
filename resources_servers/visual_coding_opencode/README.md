@@ -49,14 +49,36 @@ Server opens an agent session, sends the task and closes the session.
 - The images that `read` returns come between model calls. On NeMo RL's single controller the vLLM worker stages
   them, so training sees them. Gym's local capture records them only with #5837. Saved rollouts keep the prompt image
   in `responses_create_params`, but not the images that `read` returns: their tool outputs keep only text.
-- The pairing is OpenCode-only: the instruction names OpenCode's tools, the benchmarks pair with `opencode_agent`, and
-  the sandbox image ships only OpenCode. A Pi pairing is a follow-up.
+- OpenCode is this server's own pairing: the instruction names OpenCode's tools, the benchmarks pair with
+  `opencode_agent`, and the sandbox image ships only OpenCode. `configs/multiharness.yaml` adds Pi, Codex, Claude
+  Code and OpenClaw (see "Other harnesses"), and their rows keep the same instruction.
+
+## Sandbox image
+
+Each task runs OpenCode in an OpenSandbox sandbox started from this image. Build it from `sandbox_image/` for the
+architecture of the OpenSandbox nodes, push it to a registry that the OpenSandbox server can pull from, and set
+`VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it:
+
+```bash
+docker build --platform linux/amd64 -t <registry>/visual-coding-opencode-sandbox:<tag> \
+    resources_servers/visual_coding_opencode/sandbox_image
+docker push <registry>/visual-coding-opencode-sandbox:<tag>
+export VISUAL_CODING_OPENCODE_SANDBOX_IMAGE=<registry>/visual-coding-opencode-sandbox:<tag>
+```
+
+The build context is `sandbox_image/`, not the repository root. The image holds the Python toolkit, OpenCode at
+`/opt/opencode/bin/opencode` and OpenCode's plugin dependencies, built from the lockfile in `sandbox_image/opencode/`.
+The sandbox can reach only the policy model server, so everything the agent runs must be in the image.
+
+The Dockerfile checks the SHA-256 of the OpenCode binary and of the plugin archive during the build, so a build that
+succeeds has the expected files. When you change the OpenCode version or the lockfile, update those digests in the
+Dockerfile.
 
 ## Run
 
 The config needs the following:
 
-1. Build the sandbox image from `sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. The
+1. Build the sandbox image (see "Sandbox image") and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. The
    image has the Python toolkit, OpenCode under `/opt/opencode/bin` and OpenCode's plugin dependencies, which the
    config pins by SHA-256. The plugin dependencies come from the lockfile in `sandbox_image/opencode/`, a copy of
    `benchmarks/agentic_if/opencode/`.
@@ -108,3 +130,28 @@ them and saving them as PNG keeps every pixel.
 last two are BabyVision tasks 4624 (Spatial Perception, Count 3D blocks) and 487 (Visual Pattern Recognition, Logic
 Patterns), taken from the same `UnipatAI/BabyVision` revision and written in `prepare.py`'s format.
 `data/example_rollouts.jsonl` holds one OpenCode rollout of each row.
+
+## Other harnesses
+
+`configs/multiharness.yaml` composes the same resources server with Pi, Codex, Claude Code and OpenClaw
+beside OpenCode, each with its own `single_agent_turn_legacy` Environment Server, as the CAD recipe does. It
+changes no shared code and no other task's agents.
+
+Prepare each row for its harness:
+
+```bash
+python resources_servers/visual_coding_opencode/prepare_multiharness.py rows.jsonl pi.jsonl --harness pi
+python resources_servers/visual_coding_opencode/prepare_multiharness.py rows.jsonl claude.jsonl --harness claude_code --file-input
+```
+
+- A row's images are written into the lent sandbox as `/workspace/input-<i>.<ext>` (`input_images`), so a harness's Python
+  shell can read the pixels.
+- OpenCode, Pi, Codex and OpenClaw keep the inline image in the prompt. Claude Code takes only text in its prompt, so
+  `--file-input` replaces the image with those paths.
+- The lent sandbox reaches only the policy model (`sandbox_network_access: model_only`), so it cannot download a
+  runtime. Build an image from `sandbox_image/Dockerfile` that also holds the Pi, Codex and OpenClaw runtimes. Lay
+  each one out with its agent's `install_<harness>_runtime.sh`, and set that agent's `sandbox_runtime_dir` to it.
+  Claude Code needs nothing in the image: the agent host downloads the pinned binary and uploads it to the sandbox.
+- Do not blend this recipe with a config that edits a stock agent block, such as `benchmarks/hle/pi.yaml`. In either
+  order, `visual_coding_pi_agent` takes HLE's Pi settings. Loaded after HLE, this recipe also resets the Pi version,
+  model and timeout of HLE's own agent.

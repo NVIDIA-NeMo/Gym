@@ -3,6 +3,7 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/circle_click/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
@@ -16,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 111.6,
-        "Min": 111.0,
-        "Max": 114.0,
-        "Standard deviation": 1.34
+        "Average": 157.6,
+        "Min": 154.0,
+        "Max": 160.0,
+        "Standard deviation": 2.51
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -36,7 +37,7 @@
         "Standard deviation": 0.0
     },
     "target_color": {
-        "unique_count": 5,
+        "unique_count": 4,
         "total_count": 5
     }
 }

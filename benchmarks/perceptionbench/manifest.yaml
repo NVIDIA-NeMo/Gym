@@ -1,0 +1,30 @@
+name: perceptionbench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: PerceptionBench short-answer VQA across ten atomic visual-perception capabilities
+  (3,000 items), graded 0/1 by an LLM judge against reference answers.
+modality: image
+licensing: Apache-2.0 AND CC-BY-NC-4.0
+authors:
+- hk1510
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: perceptionbench
+agent_server: simple_agent
+datasets:
+- name: perceptionbench
+  type: benchmark
+  jsonl_fpath: benchmarks/perceptionbench/data/perceptionbench_benchmark.jsonl
+  prepare_script: benchmarks/perceptionbench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: train
+prompt_source: prepared
+lifecycle: active

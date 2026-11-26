@@ -15,6 +15,7 @@
 # limitations under the License.
 import asyncio
 import base64
+import errno
 import glob
 import hashlib
 import importlib.util
@@ -56,6 +57,7 @@ from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
+    ConfigError,
     ModelServerRef,
     get_first_server_config_dict,
     get_global_config_dict,
@@ -3119,6 +3121,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # `results_dir` so runs can point it at a shared filesystem. The key is
         # absent only for hand-built config dicts that bypassed the parser.
         global_config_dict = get_global_config_dict()
+        # The agent script exports the whole config as one environment variable inside the agent's container, and
+        # Linux refuses to start a program with a variable over 32 memory pages. Every rollout would then end
+        # without a patch and score 0.0, so the server stops here instead.
+        config_dict_yaml = OmegaConf.to_yaml(global_config_dict)
+        try:
+            Popen(["/bin/sh", "-c", ":"], env={"PATH": os.defpath, "NEMO_GYM_CONFIG_DICT": config_dict_yaml}).wait()
+        except OSError as error:
+            if error.errno != errno.E2BIG:
+                raise
+            raise ConfigError(
+                f"The config is {len(config_dict_yaml.encode()):,} bytes, too long for the environment variable that "
+                "swe_agents exports into its agent container. Run swe_agents with a smaller config."
+            ) from error
         configured_results_root = global_config_dict.get(RESULTS_DIR_KEY_NAME)
         results_root = Path(configured_results_root) if configured_results_root else RESULTS_DIR
         base_results_dir = results_root / f"swebench_results_{run_session_id}"
@@ -3141,7 +3156,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
             base_results_dir=base_results_dir,
-            ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(global_config_dict)),
+            ng_global_config_dict_str=shlex.quote(config_dict_yaml),
             model_server_name=self.config.model_server.name,
             model_server_base_url=f"http://{model_server_config.host}:{model_server_config.port}",
             openhands_setup_dir=openhands_setup_dir,

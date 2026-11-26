@@ -47,7 +47,7 @@ class _RecordingAsyncSandbox:
     async def exec(self, *args, **kwargs) -> None:
         return None
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout_s: float | None = None) -> None:
         return None
 
 

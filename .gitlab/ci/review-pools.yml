@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+.review-pools-trigger:
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "trigger" &&
+        $CI_COMMIT_BRANCH == "nv-internal-main" &&
+        $CI_COMMIT_REF_PROTECTED == "true" &&
+        $TRIGGER_PAYLOAD
+
+gym-review-pools-prepare:
+  extends: .review-pools-trigger
+  stage: test
+  allow_failure: true
+  image: python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+  variables:
+    GIT_DEPTH: "1"
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - python3 .gitlab/ci/prepare_review_pools.py "$TRIGGER_PAYLOAD" review-pools-child.yml
+  artifacts:
+    paths:
+      - review-pools-child.yml
+    expire_in: 1 day
+
+gym-review-pools:
+  extends: .review-pools-trigger
+  stage: report
+  needs: [gym-review-pools-prepare]
+  allow_failure: true
+  trigger:
+    include:
+      - artifact: review-pools-child.yml
+        job: gym-review-pools-prepare
+    strategy: depend
+    forward:
+      yaml_variables: false
+      pipeline_variables: false

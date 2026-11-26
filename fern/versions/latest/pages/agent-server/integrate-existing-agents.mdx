@@ -23,7 +23,7 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | Pi (`pi_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Declared | Declared | Yes |
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Off by default (`token_id_capture`) | Declared | Declared | Yes |
 | Kilo (`kilocode_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Declared | Not declared | With `--agent kilocode_agent/kilocode_sandboxed` and `++use_absolute_ip=true` |
-| OpenCode (`opencode_agent`: OpenCode 1.17.11, or 2.2.7 with `opencode_version: "2.2.7"`) | Chat Completions | MCP only | Off by default; the session path is evaluation only | Not declared | Declared | Yes |
+| OpenCode (`opencode_agent`: OpenCode 1.19.6, or 2.3.2 with `opencode_version: "2.3.2"`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Not declared | Declared | Yes |
 | OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Off by default (`token_id_capture`) | Not declared | Declared | Yes |
 | WildClawBench native bridge (`wildclawbench_agent`) | Chat Completions | None; required grants and borrowed sandboxes rejected | Not captured; evaluation only | Not declared | Not declared | No; pinned native WildClawBench pairing only |
 | Cline (`cline_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Not declared | Not validated |
@@ -329,6 +329,13 @@ retries, skipped indices, and overlapping new activations fail. The existing
 `metadata.agent_timeout_sec` sets the per-activation budget, including preparation,
 queueing and staging. Setup and cleanup retain their separate bounds.
 
+`simple_agent` also resumes its session, without a sandbox: it keeps the conversation in the
+session and sends each activation's input after it. The first activation's settings (tools,
+tool choice, sampling and the rest) hold for the session, and a later activation that changes
+one gets HTTP 422. `max_steps` bounds each activation. The close returns the trajectory of
+every activation. Under checkpointing, the session restarts. A subclass of `simple_agent` supports continuation only when it sets
+`continuation_supported` itself.
+
 Adapters that support continuation override `_agent_continuation_capabilities()` to return
 the supported mode and observations, implement `_validate_agent_activation()` before
 binding an index, `_activate_agent_session_state()` for execution, and
@@ -352,6 +359,39 @@ carry only new output, usage and evidence; close supplies the cumulative record.
 termination receipt fails the activation and skips verification; close releases
 the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
 the connection remain retryable.
+
+## OpenCode partial-rollout checkpoints
+
+With checkpointing on (the top-level `checkpoint` block sets `enabled: true`), an `opencode_agent`
+session with one activation in a borrowed sandbox takes part in partial-rollout checkpoints. At a
+checkpoint the activation parks and OpenCode's processes are paused in place with `SIGSTOP`, then
+continued with `SIGCONT`. The Resources Server snapshots the sandbox. Two agent settings apply:
+
+| Setting | Default | Constraint |
+| --- | --- | --- |
+| `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on storage the sandbox snapshot covers. The saved conversation lives here; a restore that does not find it starts the task afresh. |
+| `checkpoint_pause_allowance_seconds` | `3600` | Bounds the time a launch spends paused. Size it to cover the longest checkpoint commit. |
+
+- **Pause limits.** Paused time does not count against the agent's `timeout`. A launch paused for
+  longer than the allowance fails the execution. One pause that lasts longer than the allowance
+  makes the process supervisor end OpenCode as at its time limit, so OpenCode is not left paused
+  if the Agent Server dies during a checkpoint.
+- **Clocks.** A pause stops OpenCode's processes, not their clocks. A tool that runs across a
+  pause can hit its own timeout when OpenCode continues. Model calls are not affected.
+- **Pause and continue versus crash recovery.** Pause and continue keep OpenCode's processes. If a
+  pause is not confirmed, OpenCode is stopped and relaunched after the checkpoint. After a crash no
+  process is kept: the restore forks the sandbox snapshot, the Environment Server seeds the session
+  again, and the agent re-binds the session to the fork. A re-sent activation gets the reply the
+  session already gave if it is the same request, and otherwise relaunches OpenCode. A relaunch
+  reprompts the saved conversation without adding a user turn when it starts with the task's
+  prompt and the model answered at least once. Otherwise it sets the saved conversation aside and
+  starts the task afresh.
+- **Restart-only sessions.** Sandboxes the agent owns, multi-turn continuation sessions, sessions
+  that continue an imported conversation (`session_import_path`), and OpenCode 2 sessions start
+  over after a crash.
+
+See [Partial-rollout checkpoints](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md#partial-rollout-checkpoints)
+in the `opencode_agent` README for the relaunch rules, interrupted tool calls and the reply metadata.
 
 ## NOOA worker checkpoints
 
@@ -384,6 +424,59 @@ Existing agents may come with predefined tools, allowing you to leverage them di
 - To get Gym's models, tools, sandboxes, and observability, write an adapter with [Add or Update a Harness](/main/agent-server/add-or-update-a-harness). It also describes the [session contract](/main/agent-server/add-or-update-a-harness#agent-server-and-environment-server) that an adapter implements.
 
 See [Choose a Path](/main/agent-server#choose-a-path) to compare the options.
+
+## Training with tool rewards
+
+Use `string_match_tool_rewards`, `mcqa_tool_rewards` or `math_tool_rewards` to
+combine the standalone grader (`string_match`, `mcqa` or `math_with_judge`) with optional tool rewards. Their dataset schemas and
+grading behavior match the corresponding standalone graders. Enable
+`forward_agent_evidence: true` on the paired environment so the wrapper receives
+Gym's canonical tool-execution observations.
+
+The default shell name is `bash`. For a harness that calls its shell tool `shell`,
+configure the resources server with:
+
+```yaml
+tool_rewards:
+  shell_tool_name: shell
+```
+
+To use one reward configuration with several shell tool names:
+
+```yaml
+tool_rewards:
+  shell_tool_names: [terminal, bash, shell, exec, exec_command]
+  invalid_tool_call_names: null
+```
+
+Set either `shell_tool_name` or a non-null `shell_tool_names` list; setting both
+is rejected. The list must be nonempty and contain nonempty names. An omitted or
+`null` list retains the single-name setting and its
+default of `bash`. All selected names share one shell-call count and success-bonus
+schedule, including the existing `correct_bash_call_penalties` schedule. Duplicate
+comparison retains the tool name: identical arguments sent to different tools are
+not treated as duplicate calls.
+
+When omitted, `invalid_tool_call_names` defaults to the configured shell names.
+An explicit list selects tools eligible for failure penalties; `null` includes all
+supported function tools and `[]` disables failure penalties. `null` penalizes
+failed calls, not every call, and the existing correctness gates still apply.
+These settings control scoring; they do not enable tools in the harness.
+
+A nonzero shell exit must be reported as a failed tool observation.
+The configured shell names control shell counting, duplicate normalization and
+success bonuses; they do not infer exit status from tool output. Changing tool names does
+not supply missing execution evidence. The historical OpenCode and local Pi CLI
+smoke reports cover single-shell settings. The Pi smoke registered its shell as
+`shell` and checked failure filtering and call-count penalties; it does not validate
+Pi sandbox sessions or the plural setting.
+
+These components replace `opencode_string_match_tool_rewards`,
+`opencode_mcqa_tool_rewards` and `opencode_math_tool_rewards`. Update component
+keys, imports and config paths. Keep logical server-instance names unchanged to
+preserve environment bindings. The `opencode_*_tool_rewards` component paths are removed. Reward
+defaults and saved reward fields such as `opencode_tool_reward` and
+`bash_call_count` are unchanged.
 
 <Cards>
 

@@ -37,6 +37,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.app import (
     GROUP_ATTEMPT_KEY_NAME,
@@ -855,6 +856,112 @@ class TestGenRMCompareResourcesServer:
         first_waiter.cancel()
         await asyncio.gather(first_waiter, return_exceptions=True)
 
+    @pytest.mark.parametrize("attempt", [0, 1])
+    async def test_group_rejects_changed_length_coefficients(self, config, attempt):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        first = self._verify_request(0, group_id="immutable")
+        waiter = asyncio.create_task(server.verify(request_with_session(), first))
+        await asyncio.sleep(0)
+        different = self._verify_request(1, group_id="immutable", group_attempt=attempt).model_copy(
+            update={"group_answer_length_penalty_coeff": 0.12}
+        )
+        try:
+            with pytest.raises(HTTPException, match="length coefficients") as error:
+                await server.verify(request_with_session(), different)
+            assert error.value.status_code == 409
+        finally:
+            await server.aclose()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    @pytest.mark.parametrize("mode", ["rollout_cohort", "fixed_baseline"])
+    async def test_verify_applies_group_coefficients_to_rewards(self, config, mode):
+        config = config.model_copy(
+            update={
+                "comparison_mode": mode,
+                "num_rollouts_per_prompt": 2,
+                "group_answer_length_penalty_coeff": 0.06,
+            }
+        )
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5) * 2 + (-1.0,) * 3 + (0.0, 0.0))
+
+        def request(group, index, coefficient):
+            body = self._verify_request(index, group_id=group)
+            body.responses_create_params.metadata = {"baseline_response": "baseline"}
+            body.response.output = [
+                NeMoGymResponseOutputMessage(
+                    id=f"message-{index}",
+                    status="completed",
+                    role="assistant",
+                    content=[NeMoGymResponseOutputText(text=("long " * 40) if index else "short")],
+                )
+            ]
+            return body.model_copy(update={"group_answer_length_penalty_coeff": coefficient})
+
+        zero_short, zero_long, adjusted_short, adjusted_long = await asyncio.gather(
+            *(
+                server.verify(request_with_session(), request(group, index, coefficient))
+                for group, coefficient in (("zero", 0.0), ("adjusted", 0.2))
+                for index in range(2)
+            )
+        )
+        assert zero_short.reward_length_adjustment == zero_long.reward_length_adjustment == 0
+        assert zero_short.group_answer_length_penalty_coeff == zero_long.group_answer_length_penalty_coeff == 0
+        assert server._latest_group_attempts["zero"].prompt_digest.endswith(":length_coefficients:0.0:0.0")
+        assert adjusted_short.reward > adjusted_long.reward
+        assert (
+            adjusted_short.group_answer_length_penalty_coeff == adjusted_long.group_answer_length_penalty_coeff == 0.2
+        )
+
+    async def test_verify_applies_group_reasoning_coefficient(self, config):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2, "group_reasoning_length_penalty_coeff": 0.06})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5) * 2 + (-1.0,) * 3 + (0.0, 0.0))
+
+        def request(group, index, coefficient):
+            body = self._verify_request(index, group_id=group)
+            body.response.output = [
+                NeMoGymResponseReasoningItem(
+                    id=f"reasoning-{index}",
+                    summary=[NeMoGymSummary(text=("think " * 40) if index else "think", type="summary_text")],
+                ),
+                NeMoGymResponseOutputMessage(
+                    id=f"message-{index}",
+                    status="completed",
+                    role="assistant",
+                    content=[NeMoGymResponseOutputText(text="same answer")],
+                ),
+            ]
+            return body.model_copy(update={"group_reasoning_length_penalty_coeff": coefficient})
+
+        zero_short, zero_long, adjusted_short, adjusted_long = await asyncio.gather(
+            *(
+                server.verify(request_with_session(), request(group, index, coefficient))
+                for group, coefficient in (("zero", 0.0), ("adjusted", 0.2))
+                for index in range(2)
+            )
+        )
+        assert zero_short.reward_length_adjustment == zero_long.reward_length_adjustment == 0
+        assert adjusted_short.reward > adjusted_long.reward
+        assert adjusted_long.group_reasoning_length_penalty_coeff == 0.2
+        assert adjusted_long.group_answer_length_penalty_coeff == 0.0
+        with pytest.raises(HTTPException, match="length coefficients"):
+            await server.verify(request_with_session(), request("adjusted", 0, 0.3))
+
+    async def test_singleton_cohort_rejects_overrides_and_keeps_static_reward(self, config):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 1})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        body = self._verify_request(0)
+        result = await server.verify(request_with_session(), body)
+        assert result.reward == config.default_score
+        assert "group_answer_length_penalty_coeff" not in result.model_dump()
+        explicit_zero = body.model_copy(update={"group_answer_length_penalty_coeff": 0.0})
+        with pytest.raises(HTTPException, match="at least two trainable rollouts") as error:
+            await server.verify(request_with_session(), explicit_zero)
+        assert error.value.status_code == 422
+        server.server_client.post.assert_not_called()
+
     async def test_prompt_mismatch_in_group_attempt_is_rejected(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
@@ -1105,6 +1212,12 @@ class TestFixedBaseline:
             rollout_index=0,
         )
 
+        override = request.model_copy(update={"group_answer_length_penalty_coeff": 0.2})
+        with pytest.raises(HTTPException, match="at least two trainable rollouts") as error:
+            await server.verify(request_with_session(), override)
+        assert error.value.status_code == 422
+        server._run_single_comparison.assert_not_awaited()
+
         result = await server.verify(request_with_session(), request)
 
         assert result.reward == 5.0
@@ -1236,6 +1349,124 @@ class TestRunSingleComparison:
     def _get_sent_body(self, mock_server_client):
         call_kwargs = mock_server_client.post.call_args.kwargs
         return call_kwargs["json"]
+
+    async def test_verify_sends_the_image_in_conversation_order(self):
+        server, client = self._make_server()
+        server.config.num_rollouts_per_prompt = 2
+        messages = [
+            {
+                "role": "assistant",
+                "type": "message",
+                "content": [
+                    {"type": "input_text", "text": "Send a picture."},
+                    {"type": "input_image", "image_url": "https://example.invalid/reference.png", "detail": "auto"},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Here it is: "},
+                    {"type": "input_image", "image_url": "https://example.invalid/image.png", "detail": "auto"},
+                    {"type": "input_text", "text": "What do you see?"},
+                ],
+            },
+        ]
+        params = NeMoGymResponseCreateParamsNonStreaming(input=messages)
+        await asyncio.gather(
+            *(
+                server.verify(
+                    request_with_session(),
+                    TestGenRMCompareResourcesServer._verify_request(index, group_id="image").model_copy(
+                        update={"responses_create_params": params}
+                    ),
+                )
+                for index in range(2)
+            )
+        )
+        sent = self._get_sent_body(client)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
+        converted = converter.responses_to_chat_completion_create_params(sent).messages
+        assert converted[0]["role"] == "assistant"
+        assert converted[0]["content"] == "Send a picture."
+        assert converted[1]["role"] == "user"
+        assert converted[1]["content"] == [
+            {"type": "text", "text": "Here it is: "},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/image.png", "detail": "auto"}},
+            {"type": "text", "text": "What do you see?"},
+        ]
+
+    def test_user_media_message_normalizes_output_text(self):
+        image = {"type": "input_image", "image_url": "https://example.invalid/image.png", "detail": "auto"}
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "output_text", "text": "See this:"},
+                    image,
+                    {"type": "output_text"},
+                ],
+            }
+        ]
+        assert _input_to_conversation_history(messages) == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "See this:"},
+                    image,
+                    {"type": "input_text", "text": ""},
+                ],
+            }
+        ]
+
+    @pytest.mark.parametrize("use_principle", [False, True])
+    async def test_verify_uses_selected_rubric(self, use_principle):
+        server, client = self._make_server(use_principle=use_principle)
+        server.config.score_source = "rubric_mean"
+        server.config.default_rubric_ids = (1,)
+        server.config.num_rollouts_per_prompt = 2
+        answer = {
+            "rubric_evaluations": [{"rubric_id": 2 if use_principle else 1, "score_1": 5, "score_2": 5, "ranking": 3}],
+            "overall": {"score_1": 2, "score_2": 5, "ranking": 6},
+        }
+        client.post.return_value = self._http_response(self._make_response_obj(json.dumps(answer)))
+
+        requests = [
+            TestGenRMCompareResourcesServer._verify_request(index, group_id="rubric").model_copy(
+                update={"principle": "Be concise.", "expected_rubric_ids": (2,)}
+            )
+            for index in range(2)
+        ]
+        if not use_principle:
+            # The preprocessed row and the original row have the same effective rubric.
+            requests[1] = requests[1].model_copy(update={"principle": None, "expected_rubric_ids": (1,)})
+        results = await asyncio.gather(*(server.verify(request_with_session(), request) for request in requests))
+
+        metadata = self._get_sent_body(client).metadata
+        assert metadata.get("principle") == ("Be concise." if use_principle else None)
+        assert all(result.genrm_rubric_parse_failure_rate_per_group == 0 for result in results)
+        assert all(result.reward_score_raw == 5.0 for result in results)
+
+    @pytest.mark.parametrize("use_principle", [False, True])
+    async def test_compare_uses_selected_rubric(self, use_principle):
+        server, client = self._make_server(use_principle=use_principle)
+        server.config.score_source = "rubric_mean"
+        server.config.default_rubric_ids = (1,)
+        server.config.genrm_parse_retry_sleep_s = 0
+        answer = {
+            "rubric_evaluations": [{"rubric_id": 2 if use_principle else 1, "score_1": 5, "score_2": 1, "ranking": 2}],
+            "overall": {"score_1": 1, "score_2": 5, "ranking": 6},
+        }
+        client.post.return_value = self._http_response(self._make_response_obj(json.dumps(answer)))
+        result = await server.compare(
+            GenRMCompareRequest(
+                conversation_history=[{"role": "user", "content": "hello"}],
+                response_objs=[self._make_response_obj("a"), self._make_response_obj("b")],
+                principle="Be concise.",
+                expected_rubric_ids=(2,),
+            )
+        )
+        assert result.metrics["genrm_rubric_parse_failure_rate_per_group"] == 0
+        assert {item["score_1"] for item in result.comparison_results} == {5.0}
 
     def test_responses_passed_via_metadata_not_input(self):
         """response_1 and response_2 are sent in metadata, not appended to input."""

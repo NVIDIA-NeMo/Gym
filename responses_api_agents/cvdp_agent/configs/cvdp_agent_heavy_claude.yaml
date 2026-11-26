@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Heavy tasks use full repository snapshots prepared by scripts/prepare_heavy.py.
+config_paths:
+  - resources_servers/cvdp/configs/cvdp.yaml
+  - responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_claude.yaml
+
+cvdp:
+  resources_servers:
+    cvdp:
+      prepared_repository_dir: resources_servers/cvdp/data/heavy_workspaces
+
+cvdp_agent_generic_claude:
+  responses_api_agents:
+    cvdp_agent:
+      prepared_repository_dir: resources_servers/cvdp/data/heavy_workspaces
+      timeout: 1920
+      agent_kwargs:
+        timeout: 1800
+        max_turns: 60
+      datasets:
+        - name: validation
+          type: validation
+          jsonl_fpath: resources_servers/cvdp/data/cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial_gym.jsonl
+          # Dataset text: CC BY 4.0; project code retains upstream LICENSE/NOTICE terms.
+          license: Creative Commons Attribution 4.0 International
+          num_repeats: 1

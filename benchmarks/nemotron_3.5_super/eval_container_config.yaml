@@ -53,7 +53,14 @@ policy_model_name: dummy
 genrm_model:
   responses_api_models:
     openai_model:
+      _delete_key: extra_body
       max_concurrent_requests: 16
+
+omniscience_omniscience_resources_server:
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        max_output_tokens: 2048
 
 policy_model:
   responses_api_models:

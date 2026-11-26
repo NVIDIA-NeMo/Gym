@@ -14,15 +14,11 @@ name: Suggest Reviewers
 # unreviewed. _suggest_reviewers.yml resolves the real PR number/base/head
 # sha from this branch name via nv-gha-runners/get-pr-info.
 #
-# This is the Python-implementation variant of this workflow (see
-# NVIDIA-NeMo/Gym#2665 for the JS/actions-github-script version). Same
-# behavior, same security properties -- the reusable workflow it calls has
-# no JS anywhere in it.
-#
 # Implementation lives in NVIDIA-NeMo/FW-CI-templates so any NeMo repo with a
 # CODEOWNERS file can reuse it the same way. See that repo's
 # .github/workflows/_suggest_reviewers.yml and .github/scripts/
-# codeowners_suggestions.py (+ its unit tests) for the matching logic.
+# codeowners_suggestions.py (+ its unit tests) for the shared matching logic.
+# Python handles review requests; the pinned micromatch helper resolves globs.
 
 # Manual runs: dispatch this workflow from main with a PR number to (re)suggest
 # reviewers on an already-open PR, e.g.
@@ -50,13 +46,10 @@ permissions:
 
 jobs:
   suggest-reviewers:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@5d472fb485ffe334332f0e95f6f69bed650f70a0 # v1.16.1
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@b6b4df4160277e1048091f972eda0c51319bc845
     with:
-      workflow_ref: 5d472fb485ffe334332f0e95f6f69bed650f70a0  # pragma: allowlist secret
       pr_number: ${{ inputs.pr_number }}
-      # nemo-automation-bot -- same App community-bot.yml uses -- confirmed
-      # working live for team-reviewer resolution. No PAT needed.
-      app-id: ${{ vars.BOT_ID }}
+      app-id: ${{ vars.GYM_PR_APP_ID }}
     secrets:
-      BOT_KEY: ${{ secrets.BOT_KEY }}
+      BOT_KEY: ${{ secrets.GYM_PR_APP_PRIVATE_KEY }}
       SLACK_TEAM_CHANNEL_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}

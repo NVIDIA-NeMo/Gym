@@ -3,6 +3,7 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/bunsenbench_chemistry_mcq/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
@@ -16,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 24.8,
+        "Average": 24.4,
         "Min": 22.0,
         "Max": 27.0,
-        "Standard deviation": 1.79
+        "Standard deviation": 1.95
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -35,12 +36,12 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
-    "uuid": {
-        "unique_count": 5,
-        "total_count": 5
-    },
     "expected_answer": {
         "unique_count": 2,
+        "total_count": 5
+    },
+    "uuid": {
+        "unique_count": 5,
         "total_count": 5
     }
 }

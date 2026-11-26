@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate document views and materialize PDFs from an operator-mounted bucket."""
+"""Build the sandbox manifest for the selected PDFs in an operator-mounted bucket."""
 
-import hashlib
 import json
 from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from resources_servers.pdf_analyst_qa.task_data import DocumentRecord
 
 
 class MountedDocumentsConfig(BaseModel):
@@ -35,62 +36,18 @@ class MountedDocumentsConfig(BaseModel):
         return "/".join(parts)
 
 
-class DocumentRecord(BaseModel):
-    """Selected document ID and sandbox path; other dataset metadata is ignored."""
-
-    document_id: str = Field(min_length=1)
-    relative_path: str = Field(min_length=1)
-
-    @field_validator("document_id")
-    @classmethod
-    def safe_id(cls, value: str) -> str:
-        if value in {".", ".."} or any(char in value for char in ("/", "\\", "\x00")):
-            raise ValueError("invalid document ID")
-        return value
-
-    @field_validator("relative_path")
-    @classmethod
-    def safe_path(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if path.is_absolute() or ".." in value.split("/") or path.suffix.lower() != ".pdf":
-            raise ValueError("document paths must be relative PDF paths")
-        if "\\" in value or "\x00" in value:
-            raise ValueError("invalid document path")
-        return str(path)
-
-
-def workspace_documents(root: Path, workspace_id: str) -> list[DocumentRecord]:
-    """Read a host-side allowlist and validate every source before allocating compute."""
-    records = json.loads((root / "workspaces" / workspace_id / "documents.json").read_bytes())
-    if not isinstance(records, list) or not records:
-        raise ValueError("workspace requires a nonempty permitted document view")
-    documents = [DocumentRecord.model_validate(record) for record in records]
-    paths = [document.relative_path for document in documents]
-    if len(paths) != len(set(paths)):
-        raise ValueError("workspace document paths must be unique")
-    store = (root / "document_store").resolve()
-    for document in documents:
-        source = (store / f"{document.document_id}.pdf").resolve()
-        if source.parent != store or not source.is_file() or source.stat().st_mode & 0o222:
-            raise ValueError("document store must contain read-only PDFs")
-    return documents
-
-
-def mounted_document_manifest(root: Path, workspace_id: str, storage: MountedDocumentsConfig) -> str:
+def mounted_document_manifest(documents: list[DocumentRecord], storage: MountedDocumentsConfig) -> str:
     """Return only selected PDF paths and checksums; never serialize hidden task data."""
-    files = []
-    for record in workspace_documents(root, workspace_id):
-        source = root / "document_store" / f"{record.document_id}.pdf"
-        with source.open("rb") as handle:
-            digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        files.append(
+    return json.dumps(
+        [
             {
-                "source": str(PurePosixPath(storage.mount_root, storage.prefix, "document_store", source.name)),
-                "target": record.relative_path,
-                "sha256": digest,
+                "source": str(PurePosixPath(storage.mount_root, storage.prefix, document.path)),
+                "target": document.target,
+                "sha256": document.sha256,
             }
-        )
-    return json.dumps(files)
+            for document in documents
+        ]
+    )
 
 
 DOCUMENT_MANIFEST_PATH = "/tmp/pdf-analyst-qa-document-manifest.json"

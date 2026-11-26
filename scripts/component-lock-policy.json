@@ -1,4 +1,9 @@
 {
+  "benchmarks/vstar_spatiotemporal": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
   "environment_servers/nemo_user_sim": {
     "override-dependencies": [
       "pyarrow>=25.0.1,<26"
@@ -42,6 +47,11 @@
       "protobuf==4.25.9"
     ]
   },
+  "resources_servers/model_identity": {
+    "override-dependencies": [
+      "pyarrow>=25.0.1,<26"
+    ]
+  },
   "resources_servers/nemo_user_sim": {
     "override-dependencies": [
       "pyarrow>=25.0.1,<26"
@@ -79,12 +89,23 @@
       "pycountry"
     ]
   },
+  "resources_servers/visgym": {
+    "override-dependencies": [
+      "opencv-python-headless>=4.11",
+      "gprof2dot>=2025.4.14"
+    ]
+  },
   "resources_servers/vlm_eval_kit": {
     "override-dependencies": [
       "opencv-python>=4.7.0.72",
       "decord2>=3.0.0",
       "torchvision",
       "pathspec"
+    ]
+  },
+  "resources_servers/voicebench": {
+    "override-dependencies": [
+      "scikit-learn>=1.5,<1.8"
     ]
   },
   "resources_servers/wmt_translation": {
@@ -194,11 +215,6 @@
     ]
   },
   "responses_api_models/vllm_model": {
-    "override-dependencies": [
-      "pathspec"
-    ]
-  },
-  "responses_api_models/vllm_model_with_compaction": {
     "override-dependencies": [
       "pathspec"
     ]

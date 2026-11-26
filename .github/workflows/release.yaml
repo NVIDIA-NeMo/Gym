@@ -38,7 +38,7 @@ on:
         default: true
         type: boolean
       version-bump-branch:
-        description: Branch for version bump
+        description: Target main or a release branch covered by Gym's [rv][0-9].[0-9].[0-9] protection rule
         required: true
         type: string
       gh-release-from-tag:
@@ -51,10 +51,7 @@ defaults:
   run:
     shell: bash -x -e -u -o pipefail {0}
 
-permissions:
-  id-token: write
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
@@ -63,13 +60,16 @@ concurrency:
 jobs:
   pre-flight:
     if: github.event_name != 'workflow_dispatch'
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@037094bcc9138c72bc125418e6e3653f9e1c4160 # v1.11.0
-    with:
-      workflow_ref: 037094bcc9138c72bc125418e6e3653f9e1c4160 # pragma: allowlist secret
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@b6b4df4160277e1048091f972eda0c51319bc845
 
   previous-tag:
     if: ${{ !inputs.gh-release-from-tag }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.find.outputs.tag }}
     steps:
@@ -106,13 +106,83 @@ jobs:
           echo "Previous release tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-  release:
+  release-workflow-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout workflow and regression tests
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Run offline release regression tests
+        run: |
+          python -m venv .venv-release-tests
+          .venv-release-tests/bin/python -m pip install PyYAML==6.0.3
+          .venv-release-tests/bin/python .github/tests/test_release_workflow.py -v
+
+  validate-inputs:
     needs: [pre-flight, previous-tag]
     if: |
       !cancelled() && !failure()
       && !(needs.pre-flight.outputs.docs_only == 'true'
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@1ea89871720f31b9cacfd40655ad5151edd8be6f
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Validate immutable release ref
+        env:
+          RELEASE_REF: ${{ inputs.release-ref || github.sha }}
+        run: |
+          if [[ ! "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release-ref must be a full 40-character commit SHA"
+            exit 1
+          fi
+
+      - name: Require dispatch from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Select the main branch when starting the release workflow."
+          exit 1
+
+      - name: Verify release commit belongs to the protected target branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.release-ref }}
+          TARGET_BRANCH: ${{ inputs.version-bump-branch }}
+        run: |
+          case "$TARGET_BRANCH" in
+            main|[rv][0-9].[0-9].[0-9]) ;;
+            *) echo "::error::Select main or a branch covered by Gym's release-branch rule."; exit 1 ;;
+          esac
+          target_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/$TARGET_BRANCH" \
+            --jq 'select(.protected == true) | .commit.sha')
+          if [[ ! "$target_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The version bump target must be a protected branch."
+            exit 1
+          fi
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_REF...$target_sha" --jq '.status')
+          if [[ "$status" != identical && "$status" != ahead ]]; then
+            echo "::error::The release commit must be on the version bump target branch."
+            exit 1
+          fi
+
+  bump:
+    needs: [validate-inputs, release-workflow-tests]
+    if: |
+      !cancelled() && !failure() && needs.validate-inputs.result == 'success'
+      && needs.release-workflow-tests.result == 'success'
+    permissions:
+      contents: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@b6b4df4160277e1048091f972eda0c51319bc845
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
@@ -120,34 +190,95 @@ jobs:
       validate-only: ${{ github.event_name != 'workflow_dispatch' }}
       dry-run: ${{ inputs.dry-run || false }}
       version-bump-branch: ${{ inputs.version-bump-branch || github.ref_name }}
-      create-gh-release: ${{ inputs.create-gh-release || true }}
+      packaging: uv
+      release-environment: gym-release
+      restrict-to-admins: true
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  build-wheel:
+    needs: [bump, pre-flight, previous-tag]
+    if: |
+      !cancelled() && !failure() && needs.bump.result == 'success'
+    permissions:
+      contents: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_test_wheel.yml@b6b4df4160277e1048091f972eda0c51319bc845
+    with:
+      python-package: nemo_gym
       packaging: uv
       skip-test-wheel: true
-      wheel-content-ignore: "W002,W004,W009"
-      app-id: ${{ vars.BOT_ID }}
+      wheel-content-ignore: W002,W004,W009
+      ref: ${{ inputs.release-ref || github.sha }}
+
+  publish-wheel:
+    needs: build-wheel
+    if: >-
+      ${{ !cancelled() && !failure() && needs.build-wheel.result == 'success'
+          && github.event_name == 'workflow_dispatch' && !inputs.dry-run
+          && github.repository == 'NVIDIA-NeMo/Gym' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ needs.build-wheel.outputs.pypi-name }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download validated distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build-wheel.outputs.artifact-name }}
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  finalize:
+    needs: [bump, build-wheel, publish-wheel, pre-flight, previous-tag]
+    if: |
+      !cancelled() && !failure() && needs.bump.result == 'success'
+      && needs.build-wheel.result == 'success'
+      && (github.event_name != 'workflow_dispatch' || inputs.dry-run || needs.publish-wheel.result == 'success')
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@b6b4df4160277e1048091f972eda0c51319bc845
+    with:
+      release-ref: ${{ inputs.release-ref || github.sha }}
+      library-name: NeMo-Gym
+      validate-only: ${{ github.event_name != 'workflow_dispatch' }}
+      dry-run: ${{ inputs.dry-run || false }}
+      create-gh-release: ${{ github.event_name != 'workflow_dispatch' || inputs.create-gh-release }}
+      release-environment: gym-release
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
       gh-release-use-changelog-builder: true
       gh-release-from-tag: ${{ inputs.gh-release-from-tag || needs.previous-tag.outputs.tag }}
-      restrict-to-admins: true
-    secrets: inherit  # pragma: allowlist secret
+      release-version: ${{ needs.bump.outputs.release-version || needs.build-wheel.outputs.version }}
+      pypi-name: ${{ needs.build-wheel.outputs.pypi-name }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
   release-summary:
-    needs: [pre-flight, release]
-    if: ${{ !cancelled() }}
+    needs: [release-workflow-tests, pre-flight, previous-tag, validate-inputs, bump, build-wheel, publish-wheel, finalize]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - name: Result
+      - name: Check release results
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEEDS: ${{ toJSON(needs) }}
+          PUBLISH_EXPECTED: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry-run }}
+          RELEASE_SKIPPED: ${{ needs.pre-flight.outputs.docs_only == 'true' || needs.pre-flight.outputs.is_deployment_workflow == 'true' }}
         run: |
-          FAILED_JOBS=$(gh run view $GITHUB_RUN_ID --repo ${{ github.repository }} --json jobs --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required")] | length')
-
-          if [ "${FAILED_JOBS:-0}" -eq 0 ]; then
-              echo "✅ All previous jobs completed successfully"
-              exit 0
+          jq -e 'all(.[]; .result != "failure" and .result != "cancelled")' <<< "$NEEDS"
+          if [[ "$RELEASE_SKIPPED" == "true" ]]; then
+            exit 0
+          fi
+          jq -e '[.["release-workflow-tests"], .["validate-inputs"], .bump, .["build-wheel"], .finalize] | all(.[]; .result == "success")' <<< "$NEEDS"
+          if [[ "$PUBLISH_EXPECTED" == "true" ]]; then
+            jq -e '.["publish-wheel"].result == "success"' <<< "$NEEDS"
           else
-              echo "❌ Found $FAILED_JOBS failed job(s)"
-              gh run view $GITHUB_RUN_ID --repo ${{ github.repository }} --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required") | .name'
-              exit 1
+            jq -e '.["publish-wheel"].result == "skipped"' <<< "$NEEDS"
           fi

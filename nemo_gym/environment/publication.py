@@ -36,7 +36,14 @@ class EnvironmentPublicationReport:
 
 
 def _is_placeholder(value: str | None) -> bool:
-    return value is not None and value.strip().casefold().startswith("todo")
+    """A value still set to what the scaffold writes: ``TODO``, or ``TODO:`` followed by an instruction.
+
+    A real value that only starts with "todo", such as the author ``Todorov, E.``, is not one.
+    """
+    if value is None:
+        return False
+    text = value.strip().casefold()
+    return text == "todo" or text.startswith("todo:")
 
 
 def _publication_placeholders(entry: EnvironmentCatalogEntry) -> tuple[str, ...]:
@@ -48,6 +55,10 @@ def _publication_placeholders(entry: EnvironmentCatalogEntry) -> tuple[str, ...]
         placeholders.append("description")
     if any(_is_placeholder(author) for author in manifest.authors):
         placeholders.append("authors")
+    if any(_is_placeholder(maintainer) for maintainer in manifest.maintainers or ()):
+        placeholders.append("maintainers")
+    if _is_placeholder(manifest.primary_metric):
+        placeholders.append("primary_metric")
     if manifest.licensing == "unknown":
         placeholders.append("licensing")
     if manifest.kind == EnvironmentKind.BENCHMARK:

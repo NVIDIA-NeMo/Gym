@@ -30,8 +30,14 @@ class _FakeDbHandle:
         return "#### Tables\n- t:\n"
 
 
-def _entry(db_id: str = "db1", question: str = "How many students?", evidence=None, sql: str = "SELECT 1") -> dict:
-    entry = {"db_id": db_id, "question": question, "SQL": sql, "difficulty": "simple"}
+def _entry(
+    db_id: str = "db1",
+    question: str = "How many students?",
+    evidence=None,
+    sql: str = "SELECT 1",
+    question_id: int = 0,
+) -> dict:
+    entry = {"question_id": question_id, "db_id": db_id, "question": question, "SQL": sql, "difficulty": "simple"}
     if evidence is not None:
         entry["evidence"] = evidence
     return entry
@@ -116,6 +122,36 @@ class TestPrepareDialect:
     def test_output_has_one_row_per_task_never_repeated(self, prepared):
         rows = prepared([_entry(question="q1"), _entry(question="q2")])
         assert [r["id"] for r in rows] == [0, 1]
+
+
+class TestIsPreparedDataCurrent:
+    @staticmethod
+    def _write(tmp_path, name, table_heading):
+        fpath = tmp_path / name
+        row = {
+            "id": 0,
+            "db_id": "airline",
+            "sql_context": f"#### Tables\n{table_heading}\n  - `Code`:\n      data_type: STRING",
+        }
+        fpath.write_text(json.dumps(row) + "\n\n")
+        return fpath
+
+    def test_missing_file_is_not_current(self, tmp_path):
+        assert birdbench_prepare.is_prepared_data_current(tmp_path / "birdbench_spark_train.jsonl") is False
+
+    def test_spark_file_with_sanitized_headings_is_current(self, tmp_path):
+        fpath = self._write(tmp_path, "birdbench_spark_train.jsonl", "- `airline`.`Air_Carriers`:")
+        assert birdbench_prepare.is_prepared_data_current(fpath) is True
+
+    def test_spark_file_prepared_before_table_names_were_sanitized_is_stale(self, tmp_path):
+        fpath = self._write(tmp_path, "birdbench_spark_train.jsonl", "- `airline`.`Air Carriers`:")
+        assert birdbench_prepare.is_prepared_data_current(fpath) is False
+
+    def test_other_dialects_keep_their_names_and_stay_current(self, tmp_path):
+        fpath = self._write(tmp_path, "birdbench_postgres_train.jsonl", '- "airline"."air carriers":')
+        assert birdbench_prepare.is_prepared_data_current(fpath) is True
+        fpath = self._write(tmp_path, "birdbench_sqlite_train.jsonl", "- Air Carriers:")
+        assert birdbench_prepare.is_prepared_data_current(fpath) is True
 
 
 class TestBuildUberset:

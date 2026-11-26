@@ -154,6 +154,21 @@ async def test_configured_image_input_and_limits_reach_opencode_2(opencode2, att
     assert "attachment" not in config
 
 
+@pytest.mark.parametrize("snapshot", [None, False, True])
+async def test_snapshot_setting_reaches_opencode_2_without_changing_its_default(opencode2, snapshot):
+    agent, sandbox = opencode2
+    if snapshot is not None:
+        agent.config.opencode_config = {**agent.config.opencode_config, "snapshot": snapshot}
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    if snapshot is None:
+        assert "snapshots" not in config
+    else:
+        assert config["snapshots"] is snapshot
+    assert "snapshot" not in config
+
+
 async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
     agent, sandbox = opencode2
     agent.config.system_prompt = "Be {careful}."
@@ -170,12 +185,33 @@ async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
     assert config["plugins"][0]["options"]["sampling"] == {"temperature": 0.25, "top_p": 0.5}
     assert config["providers"]["nemo_gym"]["models"]["dummy_model"]["capabilities"]["temperature"] is True
     assert config["agent"] == {"build": {"steps": 5, "prompt": "Be {careful}."}}
-    assert config["compaction"] == {"auto": False}
+    assert config["compaction"] == {"auto": False, "background": False}
     # A configured rule cannot re-enable Code Mode.
     assert config["permission"] == {"*": "allow", "execute": "deny"}
     # The prompt's braces never reach OpenCode's {env:} and {file:} substitution.
     assert "{careful}" not in params["env"]["OPENCODE_CONFIG_CONTENT"]
     assert "instructions" not in config
+
+
+async def test_compaction_buffer_reaches_opencode_2(opencode2):
+    """OpenCode 2's name for the compaction buffer passes through unchanged, as OpenCode 1's reserved does."""
+    agent, sandbox = opencode2
+    agent.config.opencode_config = {**agent.config.opencode_config, "compaction": {"auto": True, "buffer": 8000}}
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert config["compaction"] == {"auto": True, "buffer": 8000, "background": False}
+
+
+@pytest.mark.parametrize("version", ["2.2.7", OPENCODE_V2_VERSION])
+async def test_background_compaction_summaries_are_off_on_each_pinned_opencode_2(opencode2, version):
+    """2.3.1 writes compaction summaries in the background by default, held by a run's process; 2.2.7 ignores the key."""
+    agent, sandbox = opencode2
+    agent.config.opencode_version = version
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert config["compaction"] == {"background": False}
 
 
 def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
@@ -227,6 +263,21 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
             "plugin dependencies",
         ),
         ({"opencode_version": "2.9.0"}, "no pinned release digest"),
+        ({"reasoning_effort": "max"}, "reasoning_effort apply only to OpenCode 1"),
+        ({"interleaved_reasoning_field": "reasoning"}, "interleaved_reasoning_field apply only to OpenCode 1"),
+        ({"output_token_policy": "remaining_context"}, "output_token_policy apply only to OpenCode 1"),
+        ({"declare_model_limits": False}, "declare_model_limits apply only to OpenCode 1"),
+        (
+            {"argv_prompt_quoting": True, "reasoning_effort": "max"},
+            "reasoning_effort, argv_prompt_quoting apply only to OpenCode 1",
+        ),
+        # OpenCode 1's name for the compaction buffer: the error says to set OpenCode 2's instead. The config refuses it
+        # when it loads; the seed refuses it again in a config changed after that, as here.
+        (
+            {"opencode_config": {"compaction": {"reserved": 8000}}},
+            "remove compaction.reserved and set compaction.buffer (OpenCode 2's name for the buffer)",
+        ),
+        ({"opencode_config": {"compaction": {"buffer": 32000}}}, "compaction.buffer must be below context_window"),
     ],
 )
 def test_settings_opencode_2_cannot_use_refuse_the_seed(opencode2, setting, message):
@@ -237,6 +288,16 @@ def test_settings_opencode_2_cannot_use_refuse_the_seed(opencode2, setting, mess
     assert refused.status_code == 422
     assert message in refused.text
     sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_oom_score_setting_reaches_the_opencode_2_runner(opencode2, enabled):
+    agent, sandbox = opencode2
+    agent.config.raise_oom_score_adj = enabled
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    params, _ = launch_config(sandbox)
+    assert ("oom_score_adj" in params["setup"]) is enabled
 
 
 async def test_an_unpinned_version_runs_from_a_pinned_binary(opencode2):
@@ -361,7 +422,7 @@ async def test_a_local_call_runs_opencode_2_standalone_and_reads_its_store(openc
     agent.config.command = str(binary)
     agent.config.workspace_root = str(tmp_path / "workspaces")
     with patch("responses_api_agents.opencode_agent.app.ensure_opencode2") as install:
-        output, usage, _, _ = await agent._run_opencode("task", None)
+        output, usage, _, _, _ = await agent._run_opencode("task", None)
     install.assert_not_called()
     call = json.loads(log.read_text())
     # A fixed title: OpenCode 2 would otherwise ask a model for one outside the rollout.

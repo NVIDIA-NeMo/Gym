@@ -513,7 +513,7 @@ def test_mirror_sync_installs_index_pinned_packages_from_their_index(tmp_path, m
     project = tmp_path / "project"
     project.mkdir()
     (project / "pyproject.toml").write_text(
-        '[project]\nname="mirror-smoke"\nversion="0"\ndependencies=["nemo-gym-mirror-plain", "nemo-gym-mirror-pinned", "packaging"]\n'
+        '[project]\nname="mirror-smoke"\nversion="0"\nrequires-python=">=3.13"\ndependencies=["nemo-gym-mirror-plain", "nemo-gym-mirror-pinned", "packaging"]\n'
         "[tool.uv]\npackage=false\n"
         f'[[tool.uv.index]]\nname="mirror"\nurl="http://{host}:{port}/mirror/"\n'
         f'[[tool.uv.index]]\nname="cpu"\nurl="http://{host}:{port}/cpu/"\nexplicit=true\n'
@@ -521,7 +521,7 @@ def test_mirror_sync_installs_index_pinned_packages_from_their_index(tmp_path, m
     )
     venv = tmp_path / "venv"
     try:
-        subprocess.run(["uv", "lock", "--project", str(project)], check=True)
+        subprocess.run(["uv", "lock", "--project", str(project), "--python", sys.executable], check=True)
         # PyPI provides only pip for the venv seed and packaging for the parent-requirement check.
         monkeypatch.setenv("UV_INDEX_URL", f"http://{host}:{port}/mirror/")
         monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")

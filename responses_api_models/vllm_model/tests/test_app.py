@@ -5684,19 +5684,69 @@ class TestAudioPathSplice:
         assert _b64.b64decode(content[1]["audio_url"]["url"].split(",", 1)[1]) == b"BBBB"
         assert content[2] == {"type": "text", "text": "Compare these."}
 
-    def test_audio_paths_must_be_a_list(self, tmp_path) -> None:
+    def test_audio_paths_rejects_a_plain_path_string(self, tmp_path) -> None:
+        # A bare path is neither a list nor a JSON-encoded list.
         model = _make_audio_path_model()
         body = {
             "model": "dummy-model",
             "messages": [{"role": "user", "content": "x"}],
-            "metadata": {"audio_paths": str(tmp_path / "a.wav")},  # string, not list
+            "metadata": {"audio_paths": str(tmp_path / "a.wav")},
         }
-        try:
+        with raises(ValueError, match="must be a list or JSON-encoded list"):
             model._preprocess_chat_completion_create_params(MagicMock(), body)
-        except ValueError as e:
-            assert "must be a list" in str(e)
-        else:
-            raise AssertionError("expected ValueError when audio_paths is not a list")
+
+    @mark.parametrize(
+        "audio_paths",
+        [
+            "123",  # valid JSON, but not a list
+            '"a.wav"',
+            '{"a": "a.wav"}',
+            "null",
+            "[]",  # an empty list carries no audio
+            '[""]',  # empty entry
+            '["a.wav", ""]',
+            "[1]",  # non-string entry
+            '["a.wav", null]',
+            '[["a.wav"]]',  # nested list
+        ],
+    )
+    def test_audio_paths_json_must_be_a_nonempty_list_of_path_strings(self, audio_paths) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {"audio_paths": audio_paths},
+        }
+        with raises(ValueError, match="nonempty list of path strings"):
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+    @mark.parametrize("audio_paths", [["a.wav", ""], [1], [None]])
+    def test_audio_paths_list_entries_must_be_nonempty_strings(self, audio_paths) -> None:
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {"audio_paths": audio_paths},
+        }
+        with raises(ValueError, match="nonempty list of path strings"):
+            model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+    def test_audio_paths_accept_json_encoded_list(self, tmp_path) -> None:
+        a = tmp_path / "a.wav"
+        b = tmp_path / "b.wav"
+        a.write_bytes(b"AAAA")
+        b.write_bytes(b"BBBB")
+        model = _make_audio_path_model()
+        body = {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "Compare these."}],
+            "metadata": {"audio_paths": json.dumps([str(a), str(b)])},
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        content = result["messages"][0]["content"]
+        assert [part["type"] for part in content] == ["audio_url", "audio_url", "text"]
+        assert _b64.b64decode(content[0]["audio_url"]["url"].split(",", 1)[1]) == b"AAAA"
+        assert _b64.b64decode(content[1]["audio_url"]["url"].split(",", 1)[1]) == b"BBBB"
 
     def test_audio_keys_mutually_exclusive(self, tmp_path) -> None:
         wav = tmp_path / "clip.wav"
@@ -9765,6 +9815,82 @@ def test_get_converter_forwards_the_custom_tool_strategy() -> None:
     assert model.get_converter().custom_tool_strategy == "function_bridge"
 
 
+def test_get_converter_forwards_the_tool_parameter_types() -> None:
+    types = {"write_stdin": {"session_id": "integer"}}
+    model = VLLMModel(
+        config=_custom_tool_config(tool_parameter_types=types),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert model.get_converter().tool_parameter_types == types
+    default = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
+    assert default.get_converter().tool_parameter_types == {}
+
+
+def test_responses_returns_the_listed_parameters_of_an_undeclared_tool_typed(monkeypatch: MonkeyPatch) -> None:
+    # The request declares only `exec`, so the engine's tool parser has no schema for `write_stdin`
+    # and returns its parameters as strings. `/v1/responses` returns the listed ones as integers.
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    upstream_arguments = json.dumps({"session_id": "86902", "chars": "12\n", "yield_time_ms": "1000"})
+    chat_completion = NeMoGymChatCompletion(
+        id="chtcmpl-123",
+        object="chat.completion",
+        created=FIXED_TIME,
+        model="dummy_model",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason="tool_calls",
+                message=NeMoGymChatCompletionMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        NeMoGymChatCompletionMessageToolCall(
+                            id="call_1",
+                            function=NeMoGymFunction(name="write_stdin", arguments=upstream_arguments),
+                            type="function",
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=chat_completion))
+    body = {
+        "input": "continue",
+        "tools": [
+            {
+                "type": "function",
+                "name": "exec",
+                "parameters": {"type": "object", "properties": {"code": {"type": "string"}}},
+                "strict": False,
+            }
+        ],
+    }
+
+    def served_arguments(**overrides: Any) -> str:
+        model = VLLMModel(
+            config=_custom_tool_config(**overrides),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        response = TestClient(model.setup_webserver()).post("/v1/responses", json=body)
+        assert response.status_code == 200
+        calls = [item for item in response.json()["output"] if item["type"] == "function_call"]
+        assert [call["name"] for call in calls] == ["write_stdin"]
+        return calls[0]["arguments"]
+
+    typed = served_arguments(
+        tool_parameter_types={"write_stdin": {"session_id": "integer", "yield_time_ms": "integer"}}
+    )
+    assert json.loads(typed) == {"session_id": 86902, "chars": "12\n", "yield_time_ms": 1000}
+    # Without the setting the call is returned as the engine sent it.
+    assert served_arguments() == upstream_arguments
+
+
+def test_tool_parameter_types_are_refused_on_the_native_responses_route() -> None:
+    with raises(ValueError, match="tool_parameter_types is not supported with is_responses_native=true"):
+        _custom_tool_config(tool_parameter_types={"write_stdin": {"session_id": "integer"}}, is_responses_native=True)
+
+
 def test_function_bridge_is_rejected_with_the_native_responses_route() -> None:
     with raises(ValueError, match="custom_tool_strategy=function_bridge is not supported with is_responses_native"):
         _custom_tool_config(custom_tool_strategy="function_bridge", is_responses_native=True)
@@ -10568,6 +10694,19 @@ async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
     assert [message["status"] for message in sent] == [200]
 
 
+def test_transport_log_uses_capture_identity_over_trace_headers():
+    from starlette.requests import Request
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-nemo-gym-log-rollout-id", b"untrusted")],
+            "state": {"nemo_gym_model_call_identity": {"rollout_id": "0-0", "model_call_id": "unique-call"}},
+        }
+    )
+    assert _transport_log_context(request) == {"rollout_id": "0-0", "model_call_id": "unique-call"}
+
+
 def _capture_vllm_messages(tmp_path: Path, *, stream: bool, completions: bool, finish: str, stop: str | int | None):
     server = VLLMModel(
         config=VLLMModelConfig(
@@ -10694,6 +10833,10 @@ def test_messages_preserve_native_provider_causes_and_saved_response_population(
     if stream:
         events = [json.loads(line[6:]) for line in received.text.splitlines() if line.startswith("data: ")]
         served = next(event["message"] for event in events if event["type"] == "message_start")
+        assert served["stop_reason"] is None
+        assert served["usage"] == {"input_tokens": 3, "output_tokens": 0}
+        [final] = [event for event in events if event["type"] == "message_delta"]
+        served = {**served, **final["delta"], "usage": {**served["usage"], **final["usage"]}}
         assert events[-1]["type"] == "message_stop"
         assert [event["delta"]["text"] for event in events if event["type"] == "content_block_delta"] == [
             "Retained answer."

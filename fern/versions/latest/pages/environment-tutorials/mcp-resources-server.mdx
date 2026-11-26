@@ -284,6 +284,15 @@ def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
 
 The returned names are signed into that rollout's session token; `tools/list` then advertises only those tools and `tools/call` rejects any other name — per rollout, with no server-wide state.
 
+### An endpoint that sandboxed code calls
+
+When the MCP client runs where the model can read its configuration, such as a harness in a sandbox the resources server lends, two config options make the endpoint an ordinary one:
+
+- `mcp_server_name` is the name the `mcp` metadata gives the endpoint, which clients name its tools by (default: the server's name). It takes letters, digits, `_` and `-`, and starts with a letter or a digit. The Environment Server's MCP grants carry this name, and so do the MCP entries that a sandboxed agent's `tool_servers` seed. Verify-time normalization strips `mcp__<mcp_server_name>__`.
+- `mcp_bearer_token: true` hands out the token as `Authorization: Bearer <token>` instead of `X-NeMo-Gym-Session-Token`. `tools/list` then requires the token and lists only the session's tools, and a tool outside the session's grant is answered as an unknown tool. Errors name no framework: a missing or invalid token is `Missing session token (Authorization header).` or `Invalid session token.`, and a tool's HTTP error names the tool rather than its route. It works with clients that pass the metadata's headers as given, as the Environment Server's MCP grants do. The code that reads the token could sign one for another session with the default session key, which anyone can compute from the server's class and name, so with this option the server signs its sessions with a secret made for the run, which all its workers share. A server whose other routes code in a sandbox reaches sets `signs_sessions_with_run_secret` for the same secret.
+
+Both options are off by default, and the endpoint then answers as described above.
+
 ### Run it
 
 A complete, copy-pasteable run (assumes you saved `app_mcp.py` above). The compose config wires that subclass entrypoint to the agent:
@@ -388,7 +397,7 @@ seed = AgentSeedSessionRequest(
 )
 ```
 
-Each grant carries the episode's token in the `X-NeMo-Gym-Episode-Token` header. `/mcp` lists only that episode's tools, and the grant ends when the episode's cleanup runs. A tool that returns `ToolResult(is_error=True)` gives an MCP result with `isError: true`. Over direct HTTP, the reply carries `X-NeMo-Gym-Tool-Error: true` instead.
+Each grant carries the episode's token in the `X-NeMo-Gym-Episode-Token` header. `/mcp` lists only that episode's tools, and the grant ends when the episode's cleanup runs. A tool that returns `ToolResult(is_error=True)` gives an MCP result with `isError: true`. Over direct HTTP, the reply carries `X-NeMo-Gym-Tool-Error: true` instead. A tool that returns `ToolResult(ends_activation=True)` asks the agent to end its activation, as a submission that ends a turn does. Over direct HTTP the reply carries `X-NeMo-Gym-End-Activation: true`: `simple_agent` runs the rest of the model response's tool calls and returns without calling the model again. Other agents ignore the header and call the model again. MCP has no field for it, so an MCP agent calls the model again.
 
 ---
 

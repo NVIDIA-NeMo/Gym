@@ -32,17 +32,16 @@ from fastapi import HTTPException
 from environment_servers.harbor.entrypoint import is_keepalive_entrypoint
 from environment_servers.harbor.network_policy import phase_network_policy
 from environment_servers.harbor.overlay import HarborOverlayError
-from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
+from environment_servers.harbor.session import HarborSession, _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user, _is_root
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
 from nemo_gym.agents import sandbox_server_url
 from nemo_gym.client import apply_rollout_prefix
-from nemo_gym.config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict, model_call_sampling_config
 from nemo_gym.core import (
     MODEL_SAMPLING_NULL,
     FailureBoundary,
     NgFailureEvent,
-    model_call_sampling_config,
     observe_failure,
 )
 from nemo_gym.data.tasks.harbor import (
@@ -862,6 +861,43 @@ class HarborSandboxMixin:
                 start=lambda sandbox: sandbox.start(spec),
             )
         )
+
+    async def _start_separate_verifier(
+        self, session: HarborSession, task: HarborTask, settings: Any
+    ) -> tuple[AsyncSandbox, bool]:
+        """The episode's separate verifier sandbox, its create retried once after a ready timeout, and whether it was.
+
+        The rollout is complete by now, so a verifier sandbox the provider never made ready is retried before the
+        episode is masked, once, and only while the episode's task deadline still leaves room for a create and
+        ``test.sh`` (:meth:`_verifier_retry_fits`), checked before the timed-out one is released and again after.
+        The caller bounds the rest of a retried verifier's start. Any other create failure is reported at once.
+        """
+        try:
+            return await self._create_verifier_sandbox(task, episode_key=session.session_id), False
+        except HarborSeedTimeoutError as exc:
+            if not self._verifier_retry_fits(session, settings):
+                raise
+            LOGGER.warning(f"{task.task_id}: retrying the verifier sandbox once: {exc}")
+            try:
+                await self._stop_sandbox(_verifier_key(session.session_id))
+            except Exception:
+                # Still owned: the caller's cleanup retries the stop. A second create would replace it unstopped.
+                LOGGER.exception(f"{task.task_id}: could not release the verifier sandbox that was never ready")
+                exc.__suppress_context__ = True
+                raise exc
+            # The release has no bound of its own and may have used the time the retry needs.
+            if not self._verifier_retry_fits(session, settings):
+                raise
+        return await self._create_verifier_sandbox(task, episode_key=session.session_id), True
+
+    def _verifier_retry_fits(self, session: HarborSession, settings: Any) -> bool:
+        """Whether the task deadline still holds a whole verifier create and ``test.sh`` with its grace, the least a
+        retry needs to be worth starting. Always true when the deadline is not enforced."""
+        if session.deadline is None:
+            return True
+        need = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
+        need += settings.timeout_sec + self.config.verifier_grace_s
+        return session.deadline - asyncio.get_running_loop().time() >= need
 
     async def _start_with_pull_retries(
         self,
