@@ -46,6 +46,7 @@ gym eval run --config benchmarks/terminal_bench_2_1/atom.yaml \
   ++agent.responses_api_agents.nooa_agent.top_p=0.95 \
   ++agent.responses_api_agents.nooa_agent.reasoning_effort=none \
   '++agent.responses_api_agents.nooa_agent.media_inputs=[]'
+  # optional: ++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.render_config.live_context.kind=dynamic
 ```
 
 The six `++agent...` overrides describe the policy model (see [Policy model settings](#policy-model-settings)); the
@@ -58,6 +59,7 @@ gym eval run --config benchmarks/terminal_bench_2_1/nooa.yaml \
   ++agent.responses_api_agents.nooa_agent.nooa.invocation_adapter=responses_api_agents.nooa_agent.atom_adapter:invoke_atom \
   ++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.turn_method=handle_batch \
   <the six policy model settings as above>
+  # optional: ++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.render_config.live_context.kind=dynamic
 ```
 
 Atom's session wraps a strategy failure in `TurnFailedError`; the adapter re-raises the wrapped error so the runner's
@@ -70,11 +72,22 @@ After verification, the generic `SingleAgentTurnResult` contract retains the gra
 and leaves only model-authored actions in `response.output`. Synthetic messages carry `synthetic: true`; ordinary
 output keeps its existing wire shape. Strict capture matching still checks the exact model-authored items and IDs.
 
-For a normal continuation, the Gym model bridge restores the exact live-context suffix before the same unedited
-reply, then appends the renderer's fresh context. It does not recover context for foreign, edited or removed replies.
-Intentional history rewrites still have to satisfy capture's normal context checks. Benchmark `instructions` and
-leading system/developer text precede NOOA's own prompt on every model request, including wrapper and child calls.
-Atom's `solve()` receives the user task separately. Non-text system/developer instructions are rejected explicitly.
+NOOA at or above the pinned revision records live context (`<context>`: to-do list, locals, workspace state) as
+`LiveContextSnapshot` events in the message history when `RenderConfig.live_context` is `append` (NOOA's default:
+a snapshot every 5 turns, only when the content changed). Each model request is then a prefix-extension of the one
+before it, so token capture links consecutive calls without any bridge-side replay of earlier requests. The policy is
+set per run on the NOOA agent, for `AtomHarness` and `BenchAgent` alike:
+
+```bash
+++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.render_config.live_context.kind=dynamic|off|append
+++agent.responses_api_agents.nooa_agent.nooa.init_kwargs.render_config.live_context.every_n_turns=5
+```
+
+`dynamic` regenerates the context block on every call (NOOA's behaviour before this pin; each request rewrites the
+prompt suffix), `off` sends none, and `append` records it in history as above. Evaluations that are compared with
+earlier `dynamic` runs set `dynamic` explicitly. Benchmark `instructions` and leading system/developer text precede
+NOOA's own prompt on every model request, including wrapper and child calls. Atom's `solve()` receives the user task
+separately. Non-text system/developer instructions are rejected explicitly.
 
 ## Policy model settings
 

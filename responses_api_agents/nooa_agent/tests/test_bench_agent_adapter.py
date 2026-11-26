@@ -832,6 +832,9 @@ async def test_real_benchagent_preserves_full_task_across_model_calls(
         llm=llm,
         working_dir=str(tmp_path),
         truncation=TruncationConfig(max_context_tokens=context_limit),
+        # The eviction below is the renderer's dynamic-context budget; NOOA's default `append` policy records the
+        # live blocks as history events before that budget applies.
+        render_config={"live_context": "dynamic"},
     )
     agent.context.set("volatile_probe", volatile)
     result = await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input=task))

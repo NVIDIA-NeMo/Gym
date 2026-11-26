@@ -1363,10 +1363,10 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.25.1,<5" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "nooa", git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=1602ec935b0e1a4afd632f38633984253d408d5b" },
-    { name = "nooa-atom", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/1602ec935b0e1a4afd632f38633984253d408d5b.tar.gz", subdirectory = "packages/nooa-atom" },
-    { name = "nooa-bench", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/1602ec935b0e1a4afd632f38633984253d408d5b.tar.gz", subdirectory = "packages/nooa-bench" },
-    { name = "nooa-cli", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/1602ec935b0e1a4afd632f38633984253d408d5b.tar.gz", subdirectory = "packages/nooa-cli" },
+    { name = "nooa", git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=d4daffba3d5d97419c02bea33d1a7a47b21edf8a" },
+    { name = "nooa-atom", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/d4daffba3d5d97419c02bea33d1a7a47b21edf8a.tar.gz", subdirectory = "packages/nooa-atom" },
+    { name = "nooa-bench", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/d4daffba3d5d97419c02bea33d1a7a47b21edf8a.tar.gz", subdirectory = "packages/nooa-bench" },
+    { name = "nooa-cli", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/d4daffba3d5d97419c02bea33d1a7a47b21edf8a.tar.gz", subdirectory = "packages/nooa-cli" },
 ]
 provides-extras = ["telemetry"]
 
@@ -2473,8 +2473,8 @@ wheels = [
 
 [[package]]
 name = "nooa"
-version = "0.0.13.dev279"
-source = { git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=1602ec935b0e1a4afd632f38633984253d408d5b#1602ec935b0e1a4afd632f38633984253d408d5b" }
+version = "0.0.13.dev313"
+source = { git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=d4daffba3d5d97419c02bea33d1a7a47b21edf8a#d4daffba3d5d97419c02bea33d1a7a47b21edf8a" }
 dependencies = [
     { name = "anyio" },
     { name = "filelock", marker = "sys_platform == 'win32'" },
@@ -2496,7 +2496,7 @@ mcp = [
 [[package]]
 name = "nooa-atom"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/1602ec935b0e1a4afd632f38633984253d408d5b.tar.gz", subdirectory = "packages/nooa-atom" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/d4daffba3d5d97419c02bea33d1a7a47b21edf8a.tar.gz", subdirectory = "packages/nooa-atom" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "click" },
@@ -2507,7 +2507,7 @@ dependencies = [
     { name = "ripgrep-bin" },
     { name = "websockets" },
 ]
-sdist = { hash = "sha256:98d6a98ab33566ba190ec80f4cd20413dc2284dd57d9d3cd65d7a0656bce8650" }
+sdist = { hash = "sha256:54cf8fc1a60ff601fe48d25217e49b9c6ad9ca59a5815ba9f003bddbbc9ae338" }
 
 [package.metadata]
 requires-dist = [
@@ -2527,15 +2527,15 @@ requires-dist = [
     { name = "nooa-bench", marker = "extra == 'benchmark'" },
     { name = "nooa-cli", extras = ["ast"] },
     { name = "numpy", marker = "extra == 'benchmark'", specifier = "==2.5.4" },
-    { name = "opentelemetry-exporter-otlp-proto-common", marker = "extra == 'benchmark'", specifier = "==1.45.1" },
-    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'benchmark'", specifier = "==1.45.1" },
-    { name = "opentelemetry-proto", marker = "extra == 'benchmark'", specifier = "==1.45.1" },
+    { name = "opentelemetry-exporter-otlp-proto-common", marker = "extra == 'benchmark'", specifier = "==1.45.2" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'benchmark'", specifier = "==1.45.2" },
+    { name = "opentelemetry-proto", marker = "extra == 'benchmark'", specifier = "==1.45.2" },
     { name = "packaging", marker = "extra == 'benchmark'", specifier = "==26.3" },
     { name = "pandas", marker = "extra == 'benchmark'", specifier = "==3.0.6" },
     { name = "pillow", marker = "extra == 'benchmark'", specifier = "==13.0.0" },
     { name = "pluggy", marker = "extra == 'benchmark'", specifier = "==1.7.0" },
     { name = "protobuf", marker = "extra == 'benchmark'", specifier = "==7.36.2" },
-    { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "pydantic", specifier = ">=2.14.2" },
     { name = "pygments", marker = "extra == 'benchmark'", specifier = "==2.21.0" },
     { name = "pyoxigraph", marker = "extra == 'benchmark'", specifier = "==0.5.9" },
     { name = "pyparsing", marker = "extra == 'benchmark'", specifier = "==3.3.3" },
@@ -2546,7 +2546,7 @@ requires-dist = [
     { name = "ripgrep-bin", specifier = ">=15.2.0" },
     { name = "scipy", marker = "extra == 'benchmark'", specifier = "==1.18.1" },
     { name = "six", marker = "extra == 'benchmark'", specifier = "==1.17.0" },
-    { name = "soupsieve", marker = "extra == 'benchmark'", specifier = "==2.9.2" },
+    { name = "soupsieve", marker = "extra == 'benchmark'", specifier = "==4.1" },
     { name = "typing-extensions", marker = "extra == 'benchmark'", specifier = "==4.16.0" },
     { name = "tzdata", marker = "extra == 'benchmark'", specifier = "==2026.5" },
     { name = "webencodings", marker = "extra == 'benchmark'", specifier = "==0.6.1" },
@@ -2557,13 +2557,13 @@ provides-extras = ["ast", "benchmark"]
 [[package]]
 name = "nooa-bench"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/1602ec935b0e1a4afd632f38633984253d408d5b.tar.gz", subdirectory = "packages/nooa-bench" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/d4daffba3d5d97419c02bea33d1a7a47b21edf8a.tar.gz", subdirectory = "packages/nooa-bench" }
 dependencies = [
     { name = "click" },
     { name = "nooa" },
     { name = "nooa-cli" },
 ]
-sdist = { hash = "sha256:98d6a98ab33566ba190ec80f4cd20413dc2284dd57d9d3cd65d7a0656bce8650" }
+sdist = { hash = "sha256:54cf8fc1a60ff601fe48d25217e49b9c6ad9ca59a5815ba9f003bddbbc9ae338" }
 
 [package.metadata]
 requires-dist = [
@@ -2575,14 +2575,14 @@ requires-dist = [
 [[package]]
 name = "nooa-cli"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/1602ec935b0e1a4afd632f38633984253d408d5b.tar.gz", subdirectory = "packages/nooa-cli" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/d4daffba3d5d97419c02bea33d1a7a47b21edf8a.tar.gz", subdirectory = "packages/nooa-cli" }
 dependencies = [
     { name = "click" },
     { name = "nooa" },
     { name = "prompt-toolkit" },
     { name = "pyyaml" },
 ]
-sdist = { hash = "sha256:98d6a98ab33566ba190ec80f4cd20413dc2284dd57d9d3cd65d7a0656bce8650" }
+sdist = { hash = "sha256:54cf8fc1a60ff601fe48d25217e49b9c6ad9ca59a5815ba9f003bddbbc9ae338" }
 
 [package.optional-dependencies]
 ast = [
