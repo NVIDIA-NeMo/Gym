@@ -461,6 +461,27 @@ def test_lustre_md_stats_on_is_saved_and_read_back():
     assert SubmitConfig.model_validate(saved).compute["cluster"].lustre_md_stats is True
 
 
+def test_node_pool_request_gpus_default_leaves_the_saved_config_as_before():
+    compute = {"cluster": {**COMPUTE["cluster"], "node_pools": {"gpu": {"partition": "batch", "gpus_per_node": 8}}}}
+    saved = SubmitConfig.model_validate(_config(compute=compute)).model_dump(mode="json")
+    assert saved["compute"]["cluster"]["node_pools"]["gpu"] == {
+        "partition": "batch",
+        "nodes": 1,
+        "ntasks_per_node": 1,
+        "gpus_per_node": 8,
+        "extra_args": {},
+    }
+
+
+def test_node_pool_request_gpus_off_is_saved_and_read_back():
+    pools = {"gpu": {"partition": "batch", "gpus_per_node": 8, "request_gpus": False}}
+    compute = {"cluster": {**COMPUTE["cluster"], "node_pools": pools}}
+    saved = SubmitConfig.model_validate(_config(compute=compute)).model_dump(mode="json")
+    assert saved["compute"]["cluster"]["node_pools"]["gpu"]["request_gpus"] is False
+    pool = SubmitConfig.model_validate(saved).compute["cluster"].node_pools["gpu"]
+    assert pool.request_gpus is False and pool.gpus_per_node == 8
+
+
 def test_lustre_md_stats_on_kubernetes_is_refused():
     compute = {"cluster": {**COMPUTE_K8S["cluster"], "lustre_md_stats": True}}
     with pytest.raises(ValidationError, match=r"kubernetes\.lustre_md_stats\n  Extra inputs are not permitted"):

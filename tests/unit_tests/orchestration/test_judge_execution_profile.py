@@ -277,6 +277,20 @@ def test_the_walltime_is_the_segment_walltime_bounded_by_the_partition_max_time(
 # --- the judge job's submission config and script ----------------------------------------------------------------
 
 
+def test_the_cpu_judge_job_does_not_request_gpus_when_the_run_does_not(tmp_path) -> None:
+    # A cluster without GPU GRES rejects --gpus-per-node, including the CPU judge job's --gpus-per-node=0.
+    config = model_served(
+        tmp_path, pools={"gpu": {"partition": "gpu", "nodes": 1, "gpus_per_node": 8, "request_gpus": False}}
+    )
+    profile = judge_execution_profile(
+        config, "cluster", "cpu", "--judge-partition", {"max_time": "8:00:00", "max_time_s": 28800, "error": None}
+    )
+    job = judge_job_config(config, "cluster", "bench", profile, "gym eval reverify")
+    compute = job.compute["cluster"]
+    script = build_sbatch_script(job, "bench", job.driver.benchmarks["bench"], compute, Path("/jobs/bench"))
+    assert "#SBATCH --partition=cpu" in script and "--gpus-per-node" not in script
+
+
 def test_the_judge_job_runs_the_reverify_command_on_one_cpu_node_without_any_service(tmp_path) -> None:
     config = model_served(tmp_path, extra_args={"qos": "normal", "gres": "gpu:8", "comment": "campaign"})
     profile = judge_execution_profile(
