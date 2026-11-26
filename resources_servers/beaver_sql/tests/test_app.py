@@ -338,7 +338,8 @@ class TestRunRecords:
 
     @pytest.mark.parametrize("source", ["environment", "literal"])
     def test_no_file_a_run_writes_holds_a_password(self, tmp_path: Path, monkeypatch, source: str) -> None:
-        from nemo_gym.rollouts.rollout_recovery import RunManifest, config_identity_path_for
+        from nemo_gym.rollouts import RunManifest
+        from nemo_gym.rollouts.rollout_recovery import config_identity_path_for  # not in the package's public API
 
         canary = "CANARY-MYSQL-PASSWORD-123"  # pragma: allowlist secret
         monkeypatch.setenv("BEAVER_MYSQL_PASSWORD", canary)
