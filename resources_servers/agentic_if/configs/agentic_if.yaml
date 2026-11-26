@@ -86,6 +86,7 @@ agentic_if_opencode_agent:
       # session grows (17 s for a 15-call session).
       session_close_timeout_seconds: 300
       # The resources server stages these at seed (opencode_bundle.PLUGIN_PATHS), loaded in this order after Gym's.
+      opencode_version: 1.17.11
       plugins:
         - /tmp/nemo-gym-agentic-if/if-profile.mjs
         - /tmp/nemo-gym-agentic-if/if-boundary.mjs
@@ -93,8 +94,6 @@ agentic_if_opencode_agent:
       export_dir: /tmp/nemo-gym-agentic-if/exports
       # A continuation row's recorded prefix, which the resources server stages (opencode_bundle.SESSION_IMPORT_PATH).
       session_import_path: /tmp/nemo-gym-agentic-if/prefix-export.json
-      # The session's own turns, so a compaction's summary call is not counted as a step (TE-9).
-      return_session_trajectory: true
       opencode_config:
         # No tools map: with the permission map's "*": allow it would expose skill and webfetch again.
         tools: null

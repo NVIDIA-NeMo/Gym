@@ -19,7 +19,16 @@ One collector per benchmark job, in its own `srun --overlap` step like any other
 scrapes each model service's Prometheus `/metrics` on localhost, accepts OTLP from the job's own
 processes, stamps the resource attributes the shared dashboards filter on (`user`, `run_id`,
 `slurm_job_id`, plus `benchmark`, `cluster`, `model`), and exports to the configured OTLP/HTTP
-endpoint (when remote export is enabled) and to `<job dir>/otel/*.jsonl`.
+endpoint (when remote export is enabled) and to `<job dir>/otel/*.jsonl` (written node-local, copied when it stops).
+
+The local `metrics.jsonl` is a lighter copy than the remote export, because node_exporter's full output made up about
+90% of its bytes (several GiB per run) and is node health rather than benchmark performance:
+- node_exporter metrics outside `otel.local_node_metrics` (CPU time, load, memory, pressure stall, network and
+  InfiniBand byte totals by default) are dropped from it. `local_node_metrics: null` keeps all of them, and
+  `local_node_metrics_extra` adds patterns;
+- the `span_metrics` connector feeds only the remote export, since the same call counts and durations come from
+  the spans in `traces.jsonl`.
+The remote export is unchanged.
 
 The ingest token travels twice, as the HTTP `Authorization` header and as an `Authorization`
 resource attribute: a routing proxy in front of the backend resolves the tenant from the
@@ -43,7 +52,14 @@ logger = logging.getLogger(__name__)
 COLLECTOR_SERVICE_NAME = "otel_collector"
 COLLECTOR_DIR = "otel"
 COLLECTOR_CONFIG_NAME = "collector.yaml"
-COLLECTOR_HEALTH_PORT = 13133
+# The collector runs a node-local copy of its binary and writes its jsonl there, never on shared storage;
+# its step appends the files into `<job dir>/otel/` when it stops. The step exports the directory in this variable.
+COLLECTOR_LOCAL_DIR_PREFIX = "/tmp/gym-otel-"
+COLLECTOR_LOCAL_DIR_ENV = "GYM_OTEL_LOCAL_DIR"
+COLLECTOR_FILE_SIGNALS = ("metrics", "traces", "logs")
+# Below the clusters' ephemeral range (ip_local_port_range 9000-65000): the collector's default
+# 13133 lies inside it, so an outgoing connection on the node can hold it and abort startup.
+COLLECTOR_HEALTH_PORT = 4319
 OTLP_GRPC_PORT = 4317
 OTLP_HTTP_PORT = 4318
 GYM_TELEMETRY_EXTRA = "telemetry"
@@ -90,7 +106,8 @@ def vllm_traces_env(component: str, service_name: str) -> dict[str, str]:
 # Seconds the collector keeps running after the driver exits, so one more scrape sees the final
 # counters before it is asked to flush and stop.
 FINAL_SCRAPE_GRACE_SECONDS = 20
-SHUTDOWN_WAIT_SECONDS = 30
+# Covers the flush and the copy of the node-local jsonl into the job directory.
+SHUTDOWN_WAIT_SECONDS = 120
 
 
 def scrape_targets(config: SubmitConfig) -> dict[str, int]:
@@ -163,16 +180,19 @@ def _policy_model_name(config: SubmitConfig) -> str | None:
     return service.served_model_name or service.model
 
 
-def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path) -> str:
+def render_collector_config(
+    config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path, *, node_local: bool = True
+) -> str:
     """The collector's YAML for one benchmark job.
 
     `run_id` is the submission's gym job id, which is the job directory's parent by construction
     (`<output_path>/<gym_job_id>/<benchmark>`); `cluster` is the sole compute key, the same value
     `SubmissionRecord.cluster` records. Values only known inside the job (`SLURM_JOB_ID`, the
-    token) are left as `${env:...}` for the collector to expand at startup.
+    token, the node-local directory) are left as `${env:...}` for the collector to expand at startup.
+    `node_local=False` writes the jsonl straight into the job directory, for a job.sh that predates the copy.
     """
     obs = config.otel
-    otel_dir = remote_bench_dir / COLLECTOR_DIR
+    file_dir = f"${{env:{COLLECTOR_LOCAL_DIR_ENV}}}" if node_local else str(remote_bench_dir / COLLECTOR_DIR)
     token = f"${{env:{obs.token_env}}}"
     interval = f"{obs.scrape_interval_seconds}s"
 
@@ -261,6 +281,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     managed_actions = [{"key": "Authorization", "value": token, "action": "upsert"}, *resource_actions]
 
     # Operations that exist only as spans (sandbox start/exec, model calls) still get latency and count series.
+    # Exported remotely only: locally the same calls and durations are in `traces.jsonl`.
     span_metrics = {
         "histogram": {
             "explicit": {"buckets": ["250ms", "1s", "2s", "5s", "10s", "30s", "60s", "120s", "300s", "600s", "1800s"]}
@@ -269,7 +290,9 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         "metrics_flush_interval": f"{obs.scrape_interval_seconds}s",
     }
 
-    metric_receivers = (["prometheus"] if scrape_configs else []) + ["otlp", "span_metrics"]
+    local_receivers = (["prometheus"] if scrape_configs else []) + ["otlp"]
+    node_filter = _local_node_metrics_filter(config)
+    local_filters = [NODE_METRICS_FILTER] if node_filter else []
     trace_transforms = ["transform/identity"] + (["transform/engine_rollout_id"] if obs.vllm_traces else [])
     doc = {
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
@@ -290,12 +313,11 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "transform/identity": identity,
             "transform/metric_names": rename_colon_metrics,
             **({"transform/engine_rollout_id": engine_rollout_id} if obs.vllm_traces else {}),
+            **({NODE_METRICS_FILTER: node_filter} if node_filter else {}),
         },
         "exporters": {
             "otlp_http/managed": {"endpoint": obs.endpoint, "headers": {"Authorization": f"Bearer {token}"}},
-            "file/metrics": {"path": str(otel_dir / "metrics.jsonl")},
-            "file/traces": {"path": str(otel_dir / "traces.jsonl")},
-            "file/logs": {"path": str(otel_dir / "logs.jsonl")},
+            **{f"file/{signal}": {"path": f"{file_dir}/{signal}.jsonl"} for signal in COLLECTOR_FILE_SIGNALS},
         },
         "service": {
             "extensions": ["health_check"],
@@ -303,13 +325,20 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "telemetry": {"logs": {"level": "info"}},
             "pipelines": {
                 "metrics": {
-                    "receivers": metric_receivers,
+                    "receivers": [*local_receivers, "span_metrics"],
                     "processors": ["transform/metric_names", "transform/identity", "resource/managed", "batch"],
                     "exporters": ["otlp_http/managed"],
                 },
+                # Filtered before `resource/local` overwrites `service.name`, while it still names the scrape job.
                 "metrics/local": {
-                    "receivers": metric_receivers,
-                    "processors": ["transform/metric_names", "transform/identity", "resource/local", "batch"],
+                    "receivers": local_receivers,
+                    "processors": [
+                        "transform/metric_names",
+                        "transform/identity",
+                        *local_filters,
+                        "resource/local",
+                        "batch",
+                    ],
                     "exporters": ["file/metrics"],
                 },
                 "traces": {
@@ -340,4 +369,34 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         del doc["exporters"]["otlp_http/managed"]
         for signal in ("metrics", "traces", "logs"):
             del doc["service"]["pipelines"][signal]
+        # Span metrics feed only the remote export; a connector nothing receives from fails collector startup.
+        del doc["connectors"]
+        doc["service"]["pipelines"]["traces/local"]["exporters"].remove("span_metrics")
     return yaml.safe_dump(doc, sort_keys=False)
+
+
+NODE_METRICS_FILTER = "filter/local_node_metrics"
+# The scrape job name, which the prometheus receiver sets as `service.name` on every node's series.
+NODE_SCRAPE_JOB = "node"
+
+
+def _ottl_string(value: str) -> str:
+    """`value` as an OTTL string literal inside the collector's YAML: `$$` stops the collector's own `${...}` expansion."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "$$") + '"'
+
+
+def _local_node_metrics_filter(config: SubmitConfig) -> dict | None:
+    """The `filter` processor that drops node_exporter metrics outside `otel.local_node_metrics` from the local file.
+
+    Keyed on the scrape job rather than a name prefix, so it covers every family node_exporter serves (including
+    textfile collectors with their own prefixes) on every scraped node, and leaves DCGM, engine and Gym metrics alone.
+    """
+    obs = config.otel
+    if obs.node_metrics_port is None or obs.local_node_metrics is None:
+        return None
+    keep = "^(?:" + "|".join(f"(?:{p})" for p in [*obs.local_node_metrics, *obs.local_node_metrics_extra]) + ")$"
+    condition = (
+        f'resource.attributes["service.name"] == {_ottl_string(NODE_SCRAPE_JOB)} '
+        f"and not IsMatch(metric.name, {_ottl_string(keep)})"
+    )
+    return {"metrics": {"metric": [condition]}}

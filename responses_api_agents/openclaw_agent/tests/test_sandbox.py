@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import math
 import shlex
 import shutil
@@ -10,6 +11,7 @@ import subprocess
 import tempfile
 from copy import deepcopy
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -37,7 +39,13 @@ from nemo_gym.core import (
 )
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxExecResult
-from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
+from responses_api_agents.openclaw_agent import sandbox as openclaw_sandbox
+from responses_api_agents.openclaw_agent.app import (
+    OpenClawAgent,
+    OpenClawAgentConfig,
+    _runtime_matches,
+    _unique_usage_messages,
+)
 
 
 def seed(*, session_id: str | None = None) -> AgentSeedSessionRequest:
@@ -154,6 +162,9 @@ class Sandbox:
         raise AssertionError("This provider supports exec only; no PTY API")
 
     async def run_exec(self, command, **kwargs):
+        if command.startswith("test -f ") and command.endswith(" || echo missing"):
+            path = f"{kwargs['cwd']}/{shlex.split(command)[2]}"
+            return SandboxExecResult(stdout="" if path in self.files else "missing\n", stderr="", return_code=0)
         if "--receipt" in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
         if "stop.request" in command:
@@ -287,10 +298,12 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert not any(path.startswith("/app/") for path in sandbox.files)
             install_call = sandbox.exec.await_args_list[1]
             assert install_call.args[0] == (
-                f"bash {installer} /tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11 2026.6.11"
+                f"bash {installer} /tmp/nemo-gym-openclaw-node-24.22.3-2026.6.11 2026.6.11"
             )
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
+            started = monotonic()
             result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "Fix the code"})
+            elapsed = monotonic() - started
             assert result.status_code == 200, result.text
             body = result.json()
             assert body["status"] == "completed"
@@ -308,7 +321,10 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
-            assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
+            supervisor = shlex.split(sandbox.launch.await_args.kwargs["command"])
+            remaining = float(supervisor[supervisor.index("--timeout") + 1])
+            assert 0 < remaining <= 900
+            assert remaining >= 900 - elapsed
             assert "timeout" not in payload
             assert "PATH" not in payload["env"]
             assert payload["env"]["OPENCLAW_NO_RESPAWN"] == "1"
@@ -498,7 +514,7 @@ def test_request_allowlist_rejects_future_fields_but_accepts_defaults(setup):
         future_control: str | None = None
 
     agent, sandbox = setup
-    assert agent._sandbox_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "")
+    assert agent._sandbox_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "", [])
     with pytest.raises(HTTPException, match="future_control") as error:
         agent._sandbox_input(ExtendedRequest(input="task", future_control="unsupported"))
     assert error.value.status_code == 422
@@ -677,7 +693,7 @@ async def test_local_and_sandbox_prompts_include_the_same_instructions(setup):
         input=[{"role": "system", "content": "input system"}, {"role": "user", "content": "task"}],
     )
     expected = ("task", "configured system\n\nrequest instructions\n\ninput system")
-    assert agent._sandbox_input(body) == expected
+    assert agent._sandbox_input(body) == (*expected, [])
     with patch.object(agent, "_run_openclaw", AsyncMock(return_value=([], {}, "test-model"))) as run:
         await agent._create_response(body)
     assert run.await_args.args == expected
@@ -845,7 +861,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
 
-    async def disconnect():
+    async def disconnect(**_):
         clock[0] = 200.0
 
     sandbox.disconnect.side_effect = disconnect
@@ -862,7 +878,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -926,6 +942,27 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     assert not request.session
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+async def test_image_that_cannot_load_the_exec_helper_is_refused_at_seed(setup):
+    """The installer's exit 3 is deterministic for the image, so seed refuses it instead of failing retryably."""
+    agent, sandbox = setup
+    message = (
+        "OpenClaw 2026.6.11 cannot run its exec tool in this image: its compiled process helper does not load "
+        "(it needs glibc 2.33 or newer, or musl)."
+    )
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        SimpleNamespace(return_code=3, error_type=None, stdout="", stderr=message),
+        SimpleNamespace(return_code=0, error_type=None),
+    ]
+    request = Request({"type": "http", "session": {}})
+    with pytest.raises(HTTPException) as raised:
+        await agent.seed_agent_session(request, seed())
+    assert raised.value.status_code == 422
+    assert "glibc 2.33" in raised.value.detail
+    assert all(record.state is None for record in agent._session_records.values())
+    sandbox.disconnect.assert_awaited_once()
 
 
 async def test_cancelled_install_never_publishes_session_or_launches_openclaw(setup):
@@ -992,7 +1029,7 @@ async def test_close_start_prevents_activation(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -1075,7 +1112,7 @@ def test_sandbox_usage_details_preserve_positive_counts_and_treat_defaulted_zero
             "input_tokens": expected_input,
             "output_tokens": 5,
             "total_tokens": expected_input + 5,
-            "input_tokens_details": {"cached_tokens": expected_cache},
+            "input_tokens_details": {"cached_tokens": expected_cache, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": None},
         }
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
@@ -1100,7 +1137,7 @@ def test_missing_call_usage_keeps_sandbox_cache_aggregate_unknown(setup, second_
             "input_tokens": 12,
             "output_tokens": 3,
             "total_tokens": 15,
-            "input_tokens_details": {"cached_tokens": None},
+            "input_tokens_details": {"cached_tokens": None, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": None},
         }
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
@@ -2006,23 +2043,24 @@ def test_unenforceable_network_access_is_a_terminal_seed_refusal(
 
 
 def _runtime_check(commands: list[str]) -> str:
-    (check,) = [command for command in commands if command.endswith("/openclaw/node_modules/openclaw/package.json")]
+    (check,) = [command for command in commands if "/openclaw.mjs --version >/dev/null" in command]
     return check
 
 
 @pytest.mark.parametrize(
     ("reported", "return_code", "error_type", "outcome"),
     [
-        ("2026.6.11", 0, None, "accepted"),
-        ("2026.5.1", 0, None, "refused"),
+        ("2026.6.11\n24.22.3\n>=22.19.0", 0, None, "accepted"),
+        ("2026.6.11\n25.0.0\n>=24.16.0 <25 || >=26.1.0", 0, None, "refused"),
+        ("2026.5.1\n24.22.3\n>=22.19.0", 0, None, "refused"),
         # The check is exact: a version that only starts with the pinned one is another version.
-        ("2026.6.110", 0, None, "refused"),
-        # Old Node, an incomplete runtime or a CLI that fails to start exits nonzero before printing the version.
+        ("2026.6.110\n24.22.3\n>=22.19.0", 0, None, "refused"),
+        # An incomplete runtime or a CLI that fails to start exits nonzero before printing the version.
         ("", 3, None, "refused"),
         # A transport failure or timeout may pass on another attempt, so it stays retryable.
         ("", None, "timeout", "retried"),
     ],
-    ids=["pinned", "other_version", "version_prefix", "failed_check", "timeout"],
+    ids=["pinned", "unsupported_engine", "other_version", "version_prefix", "failed_check", "timeout"],
 )
 def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code, error_type, outcome):
     agent, sandbox = setup
@@ -2032,7 +2070,7 @@ def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, r
     run_exec = sandbox.run_exec
 
     async def report_version(command, **kwargs):
-        if command.endswith("/opt/openclaw-runtime/openclaw/node_modules/openclaw/package.json"):
+        if "/opt/openclaw-runtime/openclaw/node_modules/openclaw/openclaw.mjs --version >/dev/null" in command:
             return SimpleNamespace(error_type=error_type, return_code=return_code, stdout=reported, stderr="")
         return await run_exec(command, **kwargs)
 
@@ -2042,8 +2080,9 @@ def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, r
 
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     check = _runtime_check(commands)
-    # Node's floor, then the CLI with a private home, then the version the package declares.
-    assert check.startswith("/opt/openclaw-runtime/node/bin/node -e ")
+    assert "pkg.engines.node" in check
+    # The exec tool's compiled process helper must load too; a release without it passes.
+    assert "@openclaw/proc-safe/reaper" in check
     assert "HOME=/tmp/nemo-gym-openclaw-sessions/" in check
     assert "/opt/openclaw-runtime/openclaw/node_modules/openclaw/openclaw.mjs --version >/dev/null" in check
     assert not any("install_openclaw_runtime.sh" in command for command in commands)
@@ -2064,7 +2103,9 @@ def test_preinstalled_runtime_check_runs_under_a_real_node(setup, tmp_path):
     (runtime / "node" / "bin" / "node").symlink_to(shutil.which("node"))
     package = runtime / "openclaw" / "node_modules" / "openclaw"
     package.mkdir(parents=True)
-    (package / "package.json").write_text(json.dumps({"version": agent.config.openclaw_version}))
+    (package / "package.json").write_text(
+        json.dumps({"version": agent.config.openclaw_version, "engines": {"node": ">=22.19.0"}})
+    )
     (package / "openclaw.mjs").write_text("console.log('OpenClaw CLI');\n")
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
@@ -2074,7 +2115,7 @@ def test_preinstalled_runtime_check_runs_under_a_real_node(setup, tmp_path):
 
     async def run_check_locally(command, **kwargs):
         # The runtime path has a space, so the command quotes it.
-        if command.endswith("/openclaw/node_modules/openclaw/package.json'"):
+        if "openclaw.mjs' --version >/dev/null" in command:
             local = command.replace("/tmp/nemo-gym-openclaw-sessions/", f"{tmp_path}/sessions/")
             done = subprocess.run(["bash", "-c", local], capture_output=True, text=True, timeout=60)
             outcome.update(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode)
@@ -2092,13 +2133,56 @@ def test_preinstalled_runtime_check_runs_under_a_real_node(setup, tmp_path):
         for part in subprocess.check_output(["node", "-p", "process.versions.node"], text=True).strip().split(".")[:2]
     )
     if node_version >= (22, 19):
-        # The version arrives without a trailing newline, so it compares equal to openclaw_version.
-        assert outcome == {"stdout": agent.config.openclaw_version, "stderr": "", "return_code": 0}
+        assert outcome["stdout"].splitlines()[0] == agent.config.openclaw_version
         assert created.status_code == 200, created.text
     else:
-        assert outcome["return_code"] == 3
-        assert "is older than 22.19.0" in outcome["stderr"]
         assert created.status_code == 422, created.text
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.parametrize("supported", [True, False])
+def test_preinstalled_runtime_exec_helper_check_runs_under_a_real_node(setup, tmp_path, supported):
+    """A preinstalled runtime whose exec-tool helper does not load is refused like an unsupported Node."""
+    agent, sandbox = setup
+    runtime = tmp_path / "runtime"
+    (runtime / "node" / "bin").mkdir(parents=True)
+    (runtime / "node" / "bin" / "node").symlink_to(shutil.which("node"))
+    package = runtime / "openclaw" / "node_modules" / "openclaw"
+    package.mkdir(parents=True)
+    node_major = subprocess.check_output(["node", "-p", "process.versions.node"], text=True).split(".")[0]
+    (package / "package.json").write_text(
+        json.dumps({"version": agent.config.openclaw_version, "engines": {"node": f">={node_major}"}})
+    )
+    (package / "openclaw.mjs").write_text("console.log('OpenClaw CLI');\n")
+    helper = runtime / "openclaw" / "node_modules" / "@openclaw" / "proc-safe"
+    helper.mkdir(parents=True)
+    (helper / "package.json").write_text(
+        json.dumps({"name": "@openclaw/proc-safe", "exports": {"./reaper": {"default": "./reaper.mjs"}}})
+    )
+    (helper / "reaper.mjs").write_text(f"export function isSupported() {{ return {str(supported).lower()}; }}\n")
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.sandbox_runtime_dir = str(runtime)
+    run_exec = sandbox.run_exec
+
+    async def run_check_locally(command, **kwargs):
+        if "openclaw.mjs --version >/dev/null" in command:
+            local = command.replace("/tmp/nemo-gym-openclaw-sessions/", f"{tmp_path}/sessions/")
+            done = subprocess.run(["bash", "-c", local], capture_output=True, text=True, timeout=60)
+            return SimpleNamespace(
+                error_type=None, return_code=done.returncode, stdout=done.stdout, stderr=done.stderr
+            )
+        return await run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = run_check_locally
+
+    _, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+
+    if supported:
+        assert created.status_code == 200, created.text
+    else:
+        assert created.status_code == 422, created.text
+        assert "cannot run its exec tool in this image" in created.text
 
 
 def test_runtime_dir_must_be_absolute(setup):
@@ -2237,7 +2321,7 @@ async def test_close_retains_capture_after_provider_release(setup, tmp_path, own
         await asyncio.wait_for(sandbox.started.wait(), 2)
         assert f"{directory}/process_supervisor.sh" in sandbox.files
 
-        async def release():
+        async def release(**_: object):
             assert state.session.cleanup["cleanup_confirmed"] is True
             assert state.session.artifacts is not None
             sandbox.files.clear()
@@ -2297,12 +2381,16 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         session_id = created.json()["agent_session_id"]
+        started = monotonic()
         response = client.post(
             "/ng-rollout/openclaw-smoke-a2/v1/responses", json=body.model_dump(mode="json", exclude_unset=True)
         )
+        elapsed = monotonic() - started
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        remaining = float(command[command.index("--timeout") + 1])
+        assert 0 < remaining <= expected
+        assert remaining >= expected - elapsed
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         payload = staged(sandbox)
@@ -2333,6 +2421,7 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert closed.status_code == 200, closed.text
 
 
+@pytest.mark.parametrize("ending", ["failover_stderr", "error_envelope"])
 @pytest.mark.parametrize("exit_code", [0, 1])
 @pytest.mark.parametrize("partial", [False, True])
 @pytest.mark.parametrize(
@@ -2346,12 +2435,20 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         ("provider failed with 400 attempts", None),
     ],
 )
-def test_terminal_model_error_retains_response_and_cause(setup, partial, message, status, exit_code):
+def test_terminal_model_error_retains_response_and_cause(setup, partial, message, status, exit_code, ending):
     agent, sandbox = setup
     sandbox.result["return_code"] = exit_code
-    sandbox.stderr = (
-        "diagnostics\nFailoverError: LLM request failed: provider rejected the request schema or tool payload.\n"
-    )
+    if ending == "failover_stderr":
+        # 2026.6.11 throws FailoverError.
+        sandbox.stderr = (
+            "diagnostics\nFailoverError: LLM request failed: provider rejected the request schema or tool payload.\n"
+        )
+    else:
+        # 2026.11.5 prints an error envelope on stdout.
+        sandbox.stderr = "diagnostics\n[openclaw] For help, run `openclaw doctor`.\n"
+        sandbox.stdout = json.dumps(
+            {"ok": False, "error": {"type": "cli_error", "message": f"LLM request rejected: {message}"}}, indent=2
+        )
     transcript = [json.loads(line) for line in events(stop_reason="error").splitlines()]
     final = transcript[2]["message"]
     final.update(errorMessage=message, content=[], usage={"input": 0, "output": 0})
@@ -2423,8 +2520,9 @@ def test_terminal_model_error_retains_response_and_cause(setup, partial, message
     ],
 )
 @pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 1])
 def test_model_transport_and_context_errors_reach_environment(
-    setup, stop_reason, message, envelope_error, expected, partial
+    setup, stop_reason, message, envelope_error, expected, partial, exit_code
 ):
     from nemo_gym.agents import AgentOutcomePolicyConfig, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
@@ -2437,7 +2535,14 @@ def test_model_transport_and_context_errors_reach_environment(
     elif not partial:
         transcript = [transcript[2]]
     sandbox.events = "\n".join(json.dumps(event) for event in transcript)
-    if envelope_error:
+    sandbox.result["return_code"] = exit_code
+    if exit_code:
+        # 2026.11.5 exits 1 after printing its result envelope with the run's error.
+        kind = envelope_error or "incomplete_turn"
+        sandbox.stdout = json.dumps(
+            {"payloads": [{"text": "failed", "isError": True}], "meta": {"error": {"kind": kind, "message": message}}}
+        )
+    elif envelope_error:
         sandbox.stdout = json.dumps({"meta": {"error": {"kind": envelope_error, "message": message}}})
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
@@ -2460,7 +2565,17 @@ def test_model_transport_and_context_errors_reach_environment(
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
-@pytest.mark.parametrize("failure", ["abort", "worker_exit", "cleanup", "untyped_envelope"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "abort",
+        "worker_exit",
+        "worker_exit_with_error_envelope",
+        "worker_exit_with_run_error",
+        "cleanup",
+        "untyped_envelope",
+    ],
+)
 def test_runtime_failures_do_not_become_model_outcomes(setup, failure):
     agent, sandbox = setup
     message = "Request was aborted." if failure == "abort" else "LLM idle timeout (2s): no response from model"
@@ -2470,6 +2585,20 @@ def test_runtime_failures_do_not_become_model_outcomes(setup, failure):
     if failure == "worker_exit":
         sandbox.result["return_code"] = 1
         sandbox.stderr = "unexpected worker exception"
+    elif failure == "worker_exit_with_error_envelope":
+        # An error envelope alone does not make an exit a model failure: the transcript must end in one.
+        transcript[2]["message"]["errorMessage"] = "Request was aborted."
+        sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+        sandbox.result["return_code"] = 1
+        sandbox.stdout = json.dumps({"ok": False, "error": {"type": "cli_error", "message": "worker failed"}})
+    elif failure == "worker_exit_with_run_error":
+        # Nor does a result envelope's error: an aborted request that is not an idle timeout is no model failure.
+        transcript[2]["message"]["errorMessage"] = "Request was aborted."
+        sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+        sandbox.result["return_code"] = 1
+        sandbox.stdout = json.dumps(
+            {"meta": {"error": {"kind": "incomplete_turn", "message": "Request was aborted."}}}
+        )
     elif failure == "cleanup":
         sandbox.result["error"] = "cleanup failed"
     elif failure == "untyped_envelope":
@@ -2546,3 +2675,216 @@ async def test_capture_header_owns_rejected_attempts_in_each_session(setup, tran
         assert [call.model_call_id for call in joined.records[0].model_calls if call.model_call_id] == expected
         assert join_agent_model_calls(joined, calls).model_dump() == joined.model_dump()
         await state.close(1)
+
+
+def keep_history_in_sqlite(sandbox, export):
+    """Make the fake worker keep history only in SQLite, as OpenClaw 2026.11.5 does, and route the export exec."""
+    wait_exit = sandbox.wait_exit
+
+    async def without_jsonl():
+        code = await wait_exit()
+        session_id = sandbox.directory.rsplit("/", 1)[-1]
+        del sandbox.files[f"{sandbox.directory}/home/.openclaw/agents/main/sessions/{session_id}.jsonl"]
+        return code
+
+    sandbox.wait_exit = without_jsonl
+    run_exec = sandbox.run_exec
+
+    async def exec_with_export(command, **kwargs):
+        if "export_sessions.mjs" in command:
+            return await export(shlex.split(command), **kwargs)
+        return await run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = exec_with_export
+
+
+def test_sqlite_transcript_is_exported_when_the_jsonl_is_absent(setup):
+    agent, sandbox = setup
+    sandbox.download = AsyncMock(wraps=sandbox.download)
+    calls = []
+
+    async def export(argv, **kwargs):
+        calls.append((argv, kwargs))
+        destination, session_id = argv[4], argv[5]
+        sandbox.files[f"{destination}/main/sessions/{session_id}.jsonl"] = sandbox.events
+        return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
+
+    keep_history_in_sqlite(sandbox, export)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        response.raise_for_status()
+        body = response.json()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        closed.raise_for_status()
+
+    directory = sandbox.directory
+    runtime = f"/tmp/nemo-gym-openclaw-node-24.22.3-{agent.config.openclaw_version}"
+    [(argv, kwargs)] = calls
+    node, script, launcher, state_dir, destination, session_id = argv
+    assert node == f"{runtime}/node/bin/node"
+    assert script == f"{directory}/export_sessions.mjs"
+    # The exporter is staged with the activation, not written during collection.
+    assert sandbox.files[script] == Path(openclaw_sandbox.__file__).with_name("export_sessions.mjs").read_text()
+    assert launcher == f"{runtime}/openclaw/node_modules/openclaw/openclaw.mjs"
+    assert state_dir == f"{directory}/home/.openclaw"
+    downloaded = [call.args[0] for call in sandbox.download.await_args_list]
+    assert f"{directory}/home/.openclaw/agents/main/sessions/{session_id}.jsonl" not in downloaded
+    assert f"{destination}/main/sessions/{session_id}.jsonl" in downloaded
+    assert destination.startswith(f"{directory}/transcripts-")
+    assert session_id == directory.rsplit("/", 1)[-1]
+    assert kwargs == {"cwd": directory, "timeout_s": 30}
+    assert [item["type"] for item in body["output"]] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert body["output"][1]["call_id"] == body["output"][2]["call_id"] == "tool-1"
+    observations = closed.json()["agent_observations"]
+    assert "agent_transcript_unavailable" not in {gap["code"] for gap in observations["gaps"]}
+    assert len(observations["records"][0]["model_calls"]) == 2
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        SimpleNamespace(error_type=None, return_code=1, stdout="", stderr="Cannot find module openclaw/plugin-sdk"),
+        SimpleNamespace(error_type="timeout", return_code=None, stdout=None, stderr=None),
+        # The script exits 0 but the selected session is not in the store.
+        SimpleNamespace(error_type=None, return_code=0, stdout="", stderr=None),
+    ],
+    ids=["exit_1", "timeout", "session_missing"],
+)
+def test_failed_sqlite_export_fails_the_turn_as_a_runtime_error(setup, result, caplog):
+    agent, sandbox = setup
+    sandbox.stdout = json.dumps(
+        {"payloads": [{"text": "Envelope answer"}], "meta": {"agentMeta": {"usage": {"input": 4, "output": 2}}}}
+    )
+
+    async def export(argv, **kwargs):
+        return result
+
+    keep_history_in_sqlite(sandbox, export)
+    with caplog.at_level(logging.WARNING), TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        closed.raise_for_status()
+
+    # Without the transcript there is no terminal assistant result: a runtime failure, never a graded answer.
+    assert response.status_code == 502, response.text
+    assert "OpenClaw produced no terminal assistant result" in response.text
+    assert "agent_transcript_unavailable" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    assert "OpenClaw transcript unavailable for" in caplog.text
+    sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [(7, 0, 7), (7, 5, 12), (7, None, None), (7, -1, None), (7, True, None), (7, 2.0, None)],
+)
+def test_sandbox_reasoning_tokens_sum_only_when_every_call_reports_them(setup, first, second, expected):
+    agent, sandbox = setup
+    transcript = [json.loads(line) for line in events().splitlines()]
+    transcript[0]["message"]["usage"]["reasoningTokens"] = first
+    if second is not None:
+        transcript[2]["message"]["usage"]["reasoningTokens"] = second
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        response.raise_for_status()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        closed.raise_for_status()
+    assert response.json()["usage"]["output_tokens_details"]["reasoning_tokens"] == expected
+    gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    assert ("reasoning_token_usage_unavailable" in gaps) == (expected is None)
+
+
+async def test_sandbox_envelope_fallback_never_reports_reasoning_tokens(setup):
+    agent, sandbox = setup
+    request, session_id, task = await activate(agent, sandbox)
+    await task
+    state = agent._session_records[session_id].state
+    state.session.artifacts = {
+        "stdout.log": json.dumps(
+            {
+                "payloads": [{"text": "Retained final output."}],
+                "meta": {"agentMeta": {"usage": {"input": 10, "output": 3, "reasoningTokens": 4}}},
+            }
+        )
+    }
+    response = await agent._collect_sandbox_response(
+        state, NeMoGymResponseCreateParamsNonStreaming(input="task"), prompt="task", system=""
+    )
+    # The envelope total counts a call without a count as zero, so it never stands in for per-call counts.
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+    assert "reasoning_token_usage_unavailable" in {gap.code for gap in state.observations.gaps}
+
+
+@pytest.mark.parametrize(
+    ("version", "relocated"),
+    [("2026.6.11", False), ("2026.7.1", False), ("2026.8.1", True), ("2026.11.5", True), ("2026.11.5-1", True)],
+)
+def test_memory_search_setting_and_tool_search_follow_the_pinned_release(setup, version, relocated):
+    agent, sandbox = setup
+    agent.config.openclaw_version = version
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        response.raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    config = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
+    if relocated:
+        assert config["memory"] == {"search": {"enabled": False}}
+        assert "memorySearch" not in config["agents"]["defaults"]
+    else:
+        assert config["agents"]["defaults"]["memorySearch"] == {"enabled": False}
+        assert "memory" not in config
+    # Every pin accepts the key; 2026.11.5 would otherwise hide MCP grant tools behind tool_search.
+    assert config["tools"]["toolSearch"] is False
+
+
+@pytest.mark.parametrize(
+    ("report", "accepted"),
+    [
+        ("2026.6.11\n24.22.3\n>=22.19.0", True),
+        # Each of these differs from the accepted report in one field only.
+        ("2026.5.1\n24.22.3\n>=22.19.0", False),
+        ("2026.6.110\n24.22.3\n>=22.19.0", False),
+        ("2026.6.11\n22.18.0\n>=22.19.0", False),
+        ("2026.6.11\n24.22.3\nundefined", False),
+        ("2026.6.11\n24.22.3\n", False),
+        ("2026.6.11\n24.22.3\n>=22.19.0\nextra", False),
+        ("2026.6.11", False),
+    ],
+    ids=[
+        "match",
+        "other_version",
+        "version_prefix",
+        "old_node",
+        "no_engine_range",
+        "empty_range",
+        "extra",
+        "one_line",
+    ],
+)
+def test_runtime_report_matches_version_and_engine_range(report, accepted):
+    assert _runtime_matches(report, "2026.6.11") is accepted
+
+
+def test_session_settings_keep_two_same_model_retries(setup):
+    """Gym's model server retries upstream failures itself; 2026.11.5 would otherwise retry a rate limit 15 times."""
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"}).raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    settings = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/agents/main/agent/settings.json"])
+    assert settings == {"retry": {"provider": {"maxRetries": 2}}}

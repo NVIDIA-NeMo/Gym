@@ -5,7 +5,12 @@
 import asyncio
 import json
 import logging
+import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from time import monotonic
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -17,12 +22,15 @@ from nemo_gym.agents import (
     is_harness_termination_failure,
     shell_assignments,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
-from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.sandbox import media_path, read_text, upload_bytes, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
 
 LOG = logging.getLogger(__name__)
+
+# Exports a session's SQLite history through the runtime's OpenClaw SDK (see export_sessions.mjs).
+_EXPORT_SCRIPT = Path(__file__).with_name("export_sessions.mjs")
 
 
 # POSIX sh run with positional parameters WORKDIR SESSION_ROOT RUNTIME_ROOT before uploading
@@ -143,23 +151,47 @@ class OpenClawSandboxSession(AgentSessionState):
             raise RuntimeError("OpenClaw MCP probe termination is unconfirmed")
         self.probe = None
 
-    async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> dict[str, str]:
+    async def execute(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        media: Sequence[MediaFile] = (),
+        timeout: float,
+        close_timeout: float,
+    ) -> dict[str, str]:
         """Run through the common lifecycle; the adapter validates terminal events."""
         artifacts = await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(payload, media=media),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
+            deadline=monotonic() + timeout,
         )
         if self.session.closing:
             raise asyncio.CancelledError
         return artifacts
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
+    async def stage_activation(
+        self, payload: dict[str, JsonValue], *, media: Sequence[MediaFile] = ()
+    ) -> SandboxCommand:
         """Stage the invocation and return the OpenClaw worker command."""
         directory = self.session.session_dir
         await self.upload_json("home/.openclaw/openclaw.json", payload["config"])
-        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        # OpenClaw reads its session settings, such as retry limits, from the agent directory.
+        if payload.get("settings"):
+            await self.upload_json("home/.openclaw/agents/main/agent/settings.json", payload["settings"])
+        prompt = payload["prompt"]
+        # The CLI only loads local images under its media allowlist. Session-owned files are
+        # removed on close; staging runs inside the shared close fence and activation deadline.
+        # OpenClaw attaches each absolute image path named in the prompt; 2026.11.5 ignores the
+        # `[Image: source: <path>]` marker. It deduplicates paths, so repeated images need separate files.
+        for index, file in enumerate(media, 1):
+            path = f"{directory}/home/.openclaw/media/{index}-{PurePosixPath(media_path(file)).name}"
+            await upload_bytes(self.session.sandbox, path=path, data=file.data)
+            prompt += f"\n{path}"
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
+        # Releases that keep history in SQLite need the exporter at collection time.
+        await self.session.sandbox.upload(_EXPORT_SCRIPT, f"{directory}/{_EXPORT_SCRIPT.name}")
         params = {
             "cwd": payload["cwd"],
             "command": payload["command"],
@@ -171,15 +203,59 @@ class OpenClawSandboxSession(AgentSessionState):
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
+    async def _read_transcript(self, transcript: str, session_id: str) -> str:
+        directory = self.session.session_dir
+        # Both layouts are normal. Only request a download for a file that exists.
+        try:
+            check = await self.session.sandbox.exec(
+                f"test -f {shlex.quote(transcript)} || echo missing", cwd=directory, timeout_s=30
+            )
+        except Exception:
+            LOG.debug("OpenClaw transcript existence check failed for %s", session_id, exc_info=True)
+        else:
+            if check.return_code == 0 and not check.error_type and (check.stdout or "").strip() == "missing":
+                return await self._read_sqlite_transcript(session_id)
+        try:
+            return await self.read_text(transcript)
+        except Exception:
+            LOG.debug("OpenClaw JSONL transcript unavailable for %s", session_id, exc_info=True)
+            return await self._read_sqlite_transcript(session_id)
+
+    async def _read_sqlite_transcript(self, session_id: str) -> str:
+        """Export this session's SQLite history with the runtime's OpenClaw SDK and return it as JSONL."""
+        directory = self.session.session_dir
+        destination = f"transcripts-{uuid4().hex}"
+        command = shlex.join(
+            [
+                f"{self.runtime}/node/bin/node",
+                f"{directory}/{_EXPORT_SCRIPT.name}",
+                f"{self.runtime}/openclaw/node_modules/openclaw/openclaw.mjs",
+                f"{directory}/home/.openclaw",
+                f"{directory}/{destination}",
+                session_id,
+            ]
+        )
+        # The exporter stops itself before this deadline, so a timed-out exec does not leave it running.
+        result = await self.session.sandbox.exec(command, cwd=directory, timeout_s=30)
+        if result.return_code != 0 or result.error_type:
+            detail = result.error_type or (result.stderr or "")[-2000:] or f"exit {result.return_code}"
+            raise RuntimeError(f"OpenClaw transcript export failed: {detail}")
+        return await self.read_text(f"{destination}/main/sessions/{session_id}.jsonl")
+
     async def collect_artifacts(self) -> dict[str, str]:
         """Retain transcript and diagnostics before releasing the task sandbox."""
         artifacts = {}
         session_id = self.session.session_dir.rsplit("/", 1)[-1]
-        for name in ("stdout.log", "stderr.log", f"home/.openclaw/agents/main/sessions/{session_id}.jsonl"):
+        for name in ("stdout.log", "stderr.log"):
             try:
                 artifacts[name] = await self.read_text(name)
             except Exception:
                 LOG.warning("OpenClaw artifact unavailable: %s", name, exc_info=True)
+        transcript = f"home/.openclaw/agents/main/sessions/{session_id}.jsonl"
+        try:
+            artifacts[transcript] = await self._read_transcript(transcript, session_id)
+        except Exception:
+            LOG.warning("OpenClaw transcript unavailable for %s", session_id, exc_info=True)
         try:
             runtime = json.loads(await self.read_text("runtime.json"))
         except Exception:

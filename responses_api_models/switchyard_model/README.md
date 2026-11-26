@@ -105,11 +105,35 @@ semantics: a pinned value wins over what the agent sent, and a null value clears
 set (typically an agent's blanket `max_tokens`). The route id is applied last and is not pinnable,
 so an override cannot silently benchmark a different route.
 
+A pinned output-token limit replaces the agent's limit under every name (`max_tokens`,
+`max_completion_tokens` and `max_output_tokens`), so a `max_tokens: null` pin also clears an agent's
+`max_completion_tokens`. A pin sends requests in Chat format, so the limit goes out as
+`max_completion_tokens` when the pin uses that name, and as `max_tokens` otherwise; a null pin sends
+no limit at all. A pin that names the limit more than once sends the value of the first name in
+`max_completion_tokens`, `max_tokens`, `max_output_tokens` order. Switchyard forwards a Chat body to
+a Chat backend unchanged, so pin `max_completion_tokens` for a backend that rejects `max_tokens`,
+such as OpenAI's o-series models.
+
 ```bash
 ++policy_model.responses_api_models.switchyard_model.uses_reasoning_parser=true \
 ++policy_model.responses_api_models.switchyard_model.sampling_overrides.temperature=1.0 \
 ++policy_model.responses_api_models.switchyard_model.sampling_overrides.max_tokens=null
 ```
+
+## Bounding a call
+
+A call to the proxy has no time limit by default. Three optional settings bound it; each is off (`null`) until set:
+
+- `request_timeout_seconds`: time limit for each HTTP attempt, not for the whole call. A timed-out attempt is retried
+  like any other transport error, so a call can take about the limit times the number of attempts. A timeout while
+  reading the response body is raised without resending the request.
+- `max_connection_retries`: connection-error attempts one call makes before raising: `N` allows N attempts, so `1`
+  means no retry. It also caps the timeout and error retry path, and does not cap the separate HTTP-status retry loop.
+- `connection_retry_timeout_s`: wall-clock seconds one call may spend retrying connection errors. It is not a deadline
+  for the whole call.
+
+Set `request_timeout_seconds` above the longest generation a route can legitimately take; a shorter limit ends good
+calls as `model_policy_response_timeout` failures.
 
 ## Dependency direction
 

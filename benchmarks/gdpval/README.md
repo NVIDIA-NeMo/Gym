@@ -107,6 +107,10 @@ The reference directory must be laid out as
 `<reference_deliverables_dir>/task_<task_id>/` with `finish_params.json` and
 the deliverable files (the same layout the Stirrup agent persists).
 
+A reference directory can also be an `s3://bucket/prefix` URI with that layout. `/verify` then downloads only the
+task it judges, skipping `history.json` and `history.pkl`, into `reference_cache_dir` (default: a directory under
+the temp dir), using the server's AWS credentials.
+
 ## Run multi-stage adaptive ELO (Best Practice - AA v2 Benchmark Method)
 
 Multi-stage ELO estimates the eval model's rating in a sequence of *stages*
@@ -489,6 +493,19 @@ gym eval run \
   the calls by the tool name alone, such as `finish`. Codex keeps about 12 KB of each tool result, so the model sees
   only the start and end of a long `fetch_web_page` result.
 - `extra_body` pins the Stirrup agent's temperature and top_p and limits each model call to 32,768 output tokens.
+- To run Codex with `--model-type vllm_model`, replace **both** `openai_model` overrides at the end of the command
+  above. For a model that reads images, use these two lines to send the image in the tool message and keep the same
+  sampling settings and output limit.
+
+  ```bash
+      ++policy_model.responses_api_models.vllm_model.inline_tool_output_images=true \
+      '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 0.95, max_tokens: 32768}'
+  ```
+
+  For a text-only model, use `++policy_model.responses_api_models.vllm_model.drop_unrepresentable_request_fields=true`
+  as the first override to send a text placeholder. With both image settings off, the Responses-to-Chat conversion
+  rejects the image when Codex uses `view_image` to inspect a chart. The episode fails with a retryable
+  `environment_server_failed` and skips grading.
 - Codex checks `model_auto_compact_token_limit` after each reply that calls a tool, so the context can pass it by
   about a reply and its tool output before Codex compacts, and the compaction call reserves 32,768 tokens for its own
   reply. So keep the limit at about the window minus twice the output limit or lower: `codex.yaml` uses 196,608 for
@@ -536,7 +553,7 @@ Replace `opencode` with `openclaw` for OpenClaw.
 
 - The rows, the task tools and the deliverables directory work as for Pi, and these are not AA v2 scores either.
   Each harness installs its pinned runtime in the task sandbox at the start of each episode (OpenCode 1.17.11,
-  OpenClaw 2026.6.11 on Node.js 22).
+  OpenClaw 2026.11.5 on Node.js 24.22.3).
 - The model sees the task tools as `gdpval_resources_server_<tool>` in OpenCode and
   `gdpval_resources_server__<tool>` in OpenClaw. Their built-in web tools are off, and the task's `web_search` and
   `fetch_web_page` are provided instead; the sandbox still has egress, so shell commands can reach the web too.
@@ -559,6 +576,51 @@ Replace `opencode` with `openclaw` for OpenClaw.
   after about 300 seconds, Bun's default `fetch` timeout, so a slower `fetch_web_page` fails at about 300 s.
 - Change a harness setting with `++gdpval_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>` or
   `++gdpval_openclaw_agent.responses_api_agents.openclaw_agent.<key>=<value>`.
+
+`benchmarks/gdpval/nooa.yaml` runs [NOOA](../../responses_api_agents/nooa_agent/README.md) in the task sandbox the
+resources server lends it. Follow the [NOOA GDPval tutorial](../../fern/versions/latest/pages/evaluation-tutorials/nooa-gdpval.mdx)
+to configure the policy model, prepare the data, and run the benchmark.
+NOOA calls the task tools as methods in its Python cell, such as `await self.finish(reason=..., paths=[...])`, through
+the resources server's HTTP routes.
+
+- NOOA's own task instruction ends a run with `return_result(TaskResult(...))`, which submits no files. The rows
+  therefore use `prompts/nooa.yaml`: `prompts/harness-neutral.yaml` plus one sentence that names `self.finish` and says
+  to call it before `return_result`. A run that ends with `return_result` alone is judged as an empty submission.
+- As for the other harnesses, the prompt and the harness differ from the certified Stirrup setup, so these are not
+  AA v2 scores.
+
+`benchmarks/gdpval/openhands.yaml` runs [OpenHands](../../responses_api_agents/openhands_agent/README.md) (the
+OpenHands Software Agent SDK) the same way:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_openhands/deliverables
+gym eval prepare --benchmark gdpval/openhands
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval/openhands \
+    --split benchmark \
+    --output results/gdpval_openhands.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name>
+```
+
+- The rows, the task tools and the deliverables directory work as for Pi. The model sees the task tools as
+  `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page`, next to OpenHands' own `terminal`,
+  `file_editor`, `task_tracker` and `think`.
+- A successful `finish` or `abandon_task_finish` ends the run (`finish_tool_names`), and OpenHands' own `finish` is
+  not offered. A reply without a tool call also ends the run, and so do the `timeout` and `max_iterations` limits.
+  Those endings submit nothing. The files are collected when the run ends.
+- The agent server builds the OpenHands runtime with uv on its own host at the first seed and uploads it, so the task
+  sandbox needs no egress for the install.
+- The request's `temperature`, `top_p` and `max_output_tokens` reach OpenHands (the last as a per-call limit), so
+  `gym eval run` may set them; otherwise the model server's settings apply.
+- OpenHands reports a run that reaches its `timeout` as `stop_reason: timeout`, so GDPVal's `agent_timeout` rule
+  (which requires `wall_time`) does not apply, as for Codex. A timed-out run that reaches verification without
+  submitting is judged as an empty submission, and so is a run that reaches `max_iterations` (250 here).
+- OpenHands stops each task-tool call after 300 seconds, its own fixed limit, so a slower `web_search` or
+  `fetch_web_page` returns a tool error at 300 s; `mcp_tool_timeout_seconds` (300) can only lower it.
+- Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
 
 ## Multi-judge panel
 

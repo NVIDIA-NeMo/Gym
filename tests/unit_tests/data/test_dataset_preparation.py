@@ -18,13 +18,18 @@ import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
 
+from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import MonkeyPatch, raises
+from pytest import MonkeyPatch, mark, raises, warns
 
 import nemo_gym.config.global_config
 import nemo_gym.data.dataset_preparation
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config.config_types import (
+    DatasetConfig,
+    ResourcesServerInstanceConfig,
+    ResponsesAPIAgentServerInstanceConfig,
+)
 from nemo_gym.config.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.data.dataset_preparation import (
     AvgMinMax,
@@ -97,6 +102,165 @@ def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPI
 
 
 class TestLoadAndValidateServerInstanceConfigs:
+    @mark.parametrize("interpolated", [False, True], ids=["literal-path", "interpolated-path"])
+    @mark.parametrize(
+        "source_settings",
+        [
+            {
+                "source": {
+                    "type": "gitlab",
+                    "dataset_name": "example_multi_step",
+                    "version": "0.0.1",
+                    "artifact_fpath": "train.jsonl",
+                }
+            },
+            {
+                "source": {
+                    "type": "huggingface",
+                    "repo_id": "nvidia/example_multi_step",
+                    "artifact_fpath": "train.jsonl",
+                }
+            },
+            {
+                "gitlab_identifier": {
+                    "dataset_name": "example_multi_step",
+                    "version": "0.0.1",
+                    "artifact_fpath": "train.jsonl",
+                }
+            },
+            {"huggingface_identifier": {"repo_id": "nvidia/example_multi_step", "artifact_fpath": "train.jsonl"}},
+            {
+                "gitlab_identifier": {
+                    "dataset_name": "example_multi_step",
+                    "version": "0.0.1",
+                    "artifact_fpath": "train.jsonl",
+                },
+                "huggingface_identifier": {"repo_id": "nvidia/example_multi_step", "artifact_fpath": "train.jsonl"},
+            },
+        ],
+        ids=["gitlab-source", "huggingface-source", "gitlab-identifier", "huggingface-identifier", "fallback-pair"],
+    )
+    def test_dataset_path_resolution_preserves_source_metadata(
+        self, source_settings: dict[str, dict[str, str]], interpolated: bool
+    ) -> None:
+        repo = Path(__file__).resolve().parents[3]
+        config = OmegaConf.load(repo / "resources_servers/example_multi_step/configs/example_multi_step.yaml")
+        datasets = config.example_multi_step_simple_agent.responses_api_agents.simple_agent.datasets
+        original = OmegaConf.to_container(datasets[0], resolve=False)
+        original.pop("source")
+        original.update(source_settings)
+        expected = DatasetConfig.model_validate(original)
+        datasets[0] = original
+        del datasets[1:]
+        config.selected_train_input = "selected-train.jsonl"
+        if interpolated:
+            datasets[0].jsonl_fpath = "${selected_train_input}"
+        before = OmegaConf.to_container(config, resolve=False)
+
+        owners = TrainDataProcessor().load_and_validate_server_instance_configs(
+            TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"), config
+        )
+
+        assert len(owners) == 1 and owners[0].name == "example_multi_step_simple_agent"
+        assert len(owners[0].datasets) == 1
+        actual = owners[0].datasets[0]
+        assert actual.jsonl_fpath == ("selected-train.jsonl" if interpolated else expected.jsonl_fpath)
+        assert actual.model_dump(exclude={"jsonl_fpath"}) == expected.model_dump(exclude={"jsonl_fpath"})
+        assert OmegaConf.to_container(config, resolve=False) == before
+
+    @mark.parametrize("unused_value", ["${undefined_key}", "${oc.env:LAB_TEST_UNSET_VARIABLE}"])
+    def test_resolves_dataset_paths_without_resolving_all_server_fields(
+        self, unused_value: str, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("LAB_TEST_UNSET_VARIABLE", raising=False)
+        global_config_dict = DictConfig(
+            {
+                "selected_input": "selected.jsonl",
+                "selected_prepare_script": "benchmarks/example/prepare.py",
+                "selected_prepare_project": "resources_servers/example",
+                "selected_prompt_config": "prompts/custom.yaml",
+                "agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "entrypoint": "app.py",
+                            "runtime_only_setting": "${runtime_only_value}",
+                            "datasets": [
+                                {
+                                    "name": "benchmark",
+                                    "type": "benchmark",
+                                    "jsonl_fpath": "${selected_input}",
+                                    "prompt_config": "${selected_prompt_config}",
+                                    "prepare_script": "${selected_prepare_script}",
+                                    "prepare_project": "${selected_prepare_project}",
+                                    "num_repeats": 1,
+                                }
+                            ],
+                            "resources_server": {
+                                "type": "resources_servers",
+                                "name": "resources",
+                            },
+                            "model_server": {
+                                "type": "responses_api_models",
+                                "name": "policy_model",
+                            },
+                        }
+                    }
+                },
+            }
+        )
+
+        datasets = global_config_dict.agent.responses_api_agents.simple_agent.datasets
+        datasets[0].unused_extra = unused_value
+        datasets.append({"name": "unused", "type": "example", "jsonl_fpath": unused_value})
+
+        result = TrainDataProcessor().load_and_validate_server_instance_configs(
+            config=TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"),
+            global_config_dict=global_config_dict,
+        )
+
+        dataset = result[0].datasets[0]
+        assert dataset.jsonl_fpath == Path("selected.jsonl")
+        assert dataset.prepare_script == Path("benchmarks/example/prepare.py")
+        assert dataset.prepare_project == Path("resources_servers/example")
+        assert dataset.prompt_config == Path("prompts/custom.yaml")
+        assert result[0].get_inner_run_server_config().model_extra["runtime_only_setting"] == "${runtime_only_value}"
+
+    def test_unresolved_selected_path_names_dataset(self) -> None:
+        repo = Path(__file__).resolve().parents[3]
+        config = OmegaConf.load(repo / "resources_servers/example_multi_step/configs/example_multi_step.yaml")
+        datasets = config.example_multi_step_simple_agent.responses_api_agents.simple_agent.datasets
+        del datasets[1:]
+        datasets[0].name = "broken_train"
+        datasets[0].jsonl_fpath = "${undefined_key}"
+
+        with raises(ValueError, match="Could not resolve paths for dataset 'broken_train'"):
+            TrainDataProcessor().load_and_validate_server_instance_configs(
+                TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"), config
+            )
+
+    def test_prepared_dataset_path_resolves_before_loading(self, tmp_path: Path) -> None:
+        prepared = tmp_path / "prepared.jsonl"
+        prepared.write_text("{}\n")
+        instance = _make_agent_instance_config(
+            "prepared_agent",
+            [{"name": "prepared", "type": "benchmark", "jsonl_fpath": "${paths.prepared}"}],
+        )
+        global_config = DictConfig(
+            {
+                "paths": {"prepared": str(prepared)},
+                "prepared_agent": OmegaConf.to_container(instance.server_type_config_dict),
+            }
+        )
+        config = TrainDataProcessorConfig(
+            output_dirpath=str(tmp_path / "collated"), mode="train_preparation", should_download=False
+        )
+        processor = TrainDataProcessor()
+        instances = processor.load_and_validate_server_instance_configs(config, global_config)
+        assert Path(instances[0].datasets[0].jsonl_fpath) == prepared
+        processor.load_datasets(config, instances)
+
     def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
         find_open_port_mock = MagicMock()
@@ -920,6 +1084,19 @@ class TestValidateSamplesAndAggregateMetrics:
             },
         }
 
+    def test_dataset_metrics_hook_lookup_warns_when_the_server_dir_is_missing(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        # A schema home that resolves to no directory anywhere used to be skipped silently (NVBug 6900465).
+        monkeypatch.chdir(tmp_path)
+        rs = ResourcesServerInstanceConfig(
+            name="plugin_rs",
+            server_type_config_dict=DictConfig({}),
+            resources_servers={"no_such_server_xyz": {"entrypoint": "app.py", "domain": "agent"}},
+        )
+        with warns(UserWarning, match=r"no resources_servers/no_such_server_xyz directory"):
+            assert TrainDataProcessor._dataset_metrics_hook_for(rs, [rs]) is None
+
     def test_categorical_metrics_merge_distributions(self) -> None:
         left = CategoricalMetrics()
         left.observe("first")
@@ -1267,7 +1444,7 @@ class TestNumRepeatsDataPreparation:
         )
 
         # Verify 6 writes occurred (2 lines * 3 repeats each)
-        expected_prepare_file = test_file.with_name(f"{test_file.stem}_prepare.jsonl")
+        expected_prepare_file = Path("prepared/example") / f"{test_file.stem}_prepare.jsonl"
         prepare_mock = write_filenames_to_mock[expected_prepare_file]
         assert len(prepare_mock.return_value.write.call_args_list) == 6
 
@@ -1360,14 +1537,12 @@ class TestCollateSamples:
 
         assert list(write_filenames_to_mock.keys()) == [
             Path("example_metrics.json"),
-            Path("resources_servers/example_multi_step/data/example_prepare.jsonl"),
+            Path("prepared/example/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
 
     def test_collate_creates_missing_parent_dir(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-        # The prepared-output file is written next to the dataset's jsonl_fpath. When that dir does not
-        # exist in the cwd (e.g. a built-in dataset resolved from the install root while collating from
-        # a fresh cwd), the write must create the parent instead of crashing with FileNotFoundError.
+        # A fresh run creates its own prepared-output directory, without writing beside the input.
         missing_dir = tmp_path / "does" / "not" / "exist"
         assert not missing_dir.exists()
         cfg = _make_agent_instance_config(
@@ -1377,10 +1552,11 @@ class TestCollateSamples:
         # Bypass the dataset read so the source file isn't needed; we're exercising the write path.
         monkeypatch.setattr(processor, "_iter_dataset_lines", lambda d: iter(['{"foo": "bar"}']))
 
-        paths = processor._collate_samples_single_type("example", [cfg])
+        paths = processor._collate_samples_single_type("example", [cfg], output_dir=tmp_path / "prepared")
 
-        prepare_path = missing_dir / "data_prepare.jsonl"
+        prepare_path = tmp_path / "prepared/data_prepare.jsonl"
         assert paths == [prepare_path]
+        assert not missing_dir.exists()
         assert prepare_path.exists()  # parent dir auto-created; write did not crash
         assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
 
@@ -1392,7 +1568,9 @@ class TestCollateSamples:
             "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(data), "num_repeats": 3}]
         )
         for num_repeats, expected in ((None, [0, 0, 0, 1, 1, 1]), (2, [0, 1])):
-            (path,) = TrainDataProcessor()._collate_samples_single_type("example", [cfg], num_repeats=num_repeats)
+            (path,) = TrainDataProcessor()._collate_samples_single_type(
+                "example", [cfg], num_repeats=num_repeats, output_dir=tmp_path / "prepared"
+            )
             assert [json.loads(line)["id"] for line in path.read_text().splitlines()] == expected
 
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
@@ -1519,9 +1697,27 @@ class TestCollateTaskSourceStamping:
 
     ROWS = [{"responses_create_params": {"input": []}, "question": "q1"}]
 
+    def test_runs_sharing_a_dataset_do_not_overwrite_prepared_rows(self, tmp_path):
+        source = tmp_path / "source.jsonl"
+        source.write_text(json.dumps(self.ROWS[0]) + "\n")
+        original = source.read_bytes()
+        prepared = []
+        for name in ("first", "second"):
+            cfg = _make_agent_instance_config(
+                name, [{"name": "shared", "type": "example", "jsonl_fpath": str(source)}]
+            )
+            (path,) = TrainDataProcessor()._collate_samples_single_type("example", [cfg], output_dir=tmp_path / name)
+            prepared.append(path)
+        assert self._read(prepared[0])[0]["task_source"] == "first"
+        assert self._read(prepared[1])[0]["task_source"] == "second"
+        assert source.read_bytes() == original
+        assert not source.with_name("source_prepare.jsonl").exists()
+
     def _collate(self, tmp_path, monkeypatch, configs):
         monkeypatch.chdir(tmp_path)
-        return TrainDataProcessor()._collate_samples_single_type(type="example", server_instance_configs=configs)
+        return TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=configs, output_dir=tmp_path / "prepared"
+        )
 
     def _read(self, path: Path) -> list:
         return [json.loads(line) for line in open(path)]
@@ -1688,7 +1884,9 @@ class TestCollateTaskSourceStamping:
         (declared,) = agent.datasets
         assert declared.type == "benchmark" and declared.prepare_script is None and declared.verified is False
         monkeypatch.chdir(tmp_path)
-        paths = TrainDataProcessor()._collate_samples_single_type(type="benchmark", server_instance_configs=[agent])
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            type="benchmark", server_instance_configs=[agent], output_dir=tmp_path / "prepared"
+        )
         (row,) = self._read(paths[0])
         assert row["task_source"] == "tb21" and row["task_id"] == {"taskset": "tb21", "task_id": "hello"}
 
@@ -1772,7 +1970,7 @@ class TestCollateTaskSourceStamping:
         rs = _instance("rep_rs", "resources_servers", {"entrypoint": "app.py", "domain": "math", "datasets": [d]})
         monkeypatch.chdir(tmp_path)
         TrainDataProcessor()._collate_samples_single_type(
-            type="example", server_instance_configs=[rs], task_data_validation="warn"
+            type="example", server_instance_configs=[rs], task_data_validation="warn", output_dir=tmp_path / "prepared"
         )
         summary = capsys.readouterr().out
         assert "1/2 rows failed" in summary
@@ -1792,6 +1990,31 @@ class TestDeclaringInstanceValidation:
             {"my_rs": {"resources_servers": {"impl": {"entrypoint": "a.py", "domain": "math", "datasets": [d]}}}}
         )
         assert [c.name for c in out] == ["my_rs"]
+
+    def test_unused_train_input_does_not_resolve_missing_environment(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("AGENTVISTA_UNUSED_TRAIN_JSONL", raising=False)
+        example = _dataset(tmp_path, "selected", [{"responses_create_params": {"input": []}}])
+        train = {
+            **example,
+            "name": "unused",
+            "type": "train",
+            "license": "MIT",
+            "jsonl_fpath": "${oc.env:AGENTVISTA_UNUSED_TRAIN_JSONL}",
+        }
+        selected = self._validate(
+            {
+                "example_path": example["jsonl_fpath"],
+                "fixture_agent": {
+                    "responses_api_agents": {
+                        "impl": {
+                            "entrypoint": "a.py",
+                            "datasets": [{**example, "jsonl_fpath": "${example_path}"}, train],
+                        }
+                    }
+                },
+            }
+        )
+        assert selected[0].get_inner_run_server_config().datasets[0].jsonl_fpath == example["jsonl_fpath"]
 
     def test_model_server_datasets_rejected(self, tmp_path) -> None:
         d = _dataset(tmp_path, "d5", [{"responses_create_params": {"input": []}}])
@@ -1820,3 +2043,51 @@ class TestDeclaringInstanceValidation:
                 }
             )
         assert [c.name for c in out] == ["my_agent"]
+
+
+def test_preparation_hint_resolves_interpolated_path(tmp_path: Path) -> None:
+    from nemo_gym.config.config_types import BenchmarkDatasetConfig
+    from nemo_gym.data.dataset_preparation import _prepare_command
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """prepare_script_args:
+  output_dir: old
+agent:
+  datasets:
+    - jsonl_fpath: ${undefined_output}/unrelated.jsonl
+      prepare_script: unrelated_prepare.py
+    - jsonl_fpath: ${prepare_script_args.output_dir}/tasks.jsonl
+      prepare_script: prepare.py
+"""
+    )
+    runtime = OmegaConf.create({"config_paths": [str(config)], "prepare_script_args": {"output_dir": "selected"}})
+    dataset = BenchmarkDatasetConfig(name="tasks", type="benchmark", jsonl_fpath="selected/tasks.jsonl")
+    assert _prepare_command(runtime, dataset) == f"gym eval prepare --config {config}"
+
+
+class TestCollateTypedTaskRows:
+    TASK = {
+        "task_id": {"taskset": "env:opencode", "task_id": "a:1"},
+        "task_input": {"responses_create_params": {"input": "x"}, "task_data": {"q": 1}},
+    }
+
+    def _collate(self, tmp_path, monkeypatch, rows):
+        monkeypatch.chdir(tmp_path)
+        dataset = _dataset(tmp_path, "d", rows) | {"taskset": "env:opencode"}
+        rs = _instance(
+            "env_rs", "resources_servers", {"entrypoint": "app.py", "domain": "math", "datasets": [dataset]}
+        )
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=[rs], output_dir=tmp_path / "prepared"
+        )
+        return [json.loads(line) for line in open(paths[0])]
+
+    def test_typed_rows_in_a_taskset_dataset_collate_unchanged(self, tmp_path, monkeypatch) -> None:
+        """A dataset that declares a taskset may hold prepared task rows of that taskset; collate keeps them."""
+        assert self._collate(tmp_path, monkeypatch, [self.TASK]) == [self.TASK | {"task_source": "env_rs"}]
+
+    def test_a_typed_row_of_another_taskset_is_refused(self, tmp_path, monkeypatch) -> None:
+        other = self.TASK | {"task_id": {"taskset": "other", "task_id": "a:1"}}
+        with raises(ValueError, match="differs from the dataset taskset"):
+            self._collate(tmp_path, monkeypatch, [other])

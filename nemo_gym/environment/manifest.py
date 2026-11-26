@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from datetime import date
 from enum import StrEnum
+from functools import cache
 from pathlib import Path
-from typing import Annotated, Any, Mapping
+from typing import Annotated, Any, Literal, Mapping, NamedTuple
 
 import yaml
 from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
@@ -16,13 +17,16 @@ from pydantic import (
     ConfigDict,
     Field,
     FiniteFloat,
+    StrictBool,
     StringConstraints,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
 from nemo_gym.config.config_types import ConfigError, Domain
+from nemo_gym.utils.text import did_you_mean
 
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
@@ -30,12 +34,97 @@ MANIFEST_SCHEMA_ID = "environment-manifest.schema.json"
 _PRIVATE_LICENSE_VALUES = frozenset({"internal", "proprietary", "unknown"})
 SOURCE_PATTERN = r"^(?:(?:https?|ssh|git|file)://\S+|[^@\s]+@[^:\s]+:\S+)$"
 CALLABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
+# A GitHub login, optionally followed by the underscore and the 3- to 8-character shortcode that GitHub appends to a
+# managed user's login (`mona-cat_octo`). Either way a login is at most 39 characters.
+GITHUB_LOGIN_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{3,8})?$"
+GITHUB_LOGIN_MAX_LENGTH = 39
+# A yes-or-no answer that an author can also give as "unknown": the value hasn't been established. An absent field
+# means the manifest doesn't state it. Strict, so Gym accepts the same values as the JSON Schema; YAML still reads a
+# bare `yes` or `no` as a boolean.
+BoolOrUnknown = StrictBool | Literal["unknown"]
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 License = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Source = Annotated[str, StringConstraints(strip_whitespace=True, pattern=SOURCE_PATTERN)]
 GitRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern=r"^[^\s]+$")]
 PythonCallable = Annotated[str, StringConstraints(strip_whitespace=True, pattern=CALLABLE_PATTERN)]
+GitHubLogin = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, max_length=GITHUB_LOGIN_MAX_LENGTH, pattern=GITHUB_LOGIN_PATTERN),
+]
+
+CAPABILITIES_AND_DOMAINS_PATH = Path(__file__).with_name("capabilities_and_domains.yaml")
+
+
+class _CapabilitiesAndDomains(NamedTuple):
+    capability_taxonomy_version: str
+    domain_list_version: str
+    # Each capability with its specializations, in the file's order.
+    capabilities: Mapping[str, tuple[str, ...]]
+    domains: tuple[str, ...]
+
+    def capability_names(self) -> list[str]:
+        """Every value `capabilities` accepts: each capability, followed by `<capability>/<specialization>`."""
+        return [
+            name
+            for capability, specializations in self.capabilities.items()
+            for name in (capability, *(f"{capability}/{specialization}" for specialization in specializations))
+        ]
+
+
+@cache
+def _capabilities_and_domains() -> _CapabilitiesAndDomains:
+    """The capability taxonomy and domain list, read once from :data:`CAPABILITIES_AND_DOMAINS_PATH`."""
+    data = yaml.safe_load(CAPABILITIES_AND_DOMAINS_PATH.read_text(encoding="utf-8"))
+    return _CapabilitiesAndDomains(
+        capability_taxonomy_version=data["capability_taxonomy_version"],
+        domain_list_version=data["domain_list_version"],
+        capabilities={name: tuple(body["specializations"]) for name, body in data["capabilities"].items()},
+        domains=tuple(data["domains"]),
+    )
+
+
+def _check_capability(value: str) -> str:
+    lists = _capabilities_and_domains()
+    capability, slash, specialization = value.partition("/")
+    specializations = lists.capabilities.get(capability)
+    if specializations is not None and (not slash or specialization in specializations):
+        return value
+    if specializations is not None:
+        raise ValueError(
+            f"'{specialization}' is not a specialization of '{capability}' in the capability taxonomy "
+            f"({lists.capability_taxonomy_version}). Its specializations are: {', '.join(specializations)}."
+        )
+    raise ValueError(
+        f"'{value}' is not in the capability taxonomy ({lists.capability_taxonomy_version}); write "
+        f"<capability> or <capability>/<specialization>.{did_you_mean(value, lists.capability_names())} "
+        "The values are listed in nemo_gym/environment/capabilities_and_domains.yaml."
+    )
+
+
+def _check_domain(value: str) -> str:
+    lists = _capabilities_and_domains()
+    if value in lists.domains:
+        return value
+    raise ValueError(
+        f"'{value}' is not in the domain list ({lists.domain_list_version}).{did_you_mean(value, lists.domains)} "
+        "The values are listed in nemo_gym/environment/capabilities_and_domains.yaml."
+    )
+
+
+def _list_capabilities(schema: dict[str, Any]) -> None:
+    schema["enum"] = _capabilities_and_domains().capability_names()
+
+
+def _list_domains(schema: dict[str, Any]) -> None:
+    schema["enum"] = list(_capabilities_and_domains().domains)
+
+
+# Items are checked by EnvironmentManifest.validate_listed_values once the field is known to be a list, so a bad
+# item gives one error rather than one per branch of `list | "unknown"`. The schema lists the values for editors.
+# The lists are read when a manifest is first validated or the schema is built, not when this module is imported.
+ListedCapability = Annotated[str, Field(json_schema_extra=_list_capabilities)]
+ListedDomain = Annotated[str, Field(json_schema_extra=_list_domains)]
 
 
 class EnvironmentKind(StrEnum):
@@ -146,6 +235,24 @@ class AdoptedFrom(_ManifestModel):
     reconciled: date
 
 
+class ManifestRequirements(_ManifestModel):
+    """What a run needs beyond the model under test. Each field also takes "unknown"."""
+
+    gpu: BoolOrUnknown | None = Field(
+        default=None,
+        description="Whether the environment itself needs a GPU, for example to score answers.",
+    )
+    # The same words as a Harbor task's `network_mode`, so a cluster with restricted egress can tell an environment
+    # that calls a few named services, which it can allowlist, from one that needs the open internet.
+    network: Literal["no-network", "allowlist", "public", "unknown"] | None = Field(
+        default=None,
+        description=(
+            "Outbound network access a run needs: no-network; allowlist (only specific services, such as a search "
+            "API or a hosted judge model); or public (the open internet, for example browsing or downloads)."
+        ),
+    )
+
+
 def _profile_schema_conditions() -> list[dict[str, Any]]:
     nonempty_string = {"minLength": 1, "type": "string"}
     nonempty_datasets = {"minItems": 1, "type": "array"}
@@ -159,12 +266,28 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
             "then": {"properties": {field: nonempty_string for field in fields}, "required": list(fields)},
         }
 
+    # A Harbor-backed manifest's rows come from its target, so it declares no datasets of its own.
+    no_harbor_target = {"harbor_target": {"type": "null"}}
     return [
         {
+            "if": {"properties": no_harbor_target},
+            "then": {"properties": {"datasets": nonempty_datasets}, "required": ["datasets"]},
+            "else": {
+                "properties": {
+                    "datasets": {"maxItems": 0, "type": "array"},
+                    "prompt_source": {"enum": [PromptSource.PREPARED.value, PromptSource.AGENT.value]},
+                },
+                "required": ["prompt_source"],
+            },
+        },
+        {
             "if": {"properties": {"kind": {"const": "benchmark"}}, "required": ["kind"]},
+            "then": {"properties": {"canonical_split": nonempty_string}, "required": list(_BENCHMARK_REQUIRED_FIELDS)},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "benchmark"}, **no_harbor_target}, "required": ["kind"]},
             "then": {
                 "properties": {
-                    "canonical_split": nonempty_string,
                     "datasets": {
                         **nonempty_datasets,
                         "contains": {
@@ -173,7 +296,6 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
                         },
                     },
                 },
-                "required": list(_BENCHMARK_REQUIRED_FIELDS),
             },
         },
         {
@@ -241,14 +363,62 @@ class EnvironmentManifest(_ManifestModel):
         description="SPDX license expression, internal, proprietary, or unknown.",
     )
     authors: list[NonEmptyString] = Field(min_length=1, json_schema_extra={"uniqueItems": True})
+    maintainers: list[GitHubLogin] | None = Field(
+        default=None,
+        min_length=1,
+        json_schema_extra={"uniqueItems": True},
+        description="GitHub logins of the people who maintain the environment now.",
+    )
+    capabilities: list[ListedCapability] | Literal["unknown"] | None = Field(
+        default=None,
+        json_schema_extra={"uniqueItems": True},
+        description=(
+            "Skills the environment exercises, from the capability taxonomy, each written <capability> or "
+            "<capability>/<specialization>, for example coding/code_generation. The first entry is the main "
+            "capability. By convention its top level (the part before the slash) is the environment's coarse "
+            "category, which readers and tools such as catalogs can group by; `gym list` groups by `domain`. An "
+            "empty list when none applies, or unknown."
+        ),
+    )
+    domains: list[ListedDomain] | Literal["unknown"] | None = Field(
+        default=None,
+        json_schema_extra={"uniqueItems": True},
+        description=(
+            "Fields of expertise the tasks need, from the domain list, with the main domain first; an empty "
+            "list when none applies, or unknown."
+        ),
+    )
+    overlaps_with: list[NonEmptyString] | None = Field(
+        default=None,
+        min_length=1,
+        json_schema_extra={"uniqueItems": True},
+        description=(
+            "Benchmarks that training on this environment would invalidate, for example because their tasks overlap "
+            "with its data."
+        ),
+    )
+    primary_metric: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "The headline score: its exact key in the run's aggregate metrics, such as mean/reward or "
+            "pass@1[avg-of-4]/accuracy, not a display label."
+        ),
+    )
+    requirements: ManifestRequirements | None = None
     reward: Reward
     determinism: Determinism = Determinism.UNKNOWN
 
     config_path: NonEmptyString = Field(default="config.yaml", description="Config path relative to the manifest.")
+    harbor_target: NonEmptyString | None = Field(
+        default=None,
+        description="Harbor task folder, entry or reference the config's harbor_target names; its tasks are the rows.",
+    )
     dataset_owner: NonEmptyString | None = None
     resources_server: NonEmptyString | None
     agent_server: NonEmptyString
-    datasets: list[ManifestDataset] = Field(min_length=1)
+    datasets: list[ManifestDataset] = Field(
+        default_factory=list, description="Required unless harbor_target is set, whose tasks are the rows."
+    )
     model_server: NonEmptyString | None = None
     rollout_driver: PythonCallable | None = None
     grading_mode: NonEmptyString | None = None
@@ -265,11 +435,26 @@ class EnvironmentManifest(_ManifestModel):
     adopted_from: AdoptedFrom | None = None
     lifecycle: Lifecycle = Lifecycle.ACTIVE
 
-    @field_validator("authors")
+    @field_validator("authors", "maintainers", "capabilities", "domains", "overlaps_with")
     @classmethod
-    def validate_unique_authors(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("authors must be unique")
+    def validate_unique_items(cls, value: list[str] | str | None, info: ValidationInfo) -> list[str] | str | None:
+        if isinstance(value, list) and len(value) != len(set(value)):
+            raise ValueError(f"{info.field_name} must be unique")
+        return value
+
+    @field_validator("capabilities", "domains")
+    @classmethod
+    def validate_listed_values(cls, value: list[str] | str | None, info: ValidationInfo) -> list[str] | str | None:
+        if not isinstance(value, list):
+            return value
+        check = _check_capability if info.field_name == "capabilities" else _check_domain
+        for item in value:
+            if item == "unknown":
+                raise ValueError(
+                    f"unknown is the whole value, as in `{info.field_name}: unknown`, not an item in a list; "
+                    "an empty list means none applies"
+                )
+            check(item)
         return value
 
     @field_validator("licensing")
@@ -289,12 +474,22 @@ class EnvironmentManifest(_ManifestModel):
         missing = [
             field for field in _PROFILE_REQUIRED_FIELDS[self.integration_profile] if getattr(self, field) is None
         ]
+        if self.harbor_target is None and not self.datasets:
+            missing.append("datasets")
         if self.kind == EnvironmentKind.BENCHMARK:
             missing.extend(field for field in _BENCHMARK_REQUIRED_FIELDS if getattr(self, field) is None)
             if self.prompt_source == PromptSource.TEMPLATE and self.standard_prompt_config is None:
                 missing.append("standard_prompt_config")
         if missing:
             raise ValueError("manifest requires: " + ", ".join(dict.fromkeys(missing)))
+        if self.harbor_target is not None:
+            if self.datasets:
+                raise ValueError("a manifest with harbor_target declares no datasets: its rows are the target's tasks")
+            if self.prompt_source == PromptSource.TEMPLATE:
+                raise ValueError(
+                    "a manifest with harbor_target needs prompt_source prepared or agent: "
+                    "its rows carry each task's instruction"
+                )
         if self.prompt_source == PromptSource.PREPARED and self.standard_prompt_config is not None:
             raise ValueError("standard_prompt_config is forbidden for prepared prompts")
         if self.prompt_source != PromptSource.TEMPLATE and any(
@@ -306,8 +501,10 @@ class EnvironmentManifest(_ManifestModel):
         names = [dataset.name for dataset in self.datasets]
         if len(names) != len(set(names)):
             raise ValueError("dataset names must be unique")
-        if self.kind == EnvironmentKind.BENCHMARK and not any(
-            dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets
+        if (
+            self.kind == EnvironmentKind.BENCHMARK
+            and self.harbor_target is None
+            and not any(dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets)
         ):
             raise ValueError("a benchmark manifest requires a benchmark dataset")
         return self

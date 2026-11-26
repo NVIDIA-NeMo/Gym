@@ -32,15 +32,23 @@ Before starting, determine which type of benchmark you're adding:
 
 ## Workflow
 
-### Step 1: Scaffold the server
+### Step 1: Scaffold the workload or server
 
-Run `gym env init` to generate the directory structure:
+For a manifest-backed benchmark, start with the [benchmark onboarding workflow](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#1-reuse-components-and-scaffold):
+
+```bash
+gym env init --benchmark my_benchmark --profile custom-gym-verifier
+```
+
+This creates `benchmarks/my_benchmark/` with its config, manifest, preparation script, prompt, sample data and README, plus `resources_servers/my_benchmark/` with the scorer and its tests. Use `--environment` for a training environment. Follow the onboarding page for benchmark preparation and prompting; the prepared-input and component-config examples below also cover standalone servers and training data.
+
+To add only a reusable resources server, use the standalone scaffold instead:
 
 ```bash
 gym env init --resources-server my_benchmark
 ```
 
-This creates:
+The standalone command creates the following server files, without a workload manifest:
 ```
 resources_servers/my_benchmark/
 ├── app.py              # Server template
@@ -56,7 +64,7 @@ For external benchmarks, create the agent server manually under `responses_api_a
 
 ### Step 2: Prepare data
 
-Convert your source dataset to Gym JSONL format. Each line must have `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata`.
+Convert your source dataset to Gym JSONL format. For template-based benchmarks, follow the [preparation and prompt instructions](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#2-prepare-data-and-complete-the-manifest). For already-rendered inputs, each line has `responses_create_params.input` (OpenAI message format), as below. Task-specific verification data goes in `verifier_metadata`.
 
 ```json
 {
@@ -123,6 +131,7 @@ Critical rules:
 - Must handle 4k-65k concurrent requests without crashing
 - Use `asyncio.Semaphore` for subprocess concurrency control
 - For Ray remote tasks: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` in async context.
+- Ray is optional. A server that uses Ray must declare `ray_enabled = True` on the class its entrypoint runs and request `nemo-gym[ray]` in its own `pyproject.toml`; otherwise Gym doesn't start Ray for it and Ray calls fail with "Ray has not been started yet". For isolated code execution, use the Sandbox API instead of Ray.
 - Decode subprocess output with `errors="replace"`
 - Strip `<think>`/`<thinking>` blocks before parsing model output (thinking models emit these)
 - Tests should `pytest.mark.skipif` when external tools aren't installed
@@ -147,7 +156,7 @@ Key points:
 
 ### Step 4: Wire YAML config
 
-Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
+For a manifest-backed workload, edit `benchmarks/my_benchmark/config.yaml` (or `environments/my_benchmark/config.yaml`) and the component configs it includes. A standalone server's config lives at `resources_servers/my_benchmark/configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
 
 Key points:
 - `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
@@ -176,6 +185,20 @@ datasets:
 
 Both fields must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` tells the system where to fetch from. `example` datasets don't need `gitlab_identifier` — they're committed to git directly.
 
+### Step 4b: Complete the manifest
+
+For a manifest-backed workload, follow [Prepare data and complete the manifest](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#2-prepare-data-and-complete-the-manifest). Complete the metadata the author chooses: identity, description, authors, licensing, reward declaration and, for benchmarks, split and prompt source. Also complete the selection metadata: maintainers, capabilities, domains, overlaps, the benchmark's headline metric and run requirements. The [field reference](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx#field-reference) defines the allowed values.
+
+Use the code, the data's licence and terms (for `licensing`), and information the user has supplied. Ask for missing maintainer identities instead of guessing. The literal `unknown` is supported by `capabilities`, `domains`, `requirements.gpu` and `requirements.network`; it is not a general value for every field. Take `capabilities` (`<capability>` or `<capability>/<specialization>`; the first entry is the main capability, and by convention its top level is the environment's coarse category, which readers and catalogs can group by) and `domains` (main domain first) from the lists in `nemo_gym/environment/capabilities_and_domains.yaml`; validation rejects other values. Write `capabilities: unknown` or `domains: unknown` when the value hasn't been established, never `unknown` inside a list, and an empty list when none applies. Choose them from what the tasks exercise and need, not from the benchmark's name. `domains` is separate from `domain`, Gym's single category, which stays as it is. Set `requirements.network` from what the code calls: `no-network`, `allowlist` for specific services such as a search API or a hosted judge model, or `public` for the open internet. List in `overlaps_with` the benchmarks that training on this environment would invalidate, for example because it uses the same source data; leave it absent unless an overlap is known. A config that only changes the harness is a run preset with no manifest of its own. If the main config's Resources Server declares `allowed_agents`, add the preset's agent there only after a representative rollout shows that the pairing works, as the [Terminal Bench 2.1 note](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#swap-the-agent-or-the-benchmark) describes; until then, run the preset with `--allow-unsupported-pairing`. A config that changes the prompt, scoring, task limits or tools gets its own manifest. Do not add manifests for `*_legacy_agent` configs.
+
+Replace every scaffold `TODO`. When wiring or dataset declarations change, edit the runtime config first, then synchronize the manifest's copied fields and review the diff:
+
+```bash
+gym env validate --manifest <path> --sync
+```
+
+Synchronization does not complete authored metadata. Skip this step when adding only a standalone server with no workload manifest.
+
 ### Step 5: Test
 
 ```bash
@@ -189,6 +212,8 @@ pytest tests/unit_tests/ -x
 Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong output), verify fail (no code extracted), verify fail (compilation error if applicable), verify timeout.
 
 ### Step 6: Smoke test end-to-end
+
+For a manifest-backed benchmark, use the [representative evaluation workflow](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx#4-run-a-representative-evaluation). The commands below exercise a standalone server's example data.
 
 ```bash
 # Start servers
@@ -240,7 +265,7 @@ The state hooks and `verifying()` manage resource ownership and compact retry ev
 | --- | --- |
 | A. The resources server observes it | For a judge, run the grading inside `observe_llm_judge_grading` (`nemo_gym.server_runtime.verifier_observability`), make the judge calls through `call_judge`, and call `record_parsed_judge_verdict()` (`nemo_gym.verification.judge`) only after a real verdict was parsed. For a plain calculation, wrap the actual calculation in `observe_programmatic_grading`. |
 | B. The shared verifier record | `observe_verifier` records a verify that completes without sending a model request: its name, score and verdict, bound to the response. Return the actual response and reward. Set `grading_may_use_uninstrumented_model = True` on the resources server class when `verify()` may ask a model through a client that notes no request (an external SDK client); it then gets no record, because a missing note does not show that grading was model-free. |
-| C. A saved grading artifact | The row carries one of the artifacts in `GRADING_ARTIFACTS` (`nemo_gym.orchestration.recovery`: `judge_record`, `rubric_verdict`, `symbolic_match`, `metric_record`, `test_execution`, `environment_reward`, `repository_test_run`, `substep_tests`, `unit_test_results`, `node_set_f1`, `session_reward_file`, `guarded_objective_score`, `native_scorer_score`), with fields that map to the graded response, the reward and the trial. Test that a mismatched or stale artifact is rejected. An aggregate score file alone is not one. |
+| C. A saved grading artifact | The row carries one of the artifacts in `GRADING_ARTIFACTS` (`nemo_gym.eval.recovery.grading`: `judge_record`, `rubric_verdict`, `symbolic_match`, `metric_record`, `test_execution`, `environment_reward`, `repository_test_run`, `substep_tests`, `unit_test_results`, `node_set_f1`, `session_reward_file`, `guarded_objective_score`, `native_scorer_score`), with fields that map to the graded response, the reward and the trial. Test that a mismatched or stale artifact is rejected. An aggregate score file alone is not one. |
 | D. The agent grades its own rollouts | With no resources server, the invocation's grading record names the agent (`agent_ref.name`) and binds the actual response and reward. Do not invent a resources-server name. This covers programmatic rubrics; a rubric that is asynchronous or judged by a hidden model needs its own observation, as in path A. Check that your pin supports the rubric you use. |
 
 **2. Type each characteristic failure where it happens.** Keep the response and the cause. A context-window rejection is `model_context_limit` and is final. Sandbox and provider faults use the matching registered kind, such as `provider_unavailable` or `provider_credentials_rejected`. A judge outage is a typed judge failure (`judge_failed`, or `judge_unparseable` for a verdict that cannot be parsed) with `mask_sample`: the row leaves the score and is re-judged from the saved answer. It is never a zero for the model. A genuine wrong answer stays an unmasked zero. Never infer a cause from a substring of an error body.
@@ -266,6 +291,8 @@ pre-commit run --all-files
 First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
 
 Set `verified: true` in YAML config after the exit checks pass. Link the run folder and its `quality_summary.json` in the PR description.
+
+CI does not start on its own for unverified commits or external contributors; a maintainer must comment `/ok to test <full-sha>`. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and labels.
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash

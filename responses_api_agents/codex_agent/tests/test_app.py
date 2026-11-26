@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import orjson
 import pytest
 import yaml
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
@@ -119,6 +119,44 @@ class TestSanity:
         with pytest.raises(ValidationError, match="must not exceed 90%"):
             _config(model_context_window=40960, model_auto_compact_token_limit=36865)
         assert _config(model_context_window=40960, model_auto_compact_token_limit=36864).model_context_window == 40960
+
+    def test_model_catalog_path_must_be_absolute(self) -> None:
+        # Codex resolves a relative path against its per-run CODEX_HOME, which no caller can name.
+        with pytest.raises(ValidationError, match="model_catalog_json"):
+            _config(model_catalog_json="catalog.json")
+
+    @pytest.mark.parametrize(
+        "codex_version, enabled",
+        [("0.144.4", False), ("0.144.4", True), ("0.99.0", False)],
+        ids=["false", "true", "older-version"],
+    )
+    def test_agents_enabled_is_refused_up_to_the_codex_version_that_rejects_the_key(
+        self, codex_version: str, enabled: bool
+    ) -> None:
+        # Codex 0.144.4 stops on the key with a configuration error, which fails the activation with HTTP 502.
+        # 0.99.0 is the older version only when the numbers are compared and not the strings.
+        with pytest.raises(ValidationError) as refusal:
+            _config(codex_version=codex_version, agents_enabled=enabled)
+        assert (
+            f"Codex {codex_version} does not support `agents_enabled`. "
+            "Use a compatible version (verified with 0.163.0) or omit the setting."
+        ) in str(refusal.value)
+
+    @pytest.mark.parametrize(
+        "codex_version, enabled",
+        [
+            ("0.144.4", None),
+            ("0.163.0", False),
+            ("0.163.0", True),
+            ("0.145.0", False),
+            ("0.144.10", False),
+            ("latest", False),
+        ],
+        ids=["unset", "verified-false", "verified-true", "unverified-version", "later-patch", "no-exact-version"],
+    )
+    def test_agents_enabled_is_accepted_otherwise(self, codex_version: str, enabled: bool | None) -> None:
+        # An unset switch writes no key. A version after 0.144.4 or a tag is not known to reject the key.
+        assert _config(codex_version=codex_version, agents_enabled=enabled).agents_enabled is enabled
 
     @pytest.mark.parametrize(
         "settings",
@@ -420,6 +458,20 @@ class TestRunTimeout:
         assert result.agent_timed_out is True
         assert result.reward == 0.5
         assert "_ng_agent_timed_out" not in verify_body["response"]
+
+    @pytest.mark.parametrize(
+        ("details", "expected_cached", "expected_reasoning"),
+        [({"cached_input_tokens": 4, "reasoning_output_tokens": 2}, 4, 2), ({}, None, None)],
+    )
+    def test_response_usage_keeps_unreported_details_unknown(
+        self, details, expected_cached, expected_reasoning
+    ) -> None:
+        stdout = _event("turn.completed", usage={"input_tokens": 7, "output_tokens": 3, **details})
+        _, verify_body = self._run(stdout)
+
+        usage = verify_body["response"]["usage"]
+        assert usage["input_tokens_details"]["cached_tokens"] == expected_cached
+        assert usage["output_tokens_details"]["reasoning_tokens"] == expected_reasoning
 
     def test_observations_reach_rollout_without_stdout_events(self) -> None:
         observations = AgentObservationBundle(source="codex")
@@ -790,12 +842,13 @@ class TestParseExecJsonl:
         assert items == []
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
-        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+        assert usage["cached_input_tokens"] is usage["reasoning_tokens"] is None
 
     @pytest.mark.parametrize("details", [{}, {"cached_input_tokens": 0, "reasoning_output_tokens": 0}])
-    def test_legacy_optional_usage_defaults_are_unchanged(self, details) -> None:
+    def test_unmeasured_usage_details_are_unknown(self, details) -> None:
+        # Codex writes zero for a cache or reasoning counter the backend did not report.
         _, usage = parse_exec_jsonl(_event("turn.completed", usage={"input_tokens": 7, "output_tokens": 3, **details}))
-        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+        assert usage["cached_input_tokens"] is usage["reasoning_tokens"] is None
         assert usage["input_tokens"] == 7 and usage["output_tokens"] == 3
 
     def test_agent_message(self) -> None:
@@ -996,6 +1049,27 @@ class TestConfigYaml:
         assert inner["sandbox_mode"] == "danger-full-access"
         # The YAML spells out the model defaults, so overrides merge into them.
         assert inner["features"] == _config().features
+
+
+@pytest.mark.parametrize("role", ["user", "system", "developer"])
+async def test_local_images_require_session(role: str) -> None:
+    agent = _make_agent()
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "role": role,
+                "content": [
+                    {"type": "input_text", "text": "Describe the image."},
+                    {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+                ],
+            }
+        ]
+    )
+    with patch.object(CodexAgent, "_run_codex", new_callable=AsyncMock) as run_codex:
+        with pytest.raises(HTTPException, match="Codex prompt images require an agent session") as exc:
+            await agent._create_response(body)
+    assert exc.value.status_code == 422
+    run_codex.assert_not_awaited()
 
 
 @pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])

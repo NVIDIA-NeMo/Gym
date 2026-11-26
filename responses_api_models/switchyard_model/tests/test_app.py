@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import logging
 import socket
 import sys
 import threading
@@ -35,6 +36,7 @@ from pytest import MonkeyPatch
 import nemo_gym.client.http_client
 import responses_api_models.switchyard_model.app as app_module
 from nemo_gym.client import ServerClient
+from nemo_gym.core import ModelCallSampling, encode_model_sampling
 from responses_api_models.switchyard_model.app import (
     NeMoGymAsyncOpenAI,
     SwitchyardModel,
@@ -247,6 +249,10 @@ class TestRolloutSessionMiddleware:
     async def test_well_formed_rollout_id_is_published(self) -> None:
         assert await self._rollout_id_for("/ng-rollout/task0-r1-a0/v1/responses") == "task0-r1-a0"
 
+    async def test_rollout_id_is_published_when_an_agent_instance_follows_it(self) -> None:
+        path = "/ng-rollout/task0-r1-a0/ng-agent-instance/judge/v1/responses"
+        assert await self._rollout_id_for(path) == "task0-r1-a0"
+
     async def test_rollout_id_outside_the_contract_charset_is_ignored(self) -> None:
         """The id becomes an upstream header value, so anything off-contract is dropped, not sent."""
         assert await self._rollout_id_for("/ng-rollout/bad\r\nx-injected: 1/v1/responses") is None
@@ -280,6 +286,29 @@ class TestApp:
     def test_sanity(self) -> None:
         server = self._setup_server()
         assert server._client.base_url == "http://127.0.0.1:4000/v1"
+
+    def test_the_proxy_call_is_unbounded_by_default(self) -> None:
+        client = self._setup_server()._client
+
+        assert client.request_timeout_seconds is None
+        assert client.max_connection_retries is None
+        assert client.connection_retry_timeout_s is None
+
+    def test_configured_bounds_reach_the_client(self) -> None:
+        client = self._setup_server(
+            request_timeout_seconds=30.0, max_connection_retries=3, connection_retry_timeout_s=15.0
+        )._client
+
+        assert client.request_timeout_seconds == 30.0
+        assert client.max_connection_retries == 3
+        assert client.connection_retry_timeout_s == 15.0
+
+    @pytest.mark.parametrize(
+        "field", ["request_timeout_seconds", "max_connection_retries", "connection_retry_timeout_s"]
+    )
+    def test_a_bound_of_zero_is_rejected(self, field: str) -> None:
+        with pytest.raises(ValueError):
+            self._setup_server(**{field: 0})
 
     def test_max_concurrent_requests_builds_semaphore(self) -> None:
         server = self._setup_server(max_concurrent_requests=2)
@@ -329,6 +358,36 @@ class TestApp:
         assert response.status_code == 200
         assert seen["kwargs"]["model"] == "policy-model"
         assert seen["headers"]["x-switchyard-session-id"] == "task0-r1"
+
+    @pytest.mark.parametrize("dialect", ["responses", "chat/completions"])
+    @pytest.mark.parametrize("training_capture", [False, True])
+    def test_sampling_values_keep_the_session_id(
+        self, monkeypatch: MonkeyPatch, dialect: str, training_capture: bool
+    ) -> None:
+        """The sampling segment follows the rollout prefix, so Switchyard still keys the session on the rollout."""
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def generate(self, **kwargs):
+            seen["headers"] = self.default_headers
+            seen["kwargs"] = kwargs
+            return _response_data() if dialect == "responses" else _chat_data()
+
+        monkeypatch.setattr(
+            NeMoGymAsyncOpenAI, "create_response" if dialect == "responses" else "create_chat_completion", generate
+        )
+        capture_path = "/training-token-capture" if training_capture else ""
+        segment = encode_model_sampling(ModelCallSampling(temperature=0.0, top_p=0.7, max_output_tokens=73))
+        inputs = {"input" if dialect == "responses" else "messages": [{"role": "user", "content": "hi"}]}
+
+        response = TestClient(server.setup_webserver()).post(
+            f"/ng-rollout/task0-r1-a2{capture_path}/ng-sampling/{segment}/v1/{dialect}", json=inputs
+        )
+
+        assert response.status_code == 200, response.text
+        assert seen["headers"]["x-switchyard-session-id"] == "task0-r1-a2"
+        assert (seen["kwargs"]["temperature"], seen["kwargs"]["top_p"]) == (0.0, 0.7)
+        assert seen["kwargs"]["max_output_tokens" if dialect == "responses" else "max_completion_tokens"] == 73
 
     def test_extra_session_id_headers_all_carry_the_id(self, monkeypatch: MonkeyPatch) -> None:
         """Attach-mode proxies can key other subsystems on other names; every configured name is sent."""
@@ -564,8 +623,8 @@ class TestSamplingOverrides:
         assert response.status_code == 200
         assert seen["temperature"] == 1.0
         assert seen["top_p"] == 0.95
-        # The agent's blanket cap is cleared rather than forwarded.
-        assert "max_tokens" in seen and seen["max_tokens"] is None
+        # The agent's blanket cap is removed rather than forwarded.
+        assert "max_tokens" not in seen
 
     def test_route_id_is_applied_last_and_cannot_be_pinned(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(sampling_overrides={"model": "sneaky"})
@@ -592,6 +651,89 @@ class TestSamplingOverrides:
         client = TestClient(server.setup_webserver())
         client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2})
         assert seen["temperature"] == 0.2
+
+    def _upstream_limits(self, monkeypatch: MonkeyPatch, server: SwitchyardModel, path: str, body: dict) -> dict:
+        """POST ``body`` to ``path`` and return the output-token limits the upstream Chat call carries, by name."""
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        response = TestClient(server.setup_webserver()).post(path, json=body)
+        assert response.status_code == 200, response.text
+        names = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+        return {name: seen[name] for name in names if name in seen}
+
+    @pytest.mark.parametrize(
+        ("pin", "request_limit", "sent"),
+        [
+            # A Chat endpoint reads max_completion_tokens first, so the caller's 500 would beat a max_tokens pin.
+            ({"max_tokens": 100}, {"max_completion_tokens": 500}, {"max_tokens": 100}),
+            ({"max_completion_tokens": 100}, {"max_tokens": 500}, {"max_completion_tokens": 100}),
+            # Chat ignores max_output_tokens, so the pin goes out as max_tokens.
+            ({"max_output_tokens": 100}, {"max_tokens": 500}, {"max_tokens": 100}),
+            # A null pin removes an agent's blanket limit whichever name the agent used, and sends none.
+            ({"max_tokens": None}, {"max_completion_tokens": 131072}, {}),
+        ],
+        ids=["max_tokens_pin", "max_completion_tokens_pin", "max_output_tokens_pin", "null_pin"],
+    )
+    def test_a_limit_pin_replaces_the_callers_limit_under_every_name(
+        self, monkeypatch: MonkeyPatch, pin: dict, request_limit: dict, sent: dict
+    ) -> None:
+        """The upstream gets only the pinned limit, under one Chat name, or none for a null pin."""
+        server = self._setup_server(sampling_overrides=pin)
+        body = {"messages": [{"role": "user", "content": "hi"}], **request_limit}
+        assert self._upstream_limits(monkeypatch, server, "/v1/chat/completions", body) == sent
+
+    @pytest.mark.parametrize(
+        ("pin", "sent"),
+        [
+            # Chat ignores max_output_tokens, so the caller's 500 would win.
+            ({"max_output_tokens": 100}, {"max_tokens": 100}),
+            ({"max_completion_tokens": 100}, {"max_completion_tokens": 100}),
+        ],
+        ids=["max_output_tokens_pin", "max_completion_tokens_pin"],
+    )
+    def test_a_limit_pin_on_a_responses_call_replaces_the_callers_limit(
+        self, monkeypatch: MonkeyPatch, pin: dict, sent: dict
+    ) -> None:
+        """A pin sends a Responses call in Chat format, where the caller's max_output_tokens becomes max_tokens."""
+        server = self._setup_server(sampling_overrides=pin)
+        body = {"input": [{"role": "user", "content": "hi"}], "max_output_tokens": 500}
+        assert self._upstream_limits(monkeypatch, server, "/v1/responses", body) == sent
+
+    @pytest.mark.parametrize(
+        ("request_limit", "sent"),
+        [
+            # A Chat endpoint reads max_completion_tokens first, so the default of 64 would beat the caller's 500.
+            ({"max_tokens": 500}, {"max_tokens": 500}),
+            ({}, {"max_completion_tokens": 64}),
+            # A null request limit sets no limit, so the default still applies.
+            ({"max_tokens": None}, {"max_tokens": None, "max_completion_tokens": 64}),
+        ],
+        ids=["request_limit", "no_request_limit", "null_request_limit"],
+    )
+    def test_a_request_limit_beats_an_extra_body_limit_under_the_other_name(
+        self, monkeypatch: MonkeyPatch, request_limit: dict, sent: dict
+    ) -> None:
+        """extra_body is a default: its limit applies only when the request sets none of its own."""
+        server = self._setup_server(extra_body={"max_completion_tokens": 64})
+        body = {"messages": [{"role": "user", "content": "hi"}], **request_limit}
+        assert self._upstream_limits(monkeypatch, server, "/v1/chat/completions", body) == sent
+
+    def test_a_responses_call_limit_beats_an_extra_body_limit(self, monkeypatch: MonkeyPatch) -> None:
+        """A Responses call sent in Chat format keeps its own limit, which the conversion names max_tokens."""
+        server = self._setup_server(uses_reasoning_parser=True, extra_body={"max_completion_tokens": 4096})
+        body = {"input": [{"role": "user", "content": "hi"}], "max_output_tokens": 11}
+        assert self._upstream_limits(monkeypatch, server, "/v1/responses", body) == {"max_tokens": 11}
+
+    def test_limit_pins_that_disagree_log_which_value_is_sent(self, caplog) -> None:
+        """Like vllm_model, the server warns at startup that only the first pinned name's value is sent."""
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            self._setup_server(sampling_overrides={"max_tokens": 4096, "max_completion_tokens": 131072})
+        assert "every endpoint sends max_completion_tokens=131072" in caplog.text
 
 
 class TestProxyLifecycle:
@@ -1337,19 +1479,22 @@ target = "policy"
             stats = json.loads(stats_response.read())
         assert json.dumps(stats).count("upstream/model"), stats
 
-    @pytest.mark.parametrize("max_tokens", [16, None])
-    def test_responses_sampling_pins_reach_chat_upstream(self, gym_app, monkeypatch, max_tokens) -> None:
+    @pytest.mark.parametrize("limit_name", ["max_tokens", "max_output_tokens"])
+    @pytest.mark.parametrize("limit", [16, None])
+    def test_responses_sampling_pins_reach_chat_upstream(self, gym_app, monkeypatch, limit_name, limit) -> None:
         client, _ = gym_app
         server = client.app.state.switchyard_server
-        monkeypatch.setattr(server.config, "sampling_overrides", {"max_tokens": max_tokens, "top_k": 5})
+        monkeypatch.setattr(server.config, "sampling_overrides", {limit_name: limit, "top_k": 5})
         response = client.post(
             "/v1/responses",
             json={"input": "hi", "max_output_tokens": 99, "temperature": 0.3},
         )
         assert response.status_code == 200, response.text
         upstream_body = _StubUpstream.requests[-1][2]
-        assert upstream_body.get("max_tokens") == max_tokens
-        assert upstream_body.get("max_completion_tokens") is None
+        names = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+        sent = {name: upstream_body[name] for name in names if name in upstream_body}
+        # A null pin sends no limit at all.
+        assert sent == ({} if limit is None else {"max_tokens": limit})
         assert upstream_body["top_k"] == 5
         assert upstream_body["temperature"] == 0.3
         assert response.json()["model"] == "upstream/model"

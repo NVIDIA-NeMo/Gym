@@ -14,20 +14,36 @@
 # limitations under the License.
 import asyncio
 import atexit
+import hashlib
 import json
 import logging
 import resource
+import secrets
 import signal
 import socket
 import sys
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from functools import partial
+from functools import cached_property, partial
 from ipaddress import ip_network
 from os import environ, getenv
 from traceback import format_exception, print_exception
-from typing import Any, Awaitable, Callable, ClassVar, List, Optional, Protocol, Sequence, TextIO, Tuple, Type
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    ClassVar,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    TextIO,
+    Tuple,
+    Type,
+)
 from urllib.parse import urlsplit, urlunsplit
 
 import uvicorn
@@ -38,7 +54,7 @@ from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
-from pydantic import BaseModel, PositiveInt, model_validator
+from pydantic import BaseModel, PositiveInt, PrivateAttr, ValidationError, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
@@ -64,6 +80,7 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.core.correlation import CorrelationPathError, parse_path
 from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.ray_support import (
@@ -86,10 +103,7 @@ from nemo_gym.server_runtime.request_handling.session_routing import (
     create_session_socket_dir,
     install_session_routing,
 )
-from nemo_gym.server_runtime.request_handling.trace_context import (
-    _ROLLOUT_PREFIX_RE,
-    install_trace_context_path,
-)
+from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
 from nemo_gym.server_runtime.uvicorn_reuse_port import reuse_port_supported, run_with_reuse_port
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.connection_pool import (
@@ -112,7 +126,13 @@ from nemo_gym.utils.server_process import (
 )
 
 
+if TYPE_CHECKING:
+    from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
+
 logger = logging.getLogger(__name__)
+
+# The longest a server's shutdown spends stopping the sandboxes it still owns.
+SANDBOX_SHUTDOWN_TIMEOUT_S = 150.0
 
 
 class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
@@ -153,9 +173,29 @@ class BaseServer(BaseModel):
         server_config_dict = get_first_server_config_dict(global_config_dict, config_path_str)
 
         server_config_cls: Type[BaseRunServerInstanceConfig] = cls.model_fields["config"].annotation
-        server_config = server_config_cls.model_validate(
-            OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
-        )
+        try:
+            server_config = server_config_cls.model_validate(
+                OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
+            )
+        except ValidationError as exc:
+            # Name the source setting when a required field interpolates an unset value.
+            unresolved = OmegaConf.to_container(server_config_dict, resolve=False)
+            missing = set()
+            for error in exc.errors():
+                if error.get("input") is None and error["loc"]:
+                    source = unresolved.get(error["loc"][0])
+                    if isinstance(source, str) and source.startswith("${") and source.endswith("}"):
+                        key = source[2:-1]
+                        if key in global_config_dict and global_config_dict[key] is None:
+                            missing.add(key)
+            if missing:
+                settings = ", ".join(sorted(missing))
+                overrides = " ".join(f"++{key}=<value>" for key in sorted(missing))
+                raise ValueError(
+                    f"Required settings for {config_path_str} are unset: {settings}. "
+                    f"Provide them in a config file or via CLI overrides: {overrides}"
+                ) from None
+            raise
 
         return server_config
 
@@ -251,6 +291,26 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+# The variables that carry each server's run secret (run_session_secret) to its workers, by a hash of its name.
+RUN_SESSION_SECRET_ENV_PREFIX = "NEMO_GYM_RUN_SESSION_SECRET_"
+
+
+def run_session_secret(server_name: str) -> str:
+    """The random secret that signs one server's sessions for this run.
+
+    The first call in a process without it makes one and sets it in the environment, under a variable named after the
+    server, so servers that share a process keep one secret each. A multi-worker server reads it in its main process
+    (``setup_webserver``) before uvicorn starts the workers, so every worker inherits it and reads the cookies and
+    tokens another worker signed, as Environment Servers do with ``episode_token_secret``. A server that starts
+    again makes a new one, which ends the sessions signed with the old.
+    """
+    variable = RUN_SESSION_SECRET_ENV_PREFIX + hashlib.sha256(server_name.encode()).hexdigest()[:16].upper()
+    secret = environ.get(variable)
+    if not secret:
+        secret = environ[variable] = secrets.token_urlsafe(32)
+    return secret
+
+
 def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
     """Raise when the server asks for several workers but cannot run with them."""
     if not server.config.num_workers or server.config.num_workers <= 1:
@@ -263,7 +323,7 @@ def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
 def _unblock_shutdown_signals() -> None:
     """Let SIGINT and SIGTERM, on which uvicorn shuts a server down, reach this process. A process starts with the
     signal mask of the thread that launched it, so a server launched from a thread that blocks these signals, such as
-    any thread of a Ray worker, would otherwise leave RunHelper's interrupt pending and never run its shutdown.
+    any thread of a Ray worker, would otherwise leave ServerSupervisor's interrupt pending and never run its shutdown.
     Unblocking a signal that is not blocked changes nothing."""
     signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
 
@@ -277,6 +337,175 @@ class SimpleServer(BaseServer):
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
+    # Whether this server lends sandboxes it owns, as an Environment Server lends an attempt's sandbox to the agent and
+    # to the Resources Server, so startup refuses a provider that never reconnects.
+    lends_sandboxes: ClassVar[bool] = False
+    # The sandbox blocks whose sandboxes this server starts through its own sandboxes, as
+    # self.sandboxes.on(<provider field>).spec(<block>): each config field holding a SandboxConfig (a dotted path for
+    # a nested one), mapped to the config field that names its provider. Startup checks each block against that
+    # provider, and refuses a restricted network rule in any block not listed, since nothing would apply it.
+    owned_sandbox_blocks: ClassVar[Mapping[str, str]] = {}
+    # The sandboxes this server owns, one OwnedSandboxes per provider field, created on first use.
+    _owned_sandboxes: dict[str, "OwnedSandboxes"] = PrivateAttr(default_factory=dict)
+    # Set when the shutdown sweep begins: no instance is built after it, so none is left that nothing closes.
+    _sandboxes_closed: bool = PrivateAttr(default=False)
+
+    @property
+    def sandboxes(self) -> "OwnedSandboxes":
+        """The sandboxes this server owns on its ``sandbox_provider``, created on first use.
+
+        A server tracks, lends, snapshots and stops the sandboxes it starts through it, and the server's shutdown stops
+        what is left in it. (Servers that own sandboxes through ``LentSandboxes`` or ``start_episode_sandbox`` move onto
+        it in later changes.) ``self.sandboxes.on("<field>")`` gives the instance for a second provider field, such as a
+        GPU provider. A server that never uses it creates nothing. Lending needs ``sandbox_provider`` to name a provider
+        block, since a borrower resolves the provider by that name. Use it from the event loop: the instance is built
+        on first use without a lock, so a worker thread could build a second one that the shutdown never stops.
+
+        Raises:
+            ValueError: If the server's config sets no ``sandbox_provider``.
+            RuntimeError: If the server's shutdown has begun.
+        """
+        return self._sandboxes_on("sandbox_provider")
+
+    def _sandboxes_on(self, provider_field: str) -> "OwnedSandboxes":
+        owned = self._owned_sandboxes.get(provider_field)
+        if owned is None:
+            if self._sandboxes_closed:
+                raise RuntimeError(f"{self.config.name} is shutting down: it starts no sandboxes on {provider_field}")
+            from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
+
+            owned = OwnedSandboxes.for_server(
+                config=self.config,
+                provider_field=provider_field,
+                global_config=self._global_config(),
+                on=self._sandboxes_on,
+            )
+            self._owned_sandboxes[provider_field] = owned
+        return owned
+
+    def _global_config(self) -> Any:
+        # The config the server was started with; a process that set none, such as a test, falls back to the global.
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        return global_config if global_config is not None else get_global_config_dict()
+
+    def setup_owned_sandboxes(self, app: FastAPI) -> None:
+        """Stop every sandbox this server still owns once the app's lifespan has ended.
+
+        Wraps the app's lifespan, including any shutdown a server adds itself, so the server's own cleanup runs first
+        and what it leaves is stopped here. An instance keeps a sandbox whose stop failed and logs it. The whole sweep
+        is bounded by ``SANDBOX_SHUTDOWN_TIMEOUT_S``; under the launcher's default ``server_shutdown_timeout_seconds``
+        the process usually ends before then, and the sandboxes' ``ttl_s`` reclaims what is left.
+        """
+        inner_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(application: FastAPI) -> AsyncIterator[Any]:
+            try:
+                async with inner_lifespan(application) as state:
+                    yield state
+            finally:
+                await self.aclose_sandboxes()
+
+        app.router.lifespan_context = lifespan
+
+    def check_sandbox_provider(self) -> None:
+        """Refuse at startup what the server's sandbox providers cannot do for the sandboxes its config declares.
+
+        Each block in ``owned_sandbox_blocks`` is checked against the provider its provider field names: the block is
+        resolved, the provider class checked for the block's network rule, and the model and tool servers the rule
+        allows resolved to hosts a sandbox reaches. A server that sets ``lends_sandboxes`` is checked for lending on
+        ``sandbox_provider``. A ``SandboxConfig`` anywhere else in the config may not set a restricted rule. A rule
+        that allows a host other servers also listen on is logged. No provider is created.
+
+        Raises:
+            ValueError: Naming the first need a provider cannot meet, a server the rule cannot reach, or a restricted
+                rule in a block the server does not start through ``self.sandboxes``.
+        """
+        from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
+        from nemo_gym.sandbox.providers.base import NETWORK_RULES
+        from nemo_gym.sandbox.providers.registry import get_provider_class
+        from nemo_gym.server_runtime.owned_sandboxes import (
+            check_provider,
+            rule_hosts,
+            sandbox_blocks,
+            servers_sharing_hosts,
+        )
+
+        blocks_by_field: dict[str, list[SandboxConfig]] = {}
+        declared: set[int] = set()
+        for path, provider_field in self.owned_sandbox_blocks.items():
+            block: Any = self.config
+            for name in path.split("."):
+                block = getattr(block, name, None)
+            if block is None:
+                continue
+            if not isinstance(block, SandboxConfig):
+                raise ValueError(
+                    f"{type(self).__name__}.owned_sandbox_blocks names {path!r}, which is no SandboxConfig"
+                )
+            declared.add(id(block))
+            blocks_by_field.setdefault(provider_field, []).append(block)
+        for path, block in sandbox_blocks(self.config):
+            if id(block) not in declared and block.network in NETWORK_RULES and block.network != "inherit":
+                raise ValueError(
+                    f"{self.config.name} sets network {block.network!r} in {path}, but {type(self).__name__} does not "
+                    "start that block's sandboxes through self.sandboxes (owned_sandbox_blocks), the only place a "
+                    "network rule is applied"
+                )
+        if self.lends_sandboxes:
+            blocks_by_field.setdefault("sandbox_provider", [])
+        if not blocks_by_field:
+            return
+        global_config = self._global_config()
+        for provider_field, blocks in blocks_by_field.items():
+            reference = getattr(self.config, provider_field, None)
+            if reference is None:
+                if any(block.network in NETWORK_RULES for block in blocks):
+                    raise ValueError(f"{self.config.name} sets a network rule but no {provider_field} to apply it")
+                continue
+            ((provider_name, provider_config),) = resolve_provider_config(reference, global_config).items()
+            lends = self.lends_sandboxes and provider_field == "sandbox_provider"
+            check_provider(
+                get_provider_class(provider_name), configs=blocks, lends=lends, provider_config=provider_config
+            )
+            for block in blocks:
+                if block.network not in NETWORK_RULES:
+                    continue
+                rule_hosts(block, global_config)
+                for host, servers in servers_sharing_hosts(block, global_config).items():
+                    logger.warning(
+                        "network %r of %s allows host %s, where %s also listen; its sandboxes reach them too",
+                        block.network,
+                        self.config.name,
+                        host,
+                        ", ".join(servers),
+                    )
+
+    async def aclose_sandboxes(self) -> None:
+        """Stop every sandbox of every ``OwnedSandboxes`` this server created; see ``OwnedSandboxes.aclose``.
+
+        No instance is built from here on. The sweep gives up after ``SANDBOX_SHUTDOWN_TIMEOUT_S`` and logs it.
+        """
+        self._sandboxes_closed = True
+        owned = list(self._owned_sandboxes.values())
+        try:
+            async with asyncio.timeout(SANDBOX_SHUTDOWN_TIMEOUT_S):
+                outcomes = await asyncio.gather(*(instance.aclose() for instance in owned), return_exceptions=True)
+        except TimeoutError:
+            logger.error(
+                "Sandboxes of %s were not all stopped within %s s of shutdown; their ttl_s reclaims them",
+                self.config.name,
+                SANDBOX_SHUTDOWN_TIMEOUT_S,
+            )
+            return
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                logger.error("Sandboxes of %s were not all stopped at shutdown: %r", self.config.name, outcome)
+
+    # Sign session cookies and MCP session tokens with a secret made for the run (run_session_secret), not with the
+    # public key get_session_middleware_key() derives from the server's class and name: for a server whose routes code
+    # it does not trust can call, such as code in a sandbox it lends. mcp_bearer_token turns it on as well.
+    signs_sessions_with_run_secret: ClassVar[bool] = False
 
     def owned_session_routing(self) -> dict[str, Any]:
         """Arguments to ``install_session_routing``: where requests name their session, and how long ownership lasts.
@@ -348,9 +577,47 @@ class SimpleServer(BaseServer):
         instrument_fastapi_app(app)
 
     def get_session_middleware_key(self) -> str:
-        # This method is here to override in case we want to ever use an actual session middleware secret key.
-        # e.g. for an actual product.
+        # Names this server in logs and error text, and by default its session cookie, so it is public.
+        # To sign sessions with a secret, set signs_sessions_with_run_secret (or override get_session_secret).
         return f"{self.__class__.__name__}___{self.config.name}"
+
+    def get_session_secret(self) -> str:
+        """The key that signs this server's session cookies and MCP session tokens; callers read it once, through
+        ``session_secret``.
+
+        With ``signs_sessions_with_run_secret``, or with ``mcp_bearer_token`` in the config, it is a secret made for
+        the run (``run_session_secret``), so callers that can reach the server's routes, such as code in a sandbox
+        the server lends, cannot forge another session's cookie or token. Otherwise it is
+        ``get_session_middleware_key()``, which anyone who knows the server's class and name can compute.
+        Only the signing changes: the cookie keeps its name (``get_session_cookie_name()``).
+
+        An override must return the same secret in every worker of the server, because a cookie or token signed by
+        one worker is read by another (session routing reads it to find the session's worker). And every cookie and
+        token signed with a secret is invalid once the secret changes: a secret made when the process starts ends
+        every open session at a restart, so it suits a server whose sessions cannot outlive its process anyway.
+        """
+        if (
+            getattr(type(self), "signs_sessions_with_run_secret", False) is True
+            or getattr(self.config, "mcp_bearer_token", False) is True
+        ):
+            return run_session_secret(self.config.name)
+        return self.get_session_middleware_key()
+
+    @cached_property
+    def session_secret(self) -> str:
+        """``get_session_secret()``, resolved once per server: the session middleware, session routing and the MCP
+        endpoint of a process all sign and read with one key, even under an override that answers differently from
+        call to call. The instance's ``__dict__`` keeps it, so it holds however the server was built."""
+        return self.get_session_secret()
+
+    def get_session_cookie_name(self) -> str:
+        """The name of this server's session cookie, for SessionMiddleware and the session router that reads it.
+
+        The default is ``get_session_middleware_key()``. Callers see the name in every answer that sets the cookie,
+        so a server whose routes code in a sandbox can reach may return one that says nothing of the server.
+        It must stay unique per server: a client keeps one cookie per name and host, and servers share hosts.
+        """
+        return self.get_session_middleware_key()
 
     def setup_session_middleware(self, app: FastAPI) -> None:
         if getattr(app.state, "nemo_gym_session_middleware_installed", False):
@@ -364,8 +631,9 @@ class SimpleServer(BaseServer):
         # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
         app.add_middleware(SessionIDMiddleware)
 
-        session_middleware_key = self.get_session_middleware_key()
-        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+        app.add_middleware(
+            SessionMiddleware, secret_key=self.session_secret, session_cookie=self.get_session_cookie_name()
+        )
 
     def setup_exception_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ExceptionHandlingMiddleware, failure_reply=partial(SimpleServer._failure_reply, self))
@@ -497,6 +765,14 @@ repr(e): {repr(e)}"""
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
+        # Standalone recipes can be inspected before a provider block is composed in.
+        # At launch, resolve explicit names. Some execution modes leave a default provider unused.
+        provider_ref = getattr(server_config, "sandbox_provider", None)
+        if isinstance(provider_ref, str) and "sandbox_provider" in server_config.model_fields_set:
+            from nemo_gym.sandbox.config import resolve_provider_config
+
+            resolve_provider_config(provider_ref, global_config_dict)
+
         startup.mark("load_config")
         _connect_server_to_ray(cls, global_config_dict)
         if cls.ray_enabled:
@@ -510,6 +786,7 @@ repr(e): {repr(e)}"""
         startup.mark("init_server")
         # Before the dry-run return, so a dry run reports the misconfiguration too.
         refuse_unsupported_num_workers(server)
+        server.check_sandbox_provider()
         reuse_port = server.config.uvicorn_reuse_port
         if reuse_port is None:
             reuse_port = UvicornReusePortConfig.model_validate(global_config_dict).uvicorn_reuse_port
@@ -534,20 +811,21 @@ repr(e): {repr(e)}"""
         startup.mark("setup_webserver")
         observe_app_event_loop(app, "server")
         server.setup_checkpoint_participant(app)
+        server.setup_owned_sandboxes(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.server_runtime.mcp_auto_exposure import (
-                TOKEN_HEADER,
                 maybe_auto_expose,
+                session_token_header,
                 session_token_serializer,
             )
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
             mcp_token_routing = dict(
-                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+                mcp_token_header=session_token_header(server), mcp_token_serializer=session_token_serializer(server)
             )
         server.setup_liveness(app)
         server.set_ulimit()
@@ -568,12 +846,12 @@ repr(e): {repr(e)}"""
         if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
             # Outside SessionMiddleware and the exception middleware:
             # a forwarded request is handled only by the worker that owns its session.
-            session_cookie = server.get_session_middleware_key()
             install_session_routing(
                 app,
                 socket_dir=session_socket_dir,
-                session_cookie=session_cookie,
-                secret_key=session_cookie,
+                session_cookie=server.get_session_cookie_name(),
+                # Reads the cookie as SessionMiddleware does, so with the same key.
+                secret_key=server.session_secret,
                 backlog=backlog,
                 **mcp_token_routing,
                 **server.owned_session_routing(),
@@ -725,7 +1003,12 @@ def with_rollout_prefix(url: str, base_urls: Sequence[str]) -> str:
         ] != base_segments:
             continue
         rest = "/" + "/".join(segments[len(base_segments) :])
-        if _ROLLOUT_PREFIX_RE.match(rest):
+        try:
+            resolved = parse_path(rest, allow_empty_rest=True)
+        except CorrelationPathError:
+            # The receiving server answers a malformed prefix; adding a second one would only hide it.
+            return url
+        if resolved is not None and resolved[0].capture_key is not None:
             return url
         rollout_id = current_rollout_id()
         if not rollout_id:

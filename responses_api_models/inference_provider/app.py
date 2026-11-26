@@ -22,10 +22,10 @@ For training workloads that require token IDs, use vllm_model instead.
 
 from asyncio import Semaphore
 from time import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import Request
-from pydantic import Field
+from pydantic import Field, PositiveFloat, PositiveInt
 
 from nemo_gym.client import NeMoGymAsyncOpenAI
 from nemo_gym.core import (
@@ -49,6 +49,18 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     num_concurrent_requests: int = 1000
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
+    # Optional bounds on a call to the provider. Each defaults to None, which keeps the client's unbounded behaviour.
+    request_timeout_seconds: Optional[PositiveFloat] = None
+    """Total time limit for each HTTP attempt to the provider, not for the whole call. A timed-out attempt is retried
+    like any other transport error. None means no limit."""
+    max_connection_retries: Optional[PositiveInt] = None
+    """Connection-error attempts before raising: N allows N attempts, so 1 means no retry.
+    Also caps the timeout/error retry path, not the separate HTTP-status retry loop.
+    None adds no caller-specified cap."""
+    connection_retry_timeout_s: Optional[PositiveFloat] = None
+    """Wall-clock seconds one call may spend retrying connection errors before raising the first one. Any answer from
+    the provider closes the window. None retries without a time limit."""
+
     correlate_via_user_field: bool = False
     """Forward the current rollout id (see ``nemo_gym.core.episode_context``) as
     the outbound request's standard OpenAI ``user`` field, so a downstream
@@ -64,6 +76,11 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
+            internal=False,
+            request_timeout_seconds=self.config.request_timeout_seconds,
+            max_connection_retries=self.config.max_connection_retries,
+            connection_retry_timeout_s=self.config.connection_retry_timeout_s,
         )
         self._converter = ChatCompletionsConverter(
             return_token_id_information=False,

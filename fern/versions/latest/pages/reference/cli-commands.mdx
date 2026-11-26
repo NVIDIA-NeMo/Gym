@@ -60,6 +60,7 @@ gym eval resubmit             # queue a submitted benchmark again, or recover it
 gym eval aggregate            # merge sharded rollout results
 gym eval export               # export a finished run (default exporter: atif)
 gym eval status               # show saved run progress
+gym eval lustre-stats         # summarize a submitted job's Lustre metadata requests per phase
 gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
@@ -119,23 +120,42 @@ non-default config in that directory.
 gym eval run \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
+    --sandbox opensandbox \
     --model-type vllm_model
 ```
 
-Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. Like the other
-selectors it is pure shorthand, so `--agent-type terminus_2_sandboxed_agent` and `--config <that file>`
-behave identically.
+Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. For benchmarks that
+compose their own servers, `--agent-type terminus_2_sandboxed_agent` loads the same config as `--config <that file>`,
+and also checks that the run uses it. A Harbor-backed benchmark (one whose config sets `harbor_target`) runs only
+through `gym eval run --benchmark`; there, use `--agent-type` to swap the harness, since loading an agent config with
+`--config` does not select it. `gym env start`, `gym env prefetch`, `gym eval reverify` and `gym eval submit` do not
+compose its Harbor environment server.
 
 Run `gym list agents` to see the harnesses you can pass.
 
+`--agent-type` puts the selected harness in place of the benchmark's own only when the selected config leaves
+`resources_server.name` unset (`???`), as `terminus_2_sandboxed_agent` and `simple_agent` do, or is a LangGraph agent.
+Session agents such as `codex_agent`, `hermes_agent`, and `opencode_agent` set `resources_server: null`, so they run
+only where a config binds them, for example in an Environment Server's `agent_server`. When a task of the run would
+still run on another agent, all four commands refuse the selection before they prepare data or start servers. The
+error lists where each task runs and, for a taskset route, the override that binds the selected agent. To run a
+session agent on such a benchmark, use a benchmark config that already pairs them (`gym list benchmarks`), or bind it
+as [Swap the agent or the benchmark](/main/agent-server/integrate-existing-agents#swap-the-agent-or-the-benchmark)
+shows. A `--config` file merges before `--benchmark`, so a binding in it must list the benchmark config in its own
+`config_paths` and take the place of `--benchmark`.
+
+For a benchmark whose config names a Harbor target (`harbor_target`), `--agent-type` on `gym eval run` selects the
+harness the per-taskset environment server binds, in place of the benchmark's own agent instance; no composition or
+renaming is involved, and the dataset's `[gym] allowed_agents` is the compatibility check.
+
 **The composed server instance is renamed after the agent that runs it**, so metrics and `gym env status`
 report the harness actually used: composing `terminus_2_sandboxed_agent` onto
-`terminal_bench_2_1_opencode_sandboxed_agent` produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
+`terminal_bench_2_1_opencode_sandboxed_agent` (the relay recipe `terminal_bench_2_1/opencode_legacy_agent`) produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
 `gym env start` prints the instance list, which matters for the two-step flow:
 
 ```bash
 gym env start \
-    --benchmark terminal_bench_2_1/opencode \
+    --benchmark terminal_bench_2_1/opencode_legacy_agent \
     --agent-type terminus_2_sandboxed_agent \
     --model-type vllm_model
 gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
@@ -360,19 +380,20 @@ gym search models vllm --json
 Commands for preparing, previewing, and managing datasets. By default dataset transfer commands use HuggingFace; pass `--storage gitlab` to target the GitLab Registry.
 
 <Note>
-HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/download-huggingface) for HF authentication details.
+HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/jsonl/download-huggingface) for HF authentication details.
 </Note>
 
 ### `gym dataset init`
 
 Scaffold a dataset in the Harbor task format: `dataset.toml` with a `[gym]` table and one task with an
-instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+instruction, a verifier and a reference solution. Refer to [Author Task Folders](/main/data/task-folders/harbor-tasks).
 
 | Option | Description |
 | --- | --- |
 | `NAME` | Dataset name as `org/name`; a bare name is written as `local/<name>`. The folder is the name without the org and must not exist yet. |
 | `--root DIR` | Where to create the folder (default: current directory). |
 | `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
+| `--parameterized` | Write a template folder instead: `dataset.toml`, `task.toml`, `instruction.template.md`, `tasks.jsonl`, `task_data.py`, a Python verifier (`tests/verifier.py`) and `solution/answer.template.md`. Prepare renders one task per row. |
 
 ```bash
 gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
@@ -386,7 +407,7 @@ dataset digest. Nothing is prepared, built or run. The fetch is the
 one `gym eval run` and `gym dataset validate` make for a `harbor:` target, so a folder that was edited by hand,
 left by an interrupted fetch of another version, or written for another package is refused in the same words;
 a second pull of an unchanged dataset downloads nothing and says so. Refer to
-[Harbor Tasks](/main/data/harbor-tasks#gym-dataset-pull-and-committed-entries).
+[Pulled datasets](/main/reference/task-folder-storage#pulled-datasets).
 
 | Option | Description |
 | --- | --- |
@@ -406,7 +427,13 @@ is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollo
 names another file, the generated run config and `skipped.json`), apart from any evaluation of the same target,
 so an evaluation never resumes from the oracle's rewards. The exit code is 0 when every selected solution scored
 1, and 1 when a solution scored below 1, was masked or failed, when a task folder did not load, or when no
-selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+selected task had a solution to run. When no task is left to run (every task folder was left out, for example
+because the sandbox block lacks a setting the tasks need), the command prints `No runnable task left` with the
+reason for each task and exits 2. When every selected task fails before it is scored (for example at seed), the
+run can be rejected as incomplete. An incomplete evaluation exits 75 when eligible retries remain and the invocation
+made progress, 1 when eligible retries remain but it made no progress (for example, only admission timeouts), and 76
+when nothing is eligible for retry. See [Resume interrupted runs](#resume-interrupted-runs). Refer to
+[Author Task Folders](/main/data/task-folders/harbor-tasks).
 
 | Option | Description |
 | --- | --- |
@@ -423,6 +450,28 @@ selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-t
 gym dataset validate my-dataset --sandbox opensandbox
 gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
 gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed entry, after `gym dataset pull terminal_bench_4`
+```
+
+### `gym dataset publish`
+
+Write a Gym-authored dataset as plain Harbor task folders that run under Harbor as they are. Template rows are
+expanded into task folders, each single-step task's Python verifier is wrapped in a `tests/test.sh`, each
+`solution/answer.md` becomes a `solution/solve.sh`, and `dataset.toml` is written without its `[gym]` table, or not
+at all when nothing else is left. The publish is refused if a Python verifier's `verify` takes `response`, if the
+verifier would grade in separate verifier mode, if two task folders share a `[task].name`, or if a published path is
+a symbolic link. It is also refused if a task's fields fail the dataset's `TaskData`, or if the rest of
+`dataset.toml` has no `[dataset]` table with an `org/name` `name`. Only the task folders and `dataset.toml` are
+published; a dataset-level `verifier.py` is copied into the shim of each task it grades. When the `harbor` package
+is installed, Harbor's own format check runs over every folder first; a refused publish leaves nothing under `--output`.
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A dataset folder, a task folder, or a parameterized template folder. |
+| `--harbor` | Required: publish in Harbor's task format. |
+| `--output DIR` | A new or empty folder outside the dataset, for the task folders. Required. |
+
+```bash
+gym dataset publish --harbor my-qa --output ./published/my-qa
 ```
 
 ### `gym dataset upload`
@@ -846,10 +895,15 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
-In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Such a run needs `--agent <harness>`: a folder under `responses_api_agents/`, given as `NAME` or `NAME/FLAVOR` (such as `hermes_agent`). It starts its own servers (`--no-serve` is refused) and writes under `results/harbor/<taskset>/`, or under `results/harbor/validation/<taskset>/` with `--agent harbor_oracle_agent`, which runs `gym dataset validate`. Refer to [Author Task Folders](/main/data/task-folders/harbor-tasks) for the layout and to [Task Folder Files and Storage](/main/reference/task-folder-storage) for what it writes. A benchmark whose config sets `harbor_target` runs that target under `--benchmark`, with the benchmark's harness or the one `--agent-type` names (refer to [A benchmark config that names a target](/main/agent-interactions/harbor#a-benchmark-config-that-names-a-target)).
 
 | Option | Description |
 | --- | --- |
+| `TARGET` | A task folder, folder of task folders, `harbor:` reference or committed entry name, as above. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). Task targets only. Without it, `env.yaml` or a `--config` file must supply the `sandbox:` block, or every episode fails at seed. |
+| `--only-tasks PATTERNS`, `--exclude-tasks PATTERNS` | Comma-separated task names or globs to run or to leave out. Task targets only. |
+| `--skip-unloadable` | Run the tasks that load and record the rest in `skipped.json`. Without it, a task that does not load stops the run before any server starts. |
+| `+harbor_output_root=DIR` | Write the rows, run config, `skipped.json`, `images.json` and `verifier/` under `DIR/<taskset>/` instead of `results/harbor/<taskset>/` (a parameterized dataset also renders there). Task targets only. A run submitted with a `target` sets it to a folder in its job directory. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--environment NAME` | Load the named environment config. Repeatable. |
@@ -858,12 +912,14 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
-| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`, and when a task of the run would still run on another agent. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--agent`, `-a` | Agent instance to collect rollouts with. |
 | `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
+| `--task-ids ID[,ID...]` | Run only these tasks of the input, selected by the id each row stores (`task_id`, `problem_id` or `instance_id`), with every copy of each. A subset run: when the run starts, the selection is written to `rollouts_task_selection.json` beside the output; resume keeps it; `gym eval resubmit --recover --inspect`, the MLflow run (tag `gym_task_selection=subset` with `gym_task_ids_sha256`) and `gym eval compare` label the score a subset score. Ids Hydra reads as numbers lose a leading zero or an exponent: quote them or use `--task-ids-file`. Not with `--limit`. |
+| `--task-ids-file PATH` | As `--task-ids`, from a file with one task id per line; blank lines and lines starting with `#` are skipped. Use it for a named, versioned subset. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--interleave-repeats` | Start repeats round by round (every task's first rollout, then every task's second) rather than each task's back to back. Use it when a task is heavy on the machine running it, for example when its sandbox loads large data, to spread its repeats over the run. This is best effort: repeats still overlap when the concurrency is high or rollouts are long. GDPVal's multistage orchestrator rebuilds its stage rows per task and does not keep this order. Maps to legacy `+interleave_repeats=true`. |
 | `--prompt-config` | Prompt template YAML to apply. |
@@ -948,6 +1004,7 @@ Next to `--output` (`<stem>` is its name without `.jsonl`), the run writes:
 | `<stem>_failures.jsonl` | Failed rollouts routed to the sidecar, when there are any. |
 | `<stem>_aggregate_metrics.json` | Aggregate metrics, unless aggregation is disabled. |
 | `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. Masking is a precaution (it also covers the password in a URL's user info), not a guarantee: keep secrets out of the config with `${oc.env:NAME}` or `env.yaml`. |
+| `<stem>_provenance.json` | What produced the run, written just before the first rollout is dispatched: Gym version and commit, model, dataset and sampling identifiers (credentials and query strings dropped from URLs), fingerprints of the inputs, prompts and templates, the seed, each model server's served models as its backends report them at `GET <base_url>/models` (the served `id` and, for vLLM, the loaded checkpoint `root`), and `efb_config_ref` when passed. Unknown values are recorded with the reason; `status: unavailable` when it cannot be written. |
 
 #### Resume interrupted runs
 
@@ -1144,7 +1201,7 @@ service stops accepting an old client, the export fails and names the environmen
 | `+wait=true\|false` | Wait for EvalRDL's verdict on the upload. Defaults to `true`. |
 | `+timeout=SECONDS` | How long to wait for the verdict. Defaults to `1800`. |
 | `+url=prod\|stg\|URL` | EvalRDL service. Defaults to the SDK's own choice. |
-| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl`. |
+| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl>=0.0.241`. |
 
 The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. With
 `+wait=false` the run counts as `succeeded` once EvalRDL has stored it, and the upload token is in the result. When
@@ -1200,6 +1257,19 @@ identities warn once and disable status reporting while collection continues. Gy
 Fresh runs clear their output stem's previous status before initializing the tracker. Manifest-backed runs
 retain strict validation. Resume loading retains compact identities rather than full input payloads,
 and general-run progress counters update incrementally as results arrive.
+
+### `gym eval lustre-stats`
+
+Summarize the Lustre metadata requests of a job whose Slurm compute sets `lustre_md_stats: true`. Pass the
+benchmark directory, which reads every `logs/lustre-md-stats-<slurm job id>.tsv` in it, or one such file:
+
+```bash
+gym eval lustre-stats <job.output_path>/<gym job id>/<benchmark>
+gym eval lustre-stats <benchmark dir>/logs/lustre-md-stats-123456.tsv --json
+```
+
+It prints one table per Slurm job, with a row per phase interval. `--json` prints a mapping from each file to its
+report. See [Lustre Metadata Load](/orchestration/how-to/lustre-metadata-stats).
 
 ### `gym eval health-check`
 
@@ -1318,6 +1388,26 @@ gym eval compare-suite \
 Run paths and optional agent or environment-server selectors come from the suite YAML. See [Compare Results](/main/evaluation/compare-results#compare-a-benchmark-suite) for a complete multi-model suite YAML, source options, theoretical metric bounds, normalization, equal weighting, statistical assumptions, and coverage/exclusion behavior.
 
 Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance. The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and defaults to 95% difference intervals.
+
+### `gym eval plan-repeats`
+
+Plan new repeats from directly supplied complete-pass standard deviations. One YAML file defines one benchmark, model, or suite aggregate, with equal weights across its model × benchmark entries; each entry supplies the SD of one complete-repeat benchmark score. Keep an existing baseline fixed or jointly plan a baseline reused across a configurable number of distinct candidate checkpoints.
+
+```bash
+gym eval plan-repeats \
+    --plan planning.yaml \
+    --output-dir results/repeat-planning
+```
+
+| Option | Description |
+| --- | --- |
+| `--plan PATH` | Required planning YAML containing direct SD inputs, aggregation level, baseline mode, and statistical targets. |
+| `--output-dir DIR`, `-o` | Report directory; defaults to the planning YAML's directory. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+Writes `repeat_planning_report.md` and/or `repeat_planning_report.json`, with full-precision numerical evidence in JSON. Statistical targets, candidate experiment count, repeat increments, costs, search bounds, and optional simulation validation are configured in YAML. See [Plan Repeats](/main/evaluation/plan-repeats) for complete examples and the distinction between analytic power and validation through the comparison procedure.
+
+Follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats) for a walkthrough from SD inputs to verified example allocations and the final comparison decision.
 
 ### `gym eval reverify`
 

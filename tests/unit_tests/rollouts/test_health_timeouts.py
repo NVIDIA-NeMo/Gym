@@ -103,8 +103,9 @@ class TestEvidence:
         assert result["by_limit"] == {"default_episode_timeout_seconds": 1}
         assert result["by_enforcer"] == {"gym.environment_server": 1}
 
-    def test_a_typed_event_wins_over_a_legacy_signal(self) -> None:
-        row = {"agent_timed_out": True, "timeouts": [event(limit="agent_timeout_seconds")]}
+    @pytest.mark.parametrize("legacy", [{"agent_timed_out": True}, {"opencode_error_type": "timeout"}])
+    def test_a_typed_event_wins_over_a_legacy_signal(self, legacy: dict) -> None:
+        row = {**legacy, "timeouts": [event(limit="agent_timeout_seconds")]}
 
         assert section(row)["by_limit"] == {"agent_timeout_seconds": 1}
 
@@ -721,7 +722,10 @@ async def test_collection_writes_and_exports_the_section_and_a_recheck_agrees(
 
     await RolloutCollectionHelper().run_from_config(
         RolloutCollectionConfig(
-            input_jsonl_fpath=str(_input(tmp_path, 3)), output_jsonl_fpath=str(output), num_samples_in_parallel=1
+            input_jsonl_fpath=str(_input(tmp_path, 3)),
+            output_jsonl_fpath=str(output),
+            num_samples_in_parallel=1,
+            dispatch_reservation_interval_s=0.0,
         )
     )
 
@@ -742,7 +746,10 @@ async def test_offline_aggregation_writes_the_same_section(
     output = tmp_path / "rollouts.jsonl"
     await RolloutCollectionHelper().run_from_config(
         RolloutCollectionConfig(
-            input_jsonl_fpath=str(_input(tmp_path, 3)), output_jsonl_fpath=str(output), num_samples_in_parallel=1
+            input_jsonl_fpath=str(_input(tmp_path, 3)),
+            output_jsonl_fpath=str(output),
+            num_samples_in_parallel=1,
+            dispatch_reservation_interval_s=0.0,
         )
     )
     after_run = orjson.loads((tmp_path / QUALITY_SUMMARY_FILENAME).read_bytes())["run"]["stats"]["timeouts"]

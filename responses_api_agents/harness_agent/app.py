@@ -19,8 +19,9 @@ import shlex
 import socket
 import subprocess
 import tempfile
-from asyncio import Semaphore
+from asyncio import Semaphore, timeout
 from contextvars import ContextVar
+from functools import cache
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -39,6 +40,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    EpisodeId,
     FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -54,12 +56,34 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
 
 LOG = logging.getLogger(__name__)
+CLOSE_SESSION_TIMEOUT_S = 30.0
 _RUN_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("harness_agent_run_context", default={})
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: harness_agent runs each episode through its own legacy /run path and will be removed after the "
+    "environment-server migration. Use the harness's own agent (claude_code_agent, codex_agent, hermes_agent, "
+    "pi_agent, opencode_agent and so on) with sandbox sessions under an environment server instead, as the job_bench "
+    "and workspace_bench configs do. The swe_atlas_qa and rna_design configs still run on this agent and keep "
+    "working until they move. See responses_api_agents/harness_agent/README.md."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOG.warning(DEPRECATION_WARNING)
 
 
 _AGENTS = {
@@ -228,6 +252,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        _warn_deprecated_once()
         self.sem = Semaphore(self.config.concurrency)
         global_config = self.server_client.global_config_dict
         provider_config = resolve_provider_config(
@@ -311,6 +336,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             "agent_module": agent_module,
             "agent_class": agent_class,
             "agent_config_class": agent_config_class,
+            "token_id_capture": self._token_id_capture_enabled(),
         }
         return script, runner_config, f"{self.config.sandbox_python} runner.py"
 
@@ -371,6 +397,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 return HarnessAgentVerifyResponse.model_validate(verify_json)
             except Exception as exc:
                 await self._close_run_sandbox(run_context)
+                await self._close_resources_session(body, cookies, seed.get("resources_session_id"))
                 failure_kind = sandbox_infra_failure_kind(exc)
                 if failure_kind is None:
                     raise
@@ -388,9 +415,31 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 return _masked_result(body, failure_kind, f"{facts}{type(exc).__name__}: {exc}")
             except BaseException:
                 await self._close_run_sandbox(run_context)
+                await self._close_resources_session(body, cookies, seed.get("resources_session_id"))
                 raise
             finally:
                 _RUN_CONTEXT.reset(token)
+
+    async def _close_resources_session(self, body: HarnessAgentRunRequest, cookies: Any, session_id: Any) -> None:
+        # A failed run never reaches /verify. A server whose seed reply names its session releases it now, not at its
+        # TTL. Session routing refuses a close whose body and cookie name different sessions, so only that id works.
+        if not isinstance(session_id, str) or not session_id:
+            return
+        try:
+            # The server client retries without a deadline, so bound the close or a dead server hides the run's error.
+            async with timeout(CLOSE_SESSION_TIMEOUT_S):
+                episode_id = EpisodeId.from_capture_key(self.rollout_id_from_run(body) or "harness-run")
+                resp = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/close_session",
+                    json=ResourcesCloseSessionRequest(
+                        resources_session_id=session_id, episode_id=episode_id
+                    ).model_dump(mode="json"),
+                    cookies=cookies,
+                )
+                await raise_for_status(resp)
+        except Exception:
+            LOG.warning("could not close the resources session of a failed run", exc_info=True)
 
     def _mcp_server_entry(self, seed: dict) -> dict[str, Any]:
         """This rollout's MCP server for the in-box agent, from the /seed_session response."""
@@ -591,3 +640,6 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarnessAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarnessAgent.run_webserver()  # noqa: F401

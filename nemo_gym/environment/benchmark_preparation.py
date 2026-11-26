@@ -13,6 +13,7 @@ import importlib.util
 import json
 import logging
 import os
+import signal
 import site
 import subprocess
 import sys
@@ -20,10 +21,10 @@ import sysconfig
 from multiprocessing import Pool
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from omegaconf import DictConfig, OmegaConf
-from pydantic import Field
+from pydantic import Field, PositiveFloat
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, WORKING_DIR, _resolve_under_cwd_or_install
@@ -36,8 +37,8 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.failure_kinds import ENVIRONMENT_PREPARE_FAILED
 from nemo_gym.environment.benchmarks import BenchmarkConfig
 from nemo_gym.eval.eval_plan import EvalPlan, PlanBenchmark, PlanGym, build_eval_plan
-from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
+from nemo_gym.utils.gym_commit import installed_gym_commit
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,14 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     prepare_script_args: Dict[str, Any] = Field(
         default_factory=dict, description="Arguments forwarded to the benchmark's prepare() function"
     )
+    prepare_timeout_seconds: Optional[PositiveFloat] = Field(
+        default=None,
+        description=(
+            "Time limit, in seconds, for installing a dataset's prepare_dependencies and for each prepare script that "
+            "runs in an isolated environment (prepare_project). A step that runs out of time fails the preparation. "
+            "A prepare script that runs in the Gym process itself cannot be interrupted. None (default) sets no limit."
+        ),
+    )
 
 
 class PreparationFailedError(RuntimeError):
@@ -101,6 +110,7 @@ def _multiprocess_benchmark_prepare_fn(args):
     prepare_script_args: Dict[str, Any]
     (benchmark_config, prepare_module_path, prepare_script_args, python) = args[:4]
     config = args[4] if len(args) > 4 else None
+    timeout_s = args[5] if len(args) > 5 else None
 
     print(f"Preparing dataset: {benchmark_config.name}")
 
@@ -112,9 +122,10 @@ def _multiprocess_benchmark_prepare_fn(args):
             Path(benchmark_config.dataset.jsonl_fpath),
             prepare_script_args,
             config=config,
+            timeout_s=timeout_s,
         )
         return
-    from nemo_gym.cli._prepare_worker import load_preparer
+    from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
     module = load_preparer(prepare_module_path)
     try:
@@ -132,7 +143,32 @@ def _multiprocess_benchmark_prepare_fn(args):
     print(f"Dataset prepared at: {output_fpath}")
 
 
-def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
+def _run_checked(command: list[str], *, timeout_s: float | None, env: dict[str, str] | None = None) -> None:
+    """Run `command` like ``subprocess.run(check=True, timeout=timeout_s)``, but on expiry stop its whole process group.
+
+    ``subprocess.run`` kills only the direct child, so a preparer's own download or build subprocess would go on
+    writing after the failure is reported. With a limit the command leads its own process group, and an expiry or an
+    interrupt kills the group and reaps the child. None sets no limit and keeps the caller's process group."""
+    with subprocess.Popen(command, env=env, start_new_session=timeout_s is not None) as process:
+        try:
+            returncode = process.wait(timeout=timeout_s)
+        except BaseException as exc:
+            try:
+                if timeout_s is None:
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+            process.wait()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise subprocess.TimeoutExpired(command, timeout_s) from None
+            raise
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
+def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig", timeout_s: float | None = None) -> None:
     """Install what a benchmark's prepare script imports, before importing it.
 
     Gym cannot depend on every benchmark's data-prep requirements, so a benchmark
@@ -144,7 +180,7 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         return
     logger.info("Installing prepare dependencies for %s: %s", benchmark_config.name, " ".join(dependencies))
     try:
-        subprocess.run(["uv", "pip", "install", "--python", sys.executable, *dependencies], check=True)
+        _run_checked(["uv", "pip", "install", "--python", sys.executable, *dependencies], timeout_s=timeout_s)
         # An editable install only adds a .pth file, which `site` reads at
         # interpreter startup -- this process would not see it otherwise.
         importlib.invalidate_caches()
@@ -153,21 +189,28 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         raise ConfigError(
             f"`uv` is required to install prepare_dependencies for dataset '{benchmark_config.name}'."
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigError(
+            f"Installing prepare_dependencies for dataset '{benchmark_config.name}' did not finish within "
+            f"{timeout_s} s: {' '.join(dependencies)}"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         raise ConfigError(
             f"Could not install prepare_dependencies for dataset '{benchmark_config.name}': {' '.join(dependencies)}"
         ) from exc
 
 
-def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | None = None) -> Path | None:
+def _prepare_environment(
+    benchmark_config: "BenchmarkConfig", venv_root: Path | None = None, timeout_s: float | None = None
+) -> Path | None:
     """Use explicit dependency arguments as before, or sync an isolated locked project."""
-    from nemo_gym.cli._locked_env import sync_environment
+    from nemo_gym.server_runtime.supervisor._locked_env import sync_environment
 
     dataset = benchmark_config.dataset
     if dataset.prepare_dependencies:
         # Explicit arguments retain their existing meaning, including editable installs
         # and requirements-file options. Do not silently ignore caller overrides.
-        _install_prepare_dependencies(benchmark_config)
+        _install_prepare_dependencies(benchmark_config, timeout_s)
         return None
     if dataset.prepare_project is None:
         return None
@@ -191,13 +234,20 @@ def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | 
 
 
 def _run_isolated_prepare(
-    python: Path, module: str, action: str, expected: Path, args: dict, *, config: DictConfig | dict | None = None
+    python: Path,
+    module: str,
+    action: str,
+    expected: Path,
+    args: dict,
+    *,
+    config: DictConfig | dict | None = None,
+    timeout_s: float | None = None,
 ) -> dict:
     """Keep preparer stdout visible and pass structured results over a separate file."""
     from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, maybe_get_global_config_dict
 
-    # The worker script is a module of `nemo_gym.cli`, which stays where it is; locate it without importing it here.
-    worker = Path(importlib.util.find_spec("nemo_gym.cli._prepare_worker").origin)
+    # The worker script is a module of `nemo_gym.server_runtime.supervisor`; locate it without importing it here.
+    worker = Path(importlib.util.find_spec("nemo_gym.server_runtime.supervisor._prepare_worker").origin)
     if module.endswith(".py"):
         root = Path(module).parent
     else:
@@ -215,7 +265,7 @@ def _run_isolated_prepare(
         serialized_args = OmegaConf.to_container(args, resolve=True) if OmegaConf.is_config(args) else args
         options.write_text(json.dumps(serialized_args, default=_prepare_json_default))
         try:
-            subprocess.run(
+            _run_checked(
                 [
                     str(python),
                     str(worker),
@@ -232,7 +282,7 @@ def _run_isolated_prepare(
                     "--result",
                     str(result),
                 ],
-                check=True,
+                timeout_s=timeout_s,
                 env=os.environ
                 | {
                     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),
@@ -241,6 +291,8 @@ def _run_isolated_prepare(
                     "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
                 },
             )
+        except subprocess.TimeoutExpired as exc:
+            raise PreparationFailedError(module, action, f"did not finish within {timeout_s} s") from exc
         except subprocess.CalledProcessError as exc:
             raise PreparationFailedError(module, action, f"exit status {exc.returncode}") from exc
         return json.loads(result.read_text())
@@ -253,6 +305,15 @@ def _prepare_json_default(value: Any) -> Any:
     if OmegaConf.is_config(value):
         return OmegaConf.to_container(value, resolve=True)
     raise TypeError(f"Cannot serialize preparation value of type {type(value).__name__}")
+
+
+def read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    """The rows of a JSONL file, one per newline-terminated line.
+
+    ``str.splitlines()`` also breaks at U+2028, U+0085, vertical tab and form feed, which a JSON string may hold
+    unescaped, so it would cut a row in the middle of a string.
+    """
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
 
 
 def datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
@@ -344,7 +405,9 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
             if Path(prepare_script).is_absolute()
             else ".".join(Path(prepare_script).with_suffix("").parts)
         )
-        python = _prepare_environment(benchmark_config, prepare_benchmark_config.uv_venv_dir)
+        python = _prepare_environment(
+            benchmark_config, prepare_benchmark_config.uv_venv_dir, prepare_benchmark_config.prepare_timeout_seconds
+        )
         if python is not None:
             probe = _run_isolated_prepare(
                 python,
@@ -353,6 +416,7 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
                 Path(benchmark_config.dataset.jsonl_fpath),
                 {"check_cache": prepare_benchmark_config.use_cached_prepared_benchmarks},
                 config=config,
+                timeout_s=prepare_benchmark_config.prepare_timeout_seconds,
             )
             if not probe["has_prepare"]:
                 prepare_function_missing.append(benchmark_config)
@@ -361,7 +425,7 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
                 already_prepared.append(benchmark_config)
                 continue
         else:
-            from nemo_gym.cli._prepare_worker import load_preparer
+            from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
             module = load_preparer(prepare_module_path)
             if not hasattr(module, "prepare"):
@@ -376,7 +440,14 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
                 print(f"The cached file for {benchmark_config.name} is out of date, so it will be prepared again.")
 
         validated.append(
-            (benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args), python, config)
+            (
+                benchmark_config,
+                prepare_module_path,
+                dict(prepare_benchmark_config.prepare_script_args),
+                python,
+                config,
+                prepare_benchmark_config.prepare_timeout_seconds,
+            )
         )
 
     if already_prepared:
@@ -443,14 +514,14 @@ def plan_for_config(
     benchmark = benchmarks[0]
 
     prepare_datasets([benchmark], prepare_config)
-    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    rows = read_jsonl_rows(benchmark.dataset.jsonl_fpath)
     return build_eval_plan(
         rows,
         benchmark=PlanBenchmark(
             name=benchmark.name,
             config_paths=[gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
         ),
-        taskset=benchmark.dataset.taskset or benchmark.name,
+        taskset=benchmark.dataset.taskset,
         gym=PlanGym(version=__version__, commit=installed_gym_commit()),
         selected_task_ids=task_ids,
     )

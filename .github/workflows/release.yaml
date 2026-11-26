@@ -52,7 +52,6 @@ defaults:
     shell: bash -x -e -u -o pipefail {0}
 
 permissions:
-  id-token: write
   contents: write
   pull-requests: write
 
@@ -67,13 +66,93 @@ jobs:
     with:
       workflow_ref: 037094bcc9138c72bc125418e6e3653f9e1c4160 # pragma: allowlist secret
 
-  release:
-    needs: [pre-flight]
+  previous-tag:
+    if: ${{ !inputs.gh-release-from-tag }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+    steps:
+      - name: Checkout release ref
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.release-ref }}
+          sparse-checkout: nemo_gym/package_info.py
+          persist-credentials: false
+
+      - name: Find previous release tag
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          TAGS=$(gh api --paginate "repos/${{ github.repository }}/tags" --jq '.[].name' \
+            | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V)
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            PKG=nemo_gym/package_info.py
+            MAJOR=$(awk -F'= ' '/^MAJOR = /{print $2}' "$PKG")
+            MINOR=$(awk -F'= ' '/^MINOR = /{print $2}' "$PKG")
+            PATCH=$(awk -F'= ' '/^PATCH = /{print $2}' "$PKG")
+            TARGET="v${MAJOR}.${MINOR}.${PATCH}"
+            TAG=$(printf '%s\n%s\n' "$TAGS" "$TARGET" | sed '/^$/d' | sort -V -u \
+              | awk -v t="$TARGET" '$0 == t {print p; exit} {p = $0}')
+            echo "Release target: $TARGET"
+          else
+            TAG=$(printf '%s\n' "$TAGS" | tail -n1)
+          fi
+
+          echo "Previous release tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  release-workflow-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout workflow and regression tests
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Run offline release regression tests
+        run: |
+          python -m venv .venv-release-tests
+          .venv-release-tests/bin/python -m pip install PyYAML==6.0.3
+          .venv-release-tests/bin/python .github/tests/test_release_workflow.py -v
+
+  validate-inputs:
+    needs: [pre-flight, previous-tag]
     if: |
       !cancelled() && !failure()
       && !(needs.pre-flight.outputs.docs_only == 'true'
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@f7af92c4d1caea5a58577ce4ac5314f7de1bc5d4 # v1.4.3
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Validate immutable release ref
+        env:
+          RELEASE_REF: ${{ inputs.release-ref || github.sha }}
+        run: |
+          if [[ ! "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release-ref must be a full 40-character commit SHA"
+            exit 1
+          fi
+
+  bump:
+    needs: [validate-inputs, release-workflow-tests]
+    if: |
+      !cancelled() && !failure() && needs.validate-inputs.result == 'success'
+      && needs.release-workflow-tests.result == 'success'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
@@ -81,34 +160,92 @@ jobs:
       validate-only: ${{ github.event_name != 'workflow_dispatch' }}
       dry-run: ${{ inputs.dry-run || false }}
       version-bump-branch: ${{ inputs.version-bump-branch || github.ref_name }}
-      create-gh-release: ${{ inputs.create-gh-release || true }}
+      packaging: uv
+      app-id: ${{ vars.BOT_ID }}
+      restrict-to-admins: true
+    secrets:
+      BOT_KEY: ${{ secrets.BOT_KEY }}
+
+  build-wheel:
+    needs: [bump, pre-flight, previous-tag]
+    if: |
+      !cancelled() && !failure() && needs.bump.result == 'success'
+    permissions:
+      contents: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_test_wheel.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
+    with:
+      python-package: nemo_gym
       packaging: uv
       skip-test-wheel: true
-      wheel-content-ignore: "W002,W004,W009"
+      wheel-content-ignore: W002,W004,W009
+      ref: ${{ inputs.release-ref || github.sha }}
+
+  publish-wheel:
+    needs: build-wheel
+    if: >-
+      ${{ !cancelled() && !failure() && needs.build-wheel.result == 'success'
+          && github.event_name == 'workflow_dispatch' && !inputs.dry-run
+          && github.repository == 'NVIDIA-NeMo/Gym' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ needs.build-wheel.outputs.pypi-name }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download validated distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build-wheel.outputs.artifact-name }}
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  finalize:
+    needs: [bump, build-wheel, publish-wheel, pre-flight, previous-tag]
+    if: |
+      !cancelled() && !failure() && needs.bump.result == 'success'
+      && needs.build-wheel.result == 'success'
+      && (github.event_name != 'workflow_dispatch' || inputs.dry-run || needs.publish-wheel.result == 'success')
+    permissions:
+      contents: write
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
+    with:
+      release-ref: ${{ inputs.release-ref || github.sha }}
+      library-name: NeMo-Gym
+      validate-only: ${{ github.event_name != 'workflow_dispatch' }}
+      dry-run: ${{ inputs.dry-run || false }}
+      create-gh-release: ${{ github.event_name != 'workflow_dispatch' || inputs.create-gh-release }}
       app-id: ${{ vars.BOT_ID }}
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
       gh-release-use-changelog-builder: true
-      gh-release-from-tag: ${{ inputs.gh-release-from-tag || '' }}
-      restrict-to-admins: true
+      gh-release-from-tag: ${{ inputs.gh-release-from-tag || needs.previous-tag.outputs.tag }}
+      release-version: ${{ needs.bump.outputs.release-version || needs.build-wheel.outputs.version }}
+      pypi-name: ${{ needs.build-wheel.outputs.pypi-name }}
     secrets: inherit  # pragma: allowlist secret
 
   release-summary:
-    needs: [pre-flight, release]
-    if: ${{ !cancelled() }}
+    needs: [release-workflow-tests, pre-flight, previous-tag, validate-inputs, bump, build-wheel, publish-wheel, finalize]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - name: Result
+      - name: Check release results
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEEDS: ${{ toJSON(needs) }}
+          PUBLISH_EXPECTED: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry-run }}
+          RELEASE_SKIPPED: ${{ needs.pre-flight.outputs.docs_only == 'true' || needs.pre-flight.outputs.is_deployment_workflow == 'true' }}
         run: |
-          FAILED_JOBS=$(gh run view $GITHUB_RUN_ID --repo ${{ github.repository }} --json jobs --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required")] | length')
-
-          if [ "${FAILED_JOBS:-0}" -eq 0 ]; then
-              echo "✅ All previous jobs completed successfully"
-              exit 0
+          jq -e 'all(.[]; .result != "failure" and .result != "cancelled")' <<< "$NEEDS"
+          if [[ "$RELEASE_SKIPPED" == "true" ]]; then
+            exit 0
+          fi
+          jq -e '[.["release-workflow-tests"], .["validate-inputs"], .bump, .["build-wheel"], .finalize] | all(.[]; .result == "success")' <<< "$NEEDS"
+          if [[ "$PUBLISH_EXPECTED" == "true" ]]; then
+            jq -e '.["publish-wheel"].result == "success"' <<< "$NEEDS"
           else
-              echo "❌ Found $FAILED_JOBS failed job(s)"
-              gh run view $GITHUB_RUN_ID --repo ${{ github.repository }} --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required") | .name'
-              exit 1
+            jq -e '.["publish-wheel"].result == "skipped"' <<< "$NEEDS"
           fi

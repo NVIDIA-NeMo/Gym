@@ -6,7 +6,8 @@
 The sandbox needs no network, no ``uv`` and no Python of its own. For each sandbox platform, the host downloads a
 pinned python-build-standalone CPython and checks its SHA-256, then installs the harness's requirements for that
 platform with ``uv`` into a separate site-packages archive. Packages are pinned to the versions installed in this
-Agent Server's environment, so the sandbox runs the versions the adapter is tested with. Requirements given as
+Agent Server's environment, so the sandbox runs the versions the adapter is tested with, or to a lock the adapter
+passes when its harness is not the one installed with the server. Requirements given as
 direct URLs, such as a harness pinned to a commit, are built from source on the host; every other package must
 publish a wheel for the sandbox's platform. Both archives are cached on the host under ``sandbox_python`` in Gym's
 ``cache_dir``.
@@ -58,11 +59,16 @@ _PYTHON_SHA256 = {
     "x86_64/musl": "c6b77767b2c97ce77c21496909396b6e056b96220b2cda45f2c93b654376dd93",  # pragma: allowlist secret
     "aarch64/musl": "960738ebde53abeceb5452b71c2217d50452023e3baf2439dc57290d07930637",  # pragma: allowlist secret
 }
+_PYTHON_314_SHA256 = {
+    "x86_64/gnu": "a3a4e4b81b138960c7c546694df8a77578c0b6aa46d47e96f49b9e10e8f860c9",  # pragma: allowlist secret
+    "aarch64/gnu": "f278d66c15e81f6c77719892e3eb32ff4bca5fc4ab424e171d14bc12bb88b4ee",  # pragma: allowlist secret
+    "x86_64/musl": "55aad270d776b9e5f983e5b1b2aba23433fca5f8f0b5ce423da5aafe2c784935",  # pragma: allowlist secret
+    "aarch64/musl": "b014b2aaa2e2b5b48739c751869de21e6cec94df720d56ecc9e5335a9a7dfe3c",  # pragma: allowlist secret
+}
 # UV_PYTHON_INSTALL_MIRROR replaces this base for HTTP(S) mirrors; file:// mirrors are not supported here.
 # Offline hosts can prepopulate cache_dir/sandbox_python with the pinned archive; checksums still apply.
 _PYTHON_DOWNLOADS = "https://github.com/astral-sh/python-build-standalone/releases/download"
 _PYTHON_FILE = "cpython-{version}%2B{release}-{arch}-unknown-linux-{libc}-install_only_stripped.tar.gz"
-_SITE_PACKAGES = f"python/lib/python{PYTHON_VERSION.rsplit('.', 1)[0]}/site-packages"
 _INSTALLER = Path(__file__).with_name("install_python_runtime.sh")
 # Prefer glibc evidence: Debian/Ubuntu can also install a musl loader alongside their system libc.
 # ldd is the fallback when getconf is absent; musl's ldd may print its version and exit nonzero.
@@ -180,12 +186,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-async def _python_archive(platform: SandboxPlatform) -> Path:
-    """The pinned python-build-standalone archive for ``platform``, checked against its published SHA-256."""
-    expected = _PYTHON_SHA256.get(f"{platform.arch}/{platform.libc}")
+async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VERSION) -> Path:
+    """Return the host-cache path to the target platform's Python archive after checking its published SHA-256."""
+    checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}.get(version)
+    if checksums is None:
+        raise RuntimeError(f"No pinned Python {version} build; add its checksums to sandbox_python.py")
+    expected = checksums.get(f"{platform.arch}/{platform.libc}")
     if expected is None:
         raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")
-    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=PYTHON_VERSION, arch=platform.arch, libc=platform.libc)
+    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=version, arch=platform.arch, libc=platform.libc)
     url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{_PYTHON_RELEASE}/{name}"
     # A host that cannot download it can be given the file here.
     path = _cache_dir() / name.replace("%2B", "+")
@@ -259,30 +268,39 @@ class SandboxPythonRuntime:
 
     ``import_check`` is Python source that runs without error only in a usable runtime, for example
     ``"import run_agent, mcp"``. ``overrides`` are the uv overrides the adapter's own environment is installed with,
-    such as the lines of its ``overrides.txt``.
+    such as the lines of its ``overrides.txt``. ``constraints`` pins the runtime's packages instead of this Agent
+    Server's environment, for a harness whose versions differ from the ones the server itself runs, such as the lines
+    of a ``uv pip compile`` lock of ``requirements``.
     """
 
     harness: str
     requirements: tuple[str, ...]
     import_check: str
+    python_version: str = PYTHON_VERSION
     overrides: tuple[str, ...] = ()
+    constraints: tuple[str, ...] | None = None
+
+    @property
+    def pins(self) -> tuple[str, ...]:
+        """The versions the runtime's packages are constrained to: ``constraints``, or this server's environment."""
+        return _agent_environment_pins() if self.constraints is None else self.constraints
 
     @functools.cached_property
     def directory(self) -> str:
         """Sandbox directory keyed by everything that goes into the runtime.
 
         A runtime found there, such as one an earlier session left in this sandbox, was built from the same inputs and
-        is reused. The key covers every index-installed version in this Agent Server's environment, so a runtime
-        baked into an image is reused only by an Agent Server environment with exactly those versions. The adapter
-        may keep its own harness files here, beside ``python/``.
+        is reused. The key covers every pinned version, by default every index-installed version in this Agent
+        Server's environment, so a runtime baked into an image is reused only by an Agent Server environment with
+        exactly those versions. The adapter may keep its own harness files here, beside ``python/``.
         """
-        inputs = [PYTHON_VERSION, _PYTHON_RELEASE, self.requirements, self.overrides, _agent_environment_pins()]
+        inputs = [self.python_version, _PYTHON_RELEASE, self.requirements, self.overrides, self.pins]
         key = hashlib.sha256(json.dumps(inputs).encode()).hexdigest()[:16]
         return f"/tmp/nemo-gym-{self.harness}-runtime-{key}"
 
     @property
     def python(self) -> str:
-        """The runtime's interpreter in the sandbox, once ``is_installed()`` passes or ``install()`` returns.
+        """Absolute path to the interpreter inside the task sandbox after runtime installation.
 
         Run an absolute harness script with ``-E -s``: ignore the task's Python environment settings and user
         site-packages without changing the environment inherited by tool subprocesses. The script directory
@@ -314,8 +332,7 @@ class SandboxPythonRuntime:
         try:
             async with asyncio.timeout(timeout_s):
                 platform = await probe_sandbox_platform(sandbox)
-                python_archive = await _python_archive(platform)
-                site_packages_archive = await self._site_packages_archive(platform)
+                python_archive, site_packages_archive = await self.archives(platform)
                 setup = f"{self.directory}/.setup-{uuid4().hex}"
                 try:
                     prepared = await sandbox.exec(f"mkdir -p {shlex.quote(setup)}", cwd="/", timeout_s=30)
@@ -353,7 +370,16 @@ class SandboxPythonRuntime:
                 f"{(result.stderr or '')[-2000:]}{(result.stdout or '')[-2000:]}"
             )
 
+    async def archives(self, platform: SandboxPlatform) -> tuple[Path, Path]:
+        """Return the host-cache paths to the Python and package archives for ``platform``, building them if needed.
+
+        ``install()`` uploads both to a sandbox; a prebuilt runtime can also be unpacked from them.
+        """
+        python_archive = await _python_archive(platform, version=self.python_version)
+        return python_archive, await self._site_packages_archive(platform)
+
     async def _site_packages_archive(self, platform: SandboxPlatform) -> Path:
+        """Return the host-cache path to the package archive built for this sandbox platform."""
         path = _cache_dir() / f"{Path(self.directory).name}-{platform.wheel_platform}.tar.gz"
         return await _cached(path, lambda: self._build_site_packages(platform, path))
 
@@ -366,7 +392,7 @@ class SandboxPythonRuntime:
         scratch = Path(tempfile.mkdtemp(prefix=".build-", dir=destination.parent))
         try:
             constraints = scratch / "constraints.txt"
-            constraints.write_text("".join(f"{pin}\n" for pin in _agent_environment_pins()))
+            constraints.write_text("".join(f"{pin}\n" for pin in self.pins))
             argv = [
                 uv,
                 "pip",
@@ -377,11 +403,11 @@ class SandboxPythonRuntime:
                 "--python",
                 sys.executable,
                 "--python-version",
-                PYTHON_VERSION,
+                self.python_version,
                 "--python-platform",
                 platform.wheel_platform,
                 "--target",
-                str(scratch / _SITE_PACKAGES),
+                str(scratch / "python/lib" / f"python{self.python_version.rsplit('.', 1)[0]}" / "site-packages"),
                 "--constraints",
                 str(constraints),
                 "--only-binary",

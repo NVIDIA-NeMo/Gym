@@ -33,7 +33,7 @@
 gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
 # Gym benchmark config this recipe builds on.
 benchmark_config:
-  - benchmarks/swebench/multilingual/opencode.yaml
+  - benchmarks/swebench/multilingual/opencode_legacy_agent.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 policy_model:
@@ -75,5 +75,6 @@ swebench_multilingual_opencode_resources_server:
 swebench_multilingual_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
+      opencode_version: 1.17.11
       remote_opencode_install_script_path: /opt/recipes/install-opencode.sh
       remote_opencode_binary_path: /opt/opencode/glibc/opencode

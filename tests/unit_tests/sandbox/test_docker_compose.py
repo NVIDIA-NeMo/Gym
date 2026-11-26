@@ -185,12 +185,14 @@ class ShellProvider(Provider):
 
 
 @pytest.mark.asyncio
-async def test_health_and_completed_dependency_gate_real_processes(tmp_path):
+@pytest.mark.parametrize("delay_health_poll", [False, True], ids=["immediate", "delayed"])
+async def test_health_and_completed_dependency_gate_real_processes(tmp_path, monkeypatch, delay_health_poll):
     import shlex
 
     ready = shlex.quote(str(tmp_path / "ready"))
     seeded = shlex.quote(str(tmp_path / "seeded"))
     result = tmp_path / "result"
+    release = tmp_path / "release"
     document = {
         "services": {
             "app": {
@@ -206,7 +208,12 @@ async def test_health_and_completed_dependency_gate_real_processes(tmp_path):
             },
             "db": {
                 "image": "image",
-                "command": ["sh", "-c", f"sleep .1; touch {ready}; sleep 1"],
+                # Stay alive until the test releases us, even if a loaded runner delays the health poll.
+                "command": [
+                    "sh",
+                    "-c",
+                    f"sleep .1; touch {ready}; while test ! -f {shlex.quote(str(release))}; do sleep .01; done",
+                ],
                 "healthcheck": {
                     "test": ["CMD", "test", "-f", str(tmp_path / "ready")],
                     "interval": "20ms",
@@ -216,9 +223,23 @@ async def test_health_and_completed_dependency_gate_real_processes(tmp_path):
         }
     }
     provider = ShellProvider()
-    async with make_compose(provider, document, default_command=["false"], poll_interval_s=0.01) as group:
+    group = make_compose(provider, document, default_command=["false"], poll_interval_s=0.01, timeout_s=30)
+    wait = group._wait
+
+    async def wait_after_scheduling_delay(name, condition):
+        if delay_health_poll and name == "db" and condition == "service_healthy":
+            while not (tmp_path / "ready").exists():
+                await asyncio.sleep(0.01)
+            # Exercise a poll after the fixture's former one-second service lifetime.
+            await asyncio.sleep(1.2)
+        await wait(name, condition)
+
+    monkeypatch.setattr(group, "_wait", wait_after_scheduling_delay)
+    async with group:
         await group._wait("app", "service_completed_successfully")
         assert result.read_text() == "compose"
+        release.touch()
+        await group._wait("db", "service_completed_successfully")
     assert provider.closed == ["3", "2", "1"]
 
 
@@ -869,7 +890,12 @@ async def test_service_resources_environment_and_workdir(tmp_path, user):
                     "working_dir": str(tmp_path),
                     "cpus": "1.5",
                     "mem_limit": 1048577,
-                    "healthcheck": {"test": ["CMD-SHELL", f"test -f {output}"], "interval": "1ms"},
+                    "healthcheck": {
+                        "test": ["CMD-SHELL", f"test -f {output}"],
+                        "interval": "1ms",
+                        "start_period": "2s",
+                        "start_interval": "1ms",
+                    },
                 }
             }
         },
@@ -1112,8 +1138,11 @@ async def test_resolve_selected_environment_urls_for_nonroot_service(tmp_path, a
                     "healthcheck": {
                         "test": [
                             "CMD-SHELL",
+                            f"test -s {shlex.quote(str(output))} && "
                             f'test "$URL" = {shlex.quote(expected)} && test "$UNCHANGED" = {shlex.quote(original)}',
-                        ]
+                        ],
+                        "interval": "0.01s",
+                        "retries": 500,
                     },
                 }
             }
@@ -1377,7 +1406,7 @@ async def test_a_working_directory_the_image_lacks_is_created_before_the_first_e
         }
     }
     async with make_compose(provider, document, poll_interval_s=0.01) as group:
-        await group._wait("main", "service_started")
+        await group._wait("main", "service_completed_successfully")
         assert workdir.is_dir()
         assert seen.read_text().strip() == str(workdir)
     assert provider.calls[0] == (f"mkdir -p {workdir}", "/", "root")

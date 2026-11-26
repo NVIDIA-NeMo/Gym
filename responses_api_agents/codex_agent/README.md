@@ -110,6 +110,9 @@ sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole 
 as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
 `OMP_NUM_THREADS`), keeping only `CODEX_HOME` private. Use it only with remote providers,
 where that environment is the task's own.
+In both cases `SandboxAccess.env` is forwarded over the sandbox's values. A seed whose
+`SandboxAccess.env` holds a `CODEX_*`, `OPENAI_*` or `NEMO_GYM_*` variable is rejected with
+HTTP 422, and the error lists those names without their values.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
@@ -127,10 +130,21 @@ context-management controls, not generation budgets.
 
 ## Requests, results, and lifecycle
 
-Input is a string or one text user message, optionally preceded by a system/developer message.
+Input is a string or one user message with text and base64 data-URI `input_image` parts, optionally preceded by a text system/developer message.
 Configured `system_prompt`, request `instructions`, and that preceding message become Codex
-developer instructions in that order. Unsupported conversation/multimodal input, required
+developer instructions in that order. Unsupported conversation input, other media, required
 direct HTTP tools, provider overrides, and extra host config are rejected before activation.
+
+The adapter stages prompt images at `/tmp/nemo-gym-media/<sha256>.<ext>` and passes each occurrence with
+`codex exec --image`. Codex shows these paths beside the images; content-based names keep them stable across
+rollouts of a task. Staged files remain in borrowed sandboxes after close. Codex 0.144.4 puts images in their
+supplied order before all prompt text, uses `detail: high` regardless of the requested detail, and resizes images
+over 2048 px on a side or 2,500 tiles of 32 px. For example, a 2400x2400 PNG becomes 1600x1600. GIF is re-encoded
+as PNG. These native processing limits cannot be disabled. Image-only prompts are supported in sessions;
+local execution rejects images with HTTP 422. Exported conversations retain images as data URIs. When the native
+transcript shows fewer images than supplied, completed and output-limit runs fail with HTTP 502 instead of
+scoring an answer made without all prompt images. Wall-time limits and reported model failures keep their
+existing outcomes.
 
 Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls
@@ -189,6 +203,49 @@ The supervisor and the shared `harness_runner.sh` are bash scripts, and `sandbox
 the runtime's private Node, so a task agent's `pkill -f python3`, `pkill python3` or `killall python3`
 does not end Codex, as it would not under Harbor.
 
+### Tool commands versus the harness
+
+The model's tool commands run as the same user as the harness. By default they also share its
+pid namespace, so `pkill -f python`, `pkill -f node` or `kill -9 -1` can end the episode.
+Three layers keep that apart:
+
+- **`tool_pid_namespace: true`** (off by default) runs every tool command (`exec_command` and
+  `write_stdin` sessions, the shell tool, `apply_patch`, file reads) in a nested pid namespace.
+  Codex 0.144 reaches it through `$CODEX_HOME/environments.toml`: one stdio exec-server
+  environment and no local one. The exec-server is the native Codex binary, linked as
+  `nemo-gym-tool-host` and started as pid 1 by an uploaded bwrap (`tool_pid_namespace_bwrap_path`,
+  default the bwrap provider's `bwrap_path`). The namespace has the same filesystem, `/dev` and
+  network as the sandbox and a fresh `/proc`: tools see only each other. As pid 1, the tool host
+  ignores SIGKILL from inside, and `kill -1` skips it. Tools also keep managing their own
+  processes, because they share one namespace. Seed fails if the namespace cannot be created.
+  A sandboxed root needs the bwrap provider's `allow_nested_userns: true`. The generated
+  config disables the orchestrator `skills` tools, so the model sees the same tools as before.
+  Validated with Codex 0.144.4 (`codex_version`); `codex exec-server` is marked experimental
+  upstream and `environments.toml` rejects unknown fields, so test a new version before
+  using the flag with it.
+  **Validated on the bwrap provider only.** There each exec already has its own pid
+  namespace and no capabilities, so the nested namespace changes little else. On another
+  provider (`tool_pid_namespace_bwrap_path` set, a bwrap that runs in the task image, and
+  unprivileged user namespaces): tools lose root's capabilities (`--cap-drop ALL`, so
+  `apt-get` or `chown` fail), cannot see or signal services the image or the seed started,
+  and every process a tool daemonizes dies when Codex exits (pid 1 with `--die-with-parent`).
+- **Process names.** The supervisor and runner are bash scripts, so their command lines
+  contain neither `python` nor `python3 -`.
+- **Stop signals.** The supervisor counts a SIGTERM/SIGINT/SIGHUP as a stop only once
+  `stop.request` exists; controllers stop it through that file. Others are ignored and
+  reported in the `harness_signals_ignored` gap.
+
+If a harness process dies anyway and nobody stopped it, the error and gaps say
+`harness_killed`: the supervisor left no receipt after the launch shell was signalled, or the
+runner exited with 128+N, N up to 64 (it or Codex ended by signal N; 137 is also an OOM kill).
+The label is `agent_killed_harness` only with positive evidence that tools signalled the
+supervisor (ignored stop signals, without `tool_pid_namespace`). With
+`failure_artifacts_dir` set, `failure.json` records the evidence beside the session's logs.
+
+`responses_api_agents/codex_agent/tests/tool_namespace_check.py` checks all of this end to end against a
+real bwrap. Its optional mode runs the real Codex CLI. See
+`responses_api_agents/codex_agent/tests/test_bwrap_tool_namespace.py`.
+
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
 model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
@@ -221,8 +278,17 @@ when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent 
 than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
 container's memory cgroup. The runner records the change in the supervisor's `output.log`.
 
-Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; the cumulative totals in Codex's session files supplement CLI totals when a failed turn omits them. A turn stopped at its output or wall-time limit reports unknown usage, because neither total covers every call: Codex records no usage for an output-limited response and writes a call's token count only after the call's tools finish. A run stopped before any model call reports zero. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
+
+Session transcripts remain separate per Codex thread. The root keeps the episode invocation
+ID; children use `<episode-invocation-id>.<codex-thread-id>`. The request forwarder applies
+the same mapping to capture headers, without changing the rollout route or request body.
+Parent links come from session metadata, and spawning tool references come from the parent's
+`spawn_agent` result. A child's completion status comes from its own terminal events, not
+the root process exit. Unsupported or incomplete hierarchy metadata remains an observation
+gap; it must not be treated as a fully attributed training trajectory. This mapping is tested
+with Codex 0.144.4, including child compaction.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
 `sandbox_install_timeout_seconds` defaults to 600 and `session_close_timeout_seconds` to 60;
@@ -362,7 +428,11 @@ codex_agent:
 - `request_max_retries`, `stream_max_retries`: the provider's resends of a request that fails before its stream starts, and reconnects after a stream drops. `null` (the default) leaves Codex's own defaults. Unlike `extra_config`, they also apply to sandbox sessions
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
 - `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Unlike `extra_config`, it also applies to sandbox sessions
+- `model_catalog_json`: absolute path of a model catalog file, written into the generated config under the same name. Codex then takes its model catalog from that file instead of its bundled one, so a `model` the bundled catalog does not list gets the metadata of the file's entry with that `slug` (for example its tool set and base instructions) rather than Codex's fallback metadata. The entry decides the tool set ahead of `features`: with an entry copied from a bundled code-mode model, Codex offers the free-form `exec` tool although `features` sets `code_mode: false`, so name such a catalog only when the model server can carry that tool. `codex debug models --bundled` prints the bundled catalog in the file's format, `{"models": [...]}`. The file must exist where Codex runs (in a sandbox session, inside the sandbox) and be in the format of `codex_version`; the adapter does not write it, and Codex stops before its first model call when it cannot read the file. Codex resolves a relative path against its per-run `CODEX_HOME`, so only an absolute path is accepted. `null` (the default) leaves the key out. Unlike `extra_config`, it also applies to sandbox sessions
+- `agents_enabled`: the `enabled` key of the generated `[agents]` table. `true` writes `enabled = true`, `false` writes `enabled = false`, and `null` (the default) leaves the table out, so the CLI uses its own default. `false` removes Codex's subagent tools (the `collaboration` namespace), which a catalog entry with a `multi_agent_version` adds to the request even when `features` turns `multi_agent` off; an entry without that key adds none. The setting needs a Codex version that knows the key, and it is verified with Codex 0.163.0. Codex 0.144.4, the `codex_version` that `configs/codex_agent.yaml` pins, does not know the key and stops with a configuration error. Configuration validation therefore refuses `true` or `false` together with a `codex_version` of 0.144.4 or older. An older version is assumed not to know the key. A version between 0.144.4 and 0.163.0 is unverified and is not refused. Only a `codex_version` of three numbers, such as `0.144.4`, is compared; another form, such as `latest`, is not refused. Unlike `extra_config`, it also applies to sandbox sessions
 - `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied)
+- `tool_pid_namespace`, `tool_pid_namespace_bwrap_path`: task-sandbox sessions only (ignored on the local `/run` path). Run Codex's tool commands in a nested bwrap pid namespace; see [Tool commands versus the harness](#tool-commands-versus-the-harness). The bwrap path defaults to the bwrap sandbox provider's `bwrap_path` and must be an executable on the agent host
+- `failure_artifacts_dir`: task-sandbox sessions only. An agent-host directory where a failed activation (or one whose supervisor left no receipt) keeps the session's supervisor and Codex logs and a `failure.json` before the sandbox is released. Default `null` (off)
 - `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. At most `timeout`. `null` leaves the pinned CLI's default of 300 seconds
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
@@ -390,7 +460,8 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 
 ## Legacy direct-agent limitations
 
-- Eval only for now. Token IDs and logprobs are not wired up yet.
+- Training token-ID capture works as in agent sessions when `model_server` is set. A direct
+  `openai_base_url` endpoint bypasses Gym capture.
 - Token counts come from Codex's own usage reporting (`turn.completed`).
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.

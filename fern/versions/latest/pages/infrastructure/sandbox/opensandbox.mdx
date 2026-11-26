@@ -166,6 +166,64 @@ A `resource_requests` entry above the sandbox's limit is clamped to the limit wi
 declares no `resources` is held to the SDK's default limits (1 CPU, 2048 MiB), since those are what the
 server applies.
 
+When a create attempt times out or the caller cancels it, the provider finds the sandbox the attempt
+left behind by the attempt's metadata key, deletes it and cancels the create request. If it finds none
+(the server had not recorded the sandbox yet, or the lookup failed), it lets the request finish and
+deletes the sandbox the server's answer names. `aclose()` waits up to `operations.close_timeout_s` for
+those requests.
+
+Set `create.renew_ttl_s` and `create.renew_interval_s` to keep every sandbox on a lease
+(`renew_ttl_s: 1200`, `renew_interval_s: 300`, `renew_timeout_s: 30`). The lease is off in the shipped config.
+A config that checkpoints sandboxes should set it: a server that crashes leaves its sandboxes running, a
+restore replaces them with new ones, and without a lease the old ones run until the spec's `ttl_s`. Each sandbox is
+then created with `renew_ttl_s`, or the spec's `ttl_s` when that is shorter, and the process that created it
+renews it every `renew_interval_s` (jittered by up to 10% earlier), with `renew_timeout_s` per call, but never
+past the spec's `ttl_s` from creation. The lease runs from the create request: the service starts it when it
+receives the request and answers once the sandbox is ready. It must therefore be longer than the time the
+request stays open (placement and the image pull, which a sandbox created from a snapshot repeats) plus the
+provider-side setup that follows (the reconnect, the readiness probe and `setup.commands`); the first renewal
+comes that much sooner, and at once if more than one interval has already passed. A create that takes longer
+than the whole lease loses its sandbox. Stopping a sandbox stops its renewal, and so does a crash of the process that
+created it: the service then deletes the sandbox within one `renew_ttl_s` instead of at the end of the spec's
+lifetime. A failed renewal is logged and tried again within what is left of the lease, at most one interval
+later and sooner as the expiry nears, with jitter so that sandboxes created together do not retry in step. A
+sandbox survives an outage if the API answers again at least one
+`renew_timeout_s` plus a few seconds before its lease runs out, so live sandboxes expire once the OpenSandbox API
+is unreachable for longer than about `renew_ttl_s - renew_interval_s - renew_timeout_s`. Without `renew_ttl_s`,
+`renew_interval_s` alone refreshes the spec's whole `ttl_s` at every interval, and a renewal that fails fails
+the sandbox's later operations.
+
+The snapshots of partial-rollout checkpoints are deleted only when the controller releases a checkpoint it no
+longer restores. The OpenSandbox service does not expire snapshots, and deleting the source sandbox leaves
+them. So what a job leaves behind depends on its controller:
+
+- A controller that releases as it goes leaves the snapshots of the checkpoints it had not released when the
+  job ended.
+- A controller that never releases leaves every snapshot of every checkpoint: one per live sandbox at each
+  commit. The server logs a warning once its index holds more than a few checkpoints.
+
+Delete them by the name prefix of the job's `checkpoint.state_dir`, whose id is in
+`<checkpoint.state_dir>/state_dir_id` (this is not the `run_id` of a rollouts manifest):
+
+```bash
+python -m nemo_gym.sandbox.providers.opensandbox.snapshots \
+  --connection-config <yaml> \
+  --name-prefix "ng-$(cat <state_dir>/state_dir_id)-" \
+  --reap
+```
+
+A `checkpoint.state_dir` belongs to one job and its restarts. Two jobs that run at the same time must not share
+one, for example by launching two experiments from a config that sets the same absolute path: they would share
+the name prefix above and the record of which snapshots belong to which checkpoint, and each job's release would
+delete the other's snapshots. Put the job's id in the path. The directory must also be on a filesystem whose
+`flock` holds across every node that runs the server: on Lustre, mount with `-o flock`, since `localflock` only
+holds within one node.
+
+A release lists every snapshot on the service to find the ones a crashed process left unrecorded, because the
+service's `name` filter matches whole names only. `operations.snapshot_list_timeout_s` bounds that listing and
+`operations.snapshot_delete_timeout_s` each delete, retries included; one that runs out fails the release, and
+the next release tries again.
+
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
 ```bash
@@ -180,9 +238,9 @@ The provider constructor accepts these optional config sections:
 | Section | Purpose |
 | --- | --- |
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
-| `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
+| `create` | Sandbox create timeout, retry, image pull policy, health-check behavior, and the lease (`renew_ttl_s`, `renew_interval_s`, `renew_timeout_s`). |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. |
+| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. `checkpoint_background_poll_interval_s` caps the command-poll interval while a harness is being stopped for a checkpoint. `snapshot_timeout_s` and `snapshot_lookup_grace_s` bound the snapshots of partial-rollout checkpoints, `snapshot_request_timeout_s` bounds each management API request for one, and `snapshot_list_timeout_s` and `snapshot_delete_timeout_s` bound one whole listing and one whole delete, retries included. |
 | `diagnostics` | `timeout_s` bounds active diagnostic I/O during one uninterrupted status-read recovery. Status requests and polling sleeps do not spend it; each lookup also respects the recovery and client-wait deadlines. A successful status read resets the diagnostic budget. `request_timeout_s` bounds each diagnostic request; `poll_interval_s` controls diagnostic polling. Recognized control-plane lifecycle reports can confirm OOM; `inspect_oom` enables a deployment-specific fallback and defaults to `false`. See [OOM evidence](./opensandbox-debugging#the-whole-sandbox-died). |
 
 ## Failure reporting and recovery
@@ -274,6 +332,25 @@ sandbox:
         - "command -v python3 >/dev/null || ! command -v apt-get >/dev/null || (apt-get update && apt-get install -y --no-install-recommends python3)"
 ```
 
+## Task folders
+
+When the `harbor` Environment Server runs [task folders](/main/data/task-folders/harbor-tasks) on OpenSandbox:
+
+- Prepare reads the configuration of private images with the `sandbox:` block's `images.auth` (never the
+  `gpu_sandbox_provider` block's), at the reference the task names. The provider matches each prefix against the
+  reference it pulls, after `images.rewrites`, so an image a rewrite moves between private registries needs an entry
+  for each. A declared
+  `docker_image` is pulled as written; a Dockerfile's `FROM` image and every Compose service image are pulled at their
+  recorded digest, which spells a Docker Hub image without `docker.io/`. So key a Docker Hub image as `myorg/` (prepare
+  also accepts `docker.io/myorg/` for its own reads), and an image on another registry by its host prefix. Outside a
+  Compose task, a declared `docker_image` written `docker.io/myorg/img` also needs a `docker.io/myorg/` entry.
+- Images built from a task's Dockerfile must be pushed to a registry, so set `builds.repository` (see
+  [Harbor image builds](/main/reference/configuration#harbor-image-builds)). The build tool pushes with its own
+  login, but the provider pulls with `images.auth`, so a private repository needs an entry there too.
+- Compose tasks need `networking.enabled: true`, and `networking.loopback_forwarding: true` when a service uses
+  `network_mode: service:<name>`. Named volumes need `shared_storage`. See
+  [Run on OpenSandbox](/main/data/task-folders/compose-tasks#run-on-opensandbox) for every setting a Compose task needs.
+
 ## SandboxSpec Provider Options
 
 Set OpenSandbox-specific create options under `SandboxSpec.provider_options`, or under `sandbox_spec.provider_options` in an agent config:
@@ -308,7 +385,18 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 
 ## Network Policy
 
-`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.agents.agent_tools` builds one from endpoint URLs, and a harness that creates its own sandbox applies its `network_access` setting with `restrict_sandbox_network` in `nemo_gym.agents.utils.sandbox_network`, which builds that policy for the model and tool endpoints (see [Restrict the egress of an owned sandbox](/main/agent-server/add-or-update-a-harness#restrict-the-egress-of-an-owned-sandbox)); the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
+OpenSandbox supports the typed `inherit` rule on every deployment. To enable `no_network`, `model_only`, `model_and_tools`, or `hosts_only`, the deployment operator must confirm that the control plane enforces default-deny policies at the packet level, including for direct IP connections, and that deployment-wide exceptions preserve the requested allowlist. For example, check the control plane's `dns+nft` mode and its egress configuration. After confirming enforcement, set the declaration in the shared provider configuration.
+
+```yaml
+sandbox:
+  opensandbox:
+    networking:
+      enforces_network_policy: true
+```
+
+This setting records the operator's declaration in Gym. The OpenSandbox control plane controls enforcement. With the declaration absent or false, Gym rejects a restricted typed rule during startup (including a dry run) and when its owner builds a sandbox spec. Existing raw `provider_options.network_policy` blocks retain their deployment-specific behavior.
+
+A server that owns its sandboxes through `self.sandboxes` sets the typed `network` rule in its sandbox block instead, which becomes this policy (see [Network Rule](/infrastructure/sandbox#network-rule)). `provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.utils.network_policy` (also importable from `nemo_gym.agents`) builds one from endpoint URLs. A harness that creates its own sandbox applies its `network_access` setting with `restrict_sandbox_network` in `nemo_gym.agents.utils.sandbox_network`, which builds that policy for the model and tool endpoints (see [Restrict the egress of an owned sandbox](/main/agent-server/add-or-update-a-harness#restrict-the-egress-of-an-owned-sandbox)). A resources server that lends a sandbox with `LentSandboxes` passes `network_access="model_only"` and `model_server`, and each lent sandbox then reaches only that model server's host. With `network_access="model_and_tools"` and `tool_servers` (the servers whose tools the harness calls over MCP, such as the resources server itself), it also reaches their hosts; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
 
 ```yaml
 sandbox_spec:
@@ -320,13 +408,13 @@ sandbox_spec:
         - { action: allow, target: "*.nvidia.com" }
 ```
 
-What the control plane does with it, verified live with the OpenSandbox 0.1.15 SDK against an OpenSandbox deployment (October 2026). The probes read neither the control plane's own version nor its egress enforcement mode, `dns` or `dns+nft`, which is a server setting (see [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices)). Confirm that setting separately; a connection timeout alone does not identify the enforcement layer:
+What the control plane does with it, verified live with the OpenSandbox 0.1.15 SDK against an OpenSandbox deployment. The probes read neither the control plane's own version nor its egress enforcement mode, `dns` or `dns+nft`, which is a server setting (see [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices)). Confirm that setting separately; a connection timeout alone does not identify the enforcement layer:
 
 - A sandbox created without a `network_policy` has no egress sidecar: it is unrestricted, and its policy can neither be read nor changed afterwards (the egress endpoints answer 502).
 - A sandbox created with a policy keeps its `defaultAction` for life. The SDK's `patch_egress_rules` and `delete_egress_rules` change the rules of a running sandbox and the change is enforced within seconds, but no call changes `defaultAction`, and `*` is not a catch-all target: a `deny *` rule under `defaultAction: allow` blocks nothing, and an `allow *` rule under `deny` opens nothing.
 - Under `defaultAction: deny`, name resolution failed and a connection to a raw IP timed out on the deployment probed. The probes did not establish which layer caused the timeout: `dns` filters name resolution only, so a hard-coded IP bypasses the policy and a `no-network` phase is weaker there, while `dns+nft` additionally enforces at the IP layer; confirm which mode your cluster runs before relying on it. An `allow` rule for a host name, a `*.domain` wildcard or an IP literal opened exactly that target.
 
-A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the Harbor environment server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see the Harbor environment server README), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
+A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the `harbor` Environment Server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see [Shared and separate verification](/main/data/task-folders/task-folder-verifiers#shared-and-separate-verification)), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
 
 ## Relevant SandboxSpec Fields
 
@@ -340,7 +428,117 @@ A public sandbox therefore cannot be switched to a restricted policy once it run
 | `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
 | `resources` | Mapped to OpenSandbox resource quantities. |
 | `entrypoint` | Passed to OpenSandbox create when set. |
+| `sidecars` | Each sidecar is created as a sandbox of its own. See [Sidecars](#sidecars). |
 | `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `network_policy`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
+
+### Sidecars
+
+OpenSandbox has no second container in a sandbox, so the provider creates each entry of `SandboxSpec.sidecars` as a
+separate sandbox from the sidecar's image, environment, resources and its own `provider_options`. It is created before
+the main sandbox, with the same `ttl_s` and `ready_timeout_s` and none of the main sandbox's other provider options.
+Closing the main sandbox deletes its sidecars.
+
+A sidecar that serves the main sandbox names its service: `entrypoint` starts it, and `ports` lists the TCP ports
+the main sandbox may reach. A sidecar without `ports` is one the main sandbox may not reach, such as a grader.
+
+```python
+SandboxSpec(
+    image="task:1",
+    sidecars=[
+        {"name": "tools", "image": "tools:2", "entrypoint": ["tool-server", "--port", "8080"], "ports": [8080]},
+        {"name": "grader", "image": "grader:3"},
+    ],
+)
+```
+
+- The main sandbox and its sidecars carry one `nemo.nvidia.com/placement-group` label, so a
+  [multi-cell front end](#multi-cell-front-ends) creates them on one cell. A group the spec's metadata already names
+  is kept; otherwise the provider makes one per sandbox.
+- A sidecar carries the main sandbox's metadata without the `shared_storage.metadata` labels, and a
+  `<attribution prefix>sidecar` label with its name (`nemo-gym.nvidia.com/sidecar` by default), so cleanup and
+  dashboards that list by run label can tell it from a task sandbox. The name is that label's value and the sidecar's
+  hostname, so it is a hostname of at most 63 characters.
+- A sidecar gets none of the deployment's setup: no `setup.env`, no `setup.commands` and no create probe. Those are
+  written for task images and run a shell.
+- Without an `entrypoint` the sidecar idles on the keep-alive entrypoint, which runs `sh`. A deployment's own
+  bootstrap can need a shell in the image too: on the deployment probed, an image without one exited at start even
+  with its own `entrypoint`. A sidecar whose container exits at start fails the create as `provider_setup_failed`,
+  with the image, the entrypoint and the exit code in the reason, and is not tried again.
+- The provider waits until the service an `entrypoint` starts answers an HTTP request on each of the sidecar's
+  `ports`, for up to `ready_timeout_s` (120 seconds without one). It asks through the sidecar's own endpoint, so
+  nothing runs in the sidecar's image, and any answer of the service counts; its body is not read. The time limit
+  covers the whole wait, a request in flight included, so a service that accepts a connection and never answers does
+  not hold the create. A service that does not answer in time fails the create as `provider_setup_failed` and deletes
+  every member already started.
+- A sidecar that names `ports` without an `entrypoint` starts no service, so the create does not wait for one. The
+  main sandbox may reach those ports as soon as the create returns; start the service with
+  `sandbox.sidecar(name).exec(...)` and wait for it yourself, for example a service installed into a stock image
+  after the sandbox starts.
+- `ports` needs `networking.enabled: true`; without it the create is refused before anything starts, because nothing
+  in the main sandbox could reach the service. The main sandbox resolves each sidecar by its name through
+  `/etc/hosts`, which needs root in the main sandbox. The two do not share a loopback interface.
+- `sandbox.sidecar("tools").url()` is the URL at which the main sandbox reaches the service, here
+  `http://tools:8080`. Pass the port when the sidecar declares several. Take the URL from this call instead of
+  writing a host name into a task: a provider whose sidecars share the sandbox's loopback answers with a loopback
+  address. The URL is for code inside the main sandbox and does not resolve on the Gym host.
+- Each sandbox reaches only what it was granted. When the main sandbox has an [egress policy](#network-policy):
+  - A sidecar whose `provider_options` name no `network_policy` gets a deny-by-default policy with no rules. It does
+    not inherit the main sandbox's grants, so a tool sidecar does not reach the Model Server. Give a sidecar its own
+    policy to let it reach its own hosts:
+
+    ```python
+    def only(host: str) -> dict:
+        return {"defaultAction": "deny", "egress": [{"action": "allow", "target": host}]}
+
+    SandboxSpec(
+        image="task:1",
+        provider_options={"network_policy": only("models.example.com")},
+        sidecars=[
+            {
+                "name": "tools",
+                "image": "tools:2",
+                "entrypoint": ["tool-server", "--port", "8080"],
+                "ports": [8080],
+                "provider_options": {"network_policy": only("api.example.com")},
+            }
+        ],
+    )
+    ```
+
+  - The main sandbox's policy gets one leading allow rule per sidecar with `ports`, for that sidecar's IP and those
+    ports only. A sidecar without `ports` gets no rule. A sidecar's exec daemon (44772) and egress API (18080) are
+    never among them: naming one in `ports` is refused.
+  - That rule needs an egress layer that applies a rule's `ports`. Set `networking.rule_ports_enforced: true` where
+    the deployment does. It is off by default, and the create is then refused before anything starts: an egress layer
+    that drops `ports` would turn the rule into one for every port of the sidecar, and code in the main sandbox could
+    run commands in the sidecar and read the environment it was given.
+  - The rule also needs an `opensandbox` SDK whose network rule has `ports`. An SDK without the field sends the rule
+    without them, so the create is refused before anything starts; upgrade the SDK.
+  - A sidecar under a deny-by-default policy cannot open a connection to the main sandbox.
+
+  A main sandbox without an egress policy is not restricted, and neither are its sidecars: it reaches every port of
+  every sandbox on the cell that it finds an address for. Give the main sandbox a policy when a sidecar holds a secret
+  or must stay out of its reach.
+- A sidecar's TTL starts again once the main sandbox exists, so a sidecar does not end before its main sandbox. With
+  a sandbox lease (`create.renew_ttl_s`), the sidecar's renewals count the spec's lifetime from that moment.
+- A sidecar that does not start, or that the main sandbox cannot reach by IP, fails the create as a provider failure
+  (`provider_setup_failed` when its address is not peer-reachable) and deletes every member already started.
+- `sandbox.sidecar(name).exec(*argv)` sends the argv to execd without a shell, so the sidecar image can be
+  distroless; like any [argument list](#user-and-runtime-notes), it needs `opensandbox>=1.1.0`. `on_stdout` receives
+  stdout one line at a time from the streamed request. With `operations.background_exec`, it receives what each poll
+  finds new, stdout and stderr together, and the rest once the command has ended, also past the amount execd returns
+  in one read. An exception that `on_stdout` raises ends the forwarding and is raised to the caller unchanged once the
+  command has ended; with `operations.background_exec` the command is interrupted first.
+- A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
+  A checkpoint therefore keeps each sidecar's spec, its `image_auth` included, in plain text in its state; give a
+  sidecar's registry credentials through [`images.auth`](#image-policy-and-setup-commands) to keep them out of it.
+- A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs. A
+  sidecar that no longer exists does not fail the connect, so the sandbox can still be stopped; using that sidecar
+  raises a provider failure. A sidecar that cannot be reached for another reason fails the connect. Connects to one
+  sandbox through one provider share its sidecar handles, and the last `disconnect` releases them.
+- Pausing and resuming act on the main sandbox only. Its sidecars keep running, and are deleted when their TTL or
+  sandbox lease ends. With `networking.enabled: true`, a resume writes the sidecars' `/etc/hosts` entries again,
+  because a resumed sandbox can start without them.
 
 ## Resource Mapping
 
@@ -450,7 +648,14 @@ The neutral `user` argument to `exec()` maps onto OpenSandbox command options:
 | Integer uid | Pass the uid through the OpenSandbox command options. |
 | Other string | Wrap the command with `su -s /bin/sh -c ... <user>`. |
 
-Commands with a reported exit status return `SandboxExecResult`. A missing or contradictory final outcome raises `NgFailureEvent` with `provider_command_outcome_unknown`. A signal death near the configured deadline does not establish that the command timer fired, so its reported exit code is preserved. For session commands, Gym observes its own deadline directly: it records `provider_command_timeout`, performs cleanup and returns the existing timeout result. A client request timeout instead reports `provider_io_timeout`; it does not establish that the remote command stopped.
+A `SandboxSpec.workdir` that the image lacks is created with `mkdir -p` when the sandbox is, as Docker creates a missing `-w`
+directory, because execd refuses a command whose working directory does not exist. It runs from `/` after
+`setup.commands`, as root or as the image's own user where the sandbox cannot switch, and that user owns it. If it
+fails, the create fails with `provider_setup_failed` and the sandbox is deleted.
+
+A command given as a list of strings goes to execd as its `argv` and runs without a shell; it needs `opensandbox>=1.1.0`, the first SDK that sends one. With an older SDK the provider's `exec_takes_argv()` is false, so `exec()` raises `SandboxExecArgvUnsupportedError` for a list, and the provider logs the requirement once. It takes `user` as `None`, `"root"` or a uid only, since a user name needs `su`, and raises `SandboxExecArgvUnsupportedError` otherwise.
+
+Commands with a reported exit status return `SandboxExecResult`. A missing or contradictory final outcome raises `NgFailureEvent` with `provider_command_outcome_unknown`. A signal death near the configured deadline does not establish that the command timer fired, so its reported exit code is preserved. Gym observes its own deadline directly. For session commands it records `provider_command_timeout`, performs cleanup and returns the existing timeout result. For background commands (`operations.background_exec: true`) it records `provider_command_timeout`, interrupts a command still running at the deadline and returns code `124` with `error_type="timeout"`; execd's own timer is set `command_timeout_headroom_s / 2` later and only stops a command whose interrupt was refused. A client request timeout instead reports `provider_io_timeout`; it does not establish that the remote command stopped.
 
 If background status reads keep reporting `running=True` until Gym's overall client wait expires, Gym reports
 `provider_command_outcome_unknown` and retains that last Running observation in the reason. Failed status reads

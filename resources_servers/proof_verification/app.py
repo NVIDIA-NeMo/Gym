@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import PrivateAttr
+from pydantic import PositiveFloat, PrivateAttr
 
 from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef
@@ -27,6 +28,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import reraise_judge_errors
 
 
@@ -76,18 +78,37 @@ def _get_judge_client_config() -> tuple[str, str, int, list[str]]:
     return model, server_type, port, master_nodes
 
 
-def _wait_for_server(server_address: str, *, interval_seconds: float = 3.0) -> None:
-    """Wait until the external judge server starts accepting TCP connections."""
+def _wait_for_server(server_address: str, *, interval_seconds: float = 3.0, timeout_s: Optional[float] = None) -> None:
+    """Wait until the external judge server starts accepting TCP connections.
+
+    With `timeout_s`, raises TimeoutError once the server has not answered for that many seconds; None waits without
+    limit. The deadline is checked before every attempt and caps each attempt and sleep, so a server that answers only
+    after the deadline is not accepted.
+    """
     host, port_str = server_address.rsplit(":", 1)
     port = int(port_str)
     LOG.info("Waiting for external judge server at %s", server_address)
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    last_error: Optional[OSError] = None
     while True:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError(
+                f"External judge server at {server_address} did not accept connections within {timeout_s} s"
+            ) from last_error
         try:
-            with socket.create_connection((host, port), timeout=5):
+            with socket.create_connection((host, port), timeout=5 if remaining is None else min(5, remaining)):
                 pass
             break
-        except OSError:
-            time.sleep(interval_seconds)
+        except OSError as error:
+            last_error = error
+            remaining = None if deadline is None else deadline - time.monotonic()
+            time.sleep(interval_seconds if remaining is None else max(0.0, min(interval_seconds, remaining)))
+    if deadline is not None and time.monotonic() >= deadline:
+        # A connection that completed at or after the deadline is not accepted.
+        raise TimeoutError(
+            f"External judge server at {server_address} did not accept connections within {timeout_s} s"
+        )
     LOG.info("External judge server at %s is ready", server_address)
 
 
@@ -164,6 +185,11 @@ class ProofVerificationResourcesServerConfig(BaseResourcesServerConfig):
     top_p: float = 0.95
     max_tokens: int = 100000
     assert_think_end: bool = False
+    # An external judge (JUDGE_SERVER_ARGS) is waited for on the first verification. None (default) waits without limit;
+    # a number of seconds makes that verification fail with a TimeoutError once the server has not come up in that time.
+    external_judge_wait_timeout_seconds: Optional[PositiveFloat] = None
+    # Time limit, in seconds, for each request to an external judge server. The default is the previous fixed 4 hours.
+    external_judge_request_timeout_seconds: PositiveFloat = 60 * 60 * 4
 
 
 class ProofVerificationVerifyRequest(BaseVerifyRequest):
@@ -236,6 +262,16 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
             }
             async with self._log_lock:
                 with open(log_path, "a", encoding="utf-8") as f:
+                    # The asyncio lock covers this worker only.
+                    # With num_workers > 1, every worker appends to this file,
+                    # and a long record can reach it in several writes.
+                    # The file lock keeps records from different workers from interleaving.
+                    # A filesystem without file locks (NFS without lockd, Lustre mounted noflock) raises here;
+                    # the record is still written, unlocked, as it was before workers shared the file.
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX)
+                    except OSError:
+                        pass
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
             LOG.warning("[proof_verification] Failed to append log_jsonl %s: %s", log_path, e)
@@ -268,9 +304,11 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
         model, _server_type, port, master_nodes = cfg
         clients = []
         for node in master_nodes:
-            _wait_for_server(f"{node}:{port}")
+            _wait_for_server(f"{node}:{port}", timeout_s=self.config.external_judge_wait_timeout_seconds)
             base_url = f"http://{node}:{port}/v1"
-            client = AsyncOpenAI(base_url=base_url, api_key="EMPTY", timeout=60 * 60 * 4)
+            client = AsyncOpenAI(
+                base_url=base_url, api_key="EMPTY", timeout=self.config.external_judge_request_timeout_seconds
+            )
             clients.append(client)
         if not clients:
             raise RuntimeError("No external judge clients were initialized")
@@ -400,3 +438,6 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ProofVerificationResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ProofVerificationResourcesServer.run_webserver()  # noqa: F401

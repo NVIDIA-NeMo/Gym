@@ -19,9 +19,11 @@ and the Chat Completions API format. It is used by model servers that need to
 convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
+import base64
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Collection, Dict, List, Literal, Optional, Tuple
 from uuid import uuid4
 
@@ -31,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.responses_api_types import (
+    TOKEN_METADATA_FIELDS,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -141,7 +144,10 @@ def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) ->
     )
     return NeMoGymResponseUsage(
         input_tokens=usage.prompt_tokens,
-        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+        input_tokens_details=NeMoGymResponseInputTokensDetails(
+            cached_tokens=cached_tokens,
+            cache_write_tokens=_usage_detail(usage, "prompt_tokens_details", "cache_write_tokens"),
+        ),
         output_tokens=usage.completion_tokens,
         output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
         # Provider totals can use accounting that differs from prompt + completion.
@@ -149,14 +155,23 @@ def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) ->
     )
 
 
-class ChatCompletionsConverterState(BaseModel):
+@dataclass
+class ChatCompletionsConverterState:
+    """Buffers of one request conversion.
+
+    A plain dataclass: the converter updates these buffers once or more per input item, and every
+    field holds values the converter built itself, so validated assignment would only add cost.
+    """
+
     return_token_id_information: bool
 
-    messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
+    messages: List[NeMoGymChatCompletionMessageParam] = field(default_factory=list)
 
     content_buffer: str = ""
     refusal_buffer: str = ""
-    tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
+    tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = field(default_factory=list)
+    # Provider-signed thinking blocks replayed onto the next assistant message (preserve_thinking_blocks).
+    thinking_blocks_buffer: List[Dict[str, Any]] = field(default_factory=list)
     assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
@@ -175,11 +190,13 @@ class ChatCompletionsConverterState(BaseModel):
             shared_params["tool_calls"] = self.tool_calls_buffer
         if self.refusal_buffer:
             shared_params["refusal"] = self.refusal_buffer
+        if self.thinking_blocks_buffer:
+            shared_params["thinking_blocks"] = self.thinking_blocks_buffer
 
         if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
                 **shared_params,
-                **self.token_information.model_dump(exclude_none=True),
+                **_token_metadata_fields(self.token_information),
             )
         else:
             message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
@@ -189,6 +206,7 @@ class ChatCompletionsConverterState(BaseModel):
         self.content_buffer = ""
         self.refusal_buffer = ""
         self.tool_calls_buffer = []
+        self.thinking_blocks_buffer = []
         self.assistant_item_buffered = False
         self.token_information = None
 
@@ -199,6 +217,47 @@ def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLo
     if "prompt_token_ids" not in value:
         return None
     return TokenIDLogProbMixin.model_validate(value)
+
+
+def _token_metadata_fields(token_information: TokenIDLogProbMixin) -> Dict[str, Any]:
+    """The set token metadata fields, as ``model_dump(exclude_none=True)`` would give them, without copying.
+
+    The values are the validated lists themselves. On the request side the final
+    ``NeMoGymChatCompletionCreateParamsNonStreaming`` validation copies them; on the reply side the
+    training variant's validation does. Neither result shares lists with the converter's input.
+    """
+    fields = {name: getattr(token_information, name, None) for name in TokenIDLogProbMixin.model_fields}
+    return {name: value for name, value in fields.items() if value is not None}
+
+
+def _attach_token_information(
+    response_output: List[NeMoGymResponseOutputItem], token_information: TokenIDLogProbMixin
+) -> None:
+    """Replace the last lifted item with its training variant carrying ``token_information``."""
+    last_response_output_item = response_output[-1]
+    train_cls = training_variant_of(last_response_output_item.__class__)
+    response_output[-1] = train_cls(
+        **last_response_output_item.model_dump(),
+        **_token_metadata_fields(token_information),
+    )
+
+
+def _input_item_token_information(item: Any) -> Optional[TokenIDLogProbMixin]:
+    """The token metadata a Responses input item carries, without dumping the item.
+
+    A training variant was validated with its metadata, so it is returned as is. An item type without
+    a training variant can still carry the fields as extras; ``model_dump(exclude_none=True)`` would
+    drop null extras, so they are dropped here too before validation. A raw dict placed in ``input``
+    after the request was validated is dumped as is, null values included, so it is validated whole.
+    """
+    if isinstance(item, TokenIDLogProbMixin):
+        return item
+    if isinstance(item, BaseModel):
+        extras = item.model_extra or {}
+        return _token_information_from_mapping({key: value for key, value in extras.items() if value is not None})
+    if isinstance(item, dict):
+        return _token_information_from_mapping(item)
+    return None
 
 
 def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]:
@@ -265,12 +324,55 @@ CustomToolStrategy = Literal["passthrough", "function_bridge"]
 # so an unguarded warning would repeat each turn.
 _BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
+# The JSON types that `tool_parameter_types` can name for a tool parameter.
+ToolParameterType = Literal["integer", "boolean"]
+
+
+def _retype_tool_arguments(arguments: Any, parameter_types: Optional[Dict[str, ToolParameterType]]) -> Any:
+    """Convert string parameters of one tool call to the JSON types in `parameter_types`.
+
+    `arguments` is the JSON text of the call's arguments, and `parameter_types`
+    maps a parameter name to its type. A parameter is converted only when its
+    value is a string that spells a whole number of at most 18 ASCII digits,
+    which every 64-bit integer type holds (for `integer`), or `true` or `false`
+    in any letter case (for `boolean`). Whitespace and quote characters around
+    the value are ignored, because a model also writes `"1000"` or `False`.
+    Every other value is kept, and arguments that are not the text of a JSON
+    object are returned unchanged. When nothing was converted the same text is
+    returned, so a call that the backend already typed is not rewritten.
+    """
+    if not parameter_types or not isinstance(arguments, str):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        return arguments
+    if not isinstance(parsed, dict):
+        return arguments
+    changed = False
+    for key, kind in parameter_types.items():
+        value = parsed.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip().strip("\"'").strip()
+        if kind == "integer" and re.fullmatch(r"-?[0-9]{1,18}", text):
+            parsed[key] = int(text)
+            changed = True
+        elif kind == "boolean" and text.lower() in ("true", "false"):
+            parsed[key] = text.lower() == "true"
+            changed = True
+    return json.dumps(parsed) if changed else arguments
+
 
 class ChatCompletionsConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
     return_token_id_information: bool
     uses_reasoning_parser: bool = True
+    # Carry a Chat Completions provider's signed thinking blocks (LiteLLM's `thinking_blocks` for Anthropic models)
+    # through the Responses side: they ride in the reasoning item's encrypted_content, which a Responses client
+    # (Codex) returns verbatim, and go back on the next assistant message, so the model sees its own earlier thinking.
+    preserve_thinking_blocks: bool = False
     # How a Responses `custom` (free-form) tool crosses a Chat Completions
     # backend that admits function tools only (vLLM's chat schema).
     # "passthrough" keeps the historical behavior: the definition converts to a
@@ -287,8 +389,27 @@ class ChatCompletionsConverter(BaseModel):
     # default: OpenAI's chat tool messages carry text only, so such an output fails the conversion, or
     # becomes a text placeholder with ``drop_unrepresentable_request_fields``.
     inline_tool_output_images: bool = False
+    # The JSON type of tool parameters, by tool name and then parameter name.
+    # A backend's tool parser types a parameter from the schema that the
+    # request declares, so it returns every parameter of a tool that the
+    # request did not declare as a string. A harness that runs such a call all
+    # the same needs the types back: a returned function call to a tool named
+    # here has the listed parameters converted (`_retype_tool_arguments`).
+    # Empty leaves every call as the backend returned it.
+    tool_parameter_types: Dict[str, Dict[str, ToolParameterType]] = Field(default_factory=dict)
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+    THINKING_BLOCKS_PREFIX: ClassVar[str] = "gym.thinking_blocks.v1:"
+
+    @classmethod
+    def encode_thinking_blocks(cls, blocks: List[Dict[str, Any]]) -> str:
+        return cls.THINKING_BLOCKS_PREFIX + base64.urlsafe_b64encode(json.dumps(blocks).encode()).decode()
+
+    @classmethod
+    def decode_thinking_blocks(cls, encrypted_content: Any) -> Optional[List[Dict[str, Any]]]:
+        if not isinstance(encrypted_content, str) or not encrypted_content.startswith(cls.THINKING_BLOCKS_PREFIX):
+            return None
+        return json.loads(base64.urlsafe_b64decode(encrypted_content[len(cls.THINKING_BLOCKS_PREFIX) :]))
 
     @staticmethod
     def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:
@@ -323,7 +444,18 @@ class ChatCompletionsConverter(BaseModel):
         of the prompt, unless ``inline_tool_output_images`` keeps it as an image. Every other
         unrepresentable field, a ``current_turn`` reasoning context included, is still refused.
         """
-        responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
+        # Token metadata is the bulk of a long training transcript, and validating the request already
+        # checked it. The dump leaves it out and the loop below reads it from the input models.
+        # The exclusion itself slows the dump, so it applies only when an item carries the metadata.
+        input_models = responses_create_params.input
+        carries_token_metadata = not isinstance(input_models, str) and any(
+            isinstance(item, TokenIDLogProbMixin) for item in input_models
+        )
+        responses_create_params = responses_create_params.model_dump(
+            exclude_none=True,
+            exclude_unset=True,
+            exclude={"input": {"__all__": TOKEN_METADATA_FIELDS}} if carries_token_metadata else None,
+        )
         if responses_create_params.get("include") == []:
             del responses_create_params["include"]
 
@@ -379,7 +511,7 @@ class ChatCompletionsConverter(BaseModel):
         else:
             input_messages = response_input
 
-        for m in input_messages:
+        for index, m in enumerate(input_messages):
             if not m.get("type") and m.get("role"):
                 m["type"] = "message"
 
@@ -418,7 +550,9 @@ class ChatCompletionsConverter(BaseModel):
                     )
 
             if self.return_token_id_information:
-                token_information = _token_information_from_mapping(m)
+                token_information = (
+                    None if isinstance(input_models, str) else _input_item_token_information(input_models[index])
+                )
                 if token_information is not None:
                     state.token_information = token_information
 
@@ -518,6 +652,12 @@ class ChatCompletionsConverter(BaseModel):
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_type = tool_dict.get("type")
+                if tool_dict.get("allowed_callers") is not None:
+                    raise NotImplementedError(
+                        "Responses tool caller eligibility has no Chat Completions representation."
+                    )
+                if tool_dict.get("output_schema") is not None:
+                    raise NotImplementedError("Responses tool output schema has no Chat Completions representation.")
                 if tool_type not in {"function", "custom"}:
                     raise NotImplementedError(
                         f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
@@ -569,6 +709,8 @@ class ChatCompletionsConverter(BaseModel):
         *,
         drop_unrepresentable_request_fields: bool = False,
     ) -> None:
+        if (m.get("caller") or {}).get("type", "direct") != "direct":
+            raise NotImplementedError("Responses function caller metadata has no Chat Completions representation.")
         state.flush_assistant()
 
         assert "call_id" in m
@@ -604,7 +746,9 @@ class ChatCompletionsConverter(BaseModel):
             content = [
                 {"type": "text", "text": part["text"]}
                 if part["type"] == "input_text"
-                else self._tool_output_image_to_chat(part)
+                else self._tool_output_image_to_chat(
+                    part, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                )
                 for part in output
             ]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
@@ -620,9 +764,16 @@ class ChatCompletionsConverter(BaseModel):
         )
         state.messages.append(converted)
 
-    def _tool_output_image_to_chat(self, part: dict) -> dict:
+    def _tool_output_image_to_chat(self, part: dict, *, drop_unrepresentable_request_fields: bool) -> dict:
         """What the chat tool message carries for an ``input_image`` part of a tool call output."""
         if not self.inline_tool_output_images:
+            return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url")
+        if not image_url and drop_unrepresentable_request_fields:
+            # A file_id or an empty URL has nothing to inline. Dropping keeps its place as the placeholder;
+            # raising would fail every later turn too, since the whole transcript is converted each turn.
             return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
         if part.get("detail") == "original":
             # Chat has no "original" detail (full resolution). The Codex CLI sends it when the model
@@ -798,6 +949,12 @@ class ChatCompletionsConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        blocks = self.decode_thinking_blocks(m.get("encrypted_content")) if self.preserve_thinking_blocks else None
+        if blocks is not None and not m.get("content"):
+            # The signed blocks carry the thinking; the summary is their readable copy and is not replayed.
+            state.assistant_item_buffered = True
+            state.thinking_blocks_buffer.extend(blocks)
+            return
         if m.get("encrypted_content") or m.get("content"):
             raise NotImplementedError(
                 "Responses reasoning content/encrypted_content cannot be preserved by this Chat Completions "
@@ -813,6 +970,8 @@ class ChatCompletionsConverter(BaseModel):
         m: dict,
         state: ChatCompletionsConverterState,
     ) -> None:
+        if (m.get("caller") or {}).get("type", "direct") != "direct":
+            raise NotImplementedError("Responses function caller metadata has no Chat Completions representation.")
         state.assistant_item_buffered = True
         assert "call_id" in m
         if m.get("namespace") is not None:
@@ -843,6 +1002,8 @@ class ChatCompletionsConverter(BaseModel):
         ``{"input": "<raw text>"}``, a different object from the one the model
         generated.
         """
+        if (m.get("caller") or {}).get("type", "direct") != "direct":
+            raise NotImplementedError("Responses custom tool caller metadata has no Chat Completions representation.")
         state.assistant_item_buffered = True
         assert "call_id" in m
         if m.get("namespace") is not None:
@@ -1053,6 +1214,7 @@ class ChatCompletionsConverter(BaseModel):
             parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
             prompt_cache_key=chat_completion_create_params.prompt_cache_key,
             prompt_cache_retention=chat_completion_create_params.prompt_cache_retention,
+            prompt_cache_options=chat_completion_create_params.prompt_cache_options,
             reasoning=Reasoning(effort=chat_completion_create_params.reasoning_effort)
             if chat_completion_create_params.reasoning_effort is not None
             else None,
@@ -1081,12 +1243,25 @@ class ChatCompletionsConverter(BaseModel):
         self, choice: NeMoGymChoice, *, custom_tool_names: Collection[str] = (), structured_output: bool = False
     ) -> List[NeMoGymResponseOutputItem]:
         """Lift a chat choice; structured output permits only leading reasoning blocks."""
-        return self.postprocess_assistant_message_dict(
-            choice.message.model_dump(exclude_none=True),
+        message = choice.message
+        if not isinstance(message, TokenIDLogProbMixin):
+            return self.postprocess_assistant_message_dict(
+                message.model_dump(exclude_none=True),
+                logprobs=_chat_logprobs_to_responses(choice.logprobs),
+                custom_tool_names=custom_tool_names,
+                structured_output=structured_output,
+            )
+        # Validating the choice already checked the message's token metadata. The lift reads it
+        # from the model instead of dumping it and validating the dump again.
+        response_output = self._lift_assistant_message(
+            message.model_dump(exclude_none=True, exclude=TOKEN_METADATA_FIELDS),
             logprobs=_chat_logprobs_to_responses(choice.logprobs),
             custom_tool_names=custom_tool_names,
             structured_output=structured_output,
         )
+        if self.return_token_id_information:
+            _attach_token_information(response_output, message)
+        return response_output
 
     def postprocess_assistant_message_dict(
         self,
@@ -1096,7 +1271,31 @@ class ChatCompletionsConverter(BaseModel):
         custom_tool_names: Collection[str] = (),
         structured_output: bool = False,
     ) -> List[NeMoGymResponseOutputItem]:
-        """Lift assistant content without interpreting tags inside a structured final answer."""
+        """Lift assistant content without interpreting tags inside a structured final answer.
+
+        ``postprocess_chat_response`` calls this for a reply without token metadata only. A reply that
+        carries token metadata was already validated, so it goes to ``_lift_assistant_message`` and
+        ``_attach_token_information`` directly; an override of this method does not see it.
+        """
+        response_output = self._lift_assistant_message(
+            message_dict,
+            logprobs=logprobs,
+            custom_tool_names=custom_tool_names,
+            structured_output=structured_output,
+        )
+        token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
+        if token_information is not None:
+            _attach_token_information(response_output, token_information)
+        return response_output
+
+    def _lift_assistant_message(
+        self,
+        message_dict: Dict[str, Any],
+        *,
+        logprobs: Any,
+        custom_tool_names: Collection[str],
+        structured_output: bool,
+    ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
         content = message_dict.get("content") or ""
@@ -1128,13 +1327,19 @@ class ChatCompletionsConverter(BaseModel):
                 logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
-        if reasoning_matches:
+        thinking_blocks = None
+        if self.preserve_thinking_blocks:
+            thinking_blocks = message_dict.get("thinking_blocks") or (
+                message_dict.get("provider_specific_fields") or {}
+            ).get("thinking_blocks")
+        if reasoning_matches or thinking_blocks:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
                 type="reasoning",
                 summary=[
                     NeMoGymSummary(text=reasoning_text, type="summary_text") for reasoning_text in reasoning_matches
                 ],
+                encrypted_content=self.encode_thinking_blocks(thinking_blocks) if thinking_blocks else None,
                 status="completed",
             )
             response_output.append(reasoning_item)
@@ -1207,22 +1412,15 @@ class ChatCompletionsConverter(BaseModel):
                 response_output.append(
                     NeMoGymResponseFunctionToolCall(
                         name=tc["function"]["name"],
-                        arguments=tc["function"]["arguments"],
+                        arguments=_retype_tool_arguments(
+                            tc["function"]["arguments"], self.tool_parameter_types.get(tc["function"]["name"])
+                        ),
                         call_id=tc["id"],
                         type="function_call",
                         status="completed",
                         id=tc["id"],
                     )
                 )
-
-        token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
-        if token_information is not None:
-            last_response_output_item = response_output[-1]
-            train_cls = training_variant_of(last_response_output_item.__class__)
-            response_output[-1] = train_cls(
-                **last_response_output_item.model_dump(),
-                **token_information.model_dump(exclude_none=True),
-            )
 
         return response_output
 
@@ -1288,7 +1486,11 @@ class ChatCompletionsConverter(BaseModel):
             custom_tool_names=custom_tool_names,
             structured_output=text_format.get("type") in {"json_schema", "json_object"},
         )
-        response_output_dicts = [item.model_dump() for item in response_output]
+        # The lifted items are validated models, so the response takes them as they are. Every field is
+        # marked set, as rebuilding the items from their full dump did, so a later ``exclude_unset``
+        # dump (request replay, for one) keeps the null fields it has always carried.
+        for item in response_output:
+            item.__pydantic_fields_set__ = set(type(item).model_fields)
 
         usage = chat_completion_usage_to_response_usage(chat_completion.usage)
 
@@ -1302,6 +1504,9 @@ class ChatCompletionsConverter(BaseModel):
         provider_metadata = (
             {"native_finish_reason": str(native_finish_reason)} if native_finish_reason is not None else {}
         )
+        native_stop_reason = getattr(choice, "stop_reason", None)
+        if native_stop_reason is not None:
+            provider_metadata["native_stop_reason"] = native_stop_reason
 
         # Chat Completion -> Response
         return NeMoGymResponse(
@@ -1316,7 +1521,7 @@ class ChatCompletionsConverter(BaseModel):
             created_at=chat_completion.created,
             model=responses_create_params.model,
             object="response",
-            output=response_output_dicts,
+            output=response_output,
             tool_choice=responses_create_params.tool_choice
             if responses_create_params.tool_choice is not None
             else "auto",
@@ -1355,6 +1560,7 @@ class ChatCompletionsConverter(BaseModel):
 _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
     {
         "code_interpreter_call",
+        "program",
         "computer_call",
         "custom_tool_call",
         "file_search_call",
@@ -1386,6 +1592,7 @@ _RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
         "computer_call_output",
         "custom_tool_call_output",
         "function_call_output",
+        "program_output",
         "local_shell_call_output",
         "mcp_approval_response",
         "shell_call_output",
@@ -1417,9 +1624,5 @@ def split_responses_input_output_items(
     return items[:split_at], items[split_at:]
 
 
-# Backward-compatible aliases
-VLLMConverter = ChatCompletionsConverter
-VLLMConverterResponsesToChatCompletionsState = ChatCompletionsConverterState
-
-# Names this module had before ResponsesConverter was renamed ChatCompletionsConverter, with a warning.
+# Names this module had before the converter was renamed ChatCompletionsConverter, with a warning.
 __getattr__ = moved_names_getattr(__name__)

@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests of the OpenAI-compatible client in `nemo_gym.client.openai_client`."""
 
+import json
 import re
 from copy import deepcopy
 from types import SimpleNamespace
@@ -105,6 +106,120 @@ class TestOpenAIUtils:
         assert isinstance(captured["timeout"], ClientTimeout)
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
+
+    async def test_session_key_headers_carry_the_current_rollout(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.test/v1",
+            default_headers={"X-Static": "1"},
+            session_key_headers=["X-Session", "X-Other-Session"],
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+        await client._request(method="POST", url="https://example.test/v1/responses")
+        with rollout_context("trial-2"):
+            await client._request(method="POST", url="https://example.test/v1/responses", headers={"X-Session": "own"})
+
+        assert sent[0]["X-Session"] == sent[0]["X-Other-Session"] == "trial-1"
+        assert sent[0]["X-Static"] == "1"
+        assert "X-Session" not in sent[1]
+        assert sent[2]["X-Session"] == "own"
+        assert sent[2]["X-Other-Session"] == "trial-2"
+
+    async def test_an_explicit_header_of_another_case_replaces_the_rollout_header(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session"]
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses", headers={"x-session": "own"})
+
+        assert [value for name, value in sent[0].items() if name.lower() == "x-session"] == ["own"]
+
+    async def test_a_default_header_of_another_case_is_replaced_by_the_rollout_header_only_inside_a_rollout(
+        self, monkeypatch
+    ) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.test/v1",
+            default_headers={"x-session": "static"},
+            session_key_headers=["X-Session"],
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+        await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert [value for name, value in sent[0].items() if name.lower() == "x-session"] == ["trial-1"]
+        assert [value for name, value in sent[1].items() if name.lower() == "x-session"] == ["static"]
+
+    async def test_authorization_wins_over_a_header_of_another_case(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        await client._request(method="POST", url="https://example.test/v1/responses", headers={"authorization": "x"})
+
+        assert [value for name, value in sent[0].items() if name.lower() == "authorization"] == ["Bearer abc"]
+
+    async def test_session_key_headers_carry_the_session_key(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        monkeypatch.setattr(openai_client_module, "current_session_key", lambda: "session-of-the-call")
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", session_key_headers=["X-Session"]
+        )
+
+        await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert sent[0]["X-Session"] == "session-of-the-call"
+
+    async def test_session_key_headers_are_off_by_default(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert "X-Session" not in sent[0]
 
     async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
         captured = {}
@@ -450,6 +565,73 @@ class TestOpenAIUtils:
 
         request.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        "status,body",
+        [(429, b'{"error":{"code":"budget_exceeded"}}'), (401, b'{"error":{"code":"invalid_api_key"}}')],
+    )
+    async def test_a_spent_key_fails_over_to_the_next_key(self, monkeypatch, status, body):
+        spent = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
+        ok = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[spent, ok, ok])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key=["first", "second"], base_url="https://example.com/v1", max_num_tries=1)
+
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is ok
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is ok
+
+        sent = [call.kwargs["headers"]["Authorization"] for call in request.await_args_list]
+        assert sent == ["Bearer first", "Bearer second", "Bearer second"]
+        sleep.assert_not_awaited()
+
+    async def test_the_client_trips_once_every_key_is_spent(self, monkeypatch):
+        spent = SimpleNamespace(
+            status=429, content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":{"code":"budget_exceeded"}}'))
+        )
+        request = AsyncMock(return_value=spent)
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key=["k0", "k1", "k2"], base_url="https://example.com/v1")
+
+        with pytest.raises(PermanentEndpointError):
+            await client._request(method="POST", url="https://example.com/v1/responses")
+        with pytest.raises(PermanentEndpointError):
+            await client._request(method="POST", url="https://example.com/v1/responses")
+
+        sent = [call.kwargs["headers"]["Authorization"] for call in request.await_args_list]
+        assert sent == ["Bearer k0", "Bearer k1", "Bearer k2"]
+
+    async def test_a_request_that_failed_on_a_retired_key_resends_without_skipping_a_key(self, monkeypatch):
+        import asyncio
+
+        spent = SimpleNamespace(
+            status=429, content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":{"code":"budget_exceeded"}}'))
+        )
+        ok = SimpleNamespace(status=200)
+        both_sent = asyncio.Event()
+        sent: list[str] = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"]["Authorization"])
+            if len(sent) == 2:
+                both_sent.set()
+            await both_sent.wait()
+            return spent if kwargs["headers"]["Authorization"] == "Bearer k0" else ok
+
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", fake_request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key=["k0", "k1", "k2"], base_url="https://example.com/v1")
+
+        results = await asyncio.gather(
+            client._request(method="POST", url="https://example.com/v1/responses"),
+            client._request(method="POST", url="https://example.com/v1/responses"),
+        )
+
+        assert results == [ok, ok]
+        assert sent == ["Bearer k0", "Bearer k0", "Bearer k1", "Bearer k1"]
+        assert client.current_api_key == "k1"
+
     async def test_in_flight_retry_stops_after_sibling_trips(self, monkeypatch):
         import asyncio
 
@@ -510,6 +692,17 @@ def _busy(status: int = 429, retry_after: str | None = None) -> SimpleNamespace:
     )
 
 
+def _sleep_on_a_fake_clock(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """A mocked retry sleep whose waits advance a fake clock, so the elapsed-time budget sees them as real time."""
+    now = [0.0]
+
+    async def advance(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr("nemo_gym.client.openai_client.monotonic", lambda: now[0])
+    return AsyncMock(side_effect=advance)
+
+
 class TestProviderBackoff:
     """How the client waits on a provider that is busy: growing jittered waits, Retry-After, a time budget."""
 
@@ -544,7 +737,7 @@ class TestProviderBackoff:
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
         request = AsyncMock(return_value=_busy(status))
-        sleep = AsyncMock()
+        sleep = _sleep_on_a_fake_clock(monkeypatch)
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
         monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
 
@@ -572,24 +765,41 @@ class TestProviderBackoff:
         openai_client_module._retry_wait_seconds(tries, _busy())
         assert windows == [(0, 60.0)]
 
-    async def test_an_internal_client_keeps_retrying_a_busy_server_past_a_thousand_tries(
+    async def test_an_internal_client_stops_waiting_out_a_busy_server_when_its_budget_is_spent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        success = SimpleNamespace(status=200)
-        request = AsyncMock(side_effect=[_busy(429)] * 1025 + [success])
-        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
-        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
-        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True)
+        # The mocked sleep advances a fake clock, as a real one would. The provider has a request ceiling, so a loop
+        # that no longer ends fails here at once instead of spinning (mocked awaits never yield to a timeout).
+        now = [0.0]
 
-        assert await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses") is success
-        assert request.await_count == 1026
+        async def sleep(seconds: float) -> None:
+            now[0] += seconds
+
+        async def busy_server(**kwargs):
+            assert request.await_count < 50, "retried past the budget"
+            return _busy(429, retry_after="1")
+
+        request = AsyncMock(side_effect=busy_server)
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.client.openai_client.monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            "nemo_gym.client.openai_client.raise_for_status", AsyncMock(side_effect=RuntimeError("still busy"))
+        )
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True, max_rate_limit_wait_seconds=3
+        )
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses")
+        assert request.await_count == 4
 
     @pytest.mark.parametrize("status", [429, 503])
     async def test_a_positive_budget_ends_the_request_before_max_http_attempts_does(
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
         request = AsyncMock(return_value=_busy(status, retry_after="1"))
-        sleep = AsyncMock()
+        sleep = _sleep_on_a_fake_clock(monkeypatch)
         monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
         monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
 
@@ -711,6 +921,19 @@ class TestProviderBackoff:
 class TestExhaustedAttemptCause:
     """The final HTTP error of exhausted retries is caused by the last attempt's observed failure."""
 
+    @pytest.mark.parametrize("error_type", [ClientOSError, TimeoutError])
+    async def test_error_body_read_without_failure_evidence_preserves_the_transport_error(self, error_type) -> None:
+        error = error_type("response body was interrupted")
+        read = AsyncMock(side_effect=error)
+        response = SimpleNamespace(headers={}, content=SimpleNamespace(read=read))
+
+        with pytest.raises(error_type) as raised:
+            await openai_client_module._read_error_body(response, None)
+
+        assert raised.value is error
+        assert raised.value.__cause__ is None
+        read.assert_awaited_once_with()
+
     @staticmethod
     def _http_error() -> ClientResponseError:
         return ClientResponseError(SimpleNamespace(real_url="http://model"), (), status=503, message="unavailable")
@@ -831,3 +1054,56 @@ async def test_a_forwarded_permanent_failure_is_the_cause_of_only_the_call_it_en
     finally:
         await session.close()
         await runner.cleanup()
+
+
+def test_log_api_cost_appends_cost_headers_and_usage(tmp_path, monkeypatch) -> None:
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, log_api_cost
+
+    path = tmp_path / "cost.jsonl"
+    log_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})  # unset: nothing written
+    assert not path.exists()
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(path))
+    headers = {
+        "X-LiteLLM-Response-Cost": "0.0123",
+        "x-litellm-response-cost-input": "0.01",
+        "Authorization": "Bearer k",
+    }
+    usage = {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 8}, "output_tokens": 3}
+    log_api_cost(
+        "/responses",
+        {"model": "m", "prompt_cache_key": "conv-1", "input": "secret prompt"},
+        headers,
+        {"usage": usage, "output": ["secret answer"]},
+    )
+    log_api_cost("/chat/completions", {"model": "m"}, None, None)
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert lines[0]["cost"] == {"x-litellm-response-cost": "0.0123", "x-litellm-response-cost-input": "0.01"}
+    assert lines[0]["usage"] == usage and lines[0]["prompt_cache_key"] == "conv-1"
+    assert "secret" not in path.read_text() and "Bearer" not in path.read_text()
+    assert lines[1]["usage"] is None and lines[1]["cost"] == {}
+
+
+def test_log_api_cost_never_raises(tmp_path, monkeypatch) -> None:
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, log_api_cost
+
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(tmp_path / "missing-dir" / "cost.jsonl"))
+    log_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+
+
+async def test_alog_api_cost_writes_in_a_worker_thread_only_when_enabled(tmp_path, monkeypatch) -> None:
+    import threading
+
+    from nemo_gym.client import openai_client
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, alog_api_cost
+
+    threads = []
+    real = openai_client.log_api_cost
+    monkeypatch.setattr(
+        openai_client, "log_api_cost", lambda *args: threads.append(threading.current_thread()) or real(*args)
+    )
+    await alog_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+    assert threads == []  # off: no thread hop at all
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(tmp_path / "cost.jsonl"))
+    await alog_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+    assert len(threads) == 1 and threads[0] is not threading.main_thread()
+    assert json.loads((tmp_path / "cost.jsonl").read_text())["model"] == "m"

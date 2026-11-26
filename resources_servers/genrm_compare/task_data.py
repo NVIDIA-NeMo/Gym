@@ -3,7 +3,8 @@
 """Task-data schema for the genrm_compare server.
 
 Task-owned data contains the optional provenance label ``dataset``.
-``expected_rubric_ids`` is required only when ``score_source="rubric_mean"``.
+With ``score_source="rubric_mean"``, supply ``expected_rubric_ids`` or configure the judge's
+built-in rubric with ``use_principle: false`` and ``default_rubric_ids``.
 Multi-member verification requires ``_ng_rollout_index`` slots 0..N-1. Caller-owned
 ``_ng_group_id`` and shared ``_ng_group_attempt`` coordinates support isolated
 replacement attempts and completed reward replay. Legacy task/prompt grouping
@@ -30,6 +31,9 @@ class TaskData(BaseModel):
 
     expected_rubric_ids: Optional[Tuple[int, ...]] = Field(
         default=None,
-        description="Rubric IDs the judge must return exactly once each; required only when score_source=rubric_mean.",
+        description=(
+            "Rubric IDs the judge must return exactly once each. For rubric_mean, the verifier can take these "
+            "IDs from default_rubric_ids when use_principle is false."
+        ),
         json_schema_extra={"consumed_by": ["verify"]},
     )

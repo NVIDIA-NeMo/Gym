@@ -30,6 +30,7 @@
 # limitations under the License.
 import logging
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlsplit
 
 import orjson
 from omegaconf import DictConfig, OmegaConf
@@ -50,6 +51,8 @@ from nemo_gym.config.config_types import BaseServerConfig, ConfigError, HeadServ
 from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
 )
+from nemo_gym.core.episode_context import rollout_context
+from nemo_gym.core.model_call_sampling import model_sampling_context
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 
 
@@ -378,6 +381,59 @@ class TestServerClient:
             headers={"x-existing": "value"},
         )
 
+    @mark.parametrize(
+        "server_name, url_path, observability, sent_path",
+        [
+            ("policy_model", "/v1/responses", False, "/ng-sampling/SEG/v1/responses"),
+            (
+                "policy_model",
+                "/v1/chat/completions?x=1",
+                True,
+                "/ng-rollout/4-2/ng-sampling/SEG/v1/chat/completions?x=1",
+            ),
+            (
+                "policy_model",
+                "/ng-rollout/4-2/ng-sampling/OWN/v1/responses",
+                True,
+                "/ng-rollout/4-2/ng-sampling/OWN/v1/responses",
+            ),
+            # An agent's generation route carries it too: an agent's call to its own /v1/responses keeps the run's
+            # values, so the model calls it makes carry them. Other routes and other servers do not.
+            ("agent", "/v1/responses", False, "/ng-sampling/SEG/v1/responses"),
+            ("agent", "/run", False, "/run"),
+            ("policy_model", "/v1/embeddings", False, "/v1/embeddings"),
+            ("resources", "/verify", False, "/verify"),
+        ],
+    )
+    async def test_ServerClient_gives_model_calls_the_current_sampling_segment(
+        self, monkeypatch: MonkeyPatch, server_name: str, url_path: str, observability: bool, sent_path: str
+    ) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=11000),
+            global_config_dict=DictConfig(
+                {
+                    "observability_enabled": observability,
+                    "policy_model": {"responses_api_models": {"vllm_model": {"host": "model", "port": 1}}},
+                    "resources": {"resources_servers": {"judge": {"host": "resources", "port": 2}}},
+                    "agent": {"responses_api_agents": {"simple_agent": {"host": "agent", "port": 3}}},
+                }
+            ),
+        )
+        request_mock = AsyncMock(return_value="ok")
+        monkeypatch.setattr(
+            nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: MagicMock(request=request_mock)
+        )
+
+        with rollout_context("4-2"), model_sampling_context("SEG"):
+            await server_client.post(server_name=server_name, url_path=url_path)
+        # Without a segment in the context, nothing is added.
+        await server_client.post(server_name=server_name, url_path="/v1/responses")
+
+        first, second = request_mock.await_args_list
+        sent = urlsplit(first.kwargs["url"])
+        assert sent.path + (f"?{sent.query}" if sent.query else "") == sent_path
+        assert "/ng-sampling/" not in second.kwargs["url"]
+
     async def test_ServerClient_request_uses_base_url_table(self, monkeypatch: MonkeyPatch) -> None:
         """Resolve each server's base URL once."""
         server_client = ServerClient(
@@ -449,3 +505,35 @@ class TestServerClient:
 
         sent = orjson.loads(aiohttp_client_request_mock.call_args.kwargs["data"])
         assert sent["input"][0]["content"][0]["logprobs"] == logprobs
+
+
+class TestPollForStatus:
+    def _client(self, monkeypatch: MonkeyPatch) -> MagicMock:
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_first_server_config_dict", MagicMock())
+        client = MagicMock()
+        client._build_server_base_url.return_value = "http://localhost:1"
+        return client
+
+    def test_by_default_the_request_keeps_its_per_phase_timeout(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._client(monkeypatch)
+        requests_get = MagicMock()
+        within_deadline = MagicMock()
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", requests_get)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_within_deadline", within_deadline)
+
+        assert ServerClient.poll_for_status(client, "s", timeout_seconds=7) == "success"
+
+        requests_get.assert_called_once_with("http://localhost:1", timeout=7)
+        within_deadline.assert_not_called()
+
+    def test_with_a_total_deadline_the_poll_ends_at_it(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._client(monkeypatch)
+        requests_get = MagicMock()
+        within_deadline = MagicMock(side_effect=TimeoutError("late"))
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", requests_get)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_within_deadline", within_deadline)
+
+        assert ServerClient.poll_for_status(client, "s", timeout_seconds=7, total_deadline=True) == "timeout"
+
+        within_deadline.assert_called_once_with("http://localhost:1", timeout_s=7, read_body=False)
+        requests_get.assert_not_called()

@@ -8,8 +8,33 @@ from typing import Annotated, Literal
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 
+# Direct HTTP has no field for a tool's error result, which MCP reports as `isError`, so a tool route that answers a
+# call with an error result sets this header to "true".
+TOOL_ERROR_HEADER = "X-NeMo-Gym-Tool-Error"
+
+# The ID the model gave a tool call (its `call_id`), which an agent may send with a direct HTTP call, so the server can
+# join its record to the agent's trajectory.
+TOOL_CALL_ID_HEADER = "X-NeMo-Gym-Tool-Call-Id"
+
+# A tool route sets this header to "true" when its reply asks the agent to end its activation: ``simple_agent`` finishes
+# the tool calls of the current model response and returns, without calling the model again. Other agents ignore the
+# header and call the model again. MCP has no field for it.
+END_ACTIVATION_HEADER = "X-NeMo-Gym-End-Activation"
+
+# The names an MCP grant takes. A resources server's mcp_server_name must be one of them too: an Environment Server
+# grants agents that server's MCP endpoint under the name the endpoint lists itself under.
+MCP_TOOL_ACCESS_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+
 class DirectHTTPToolAccess(BaseModel):
-    """Connect a trusted Python agent to typed tool routes."""
+    """Connect a trusted Python agent to typed tool routes.
+
+    A route answers a call whose result is an error with ``X-NeMo-Gym-Tool-Error: true`` (``TOOL_ERROR_HEADER``),
+    even when its status is 200. An agent may send the model's ``call_id`` in ``X-NeMo-Gym-Tool-Call-Id``
+    (``TOOL_CALL_ID_HEADER``). A reply with ``X-NeMo-Gym-End-Activation: true`` (``END_ACTIVATION_HEADER``) asks
+    the agent to end its activation: ``simple_agent`` runs the rest of the model response's tool calls and
+    returns without another model call. Other agents ignore the header and call the model again.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -44,7 +69,7 @@ class MCPToolAccess(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["mcp"] = "mcp"
-    name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    name: str = Field(min_length=1, pattern=MCP_TOOL_ACCESS_NAME_PATTERN)
     required: bool
     connection: MCPStreamableHTTPConnection
 

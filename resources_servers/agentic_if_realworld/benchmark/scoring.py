@@ -89,9 +89,18 @@ async def score(
     validate_judge_config(endpoint, model)
     judge.validate_payload(payload)
     schema = bounded_schema(provider_schema(read(ROOT / "policy/judge_output.schema.json")), payload)
-    if evidence_transport not in ("quotes", "evidence_ids_v1"):
+    if evidence_transport not in ("quotes", "evidence_ids_v1", "evidence_ids_or_quotes_v1"):
         raise ValueError("Unknown judge evidence transport")
     indexed = evidence_transport == "evidence_ids_v1"
+    selection = None
+    if evidence_transport == "evidence_ids_or_quotes_v1":
+        span_count = len(evidence.build_index(payload)["spans"])
+        indexed = span_count <= 527
+        selection = {
+            "policy": evidence_transport,
+            "span_count": span_count,
+            "selected": "evidence_ids_v1" if indexed else "quotes",
+        }
     wire_schema = evidence.wire_schema(schema, payload) if indexed else provider_schema(schema)
     body = {
         "model": model,
@@ -121,6 +130,7 @@ async def score(
             "endpoint": endpoint,
             "validation_schema": schema,
             "transport_version": evidence.VERSION if indexed else TRANSPORT_VERSION,
+            **({"selection": selection} if selection else {}),
         }
     )
     work = directory / "judges" / identity
@@ -138,6 +148,13 @@ async def score(
             if (work / name).exists() and read(work / name) != expected:
                 raise ValueError("Saved pending judge payload or schema changed")
         receipt_paths = sorted(work.glob("attempt*.json"), key=lambda path: int(path.stem.removeprefix("attempt")))
+        if selection:
+            selection_path = work / "transport_selection.json"
+            if selection_path.exists():
+                if read(selection_path) != selection:
+                    raise ValueError("Saved judge transport selection changed")
+            elif receipt_paths or (work / "result.json").exists():
+                raise ValueError("Saved judge transport selection missing")
         if [path.name for path in receipt_paths] != [f"attempt{index}.json" for index in range(len(receipt_paths))]:
             raise ValueError("Saved judge attempt sequence changed")
         receipts = []
@@ -179,6 +196,8 @@ async def score(
             _validate_dispatch(receipt)
         if validate_only:
             return unscored(payload["item_id"], "judge_cache_validated_without_scoring")
+        if selection:
+            write(work / "transport_selection.json", selection)
         write(work / "payload.json", payload)
         write(work / "transport_schema.json", schema)
         write(work / "provider_schema.json", wire_schema)
@@ -204,7 +223,10 @@ async def score(
                     continue
                 if not saved:
                     raise RetryableTransportError(
-                        "Judge transport failed; fix the service or credentials and explicitly resume the saved answer"
+                        f"Judge transport failed (http_status={receipt.get('http_status')}, "
+                        f"reason={receipt.get('reason')}, receipt={receipt_path.name}); "
+                        "fix the service or credentials and explicitly resume the saved answer",
+                        http_status=status,
                     )
                 continue
             delivered_reviews += 1
@@ -232,7 +254,12 @@ def _checked_result(
 ) -> tuple[dict, dict]:
     """Derive the full grade from the authoritative judge response."""
     choices = response["choices"]
-    if len(choices) != 1 or choices[0]["finish_reason"] != "stop":
+    if (
+        len(choices) != 1
+        or choices[0]["finish_reason"] != "stop"
+        or choices[0].get("native_finish_reason") == "repetition"
+        or choices[0].get("stop_reason") == "repetition_detected"
+    ):
         raise ValueError("Incomplete judge delivery")
     review = json.loads(choices[0]["message"]["content"])
     if indexed:

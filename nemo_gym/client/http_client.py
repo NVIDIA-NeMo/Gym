@@ -153,6 +153,24 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
             "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
         ),
     )
+    global_aiohttp_sock_connect_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Seconds one outgoing TCP handshake may take. It does not count the wait for a free connection-pool "
+            "slot, so a request queued behind a busy pool is not cut short. Total and read time stay unlimited "
+            "unless the caller passes its own timeout."
+        ),
+    )
+    global_aiohttp_internal_retry_budget_seconds: float = Field(
+        default=600.0,
+        ge=0,
+        description=(
+            "Wall-clock budget for retries of a call between Gym servers when the caller passes no attempt or "
+            "retry-window limit: an unbroken run of connection errors, or retries of other errors, ends in the last "
+            "error once it is spent. 0 retries without a time limit."
+        ),
+    )
 
 
 def get_global_aiohttp_client(
@@ -241,7 +259,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     )
     client_session = ClientSession(
         connector=connector,
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
         cookie_jar=DummyCookieJar(),
     )
 
@@ -276,7 +294,7 @@ def get_global_aiohttp_control_client() -> ClientSession:  # pragma: no cover
                     probes=cfg.global_aiohttp_tcp_keepalive_probes,
                 ),
             ),
-            timeout=ClientTimeout(),
+            timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
             cookie_jar=DummyCookieJar(),
         )
     return _GLOBAL_AIOHTTP_CONTROL_CLIENT
@@ -422,15 +440,22 @@ async def request(
     and redirects and is not forwarded to aiohttp.
 
     ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
-    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, unbounded for
+    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, the internal retry budget for
     internal ones). A ``_max_connection_retries`` limit still applies as well.
 
+    An internal call (``_internal=True``) that sets none of ``_max_num_tries``, ``_max_connection_retries`` or
+    ``_connection_retry_window`` gets ``global_aiohttp_internal_retry_budget_seconds`` (600 s by default, ``0`` for no
+    limit). The budget is a connection retry window, which starts at the first connection error, and an elapsed cap
+    on retries of other errors, which starts when the call does. A call with its own limit uses that limit and not
+    the budget.
+
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
-    server may already have received it. A connection that was never made is still retried.
+    server may already have received it. A connection that was never made, refused or timed out connecting
+    (``ClientConnectorError``, ``ConnectionTimeoutError``), is still retried.
 
     ``_retry_other_errors=False`` resends only a dropped or refused connection (``ServerDisconnectedError``,
-    ``ClientOSError``) within the caller's bound; any other error, a timeout or a body cut off mid-read included,
-    is raised at once.
+    ``ClientOSError``) or one that timed out connecting (``ConnectionTimeoutError``) within the caller's bound; any
+    other error, a read timeout or a body cut off mid-read included, is raised at once.
 
     ``_read_body=True`` reads a success reply's body before returning, but only within a ``_max_num_tries`` or
     ``_max_connection_retries`` bound and only when resending is allowed, so a reply cut off mid-body is sent again
@@ -439,9 +464,11 @@ async def request(
     attempt budget) decides whether the request runs again.
 
     ``_connection_retry_window`` caps the wall-clock time spent retrying connection errors, counted from the
-    first one, and closed when the server answers; past it the last connection error is raised. Share one window
-    across the calls of one logical request so they draw on a single budget. None retries connection errors without
-    a time limit.
+    first one, and closed when the server answers; past it the last connection error is raised. After the first
+    connection error the window also bounds each attempt's wait for a free pool slot. Share one window across the
+    calls of one logical request so they draw on a single budget. None means no window of the caller's: an internal
+    call then gets the internal retry budget above, and any other call retries connection errors without a time
+    limit.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -630,6 +657,15 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
     )
 
 
+def is_unsent_connection_failure(error: BaseException) -> bool:
+    """Whether ``error`` means the request was never sent: the connection was refused or could not be made in time.
+
+    A handshake or pool-wait timeout (``ConnectionTimeoutError``) is the same case as a refused connection: the
+    server cannot have received the request, so resending it cannot run it twice.
+    """
+    return isinstance(error, (ClientConnectorError, ConnectionTimeoutError))
+
+
 class ConnectionRetryWindow:
     """Wall-clock budget for connection-error retries of one logical request.
 
@@ -719,6 +755,14 @@ async def _request_with_retries(
         retries = 0
         retry_start = time.monotonic()
         window = _connection_retry_window
+        # A call between Gym servers retries blips quietly, but not forever: without a caller-owned bound it gets the
+        # configured budget, which covers a run of connection errors (the window) and retries of other errors.
+        internal_budget_s: Optional[float] = None
+        if _internal and _max_num_tries is None and _max_connection_retries is None and window is None:
+            cfg = _GLOBAL_AIOHTTP_CLIENT_CONFIG or GlobalAIOHTTPAsyncClientConfig()
+            if cfg.global_aiohttp_internal_retry_budget_seconds > 0:
+                internal_budget_s = cfg.global_aiohttp_internal_retry_budget_seconds
+                window = ConnectionRetryWindow(internal_budget_s)
         while True:
             if window is not None and window.expired():
                 raise window.last_error
@@ -772,17 +816,22 @@ async def _request_with_retries(
                         raise
 
                 await asyncio.sleep(_connection_backoff_s(window))
-            except ClientOSError as error:
+            except (ClientOSError, ConnectionTimeoutError) as error:
+                global _NUM_CLIENT_OS_ERROR
                 if _on_transport_failure is not None:
                     _on_transport_failure(error, _request_upload_complete(upload))
-                if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
+                timed_out = isinstance(error, ConnectionTimeoutError)
+                if timed_out and window is not None and window.expired():
+                    # The connect cap set from the window ran out: report the connection error it stood for.
+                    raise window.last_error from error
+                if not _resend_after_disconnect and not is_unsent_connection_failure(error):
                     raise
-                global _NUM_CLIENT_OS_ERROR
-                _NUM_CLIENT_OS_ERROR += 1
+                if not timed_out:
+                    _NUM_CLIENT_OS_ERROR += 1
                 retries += 1
                 if _max_num_tries is not None and explicit_tries >= _max_num_tries:
                     raise
-                if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                if not timed_out and _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
                         f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
@@ -792,7 +841,9 @@ async def _request_with_retries(
                 if _max_connection_retries is not None and retries >= _max_connection_retries:
                     raise
                 if window is not None:
-                    window.record(error)
+                    # A timeout under an open window is the cap's own, not a new error: keep the original one.
+                    if not timed_out or window.first_error_at is None:
+                        window.record(error)
                     if window.expired():
                         raise
 
@@ -802,11 +853,8 @@ async def _request_with_retries(
                     _on_transport_failure(e, _request_upload_complete(upload))
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
-                # The connect cap set from the window ran out: report the connection error it stood for.
-                if isinstance(e, ConnectionTimeoutError) and window is not None and window.expired():
-                    raise window.last_error from e
                 if not _resend_after_disconnect or not _retry_other_errors:
-                    # A connection that was never made is a ClientOSError, handled above;
+                    # A connection that was never made (refused, or timed out connecting) is handled above;
                     # anything else may have sent it, or returned part of a reply.
                     raise
 
@@ -814,14 +862,16 @@ async def _request_with_retries(
                 attempts = explicit_tries if _max_num_tries is not None else num_tries
                 if _max_connection_retries is not None and attempts >= _max_connection_retries:
                     raise
+                if internal_budget_s is not None and time.monotonic() - retry_start >= internal_budget_s:
+                    raise
 
                 if _max_num_tries is not None:
                     if explicit_tries >= _max_num_tries:
                         raise
                 else:
-                    # Internal calls skip this print and the MAX_NUM_TRIES limit, since the head server shuts
-                    # everything down if a Gym server fails. They still advance `num_tries`, so the
-                    # `_max_connection_retries` check above stops them. Connection errors count in `retries`.
+                    # Internal calls skip this print and the MAX_NUM_TRIES limit so a restarting Gym server is
+                    # retried quietly. They are bounded by `_max_connection_retries` above, or by the internal
+                    # retry budget when the caller passed no bound. Connection errors count in `retries`.
                     if not _internal:
                         print(
                             f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}

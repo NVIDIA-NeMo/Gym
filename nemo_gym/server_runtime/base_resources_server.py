@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import re
 from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
@@ -33,11 +34,14 @@ from pydantic import (
     JsonValue,
     PrivateAttr,
     SerializerFunctionWrapHandler,
+    StrictBool,
     TypeAdapter,
     ValidationError,
     field_validator,
     model_serializer,
+    model_validator,
 )
+from starlette.datastructures import Headers
 from starlette.middleware import Middleware
 
 
@@ -50,10 +54,12 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config.global_config import MODEL_SAMPLING_KEY_NAME, model_call_sampling_config
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, FailureClass, validate_failure_kind
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import observe_failure
+from nemo_gym.core.model_call_sampling import ModelCallSampling
 from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -72,8 +78,10 @@ from nemo_gym.server_runtime._checkpoint.resources import (
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
+from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, mcp_session_token
+from nemo_gym.server_runtime.tool_access import MCP_TOOL_ACCESS_NAME_PATTERN
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
@@ -146,6 +154,25 @@ class ReverifyMode(str, Enum):
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    mcp_server_name: Optional[str] = Field(
+        default=None,
+        # Harnesses name its tools after it (Pi mcp__<name>__<tool>, OpenCode <name>_<tool>), so it takes the
+        # alphabet of the tools' own names.
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="The name the MCP endpoint lists itself under in /seed_session's MCP metadata, which clients "
+        "name its tools by (default: this server's name): letters, digits, '_' and '-', starting with a letter "
+        "or a digit. For an endpoint that code a model can read calls, such as a harness in a sandbox. Needs "
+        "expose_tools_over_mcp",
+    )
+    mcp_bearer_token: bool = Field(
+        default=False,
+        description="Hand out MCP session tokens as a standard 'Authorization: Bearer' header instead of "
+        f"{NEMO_GYM_MCP_SESSION_TOKEN_HEADER}, and require one for tools/list too, which then lists only the "
+        "session's tools; a tool outside the session's grant is answered as an unknown tool, and errors name no "
+        "framework. For clients that pass the seed's MCP headers as given, as the environment server's MCP grants "
+        "do. Needs expose_tools_over_mcp. The server then signs its sessions with a secret made for the run, which "
+        "every worker shares (SimpleServer.get_session_secret)",
+    )
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -161,6 +188,28 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
+    @field_validator("mcp_server_name")
+    @classmethod
+    def _mcp_server_name_is_a_grant_name(cls, name: Optional[str]) -> Optional[str]:
+        """Refuse a name that no MCP grant takes: an Environment Server grants agents this endpoint under it."""
+        if name is not None and re.fullmatch(MCP_TOOL_ACCESS_NAME_PATTERN, name) is None:
+            raise ValueError(
+                f"{name!r} is not a name an MCP grant takes ({MCP_TOOL_ACCESS_NAME_PATTERN}), and Environment "
+                "Servers grant agents this endpoint under it"
+            )
+        return name
+
+    @model_validator(mode="after")
+    def _mcp_options_need_the_mcp_endpoint(self) -> "BaseResourcesServerConfig":
+        """Refuse the MCP endpoint's options on a server that serves no MCP endpoint, where they would do nothing."""
+        options = [name for name in ("mcp_server_name", "mcp_bearer_token") if getattr(self, name)]
+        if options and not self.expose_tools_over_mcp:
+            raise ValueError(
+                f"{' and '.join(options)} configure this server's MCP endpoint, which it serves only with "
+                "expose_tools_over_mcp: true"
+            )
+        return self
+
 
 class BaseResourcesServer(BaseServer):
     config: BaseResourcesServerConfig
@@ -173,6 +222,19 @@ class BaseRunRequest(BaseModel):
     capture_rollout_id: Optional[str] = Field(
         default=None,
         alias="_ng_rollout_id",
+        exclude=True,
+    )
+    # The training framework's sampling values for this rollout's agent, which its model URLs carry.
+    model_sampling: Optional[ModelCallSampling] = Field(
+        default=None,
+        alias=MODEL_SAMPLING_KEY_NAME,
+        exclude=True,
+    )
+    # True turns token capture off for this rollout's model calls; null counts as unset. See
+    # nemo_gym.core.episode_context.
+    skip_token_capture: Optional[StrictBool] = Field(
+        default=False,
+        alias="_ng_skip_token_capture",
         exclude=True,
     )
 
@@ -289,6 +351,20 @@ class ResourcesSeedSessionRequest(BaseModel):
     episode_id: EpisodeId
     task_id: TaskId
     task_data: dict[str, JsonValue]
+    # The task's own responses_create_params, which task_data leaves out: the prompt params /verify also receives.
+    # A server whose seed_request_model declares a `responses_create_params` field gets them in its seed request,
+    # for a session built from the task's history or tools; every other server's task_data validates as before.
+    responses_create_params: dict[str, JsonValue] | None = None
+
+    # A return annotation would replace the model's serialization schema with that container schema.
+    @model_serializer(mode="wrap")
+    def _serialize_responses_create_params(self, handler: SerializerFunctionWrapHandler):
+        """Leave the key out when there are no params, so tool-server seeds keep the wire shape an older server's
+        extra="forbid" model accepts."""
+        result = handler(self)
+        if self.responses_create_params is None:
+            result.pop("responses_create_params", None)
+        return result
 
 
 def reject_partial_typed_seed(value: object) -> object:
@@ -371,11 +447,12 @@ class ResourcesSeedRejectedError(HTTPException, ValueError):
 
 
 class ResourcesSessionConflictError(HTTPException, ValueError):
-    """Refuse a seed or close that conflicts with what this server recorded for the session.
+    """Refuse a session request that conflicts with what this server recorded for the session.
 
     Examples: a ``resources_session_id`` already bound to another episode or task, a close that names another
-    episode, or a seed for a session that already closed. FastAPI answers it with HTTP 409, which an Environment
-    Server treats as terminal. It is also a ``ValueError`` for direct callers.
+    episode, a seed for a session that already closed, or a verify that names another task than the seed. FastAPI
+    answers it with HTTP 409, which an environment server treats as terminal. It is also a ``ValueError`` for direct
+    callers.
     """
 
     def __init__(self, detail: str) -> None:
@@ -859,6 +936,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
+        if model_call_sampling_config(getattr(self.server_client, "global_config_dict", None)) is not None:
+            app.add_middleware(CallerSamplingMiddleware)
         self.setup_resources_checkpoint(app)
 
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -901,6 +980,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             )
         )
 
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
+
+        Status, discovery and seed replies report it.
+        A server whose capture depends on its configuration, such as on a sandbox provider that can snapshot,
+        overrides it.
+        """
+        return self.checkpoint_mode
+
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
         for name, allowed in (("checkpoint_mode", CheckpointMode), ("checkpoint_verify", StepType)):
@@ -916,7 +1004,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if self.checkpoint_mode == "exported":
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in get_args(CheckpointMode):
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
                 name
@@ -930,9 +1021,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 )
         participant = ResourcesParticipant(
             self,
-            self.checkpoint_mode,
+            mode,
             verify_step_type=self.checkpoint_verify,
             session_release_pending=self.session_release_pending,
+        )
+        participant.keeps_external_state = (
+            mode == "exported" and type(self).delete_external_state is not SimpleResourcesServer.delete_external_state
         )
         self._checkpoint = participant
         install_server_participant(
@@ -978,16 +1072,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         ``None`` without a token or for one that does not verify; the MCP endpoint rejects a bad token.
         An attempt claim that does not decode counts as missing.
         """
-        header = NEMO_GYM_MCP_SESSION_TOKEN_HEADER.lower().encode()
-        token = next((value for key, value in scope.get("headers", ()) if key.lower() == header), None)
-        if token is None:
-            return None
-        try:
-            text = token.decode()
-        except UnicodeDecodeError:
+        header = "Authorization" if self.config.mcp_bearer_token else NEMO_GYM_MCP_SESSION_TOKEN_HEADER
+        text = mcp_session_token(Headers(scope=scope), header)
+        if text is None:
             return None
         if self._mcp_token_serializer is None:
-            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_middleware_key())
+            self._mcp_token_serializer = mcp_session_token_serializer(self.session_secret)
         payload = mcp_session_token_payload(self._mcp_token_serializer, text)
         if not isinstance(payload, dict) or not isinstance(payload.get("sid"), str):
             return None
@@ -1015,8 +1105,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if lifetimes is not None and session_id is not None:
             lifetimes.ended(session_id)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
-        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        """Return each session's state for checkpoint ``checkpoint_id``, leaving out sessions this server no longer
+        holds."""
         raise NotImplementedError
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -1036,9 +1127,24 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             await self.release_session_state(session_id)
             self._forget_session(session_id)
 
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as sandbox snapshots.
+
+        Called after the controller published a checkpoint and pruned old ones, only in the ``exported`` mode;
+        an empty ``kept`` means nothing will be restored again. The default keeps nothing outside Gym.
+
+        - It holds the control lock: no prepare, commit, or restore runs meanwhile, and no checkpoint is open.
+        - It is cancelled at the release request's deadline, and the controller releases again later,
+          so it must tolerate state an earlier call already deleted and resume a deletion one left half done.
+        - Admission stays open: episodes keep running, so it must not touch what live sessions use.
+        - With several workers every worker runs it, so deleting what another worker already deleted must not fail.
+        - Keep by reference, not by age: keep whatever a checkpoint in ``kept`` refers to, and delete the rest.
+        """
+
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
-        return normalize_tool_name(name, self.config.name or self.__class__.__name__)
+        # MCP clients namespace tools by the name the endpoint lists itself under
+        return normalize_tool_name(name, self.config.mcp_server_name or self.config.name or self.__class__.__name__)
 
     def mcp_tools(self, harvested: list["MCPTool"], catchall: Optional[Any]) -> Optional[list["MCPTool"]]:
         """Return the MCP tools to expose (default: the auto-harvested typed POST routes).
@@ -1054,6 +1160,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         ``/seed_session``, or its ``task_data`` when an Environment Server seeds the session.
         """
         return None
+
+    def _typed_seed_fields(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
+        """What a typed seed's ``seed_request_model`` validates: its ``task_data``, plus the task's
+        ``responses_create_params`` when the model declares that field and the seed carries them."""
+        if (
+            body.responses_create_params is None
+            or "responses_create_params" not in self.seed_request_model.model_fields
+        ):
+            return body.task_data
+        return {**body.task_data, "responses_create_params": body.responses_create_params}
 
     async def seed_session(
         self,
@@ -1133,7 +1249,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ResourcesSessionConflictError("A typed seed cannot replace a cookie-seeded session")
             if session_id not in self._session_episodes:
                 try:
-                    task = self.seed_request_model.model_validate(body.task_data)
+                    task = self.seed_request_model.model_validate(self._typed_seed_fields(body))
                 except ValidationError as error:
                     raise ResourcesSeedRejectedError(
                         f"task_data is not a valid {self.seed_request_model.__name__}: {error}"

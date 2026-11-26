@@ -16,6 +16,7 @@ import asyncio
 import json
 import socket
 from contextlib import nullcontext
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,6 +37,7 @@ from nemo_gym.core import (
 from nemo_gym.models import CaptureStore
 from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.rollouts import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.server_runtime import ModelSamplingMiddleware
 from nemo_gym.telemetry import MeteredSemaphore, concurrency
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
@@ -101,6 +103,24 @@ class TestApp:
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    async def test_session_key_headers_reach_the_upstream_client(self):
+        assert self._setup_server(session_key_headers=["X-Session"])._client.session_key_headers == ["X-Session"]
+        assert self._setup_server()._client.session_key_headers == []
+
+    async def test_a_list_of_api_keys_reaches_the_upstream_client(self):
+        config = SimpleModelServerConfig(
+            host="0.0.0.0",
+            port=8081,
+            openai_base_url="https://api.openai.com/v1",
+            openai_api_key=["k0", "k1"],  # pragma: allowlist secret
+            openai_model="dummy_model",
+            entrypoint="",
+            name="test_model_server",
+        )
+        server = SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        assert server._client.current_api_key == "k0"
+        assert server._client.api_key == ["k0", "k1"]
 
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
@@ -365,6 +385,33 @@ class TestApp:
         assert calls[0].request == {"input": "hello"}
         assert aggregate_model_call_metrics(CaptureStore(tmp_path), "openai-test")["num_calls"] == 1
 
+    @pytest.mark.parametrize("summary", [pytest.param(None, id="null"), pytest.param("missing", id="missing")])
+    async def test_responses_normalizes_missing_reasoning_summary(self, summary: object) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        response_data = {
+            **_response_data(),
+            "output": [
+                {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "encrypted_content": "opaque",
+                    "content": [{"type": "output_text", "text": "Reasoning"}],
+                    **({} if summary == "missing" else {"summary": summary}),
+                }
+            ],
+        }
+        original = deepcopy(response_data)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=response_data)
+
+        response = client.post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        assert response.json()["output"][0]["summary"] == []
+        assert response.json()["output"][0]["content"][0]["type"] == "reasoning_text"
+        assert response_data == original
+
     def test_streaming_messages_capture(self, tmp_path) -> None:
         server = self._setup_server()
         server.server_client.global_config_dict = {
@@ -374,7 +421,9 @@ class TestApp:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())
         app = server.setup_webserver()
-        assert app.user_middleware[0].cls is _CaptureMiddleware
+        middleware_classes = [middleware.cls for middleware in app.user_middleware]
+        # Sampling values are applied before capture records the request.
+        assert middleware_classes.index(ModelSamplingMiddleware) < middleware_classes.index(_CaptureMiddleware)
         assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
         client = TestClient(app)
 

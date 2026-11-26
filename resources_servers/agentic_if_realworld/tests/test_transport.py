@@ -73,6 +73,45 @@ async def no_sleep(seconds):
     pass
 
 
+@pytest.mark.parametrize("metadata", [{"native_finish_reason": "repetition"}, {"stop_reason": "repetition_detected"}])
+def test_repetition_stream_is_saved_without_automatic_redispatch(tmp_path, monkeypatch, metadata):
+    terminal = {"delta": {"content": "partial answer"}, "finish_reason": "stop", **metadata}
+    raw = ("data: " + json.dumps({"choices": [terminal]}) + "\n\ndata: [DONE]\n\n").encode()
+
+    class Stream(Response):
+        async def iter_chunked(self, size):
+            yield raw[:19]
+            yield raw[19:]
+
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        response = Stream(200, None)
+        response.headers = {"content-type": "text/event-stream"}
+        return response
+
+    monkeypatch.setattr(http_client, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    path = tmp_path / "receipt.json"
+    body = {"model": "synthetic-policy", "stream": True}
+    kwargs = {"endpoint": "http://synthetic.invalid", "key_env": "SYNTHETIC", "path": path}
+    receipt = asyncio.run(wire_call(body, **kwargs))
+    assert receipt["status"] == "generated" and receipt["http_attempt"] == 1
+    assert len(calls) == 1 and len(receipt["raw_attempts"]) == 1
+    [choice] = verified_response(receipt)["choices"]
+    assert choice["finish_reason"] == "stop"
+    for key, value in metadata.items():
+        assert choice[key] == value
+    saved = {file: file.read_bytes() for file in tmp_path.iterdir()}
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: pytest.fail("Saved receipt cannot redispatch"))
+    assert asyncio.run(wire_call(body, **kwargs)) == receipt
+    assert all(file.read_bytes() == content for file, content in saved.items())
+    assert path.with_suffix(".a1.http").read_bytes() == raw
+    with pytest.raises(ValueError, match="Incomplete delivery"):
+        delivered(verified_response(receipt))
+
+
 @pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.parametrize("cancel_at", [2, 3])
 def test_interrupted_judge_http_retry_blocks_resume(judge_payload, tmp_path, monkeypatch, status, cancel_at):
@@ -867,3 +906,48 @@ def test_evidence_ids_unicode_and_omission(judge_payload):
     decoded, _ = evidence.decode_review(raw, judge_payload)
     assert decoded["constraints"][0]["response_evidence"]["quote"] == ""
     assert decoded["constraints"][0]["support_quote"] == judge_payload["constraints"][0]["support_quotes"][0]
+
+
+@pytest.mark.parametrize("extra,expected", [(0, "evidence_ids_v1"), (1, "quotes")])
+def test_adaptive_transport_preserves_request_at_boundary(judge_payload, tmp_path, monkeypatch, extra, expected):
+    from resources_servers.agentic_if_realworld.benchmark import scoring
+
+    judge_payload["response"]["message"]["content"] = "x" * (527 * 250 + extra)
+    sha = judge.sha(judge_payload["response"])
+    judge_payload["response_sha256"] = judge_payload["inference_binding"]["response_sha256"] = sha
+    requests = []
+
+    async def capture(body, **kwargs):
+        requests.append(body)
+        raise RuntimeError("captured before dispatch")
+
+    monkeypatch.setattr(scoring, "wire_call", capture)
+    for transport in (expected, "evidence_ids_or_quotes_v1"):
+        with pytest.raises(RuntimeError, match="captured before dispatch"):
+            asyncio.run(
+                score(
+                    judge_payload,
+                    directory=tmp_path,
+                    policy_prompt=SYNTHETIC_PROMPT,
+                    endpoint="http://synthetic.invalid",
+                    evidence_transport=transport,
+                )
+            )
+    assert requests[0] == requests[1]
+    assert len(list((tmp_path / "judges").iterdir())) == 2
+    selection = read(next(tmp_path.glob("judges/*/transport_selection.json")))
+    assert selection == {"policy": "evidence_ids_or_quotes_v1", "span_count": 527 + extra, "selected": expected}
+
+    selection_path = next(tmp_path.glob("judges/*/transport_selection.json"))
+    write(selection_path, {**selection, "span_count": 0})
+    with pytest.raises(ValueError, match="transport selection changed"):
+        asyncio.run(
+            score(
+                judge_payload,
+                directory=tmp_path,
+                policy_prompt=SYNTHETIC_PROMPT,
+                endpoint="http://synthetic.invalid",
+                evidence_transport="evidence_ids_or_quotes_v1",
+                validate_only=True,
+            )
+        )

@@ -14,8 +14,11 @@
 # limitations under the License.
 import asyncio
 import json
+import sys
+import time
 from asyncio import Semaphore
 from collections import defaultdict
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -110,6 +113,13 @@ class TestRolloutReverificationConfig:
         """Omitting the field (None) means unbounded/no-limit; a positive value is kept."""
         assert getattr(RolloutReverificationConfig(**self._kwargs()), field) is None
         assert getattr(RolloutReverificationConfig(**self._kwargs(**{field: 4})), field) == 4
+
+    def test_verify_timeout_seconds_is_off_by_default_and_must_be_positive(self) -> None:
+        assert RolloutReverificationConfig(**self._kwargs()).verify_timeout_seconds is None
+        assert RolloutReverificationConfig(**self._kwargs(verify_timeout_seconds=90)).verify_timeout_seconds == 90
+        for bad_value in (0, -1):
+            with pytest.raises(ValidationError):
+                RolloutReverificationConfig(**self._kwargs(verify_timeout_seconds=bad_value))
 
     def test_resume_from_cache_defaults_to_false(self) -> None:
         """resume_from_cache is opt-in: default runs start fresh."""
@@ -799,6 +809,31 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    @pytest.mark.parametrize("forward", [None, False, True])
+    def test_saved_agent_evidence_requires_explicit_opt_in(self, forward):
+        evidence = {"schema_version": "2.0", "source": "opencode", "records": []}
+        trajectory = {"turns": [], "invocations": []}
+        pair = InputRolloutPair(
+            input={"responses_create_params": {"input": []}},
+            rollout={
+                "response": {"output": []},
+                "ng_trajectory": trajectory,
+                "ng_agent_observations": evidence,
+                "opencode_tool_reward": {"auxiliary_reward": 0.1},
+            },
+        )
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        payload = _build_verify_payload(pair, **options)
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
+        assert "opencode_tool_reward" not in payload
+
     def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
         """A flat materialized row names no Environment Server; the re-verified row keeps the one the run stamped."""
         pair = InputRolloutPair(
@@ -846,6 +881,19 @@ class TestBuildVerifyPayload:
             "responses_create_params": {"input": "q1"},
             "response": {"output": "hello"},
         }
+
+    @pytest.mark.parametrize("task_data", [None, []])
+    def test_materialized_task_data_must_be_an_object(self, task_data) -> None:
+        pair = InputRolloutPair(
+            input={"task_input": {"responses_create_params": {"input": "q1"}, "task_data": task_data}},
+            rollout={"response": {"output": "saved answer"}},
+        )
+        before = json.dumps({"input": pair.input, "rollout": pair.rollout}, sort_keys=True)
+
+        with pytest.raises(ConfigError, match="task_input.task_data must be an object"):
+            _build_verify_payload(pair)
+
+        assert json.dumps({"input": pair.input, "rollout": pair.rollout}, sort_keys=True) == before
 
     def test_generic_task_input_preserves_verifier_fields(self) -> None:
         fields = {"responses_create_params": {"input": "q1"}, "instance_id": "a", "verifier_metadata": {"answer": 42}}
@@ -941,6 +989,23 @@ class TestBuildVerifyPayload:
         assert result["reference_ids"] == ["ref-b"]
         assert result["task"] == "q1"
         assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
+
+    def test_preserves_a_saved_source_and_its_binding(self) -> None:
+        """A verifier that grades a saved source again gets the source, its SHA256 and its binding."""
+        saved = {"source_artifact": "<svg/>", "source_sha256": "a" * 64, "source_binding_sha256": "b" * 64}
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={
+                "response": {"output": "x"},
+                "reward": 0.0,
+                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
+                **saved,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result == {"task": "q1", "response": {"output": "x"}, **saved}
 
 
 # ---------------------------------------------------------------------------
@@ -1316,13 +1381,16 @@ class TestPreparePayloads:
         build_calls: list = []
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._build_verify_payload",
-            lambda p: build_calls.append(p) or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            lambda p, *, forward_agent_evidence: (
+                build_calls.append((p, forward_agent_evidence)) or {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+            ),
         )
 
         _prepare_payloads(tmp_path / "in.jsonl", tmp_path / "r.jsonl", self._paths(tmp_path), resume_from_cache=False)
 
         assert len(build_calls) == 1
-        assert build_calls[0] is pair
+        assert build_calls[0][0] is pair
+        assert build_calls[0][1] is False
 
     def test_resume_from_cache_drops_already_completed_keys(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1535,10 +1603,72 @@ class TestRunVerificationPayloads:
             results.append(await fut)
         return results
 
+    @staticmethod
+    def _post_answering_after(seconds: float):
+        async def post(*args, **kwargs) -> MagicMock:
+            await asyncio.sleep(seconds)
+            return MagicMock(headers={})
+
+        return post
+
+    async def test_a_verify_that_outlasts_the_time_limit_fails_the_pass_without_a_resend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        # Answers after 3 s, so a limit that is ignored returns a result and fails the pytest.raises below.
+        mock_client.post = AsyncMock(side_effect=self._post_answering_after(3))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        started = time.monotonic()
+        with pytest.raises(
+            TimeoutError, match=r"/verify call to resources server 'rs_a' did not finish within 0\.2 s"
+        ):
+            await self._collect(_run_verification_payloads([self._make_row("agent_a")], timeout_s=0.2))
+
+        assert time.monotonic() - started < 2
+        assert mock_client.post.await_count == 1
+
+    async def test_the_time_limit_covers_reading_the_response(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"})
+
+        async def slow_body(_res) -> dict:
+            await asyncio.sleep(3)
+            return {"reward": 1.0}
+
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_response_json", slow_body)
+
+        with pytest.raises(TimeoutError):
+            await self._collect(_run_verification_payloads([self._make_row("agent_a")], timeout_s=0.2))
+
+    async def test_without_a_time_limit_a_slow_verify_still_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(side_effect=self._post_answering_after(0.3))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(_, result)] = await self._collect(_run_verification_payloads([self._make_row("agent_a")]))
+
+        assert result == {"reward": 1.0}
+
+    async def test_a_verify_inside_the_time_limit_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(side_effect=self._post_answering_after(0.1))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(_, result)] = await self._collect(_run_verification_payloads([self._make_row("agent_a")], timeout_s=5))
+
+        assert result == {"reward": 1.0}
+
     async def test_identity_stamps_stay_on_the_row_and_out_of_the_verify_request(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        row = self._make_row("agent_a") | {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        row = self._make_row("agent_a") | {
+            "_ng_environment_server": "env_a",
+            "_ng_result_type": "legacy_agent",
+            "_ng_run_id": "source-run",
+            "_ng_attempt_index": 2,
+        }
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         mock_client.post = AsyncMock(return_value=MagicMock())
@@ -1548,7 +1678,79 @@ class TestRunVerificationPayloads:
 
         sent = mock_client.post.await_args.kwargs["json"]
         assert "_ng_environment_server" not in sent and "_ng_result_type" not in sent
+        assert "_ng_run_id" not in sent and "_ng_attempt_index" not in sent
         assert returned["_ng_environment_server"] == "env_a"
+        assert (returned["_ng_run_id"], returned["_ng_attempt_index"]) == ("source-run", 2)
+
+    @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
+    @pytest.mark.parametrize("materialized", [False, True])
+    async def test_agent_context_is_omitted_from_native_verify_requests(
+        self, monkeypatch: pytest.MonkeyPatch, context_location: str, materialized: bool
+    ) -> None:
+        context = {"agent": {"artifacts": {"media": {"path": "figs/1"}}}}
+        task_input = {
+            "responses_create_params": {"input": "q1"},
+            "task_data": {"answer": 42},
+            "verifier_metadata": {"answer": "sunny"},
+        }
+        expected_fields = deepcopy(task_input)
+        if context_location in ("top_level", "both"):
+            task_input["agent_context"] = context
+        if context_location in ("task_data", "both"):
+            task_input["task_data"]["agent_context"] = context
+        input_row = self._make_row("agent_a") | ({"task_input": task_input} if materialized else task_input)
+        original_input = deepcopy(input_row)
+        response = {"output": [{"type": "message", "role": "assistant", "content": []}]}
+        payload = _build_verify_payload(InputRolloutPair(input=input_row, rollout={"response": response}))
+        original_payload = deepcopy(payload)
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(returned, result)] = await self._collect(_run_verification_payloads([payload]))
+
+        if materialized:
+            expected_fields |= expected_fields.pop("task_data")
+        assert mock_client.post.await_args.kwargs["json"] == (
+            self._make_row("agent_a") | expected_fields | {"response": response}
+        )
+        assert result == {"reward": 1.0}
+        assert returned == original_payload
+        assert input_row == original_input
+
+    @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
+    async def test_agent_context_is_omitted_from_atif_verify_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context_location: str
+    ) -> None:
+        materialized, manifest = TestPrepareAtifPayloads()._write_inputs_and_manifest(tmp_path)
+        row = orjson.loads(materialized.read_bytes())
+        row |= {"verifier_metadata": {"answer": "sunny"}, "task_data": {"answer": 42}}
+        expected_fields = deepcopy(row)
+        context = {"agent": {"values": {"tag": "figqa2"}}}
+        if context_location in ("top_level", "both"):
+            row["agent_context"] = context
+        if context_location in ("task_data", "both"):
+            row["task_data"]["agent_context"] = context
+        materialized.write_bytes(orjson.dumps(row) + b"\n")
+        [payload] = _prepare_atif_payloads(materialized, manifest)
+        original_payload = deepcopy(payload)
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"fixture-agent": "rs"}, response_json={"reward": 1.0})
+
+        [(returned, result)] = await self._collect(_run_verification_payloads([payload]))
+
+        sent = mock_client.post.await_args.kwargs["json"]
+        assert sent == expected_fields | {"response": original_payload["response"]}
+        assert [item["type"] for item in sent["response"]["output"]] == [
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert result == {"reward": 1.0}
+        assert returned == original_payload
+        assert ATIF_PROVENANCE_KEY not in sent and ATIF_PROVENANCE_KEY in returned
+        assert orjson.loads(materialized.read_bytes()) == row
 
     async def test_returns_row_and_response_json_for_each_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [self._make_row("agent_a", i) for i in range(3)]
@@ -1919,6 +2121,33 @@ class TestPrepareOutputFpaths:
 class TestLoadReverifiedResults:
     """Tests for _load_reverified_results: read the main jsonl once, sorted, with minimal routing rows."""
 
+    def test_identity_recovery_ignores_blank_lines_and_keyless_legacy_diagnostics(self, tmp_path: Path) -> None:
+        cached = {
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "response": {"output": []},
+            "reward": 0.25,
+        }
+        stamps = {"_ng_environment_server": "collected_env", "_ng_result_type": "legacy_agent"}
+        source = tmp_path / "source.jsonl"
+        source.write_bytes(
+            b"\n \t\n"
+            + orjson.dumps({"error": "legacy transport diagnostic"})
+            + b"\n"
+            + orjson.dumps(cached | stamps | {"reward": 1.0})
+            + b"\n"
+        )
+        output = tmp_path / "rescored.jsonl"
+        output.write_bytes(orjson.dumps(cached) + b"\n")
+        before = {path: path.read_bytes() for path in (source, output)}
+
+        results, rows = _load_reverified_results(output, (tmp_path / "absent_failures.jsonl", source, source))
+
+        assert results == [cached | stamps]
+        assert rows == [{AGENT_REF_KEY_NAME: cached[AGENT_REF_KEY_NAME], "_ng_environment_server": "collected_env"}]
+        assert {path: path.read_bytes() for path in (source, output)} == before
+
     def test_reads_sorted_results_and_minimal_routing_rows(self, tmp_path: Path) -> None:
         out = tmp_path / "out.jsonl"
         # written out of (task, rollout) order; the helper must sort
@@ -1985,6 +2214,40 @@ class TestCallAggregateMetrics:
             AsyncMock(return_value=self._EMPTY_AGG),
         )
         return mock_client
+
+    async def test_an_aggregate_call_that_outlasts_the_time_limit_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{"reward": 1.0, TASK_INDEX_KEY_NAME: 0}]
+
+        async def slow_post(*args, **kwargs):
+            await asyncio.sleep(3)  # a limit that is ignored lets this return and fails the pytest.raises below
+            return MagicMock()
+
+        self._patch(monkeypatch, {"agent_a": "rs_a"}, post_side_effect=slow_post)
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match=r"/aggregate_metrics call to resources server .* within 0\.2 s"):
+            await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl", timeout_s=0.2)
+
+        assert time.monotonic() - started < 2
+
+    async def test_without_a_time_limit_a_slow_aggregate_call_still_completes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{"reward": 1.0, TASK_INDEX_KEY_NAME: 0}]
+
+        async def slow_post(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return MagicMock()
+
+        self._patch(monkeypatch, {"agent_a": "rs_a"}, post_side_effect=slow_post)
+
+        written = await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+
+        assert written is not None and written.exists()
 
     async def test_each_agent_sent_to_its_own_resource_server_with_only_its_results(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2346,6 +2609,7 @@ class TestRolloutReverificationRunFromConfig:
         *,
         disable_aggregation: bool = False,
         num_samples_in_parallel: int | None = None,
+        verify_timeout_seconds: float | None = None,
     ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
@@ -2353,6 +2617,7 @@ class TestRolloutReverificationRunFromConfig:
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             disable_aggregation=disable_aggregation,
             num_samples_in_parallel=num_samples_in_parallel,
+            verify_timeout_seconds=verify_timeout_seconds,
         )
 
     def _make_row(self, agent: str, task: int, rollout: int = 0, *, skills: bool = False) -> dict:
@@ -2679,7 +2944,7 @@ class TestRolloutReverificationRunFromConfig:
         pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
         captured_semaphore: list = []
 
-        def capturing_run_verification(payloads, semaphore):
+        def capturing_run_verification(payloads, semaphore, timeout_s=None):
             captured_semaphore.append(semaphore)
             return []
 
@@ -2702,7 +2967,7 @@ class TestRolloutReverificationRunFromConfig:
         pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
         captured_semaphore: list = []
 
-        def capturing_run_verification(payloads, semaphore):
+        def capturing_run_verification(payloads, semaphore, timeout_s=None):
             captured_semaphore.append(semaphore)
             return []
 
@@ -2735,6 +3000,27 @@ class TestRolloutReverificationRunFromConfig:
         # results are still returned even though aggregation was skipped
         assert len(returned) == 1
         assert returned[0][TASK_INDEX_KEY_NAME] == 0
+
+    async def test_verify_timeout_seconds_reaches_both_the_verify_and_the_aggregate_calls(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
+        self._patch_common(monkeypatch, pairs)
+        verify_inner = sys.modules["nemo_gym.eval.rollout_reverification"]._run_verification_payloads
+        seen: dict = {}
+
+        def spy(payloads, semaphore=None, timeout_s=None):
+            seen["verify"] = timeout_s
+            return verify_inner(payloads, semaphore)
+
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._run_verification_payloads", spy)
+        agg_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._call_aggregate_metrics", agg_mock)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, verify_timeout_seconds=42))
+
+        assert seen["verify"] == 42
+        assert agg_mock.await_args.kwargs["timeout_s"] == 42
 
     async def test_multi_agent_multi_rs_routing_end_to_end(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2928,7 +3214,7 @@ class TestRunFromConfigResumeFromCache:
         )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
-        def fake_run(payloads, semaphore=None):
+        def fake_run(payloads, semaphore=None, timeout_s=None):
             dispatched.extend(payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:
@@ -2945,6 +3231,32 @@ class TestRunFromConfigResumeFromCache:
 
     def _read_jsonl(self, path: Path) -> list[dict]:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
+
+    @pytest.mark.parametrize("forward", [None, False, True])
+    @pytest.mark.parametrize("resume", [False, True])
+    async def test_reverification_config_controls_saved_evidence(self, tmp_path, monkeypatch, forward, resume):
+        evidence = {"source": "opencode", "records": []}
+        trajectory = {"turns": [], "invocations": []}
+        pair = InputRolloutPair(
+            input=self._row("agent_a", 0),
+            rollout={"response": {"output": []}, "ng_trajectory": trajectory, "ng_agent_observations": evidence},
+        )
+        dispatched = []
+        self._patch(monkeypatch, [pair], dispatched)
+        options = {} if forward is None else {"forward_agent_evidence": forward}
+        config = self._make_config(tmp_path, resume_from_cache=resume, **options)
+        assert config.forward_agent_evidence is bool(forward)
+        await RolloutReverificationHelper().run_from_config(config)
+        [payload] = dispatched
+        assert payload["response"] == pair.rollout["response"]
+        if forward:
+            assert payload["ng_trajectory"] == trajectory
+            assert payload["ng_agent_observations"] == evidence
+        else:
+            assert "ng_trajectory" not in payload
+            assert "ng_agent_observations" not in payload
+        assert pair.rollout["ng_trajectory"] == trajectory
+        assert pair.rollout["ng_agent_observations"] == evidence
 
     async def test_resume_preserves_prior_output_and_reruns_only_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3155,7 +3467,7 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
 
-        def fake_run(payloads, semaphore=None):
+        def fake_run(payloads, semaphore=None, timeout_s=None):
             dispatched.extend(p[TASK_INDEX_KEY_NAME] for p in payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:
@@ -3380,7 +3692,7 @@ class TestRunFromConfigJudgeFailedOnly:
         result (so a test can make some rows re-fail on a first pass)."""
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
-        def fake_run(payloads, semaphore=None):
+        def fake_run(payloads, semaphore=None, timeout_s=None):
             dispatched.extend(payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:
@@ -3407,11 +3719,16 @@ class TestRunFromConfigJudgeFailedOnly:
             return []
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
-    async def test_recovered_and_carried_rows_group_under_the_environment_server_of_the_run(
+    async def test_recovered_and_carried_rows_preserve_collection_identity(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Aggregation groups by the Environment Server stamp, so a recovered row must keep it as a carried one does."""
-        stamp = {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        stamp = {
+            "_ng_environment_server": "env_a",
+            "_ng_result_type": "legacy_agent",
+            "_ng_run_id": "source-run",
+            "_ng_attempt_index": 2,
+        }
         self._setup_fixture(
             tmp_path,
             materialized=[self._mat(t) for t in range(3)],
@@ -3427,6 +3744,7 @@ class TestRunFromConfigJudgeFailedOnly:
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2]
         assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in rows} == {("env_a", "legacy_agent")}
         assert {rollout_run_key(r) for r in rows} == {"env_a"}
+        assert {(r["_ng_run_id"], r["_ng_attempt_index"]) for r in rows} == {("source-run", 2)}
 
     async def test_recovers_only_judge_failed_rows_and_merges_with_successes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3507,6 +3825,8 @@ class TestRunFromConfigJudgeFailedOnly:
             successes=[self._success(0)],
             failures=[{**self._failure(1), "stage_index": 1}],
         )
+        failures = tmp_path / "rollouts_failures.jsonl"
+        failures.write_bytes(b"\n \t\n" + failures.read_bytes())
         before = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
         dispatched: list = []
         self._patch(monkeypatch, dispatched)

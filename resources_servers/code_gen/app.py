@@ -19,11 +19,12 @@ import logging
 import zlib
 from asyncio import Semaphore
 from time import time
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
-from sandbox_execution import check_correctness_in_sandbox
+from sandbox_execution import check_assertions_in_sandbox, check_correctness_in_sandbox, task_deadline_s
+from task_data import AssertionTests, ResourceLimits
 
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.metrics import (
@@ -42,10 +43,14 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_programmatic_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import SandboxVerificationConfig, SandboxVerificationError
 
 
 LOG = logging.getLogger(__name__)
+
+# Assertion tests without a task memory limit get 4 GB by default.
+_ASSERTION_MEMORY_LIMIT_MB = 4096
 
 
 # ----------------------------
@@ -78,6 +83,7 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
 
 # This is LiveCodeBench format
 class UnitTests(BaseModel):
+    type: Literal["unit-tests"] = "unit-tests"
     inputs: List[str]
     outputs: List[str]
     fn_name: Optional[str] = None
@@ -99,6 +105,8 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     unit_tests_time_taken: Optional[float] = None
     reasoning_format_violation_rate: float = 0.0
     difficulty: Optional[str] = None
+    # The limits applied; a None memory limit is the fixed 4 GB guard.
+    limits: ResourceLimits | None = None
 
 
 # ----------------------------
@@ -207,14 +215,30 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # for this verification instead of for the whole run. Falls back to the
         # old plaintext shape so pre-patch artifacts still verify.
         _raw_tests = body.verifier_metadata["unit_tests"]
-        if isinstance(_raw_tests, dict) and "packed" in _raw_tests:
+        if (
+            isinstance(_raw_tests, dict)
+            and "packed" in _raw_tests
+            and _raw_tests.get("type", "unit-tests") == "unit-tests"
+        ):
             _decoded = json.loads(zlib.decompress(base64.b64decode(_raw_tests["packed"])))
             _raw_tests = {
                 "inputs": _decoded["inputs"],
                 "outputs": _decoded["outputs"],
                 "fn_name": _raw_tests.get("fn_name"),
             }
-        tests = UnitTests.model_validate(_raw_tests)
+        if isinstance(_raw_tests, dict) and _raw_tests.get("type") == "assertions":
+            tests = AssertionTests.model_validate(_raw_tests)
+        else:
+            tests = UnitTests.model_validate(_raw_tests)
+        raw_limits = body.verifier_metadata.get("resource_limits")
+        task_limits = ResourceLimits.model_validate({} if raw_limits is None else raw_limits)
+        timeout = (
+            task_limits.time_limit_s if task_limits.time_limit_s is not None else self.config.unit_test_timeout_secs
+        )
+        memory_limit_mb = task_limits.memory_limit_mb
+        if isinstance(tests, AssertionTests) and memory_limit_mb is None:
+            memory_limit_mb = _ASSERTION_MEMORY_LIMIT_MB
+        limits = ResourceLimits(time_limit_s=timeout or None, memory_limit_mb=memory_limit_mb)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
@@ -256,22 +280,38 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             # We can directly measure here since we are inside the semaphore.
             start_time = time()
 
-            task_args = (
-                {"input_output": tests.model_dump_json()},  # sample
-                code,  # generation
-                self.config.unit_test_timeout_secs,  # timeout
-                self.config.debug,  # debug
-            )
-
             provider, sandbox_metadata = self._resolve_sandbox_target()
             try:
-                result, metadata = await check_correctness_in_sandbox(
-                    *task_args,
-                    num_tests=len(tests.inputs),
-                    provider=provider,
-                    config=self.config.sandbox_config,
-                    metadata=sandbox_metadata,
-                )
+                if isinstance(tests, AssertionTests):
+                    result, metadata = await check_assertions_in_sandbox(
+                        code,
+                        tests.tests,
+                        time_limit_s=timeout,
+                        memory_limit_mb=memory_limit_mb,
+                        provider=provider,
+                        config=self.config.sandbox_config,
+                        metadata=sandbox_metadata,
+                    )
+                else:
+                    task_args = (
+                        {"input_output": tests.model_dump_json()},  # sample
+                        code,  # generation
+                        timeout,
+                        self.config.debug,  # debug
+                    )
+                    # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
+                    deadline_s = (
+                        task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
+                    )
+                    result, metadata = await check_correctness_in_sandbox(
+                        *task_args,
+                        num_tests=len(tests.inputs),
+                        provider=provider,
+                        config=self.config.sandbox_config,
+                        metadata=sandbox_metadata,
+                        memory_limit_mb=memory_limit_mb,
+                        deadline_s=deadline_s,
+                    )
             except SandboxVerificationError as e:
                 # The environment failed, not the policy: exclude the sample rather than score it.
                 LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
@@ -284,6 +324,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                     extracted_model_output=model_out,
                     extracted_model_code=code,
                     difficulty=difficulty,
+                    limits=limits,
                 )
 
             unit_tests_time_taken = time() - start_time
@@ -304,6 +345,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 unit_tests_time_taken=unit_tests_time_taken,
                 reasoning_format_violation_rate=1.0 if has_violation else 0.0,
                 difficulty=difficulty,
+                limits=limits,
             )
 
         return observe_programmatic_grading(_grade)
@@ -311,3 +353,6 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CompCodingResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CompCodingResourcesServer.run_webserver()  # noqa: F401

@@ -25,7 +25,7 @@ import jsonschema.validators
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.config import ModelServerRef
@@ -34,7 +34,12 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    StageOutcomePolicyConfig,
+    applied_outcome_fields,
+    environment_fault_policy,
+    require_retry_or_fail,
 )
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -43,10 +48,12 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # Environment-prefixed failure kinds for masked results; see nemo_gym.core.failure_kinds.
 SIMULATOR_CALL_FAILED = "conversational_tool_use:simulator_call_failed"
+declare_action_kind(SIMULATOR_CALL_FAILED)  # the outcome policy's action rules may select it by name
 USER_VERDICT_FAILED = "conversational_tool_use:user_message_failed_verification"
 TOOL_VERDICT_FAILED = "conversational_tool_use:tool_result_failed_verification"
 USER_CHECK_FAILED = "conversational_tool_use:user_message_failed_check"
@@ -118,6 +125,24 @@ def _default_responses_create_params() -> NeMoGymResponseCreateParamsNonStreamin
 
 
 class ConversationalToolUseSimulationConfig(BaseResourcesServerConfig):
+    # The decision saved with a row whose user or tool simulator call failed. By default the kind is classified as the
+    # evaluation's and that class is retried; a deployment can reclassify the kind or select fail for a class.
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: environment_fault_policy("agent", (SIMULATOR_CALL_FAILED,))
+    )
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return StageOutcomePolicyConfig.overlay(environment_fault_policy("agent", (SIMULATOR_CALL_FAILED,)), value)
+
+    @field_validator("outcome_policy")
+    @classmethod
+    def require_retry_or_fail_decisions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """This boundary can retry a masked row or leave it ungraded; it cannot count it as zero."""
+        return require_retry_or_fail(policy, "agent", (SIMULATOR_CALL_FAILED,))
+
     simulator_model_server: Optional[ModelServerRef] = None
     user_model_server: Optional[ModelServerRef] = None
     tool_simulator_model_server: Optional[ModelServerRef] = None
@@ -1410,6 +1435,12 @@ Return type in JSON Schema format: {return_type}
         failure_kind, failure_reason = self._masked_failure(state)
         if failure_kind is not None:
             response_payload.update(failure_kind=failure_kind, failure_reason=failure_reason)
+        if failure_kind == SIMULATOR_CALL_FAILED:
+            # The user or tool simulator call failed during the episode, not the policy: the shared policy decides
+            # what recovery does with the unusable conversation.
+            response_payload.update(
+                applied_outcome_fields(failure_kind=failure_kind, stage="agent", config=self.config.outcome_policy)
+            )
         verified_response = ConversationalToolUseVerifyResponse.model_validate(response_payload)
         self.session_id_to_state.pop(session_id, None)
         return verified_response
@@ -2508,3 +2539,6 @@ Return type in JSON Schema format: {return_type}
 
 if __name__ == "__main__":
     ConversationalToolUseSimulationServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ConversationalToolUseSimulationServer.run_webserver()  # noqa: F401

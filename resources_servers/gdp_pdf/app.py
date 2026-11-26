@@ -41,10 +41,12 @@ retries on any criterion raises ``JudgeError`` for the *whole row*, which
 ``all_pass`` and ``mean_criterion_pass`` alike, not just the former. Given
 schema-constrained decoding, exhaustion should be rare.
 
-``reward`` is the fraction of criteria passed, matching
+By default ``reward`` is the fraction of criteria passed, matching
 ``mean_criterion_pass`` (upstream: ``mean_criteria``). The strict response-level
 ``all_pass`` score (1.0 only when every criterion passes) is reported alongside
-it, and ``compute_metrics`` surfaces both.
+it, and ``compute_metrics`` surfaces both. For training, ``reward_mode`` can make
+the reward all-pass or a weighted mixture of the two; the rubric metrics are
+reported the same way in every mode.
 """
 
 from __future__ import annotations
@@ -54,9 +56,9 @@ import json
 import re
 from contextlib import nullcontext
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -73,6 +75,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import (
     JUDGE_FAILURES,
     JudgeError,
@@ -85,6 +88,11 @@ from nemo_gym.verification import (
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+
+# What ``reward`` is: the fraction of criteria passed (the benchmark's default), all-pass, or
+# (1 - mixed_reward_alpha) * fraction passed + mixed_reward_alpha * all-pass.
+RewardMode = Literal["mean_criteria", "strict_pass", "mixed"]
 
 
 class GdpPdfConfig(BaseResourcesServerConfig):
@@ -100,6 +108,32 @@ class GdpPdfConfig(BaseResourcesServerConfig):
     judge_chat_create_params: NeMoGymChatCompletionCreateParamsNonStreaming
 
     judge_prompt_template_fpath: str = "prompt_templates/judge.txt"
+
+    # Training reward. Evaluation keeps the default; all_pass and mean_criterion_pass are
+    # reported in every mode.
+    reward_mode: RewardMode = "mean_criteria"
+    mixed_reward_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    # Optional training-only length shaping of the reasoning (chain of thought), never of the answer the judge
+    # grades: no penalty up to ``reasoning_penalty_start_tokens`` reasoning tokens, then a penalty that grows
+    # linearly to ``reasoning_penalty_max`` at ``reasoning_penalty_end_tokens`` and stays there. It is subtracted
+    # from the reward of every rollout, passed or not, so a long failed attempt still ranks below a short one.
+    # Off by default (start is None), so evaluation is unaffected. Reasoning tokens come from
+    # ``response.usage.output_tokens_details.reasoning_tokens`` when the policy server reports them, otherwise
+    # from the reasoning items' text length divided by ``reasoning_chars_per_token``.
+    reasoning_penalty_start_tokens: Optional[int] = Field(default=None, ge=0)
+    reasoning_penalty_end_tokens: Optional[int] = Field(default=None, ge=1)
+    reasoning_penalty_max: float = Field(default=0.1, ge=0.0, le=1.0)
+    reasoning_chars_per_token: float = Field(default=4.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def _check_reasoning_penalty(self) -> "GdpPdfConfig":
+        start, end = self.reasoning_penalty_start_tokens, self.reasoning_penalty_end_tokens
+        if start is not None and (end is None or end <= start):
+            raise ValueError(
+                "reasoning_penalty_end_tokens must be set and greater than reasoning_penalty_start_tokens"
+            )
+        return self
 
     # Additional attempts after the first when the judge output fails to
     # parse; 5 total matches upstream's MAX_RETRIES=4.
@@ -138,11 +172,17 @@ class GdpPdfVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     verifier_metadata: Optional[dict[str, Any]] = None
+    reward_mode: RewardMode = "mean_criteria"
     num_criteria: int = 0
     num_criteria_passed: int = 0
     all_pass: float = 0.0
     mean_criterion_pass: float = 0.0
     criterion_evaluations: list[CriterionEvaluation] = []
+    # Set only when the reasoning-length penalty is on.
+    reasoning_tokens: Optional[int] = None
+    reasoning_tokens_source: Optional[Literal["usage", "text_estimate"]] = None
+    reasoning_penalty: float = 0.0
+    reward_before_reasoning_penalty: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +208,35 @@ def _extract_generated_answer(response: NeMoGymResponse) -> str:
             if isinstance(content, str):
                 return content.strip()
     return ""
+
+
+def _reasoning_tokens(response: NeMoGymResponse, chars_per_token: float) -> tuple[int, str]:
+    """Reasoning tokens of a response: the server's usage count, else an estimate from the reasoning text."""
+    usage = getattr(response, "usage", None)
+    details = (
+        usage.get("output_tokens_details")
+        if isinstance(usage, dict)
+        else getattr(usage, "output_tokens_details", None)
+    )
+    count = (
+        details.get("reasoning_tokens") if isinstance(details, dict) else getattr(details, "reasoning_tokens", None)
+    )
+    if type(count) is int and count >= 0:
+        return count, "usage"
+    chars = 0
+    for item in response.output:
+        if getattr(item, "type", None) == "reasoning":
+            # Providers can return both the reasoning and a summary of the same text.
+            content_chars = sum(len(part.text) for part in item.content or [])
+            chars += content_chars or sum(len(part.text) for part in item.summary or [])
+    return int(round(chars / chars_per_token)), "text_estimate"
+
+
+def _reasoning_penalty(tokens: int, start: int, end: int, max_penalty: float) -> float:
+    """0 up to ``start`` tokens, linear to ``max_penalty`` at ``end``, flat after."""
+    if tokens <= start:
+        return 0.0
+    return max_penalty * min(1.0, (tokens - start) / (end - start))
 
 
 class ParseError(ValueError):
@@ -280,17 +349,41 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
 
         return await observe_llm_judge_grading(grade)
 
-    @staticmethod
-    def _build_response(body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]) -> GdpPdfVerifyResponse:
+    def _build_response(
+        self, body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]
+    ) -> GdpPdfVerifyResponse:
         num_passed = sum(1 for e in evaluations if e.passed)
         total = len(evaluations)
         mean_criterion_pass = num_passed / total
+        all_pass = 1.0 if num_passed == total else 0.0
+        reward = mean_criterion_pass
+        if self.config.reward_mode == "strict_pass":
+            reward = all_pass
+        elif self.config.reward_mode == "mixed":
+            alpha = self.config.mixed_reward_alpha
+            reward = (1 - alpha) * mean_criterion_pass + alpha * all_pass
+        shaping: dict[str, Any] = {}
+        start = self.config.reasoning_penalty_start_tokens
+        if start is not None:
+            tokens, source = _reasoning_tokens(body.response, self.config.reasoning_chars_per_token)
+            penalty = _reasoning_penalty(
+                tokens, start, self.config.reasoning_penalty_end_tokens, self.config.reasoning_penalty_max
+            )
+            shaping = dict(
+                reasoning_tokens=tokens,
+                reasoning_tokens_source=source,
+                reasoning_penalty=penalty,
+                reward_before_reasoning_penalty=reward,
+            )
+            reward -= penalty
         return GdpPdfVerifyResponse(
             **body.model_dump(),
-            reward=mean_criterion_pass,
+            **shaping,
+            reward=reward,
+            reward_mode=self.config.reward_mode,
             num_criteria=total,
             num_criteria_passed=num_passed,
-            all_pass=1.0 if num_passed == total else 0.0,
+            all_pass=all_pass,
             mean_criterion_pass=mean_criterion_pass,
             criterion_evaluations=evaluations,
         )
@@ -414,3 +507,6 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     GdpPdfResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GdpPdfResourcesServer.run_webserver()  # noqa: F401

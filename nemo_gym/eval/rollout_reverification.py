@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Optio
 
 import orjson
 from omegaconf import DictConfig
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, Field, PositiveFloat, TypeAdapter, ValidationError, model_validator
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
@@ -77,6 +77,7 @@ from nemo_gym.rollouts.rollout_records import (
     REJUDGED_FAILURE_ID_KEY,
     RUN_ID_KEY,
     coverage_path_for,
+    is_parsed_judge_abstention,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
@@ -86,6 +87,7 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
@@ -142,6 +144,10 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
         ),
     )
     output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
+    forward_agent_evidence: bool = Field(
+        default=False,
+        description="Forward saved agent trajectories and observations to /verify for execution-dependent grading.",
+    )
     force: bool = Field(
         default=False,
         description=(
@@ -234,6 +240,14 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
         ),
     )
 
+    verify_timeout_seconds: Optional[PositiveFloat] = Field(
+        default=None,
+        description=(
+            "Time limit, in seconds, for each /verify and /aggregate_metrics call this pass makes, counted from the "
+            "call to the end of its response and including any retries. When a call runs out of time, the pass fails "
+            "as it does for a /verify outcome that was lost, and nothing is resent. None (default) sets no limit."
+        ),
+    )
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
@@ -729,12 +743,11 @@ def check_saved_patch_replay(
         )
 
 
-# Collection's stamps naming the Environment Server and its result type: kept on the re-verified row, never sent
-# to /verify.
-_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
+# Collection identity is retained for grouping and cache resume, never sent to /verify.
+_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY, RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME)
 
 
-def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: bool = False) -> Dict:
     saved_patch_failure = _is_judge_failure(pair.rollout) or (
         pair.rollout.get("failure_kind") == VERIFIER_ERROR and pair.rollout.get("evaluation_completed") is False
     )
@@ -774,14 +787,28 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated
     # per-sub-step solutions an agent sent, which a masked row keeps (the response holds only the last step), with the
     # usage accounting that travels through the verifier.
-    for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
+    for key in (
+        "deliverables_dir",
+        "reference_ids",
+        "solutions",
+        "token_usage_version",
+        "step_usage",
+        # A verifier that grades a saved source again needs the source, its SHA256 and its binding.
+        "source_artifact",
+        "source_sha256",
+        "source_binding_sha256",
+    ):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
+    if forward_agent_evidence:
+        for key in ("ng_trajectory", "ng_agent_observations"):
+            if key in pair.rollout:
+                payload[key] = pair.rollout[key]
     if replay_patch:
         payload["saved_model_patch"] = saved_patch
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
-    # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
-    # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
+    # Outcome identity belongs to the collected attempt, not the materialized input.
+    # Keep it for aggregation and resume without sending it to /verify (see _IDENTITY_KEYS).
     for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
@@ -804,7 +831,7 @@ def _selected_rescoring_rows(store: RolloutStore) -> Iterator[Dict]:
     """Read answers on demand so a bounded re-score does not materialize the whole run."""
     for record in store.selected_records("success").values():
         row = record.read()
-        yield row | {
+        yield _project_reverification_row(row) | {
             _SOURCE_RUN_ID_KEY: store.manifest.run_id,
             _SOURCE_ANSWER_KEY: _rescoring_source_answer(row, store.manifest.run_id),
         }
@@ -862,9 +889,10 @@ def _prepare_payloads(
     retry_terminal_timeouts: bool = False,
     *,
     selected_rollouts: Optional[Iterable[Dict]] = None,
+    forward_agent_evidence: bool = False,
 ) -> List[Dict]:
     all_payloads = [
-        _build_verify_payload(pair)
+        _build_verify_payload(pair, forward_agent_evidence=forward_agent_evidence)
         for pair in _yield_inputs_and_rollouts_paired(
             materialized_inputs_jsonl_fpath,
             rollouts_jsonl_fpath,
@@ -941,6 +969,7 @@ def _prepare_atif_payloads(
 def _run_verification_payloads(
     payloads: List[Dict],
     semaphore: Semaphore | nullcontext[None] | None = None,
+    timeout_s: Optional[float] = None,
 ) -> Iterator[Future]:  # pragma: no cover
     semaphore = semaphore or nullcontext[None]()
     server_client = setup_server_client()
@@ -953,36 +982,51 @@ def _run_verification_payloads(
             request_row = {
                 key: value
                 for key, value in row.items()
-                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY, AGENT_CONTEXT_KEY_NAME)
                 and key not in _IDENTITY_KEYS
             }
+            # Agent context belongs only to the agent, including when a flat row keeps it in task_data.
+            # Filter at the shared HTTP boundary so native and ATIF inputs preserve the same separation.
+            if isinstance(request_row.get("task_data"), dict):
+                request_row["task_data"] = {
+                    key: value for key, value in request_row["task_data"].items() if key != AGENT_CONTEXT_KEY_NAME
+                }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
             # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a
             # later pass grades it again (see _settle_what_a_failed_pass_judged).
-            res = await server_client.post(
-                server_name=rs_name, url_path="/verify", json=request_row, _resend_after_disconnect=False
-            )
             try:
-                await raise_for_status(
-                    res
-                )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
-            # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
-            except Exception:
-                if is_global_aiohttp_client_request_debug_enabled():
-                    print(
-                        "[rollout_reverification] /verify failed "
-                        f"status={getattr(res, 'status', None)} "
-                        f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
-                        flush=True,
+                async with (deadline := asyncio.timeout(timeout_s)):
+                    res = await server_client.post(
+                        server_name=rs_name, url_path="/verify", json=request_row, _resend_after_disconnect=False
                     )
-                raise
-            result = await get_response_json(res)
-            # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
-            # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
-            report = FailureHeader.decode(getattr(res, "headers", None))
-            if report is not None:
-                result = FailureReportRow.merged_into(result, report)
+                    try:
+                        await raise_for_status(
+                            res
+                        )  # this code works similarly to the rollout collection code, so *_failures.jsonl is empty now
+                    # IMO we need another task to unify dealing with failed cases (and writing to the *_failures.jsonl file if needed)
+                    except Exception:
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_reverification] /verify failed "
+                                f"status={getattr(res, 'status', None)} "
+                                f"row={json.dumps(_rollout_verify_debug_summary(row, rs_name), sort_keys=True)}",
+                                flush=True,
+                            )
+                        raise
+                    result = await get_response_json(res)
+                    # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
+                    # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
+                    report = FailureHeader.decode(getattr(res, "headers", None))
+                    if report is not None:
+                        result = FailureReportRow.merged_into(result, report)
+            except TimeoutError as error:
+                if not deadline.expired():
+                    raise  # Not this limit: a transport error keeps its own type and message.
+                raise TimeoutError(
+                    f"The /verify call to resources server {rs_name!r} did not finish within {timeout_s} s "
+                    f"(task {row.get(TASK_INDEX_KEY_NAME)}, rollout {row.get(ROLLOUT_INDEX_KEY_NAME)})"
+                ) from error
             return row, result
 
     return tqdm.as_completed(
@@ -1088,11 +1132,13 @@ async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
     output_fpath: Path,
+    timeout_s: Optional[float] = None,
 ) -> Optional[Path]:
     """Call /aggregate_metrics on each resource server after rollouts complete.
 
     Writes a single _aggregate_metrics.json with one entry per agent (same shape
-    as the old _agent_metrics.json). Returns the file path.
+    as the old _agent_metrics.json). Returns the file path. Each call may take `timeout_s` seconds, including its
+    retries and the read of its response; None sets no limit.
     """
     if not results:
         return None
@@ -1132,14 +1178,23 @@ async def _call_aggregate_metrics(
             stripped.append(entry)
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
-        agg_response = await server_client.post(
-            server_name=rs_name,
-            url_path="/aggregate_metrics",
-            json=agg_request,
-        )
+        try:
+            async with (deadline := asyncio.timeout(timeout_s)):
+                agg_response = await server_client.post(
+                    server_name=rs_name,
+                    url_path="/aggregate_metrics",
+                    json=agg_request,
+                )
 
-        await raise_for_status(agg_response)
-        agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+                await raise_for_status(agg_response)
+                agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise  # Not this limit: a transport error keeps its own type and message.
+            raise TimeoutError(
+                f"The /aggregate_metrics call to resources server {rs_name!r} for agent {agent_name!r} did not finish "
+                f"within {timeout_s} s"
+            ) from error
 
         agent_entry = {
             AGENT_REF_KEY_NAME: {"name": agent_name},
@@ -1298,7 +1353,8 @@ def _load_reverified_results(
         stamps_by_key, source_keys = _source_identity_stamps(identity_sources)
         for r in results:
             for key, value in stamps_by_key.get((r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]), {}).items():
-                r.setdefault(key, value)
+                if key != RUN_ID_KEY or _SOURCE_RUN_ID_KEY not in r:
+                    r.setdefault(key, value)
         unresolved = [
             (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
             for r in results
@@ -1363,7 +1419,10 @@ def validate_settle_source_snapshot(source: Path, raw: str) -> None:
 
 def _reverifiable_saved_result(row: Dict[str, Any]) -> bool:
     """Whether a selected saved result is graded again from its saved answer (``reverification_cause``)."""
-    from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+    from nemo_gym.eval.recovery.grading import (
+        reverification_cause,
+        saved_row_evidence,
+    )
 
     return reverification_cause(saved_row_evidence(row)) is not None
 
@@ -1400,7 +1459,7 @@ def bind_judge_failures(
     spent = set()
     for row in store.failures():
         identity = logical_rollout_id(row)
-        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
+        if _is_judge_failure(row) and store._state.failure_count(identity) >= cap:
             if not skip_spent:
                 raise ConfigError(
                     f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
@@ -1415,7 +1474,7 @@ def bind_judge_failures(
         "failures": {
             logical_rollout_id(row): row
             for row in store.failures()
-            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
+            if _is_judge_failure(row) and logical_rollout_id(row) not in spent
         }
         | saved_results,
         "saved_results": set(saved_results),
@@ -1527,7 +1586,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
     the binding. A judged identity that the binding does not hold, a changed manifest or materialized input, or a
     failure that is no longer the selected outcome is refused. A bound saved result replaces its grade only with a
     result that binds the same saved answer and attempt (``is_rejudgment_of``); one whose re-verification answered
-    without a grade keeps its saved row, and its admission is withdrawn.
+    without a grade or a parsed abstention keeps its saved row, and its admission is withdrawn.
 
     Each settlement is recorded in ``binding["settled_operations"]`` (this pass's admission operation ids) as soon as
     it is fsynced, and each completed withdrawal in ``binding["withdrawn_operations"]``, so a pass that raises
@@ -1575,7 +1634,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         if binding["admitted"][identity].operation_id in done:
             continue  # this pass settled or withdrew it before an error
         if _ungraded_reverification(result) and (
-            identity in saved_results or result.get(NG_FAILURE_CLASS_KEY) != "judge_failed"
+            identity in saved_results or not matches_failure_class(result, {JUDGE_FAILED_FAILURE_CLASS})
         ):
             # The verifier answered without a grade or a judge failure: the bound row stays as it was, and nothing
             # is saved. A judge failure that failed to judge again is saved below as its re-judgment's outcome.
@@ -1638,11 +1697,11 @@ def _validate_rescored_completion(result: object) -> None:
 
 
 def _ungraded_reverification(result: Dict[str, Any]) -> bool:
-    """Whether a re-verification answered without a usable grade: a failure, a mask or no finite reward."""
+    """Whether the re-verification returned neither a usable grade nor a parsed abstention."""
     reward = result.get("reward")
     return (
         result.get(NG_FAILURE_CLASS_KEY) is not None
-        or bool(result.get("mask_sample"))
+        or (bool(result.get("mask_sample")) and not is_parsed_judge_abstention(result))
         or result.get("evaluation_completed") is False
         or type(reward) not in (int, float)
         or not math.isfinite(reward)
@@ -1912,6 +1971,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
+                forward_agent_evidence=config.forward_agent_evidence,
                 **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
             if config.settle_into_source and settle_binding["saved_results"]:
@@ -1925,6 +1985,7 @@ class RolloutReverificationHelper(BaseModel):
                     output_fpaths,
                     config.resume_from_cache,
                     rollout_predicate=lambda row: bound_results.get(logical_rollout_id(row)) == row,
+                    forward_agent_evidence=config.forward_agent_evidence,
                 )
 
         if config.settle_into_source:
@@ -1976,13 +2037,18 @@ class RolloutReverificationHelper(BaseModel):
         completed = 0  # number of rows re-verified this run (for progress reporting)
         sources_dropped = False
         try:
-            for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
+            for future in _run_verification_payloads(
+                payloads_to_reverify, semaphore=semaphore, timeout_s=config.verify_timeout_seconds
+            ):
                 row, result = await future
                 if _SOURCE_RUN_ID_KEY in row:
                     _validate_rescored_completion(result)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                if "instance_config" in row:
+                    # Preserve the materialized task's training mask when the verifier omits this field.
+                    result.setdefault("instance_config", row["instance_config"])
                 for key in (AGENT_REF_KEY_NAME, *_IDENTITY_KEYS):
                     if key in row:
                         result[key] = row[key]
@@ -2076,7 +2142,9 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(
+                results, agg_rows, output_fpaths.output, timeout_s=config.verify_timeout_seconds
+            )
 
         expected_rollouts = len(results) + sum(failure_counts.values())
         coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)

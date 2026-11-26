@@ -23,10 +23,12 @@ prompt template is baked into ``responses_create_params.input`` and image
 questions carry an ``input_image`` block, so the dataset needs no
 ``prompt_config`` at rollout time (``config.yaml``). ``--text-only`` keeps the 728
 questions without an image as raw fields to be templated at rollout time via
-``prompt_config`` (``text.yaml`` and the text-only sandboxed presets). ``--prompt opencode``
+``prompt_config`` (``text.yaml``, the agent-session presets and their ``*_legacy_agent``
+relay presets, through ``prepare_text.py``). ``--prompt opencode``
 materializes every question with ``prompts/opencode.yaml`` instead, the single user
-message the OpenCode sandboxed harness forwards (``opencode_full.yaml``): image
-questions carry the same ``input_image`` block, and there is no system message to drop.
+message the OpenCode harnesses forward (``opencode_hle_tools_full.yaml`` on the
+``opencode_agent`` session, and the deprecated ``opencode_full.yaml`` presets on the relay):
+image questions carry the same ``input_image`` block, and there is no system message to drop.
 
 The corpus is validated before anything is written: a wrong row count, partition
 split, image count or duplicated id aborts preparation. ``--limit N`` is the one
@@ -130,6 +132,7 @@ def format_row(row: dict[str, Any], prompt_config: Any = None) -> dict[str, Any]
     """Convert one source row to Gym JSONL; materialize the prompt when ``prompt_config`` is given."""
     image = row["image"] or ""
     entry = {
+        "task_id": row["id"],
         "question": row["question"],
         "expected_answer": row["answer"],
         # Metadata for analysis and slicing; not used for grading.
@@ -157,8 +160,10 @@ def prepare(text_only: bool = False, limit: Optional[int] = None, prompt: str = 
             mechanism; it bypasses the completeness check.
         prompt: Which ``prompts/`` file the full set is materialized with: ``default``
             (upstream's system message plus the bare question) or ``opencode`` (the
-            instruction folded into the single user message the OpenCode sandboxed
-            harness forwards; written to ``hle_diamond_benchmark_opencode_full.jsonl``).
+            instruction folded into the single user message the OpenCode harnesses
+            forward, for ``opencode_hle_tools_full.yaml`` and the deprecated
+            ``opencode_full.yaml`` presets; written to
+            ``hle_diamond_benchmark_opencode_full.jsonl``).
             Ignored with ``text_only``, whose rows are templated at rollout time.
 
     Returns:

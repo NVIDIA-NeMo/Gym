@@ -19,12 +19,9 @@ import shlex
 from pathlib import Path
 
 from nemo_gym.core.failure_kinds import DRIVER_INSTALL_FAILED
+from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
 from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
 
-
-# The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
-# that the next segment would repeat leaves its registered kind (see the guard in resume_script.py).
-DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
 
 _RAY_PRELUDE = """\
 # Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
@@ -120,6 +117,50 @@ fi
 """
 
 
+# Bound on one snapshot of `lustre_md_stats`, so a hung read or a step that cannot start never holds the job.
+LUSTRE_MD_STATS_TIMEOUT_S = 30
+
+# What each node runs: its MDC request counters as TSV rows. lctl omits an op whose count is 0, and lives in /usr/sbin,
+# which is not on every user's PATH.
+_LUSTRE_MD_STATS_NODE = r"""set -o pipefail
+PATH="$PATH:/usr/sbin:/sbin"
+lctl get_param 'mdc.*.md_stats' 2>/dev/null | awk -v OFS='\t' -v phase="$1" -v epoch="$(date +%s)" \
+    -v node="${SLURMD_NODENAME:-$(hostname)}" '
+    /^mdc\..*\.md_stats=/ { mdt = match($0, /-MDT[0-9a-fA-F]+-mdc-/) ? substr($0, RSTART + 1, RLENGTH - 6) : ""; next }
+    mdt != "" && $3 == "samples" && $2 ~ /^[0-9]+$/ { print phase, epoch, node, mdt, $1, $2 }'"""
+
+_LUSTRE_MD_STATS_PRELUDE = """\
+# --- Lustre metadata stats (lustre_md_stats) ---
+# Rows: phase, epoch, node, MDT, op, cumulative count. A snapshot keeps the status it was called with.
+_gym_md_stats_file={stats_file}
+_gym_md_stats_node=$(cat <<'GYM_MD_STATS_NODE'
+{node_script}
+GYM_MD_STATS_NODE
+)
+_gym_md_stats() {{
+    local _gym_md_rc=$? _gym_md_out _gym_md_ok=1
+    _gym_md_out=$(timeout -k 5 {timeout} {step}bash -c "$_gym_md_stats_node" _gym_md_stats "$1" 2>/dev/null) || _gym_md_ok=0
+    if [ -n "$_gym_md_out" ]; then
+        printf '%s\\n' "$_gym_md_out" >> "$_gym_md_stats_file" || _gym_md_ok=0
+    else
+        _gym_md_ok=0
+    fi
+    [ "$_gym_md_ok" = 1 ] || echo "WARNING: lustre_md_stats: phase $1 not fully recorded in $_gym_md_stats_file (lctl get_param mdc.*.md_stats failed, timed out or printed nothing); the job goes on."
+    return "$_gym_md_rc"
+}}"""
+
+
+def render_lustre_md_stats_prelude(stats_file: str, step: str = "") -> str:
+    """Define `_gym_md_stats <phase>`, which appends every node's counters to `stats_file` (a shell word).
+
+    `step` prefixes the per-node command: empty runs it in the batch shell, an `srun ... ` once on every node.
+    A missing `lctl` or a failed read prints one warning line; the call returns the status it was called with.
+    """
+    return _LUSTRE_MD_STATS_PRELUDE.format(
+        stats_file=stats_file, node_script=_LUSTRE_MD_STATS_NODE, timeout=LUSTRE_MD_STATS_TIMEOUT_S, step=step
+    )
+
+
 def bash_var(name: str) -> str:
     return re.sub(r"[^A-Z0-9]", "_", name.upper())
 
@@ -184,7 +225,7 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
 
 
 def render_repo_checkout(repo: str, ref: str, dest: str | None = None) -> str:
-    """Render an &&-chained command that installs git if missing, then clones and checks out `ref`.
+    """Render checkout steps that each fail immediately under the driver's ``set -e``.
 
     `dest` is emitted verbatim so it may be a shell expression (the driver passes
     `"$GYM_SRC/gym"` to clone outside the job directory); omit it to clone into a
@@ -194,7 +235,8 @@ def render_repo_checkout(repo: str, ref: str, dest: str | None = None) -> str:
     target = dest if dest is not None else shlex.quote(repo_name)
     ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
     return (
-        f"({ensure_git}) && git clone {shlex.quote(repo)} {target} && cd {target} && git checkout {shlex.quote(ref)}"
+        f"({ensure_git})\ngit clone --filter=blob:none --no-checkout {shlex.quote(repo)} {target}\n"
+        f"cd {target}\ngit checkout {shlex.quote(ref)}"
     )
 
 
@@ -212,8 +254,10 @@ EXPORT_STEP_MODULE = "nemo_gym.orchestration.export_step"
 EVAL_SUCCEEDED_MARKER_ENV = "GYM_EVAL_SUCCEEDED_MARKER"
 
 
-def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) -> str:
-    """Render the part of the driver script that runs `gym eval run`, then each export of its rollouts.
+def render_export_tail(
+    bench_dir: Path, exports: list[tuple[str, list[str]]], reverify_steps: list[tuple[str, str, str]] = ()
+) -> str:
+    """Render the part of the driver script that runs `gym eval run`, then its reverify steps and exports.
 
     `exports` pairs an exporter name with its shell-quoted override arguments for `EXPORT_STEP_MODULE`. The run is a child, not
     `exec`'d, so the script can go on to the exports; TERM, which is what the driver gets at the time limit, is
@@ -221,6 +265,11 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
     `<bench_dir>/eval.exit` and is the script's exit code: the exports are reported in their own result files
     and cannot change it. They run only after a successful run, so a partial run is never exported, and an
     export that already succeeded is not repeated (the export step decides that from its result file).
+
+    `reverify_steps` holds (step name, shell-quoted output path, `gym eval reverify` command) for each reverify
+    step. They run after a successful run and before the exports, so an export sees their output. A step whose
+    output exists resumes it, so a requeued job judges only what is left; a failed step is reported and does not
+    change the exit code.
     """
     bench = shlex.quote(str(bench_dir))
     lines = [
@@ -238,6 +287,11 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
         f'echo "$gym_run_rc" > {bench}/{EVAL_EXIT_FILENAME} || true',
         'if [ "$gym_run_rc" -eq 0 ]; then',
         f'    [ -z "${{{EVAL_SUCCEEDED_MARKER_ENV}:-}}" ] || : > "${EVAL_SUCCEEDED_MARKER_ENV}" || true',
+        *(
+            f"    if [ -e {output} ]; then {command} --resume; else {command}; fi"
+            f' || echo "Reverify step {name} failed; the run itself is unchanged." >&2'
+            for name, output, command in reverify_steps
+        ),
         *(
             f"    python3 -m {EXPORT_STEP_MODULE} {shlex.quote(name)} {' '.join(args)} || true"
             for name, args in exports
@@ -258,6 +312,26 @@ _DECLARED_EXTRAS_FILTER = (
     "for name in requested:\n"
     "    if name not in declared:\n"
     '        print(f"gym: the checkout defines no {name!r} extra, installing without it", file=sys.stderr)\n'
+)
+
+
+# A uv older than the checkout's `required-version` (a `>=X` lower bound in its pyproject.toml) is refused by `uv venv`
+# and `uv sync`, with an error that never reaches the reader's report. The requirement is only known after the
+# checkout, so a private copy of the caller's uv is checked then: one that is too old is replaced by a fresh private
+# install (the one used when no uv runs at all), and the read fails with both versions named only when that install
+# cannot meet the requirement either. Run inside the checkout, with the private uv first on PATH.
+_UV_VERSION_CHECK = (
+    "_gym_uv_old() { "
+    "_gym_uv_req=\"$(sed -n 's/^required-version *= *\"\\(>=\\)\\{0,1\\} *\\([0-9][0-9.]*\\).*/\\2/p' "
+    'pyproject.toml 2>/dev/null | head -n 1 || true)"; '
+    "_gym_uv_have=\"$(uv --version | awk '{print $2}')\"; "
+    '[ -n "$_gym_uv_req" ] && '
+    '[ "$(printf \'%s\\n%s\\n\' "$_gym_uv_req" "$_gym_uv_have" | sort -V | head -n 1)" != "$_gym_uv_req" ]; }; '
+    "if _gym_uv_old; then "
+    'curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$GYM_SRC/uv-bin" sh || true; hash -r; '
+    "if _gym_uv_old; then "
+    'echo "gym: uv $_gym_uv_have is older than the $_gym_uv_req this Gym checkout requires '
+    "(required-version in pyproject.toml); update it with 'uv self update'\" >&2; exit 1; fi; fi"
 )
 
 
@@ -365,6 +439,7 @@ def render_driver_entrypoint(
             # venv` instead reads requires-python from pyproject.toml and auto-downloads a
             # satisfying interpreter if the container's own Python doesn't qualify. Also never
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
+            *([_UV_VERSION_CHECK] if private_uv else []),
             "uv venv --seed .venv",
             "source .venv/bin/activate",
             f'_gym_declared_extras() {{ python -c {shlex.quote(_DECLARED_EXTRAS_FILTER)} "$@"; }}',

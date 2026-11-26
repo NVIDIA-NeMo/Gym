@@ -28,6 +28,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
 
@@ -157,6 +158,10 @@ class HarnessExaSearchConfig(BaseResponsesAPIAgentConfig):
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: str | None = None
     exa_api_key: SecretStr | None = None
+    # Time limit, in seconds, passed to the sandbox provider for the harness command. A harness that runs past it ends
+    # the rollout as a failed sandboxed harness. None (default) keeps the provider's own timeout behavior; it does not
+    # disable a provider default.
+    runner_timeout_seconds: float | None = Field(default=None, gt=0)
 
 
 class HarnessExaSearchRunRequest(BaseRunRequest):
@@ -268,7 +273,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
                         raise RuntimeError(
                             f"sandbox dependency setup failed: {(setup.stderr or setup.stdout or '')[-2000:]}"
                         )
-                runner = asyncio.create_task(sandbox.exec(command, timeout_s=None))
+                runner = asyncio.create_task(sandbox.exec(command, timeout_s=self.config.runner_timeout_seconds))
                 relay = None
                 if use_model_relay:
                     endpoint = await sandbox.endpoint(_MODEL_RELAY_PORT)
@@ -321,3 +326,6 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarnessExaSearchAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarnessExaSearchAgent.run_webserver()  # noqa: F401

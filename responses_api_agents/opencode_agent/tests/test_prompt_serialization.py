@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from responses_api_agents.opencode_agent.app import _serialize_replacement_config
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 from responses_api_agents.opencode_agent.tests.test_app import _make_agent
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
@@ -50,11 +51,11 @@ def pinned_opencode():
     configured = os.environ.get("GYM_TEST_OPENCODE_BINARY")
     binary = configured or shutil.which("opencode")
     if binary is None:
-        pytest.skip("Set GYM_TEST_OPENCODE_BINARY to OpenCode 1.17.11")
+        pytest.skip(f"Set GYM_TEST_OPENCODE_BINARY to OpenCode {OPENCODE_VERSION}")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
-    if configured is None and (version.returncode != 0 or version.stdout.strip() != "1.17.11"):
-        pytest.skip("This integration targets the pinned OpenCode 1.17.11")
-    assert version.returncode == 0 and version.stdout.strip() == "1.17.11"
+    if configured is None and (version.returncode != 0 or version.stdout.strip() != OPENCODE_VERSION):
+        pytest.skip(f"This integration targets the pinned OpenCode {OPENCODE_VERSION}")
+    assert version.returncode == 0 and version.stdout.strip() == OPENCODE_VERSION
     return binary
 
 
@@ -134,3 +135,39 @@ async def test_pinned_cli_keeps_the_generated_replacement_literal(path, setup, t
         )
         assert other.returncode == 0, other.stderr
         assert json.loads(other.stdout)["prompt"] == "expanded fixture::included fixture"
+
+
+async def test_pinned_cli_reads_the_session_step_limit(setup, tmp_path, pinned_opencode):
+    agent, sandbox = setup
+    agent.config.system_prompt_mode = "replace"
+    agent.config.system_prompt = "Answer briefly"
+    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 3}}}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).raise_for_status()
+        serialized = sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"]
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "OPENCODE_CONFIG_CONTENT": serialized,
+        "OPENCODE_DISABLE_AUTOUPDATE": "true",
+        "OPENCODE_DISABLE_MODELS_FETCH": "true",
+    }
+    result = subprocess.run(
+        [pinned_opencode, "--pure", "debug", "agent", "build"],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    build = json.loads(result.stdout)
+    assert build["steps"] == 3
+    assert build["prompt"] == "Answer briefly"

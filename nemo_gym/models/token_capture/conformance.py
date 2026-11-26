@@ -40,11 +40,19 @@ from nemo_gym.models.token_capture.protocols import (
 )
 from nemo_gym.models.token_capture.records import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    CallIdentity,
+    ModelRef,
     ParentResolutionStatus,
     TokenEntry,
     cumulative_tokens,
     stamp_lineage,
 )
+
+
+# Gym passes the call's identity on every intent and incomplete mark, so the kit's writes pass one too.
+_IDENTITY = CallIdentity(agent_instance="judge.1", model_ref=ModelRef(name="conformance-model"))
+# Another agent instance on the same model server: its requests must never resolve to ``_IDENTITY``'s calls.
+_OTHER_AGENT_INSTANCE = CallIdentity(agent_instance="assistant", model_ref=_IDENTITY.model_ref)
 
 
 class ConformanceError(AssertionError):
@@ -253,7 +261,7 @@ async def _check_mark_incomplete(sink: TokenSink, source_factory: Callable[[], T
     await sink.put(entry)
     before = await source_factory().freeze(rollout_id)
     # After freeze: the marker must still land and must move the version.
-    await sink.mark_incomplete(rollout_id, "call-2")
+    await sink.mark_incomplete(rollout_id, "call-2", identity=_IDENTITY)
     after = await source_factory().freeze(rollout_id)
     _require(after.incomplete, name, "a fresh source instance does not see the incomplete marker")
     _require(after.version != before.version, name, "mark_incomplete did not change the observable version")
@@ -345,10 +353,10 @@ async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rol
     await _require_fenced(name, sink.put(late), "a late put")
     mark = getattr(sink, "mark_incomplete", None)
     if mark is not None:
-        await _require_fenced(name, mark(rollout_id, "call-3"), "a late mark_incomplete")
+        await _require_fenced(name, mark(rollout_id, "call-3", identity=_IDENTITY), "a late mark_incomplete")
     begin = getattr(sink, "begin_call", None)
     if begin is not None:
-        await _require_fenced(name, begin(rollout_id, "call-4"), "a late begin_call")
+        await _require_fenced(name, begin(rollout_id, "call-4", identity=_IDENTITY), "a late begin_call")
     refuse = getattr(sink, "record_engine_refusal", None)
     if refuse is not None:
         await _require_fenced(
@@ -390,12 +398,17 @@ async def _check_lineage_visibility(
         request_items=_REQUEST,
         text="It is sunny.",
     )
+    # Gym resolves a request within its own lineage scope (agent instance and model server), so the committed call
+    # carries an identity and every probe passes one.
+    entry.agent_instance = _IDENTITY.agent_instance
+    entry.agent_kind = _IDENTITY.agent_kind
+    entry.model_ref = _IDENTITY.model_ref
     await sink.put(entry)
     # The fresh variant constructs its resolver only after the entry is durable.
     if store is None:
         store = lineage_factory()
     faithful = list(_REQUEST) + list(entry.output_items) + [{"role": "user", "content": "And tomorrow?"}]
-    resolution = await store.resolve(rollout_id, faithful)
+    resolution = await store.resolve(rollout_id, faithful, identity=_IDENTITY)
     _require(
         resolution.status == ParentResolutionStatus.RESOLVED,
         name,
@@ -408,14 +421,20 @@ async def _check_lineage_visibility(
         name,
         "resolved parent carries the wrong cumulative tokens",
     )
+    other_agent_instance = await store.resolve(rollout_id, faithful, identity=_OTHER_AGENT_INSTANCE)
+    _require(
+        other_agent_instance.status != ParentResolutionStatus.RESOLVED,
+        name,
+        "another agent instance's request resolved to this agent instance's call",
+    )
     rewritten = [{"role": "user", "content": "REWRITTEN"}] + list(entry.output_items)
-    rewritten_resolution = await store.resolve(rollout_id, rewritten)
+    rewritten_resolution = await store.resolve(rollout_id, rewritten, identity=_IDENTITY)
     _require(
         rewritten_resolution.status == ParentResolutionStatus.UNRESOLVED,
         name,
         f"a rewritten context resolved as {rewritten_resolution.status}",
     )
-    root = await store.resolve(rollout_id, [{"role": "user", "content": "fresh question"}])
+    root = await store.resolve(rollout_id, [{"role": "user", "content": "fresh question"}], identity=_IDENTITY)
     _require(
         root.status == ParentResolutionStatus.ROOT,
         name,
@@ -425,7 +444,7 @@ async def _check_lineage_visibility(
 
 async def _check_begin_call_custody(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
     name = "begin_call_custody"
-    await sink.begin_call(rollout_id, "call-lost")  # type: ignore[attr-defined]
+    await sink.begin_call(rollout_id, "call-lost", identity=_IDENTITY)  # type: ignore[attr-defined]
     snapshot = await src.freeze(rollout_id)
     _require(snapshot.incomplete, name, "a dangling pre-dispatch intent did not mask the rollout")
 
@@ -436,7 +455,7 @@ async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollo
     await sink.put(entry)
     begin = getattr(sink, "begin_call", None)
     if begin is not None:
-        await begin(rollout_id, "call-2")
+        await begin(rollout_id, "call-2", identity=_IDENTITY)
     await sink.record_engine_refusal(  # type: ignore[attr-defined]
         rollout_id,
         model_call_id="call-2",

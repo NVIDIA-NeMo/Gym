@@ -93,8 +93,21 @@ uv sync --active --extra all
 
 # See benchmarks/scicode/README.md
 uv pip install gdown
-gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
-    -O benchmarks/scicode/data
+# Google Drive rate-limits this download ("Too many users have viewed or downloaded this file recently"). That is
+# fatal by default, because a container built without the data fails later, at SciCode runtime. A build that does not
+# run SciCode (e.g. nl2repobench only) opts out with SKIP_SCICODE_DATA=1. A download that "succeeds" without leaving
+# benchmarks/scicode/data/test_data.h5 (the path benchmarks/scicode/config.yaml reads) is a failure too.
+# This text sits in an unquoted heredoc, so the outer shell expands any dollar-sign expression in it, comments
+# included; it uses only the opt-out.
+if ! gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
+    -O benchmarks/scicode/data || [[ ! -s benchmarks/scicode/data/test_data.h5 ]]; then
+    if [[ "${SKIP_SCICODE_DATA:-0}" == "1" ]]; then
+        echo ">>> WARNING: scicode data download failed; continuing because SKIP_SCICODE_DATA=1" >&2
+    else
+        echo ">>> ERROR: scicode data download failed or left no benchmarks/scicode/data/test_data.h5. Retry later, or set SKIP_SCICODE_DATA=1 if this container will not run SciCode." >&2
+        exit 1
+    fi
+fi
 
 if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
     echo "Copying Tau2 and Tau3 data from mounted Gym dir: $TAU_2_MOUNT_BASE_GYM_DIR"

@@ -112,10 +112,12 @@ from nemo_gym.core import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     FailureBoundary,
+    ModelCallSampling,
     NeMoGymResponse,
     NgFailureEvent,
     TaskId,
     failure_kinds,
+    model_sampling_path_segment,
     sdk_error_details,
 )
 from nemo_gym.data.tasks.harbor import (
@@ -394,6 +396,13 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # of it, so the agent keeps its conversation across steps (Harbor's `--resume-trajectory`); refused before any
     # sandbox for a harness without multi-turn continuation, as Harbor refuses an agent without SUPPORTS_RESUME.
     turn_sessions: Literal["fresh", "continue"] = "fresh"
+    # For a training framework that writes its sampling values into each row's request instead of sending them with
+    # the rollout (`_ng_model_sampling`). On: a turn's `temperature`, `top_p` and `max_output_tokens` leave the
+    # request the harness receives and become the sampling values of the turn's model calls, exactly as values the
+    # episode carries do. Sandbox harnesses refuse those request fields, because a harness cannot put them on every
+    # model call it makes; the model server can. An episode that carries sampling values keeps them, and its
+    # requests are sent as they are. Off: requests are sent as they are.
+    request_sampling_to_model_calls: bool = False
     # Values for the `${NAME}` references a task's Compose file leaves to the deployment, such as a sidecar's
     # model endpoint and key. Resolved at seed; the task and Harbor's own variables take precedence.
     compose_variables: dict[str, ComposeVariable] = Field(default_factory=dict)
@@ -535,6 +544,7 @@ class HarborEnvironmentServer(
     config: HarborEnvironmentServerConfig
     request_model = HarborEpisodeRequest
     response_model = HarborEpisodeResponse
+    applies_model_sampling = True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -1266,11 +1276,21 @@ class HarborEnvironmentServer(
         of a continuation session, named in the header the agent-session contract requires. A failed activation
         closes the session for its evidence and raises the staged episode failure."""
         progress.stage, progress.response = "agent", None
+        turn_sampling = None
+        if self.config.request_sampling_to_model_calls and request.model_sampling is None:
+            try:
+                responses_create_params, turn_sampling = _split_request_sampling(responses_create_params)
+            except ValueError as error:
+                raise self._failure(
+                    stage="agent",
+                    failure_reason=f"The request's sampling values cannot be carried on model calls: {error}",
+                    terminal=True,
+                ) from error
         headers = {AGENT_ACTIVATION_HEADER: str(activation)} if activation is not None else None
         try:
             agent_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
-                url_path=self._agent_responses_path(request),
+                url_path=self._agent_responses_path(request, turn_sampling),
                 json=_harness_params(responses_create_params),
                 cookies=handle.cookies,
                 **({"headers": headers} if headers else {}),
@@ -2073,17 +2093,28 @@ class HarborEnvironmentServer(
         self._sessions[episode_key] = session
         return session
 
-    def _agent_responses_path(self, request: HarborEpisodeRequest) -> str:
+    def _agent_responses_path(
+        self, request: HarborEpisodeRequest, turn_sampling: ModelCallSampling | None = None
+    ) -> str:
+        """The agent's activation path for one turn. ``turn_sampling`` is the sampling values taken from the turn's
+        request (``request_sampling_to_model_calls``), used when the episode carries none."""
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         agent_config = get_first_server_config_dict(
             self.server_client.global_config_dict,
             self.config.agent_server.name,
         )
-        token_capture = bool(block.get("enabled", False)) and (
-            bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        token_capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled", False))
+            and (bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        # The agent is the one the training framework trains, so its model calls carry the episode's values.
+        if request.model_sampling is None and turn_sampling is not None:
+            request = request.model_copy(update={"model_sampling": turn_sampling})
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
+        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(
@@ -2129,6 +2160,39 @@ def _turns_verifier_mode(turns: list[HarborTurnResult]) -> Literal["shared", "se
     if not modes:
         return None
     return next(iter(modes)) if len(modes) == 1 else "mixed"
+
+
+# The request fields a training framework's sampling values cover (``ModelCallSampling``).
+_REQUEST_SAMPLING_FIELDS = ("temperature", "top_p", "max_output_tokens")
+
+
+def _split_request_sampling(responses_create_params: Any) -> tuple[Any, ModelCallSampling | None]:
+    """A turn's request without its sampling fields, and those fields as the sampling values of its model calls.
+
+    Returns the request unchanged and ``None`` when it sets none of them. The row's request is not modified: the
+    result records it as the row gave it. Raises ``ValueError`` for values a model call cannot carry.
+    """
+    is_mapping = isinstance(responses_create_params, dict)
+    found = {
+        name: value
+        for name in _REQUEST_SAMPLING_FIELDS
+        if (value := responses_create_params.get(name) if is_mapping else getattr(responses_create_params, name, None))
+        is not None
+    }
+    if not found:
+        return responses_create_params, None
+    # ModelCallSampling is strict; a row written from YAML or JSON may give a whole number for a float field.
+    for name in ("temperature", "top_p"):
+        if isinstance(found.get(name), int) and not isinstance(found[name], bool):
+            found[name] = float(found[name])
+    sampling = ModelCallSampling.model_validate(found)
+    if is_mapping:
+        stripped = {key: value for key, value in responses_create_params.items() if key not in found}
+    else:
+        stripped = responses_create_params.model_copy(update=dict.fromkeys(found))
+        # Unset, not null: the request is serialized with only the fields the row set.
+        stripped.model_fields_set.difference_update(found)
+    return stripped, sampling
 
 
 def _harness_params(responses_create_params: Any) -> Any:

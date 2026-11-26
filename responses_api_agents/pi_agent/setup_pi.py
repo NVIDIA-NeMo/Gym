@@ -16,21 +16,29 @@
 import logging
 import os
 import platform
+import re
+import shlex
 import shutil
 import subprocess
 import tarfile
 import time
 import urllib.request
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+
+from nemo_gym.utils.install_lock import adopt_recorded_install, install_lock, record_install
 
 
 LOG = logging.getLogger(__name__)
 
 _PI_PKG = "@earendil-works/pi-coding-agent"
-_NODE_VERSION = "22.15.0"
+_NODE_VERSION = "22.19.0"
 _NODE_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "x64"
 _NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
-_LOCAL_PREFIX = Path(__file__).parent / ".pi_node"
+_LOCAL_PREFIX = Path(__file__).parent / f".pi_node-{_NODE_VERSION}"
+# Beside the toolchain directory rather than in it, because an interrupted install's cleanup removes that directory.
+_INSTALL_LOCK = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".lock")
+_INSTALL_RECORD = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".installed")
 
 
 def _npm_install(npm_bin: str, version: str | None) -> None:
@@ -52,10 +60,12 @@ def _npm_global_bin(npm_bin: str) -> str | None:
 
 
 def _install_node_locally() -> Path:
-    node_bin = _LOCAL_PREFIX / "bin" / "node"
-    if node_bin.is_file():
+    complete = _LOCAL_PREFIX / ".complete"
+    if complete.is_file():
         return _LOCAL_PREFIX / "bin"
 
+    # The marker is written last, so a toolchain without it is left from an interrupted install.
+    shutil.rmtree(_LOCAL_PREFIX, ignore_errors=True)
     _LOCAL_PREFIX.mkdir(parents=True, exist_ok=True)
     tarball = _LOCAL_PREFIX / "node.tar.xz"
 
@@ -70,19 +80,58 @@ def _install_node_locally() -> Path:
         item.rename(_LOCAL_PREFIX / item.name)
     nested.rmdir()
     tarball.unlink(missing_ok=True)
+    complete.touch()
     return _LOCAL_PREFIX / "bin"
 
 
-def ensure_pi(version: str | None = None) -> None:
-    """Ensure ``pi`` is on PATH, installing it via npm if necessary."""
-    if shutil.which("pi"):
-        return
+def ensure_pi(
+    version: str | None = None, *, command: Sequence[str] = ("pi",), env: Mapping[str, str] | None = None
+) -> None:
+    """Ensure ``pi`` is on PATH, installing it via npm if necessary, and check an exact ``version`` pin.
 
+    The check runs ``command --version`` with ``env`` over this process's environment, the launcher and environment
+    overrides that local runs use, so it sees the Pi that will run. A version that is not exact, such as ``latest``
+    or an npm range, is installed as given and not checked.
+    """
     local_bin = Path.home() / ".local" / "bin"
-    if (local_bin / "pi").is_file():
-        os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
-        return
+    if not shutil.which("pi"):
+        if (local_bin / "pi").is_file():
+            os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
+        else:
+            # Other workers may be installing the same release on their first local call.
+            with install_lock(_INSTALL_LOCK):
+                if not adopt_recorded_install(_INSTALL_RECORD, "pi", version=version):
+                    _install_pi(version, local_bin)
+                    record_install(_INSTALL_RECORD, Path(shutil.which("pi")).parent, version=version)
 
+    if version and re.fullmatch(r"\d+\.\d+\.\d+", version):
+        _check_pi_version(version, list(command), {**os.environ, **(env or {})})
+    LOG.info("pi is ready at %s", shutil.which("pi"))
+
+
+def _check_pi_version(version: str, command: list[str], env: dict[str, str]) -> None:
+    try:
+        result = subprocess.run(
+            [*command, "--version"], capture_output=True, text=True, errors="replace", timeout=30, env=env
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        got = str(error)
+    else:
+        if result.returncode == 0 and result.stdout.strip() == version:
+            return
+        got = result.stdout.strip() or "no version"
+        if result.returncode:
+            got += f" (exit code {result.returncode})"
+        if result.stderr.strip():
+            got += f"; stderr: {result.stderr.strip()}"
+    where = shutil.which(command[0], path=env.get("PATH")) or command[0]
+    raise RuntimeError(
+        f"Expected Pi {version} from {shlex.join(command)} ({where}); install {_PI_PKG}@{version} with npm "
+        f"and check pi --version. Got: {got}"
+    )
+
+
+def _install_pi(version: str | None, local_bin: Path) -> None:
     npm = shutil.which("npm")
     if npm:
         LOG.info("installing pi via system npm (%s)", npm)
@@ -106,5 +155,3 @@ def ensure_pi(version: str | None = None) -> None:
 
     if not shutil.which("pi"):
         raise RuntimeError("pi install appeared to succeed but 'pi' is still not on PATH")
-
-    LOG.info("pi is ready at %s", shutil.which("pi"))

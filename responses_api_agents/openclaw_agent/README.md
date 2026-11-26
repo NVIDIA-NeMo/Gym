@@ -4,7 +4,18 @@ Runs OpenClaw CLI (`openclaw agent --local --json`).
 OpenClaw runs its own tools internally.
 Resources server is used for verifier.
 
-Minimal, meant to be extended, and currently eval-only. 
+Pinned release: OpenClaw 2026.11.5 on Node.js 24.22.3. Capability level: Observability; training capture, below,
+is opt-in. The Terminal-Bench 2.1 preset `terminal_bench_2_1/openclaw` and the AnyTerminal OpenClaw preset keep
+2026.6.11 so the exec tool works on task images with glibc 2.31 (see [EnvironmentServer sandbox sessions](#environmentserver-sandbox-sessions)).
+
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`
+or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
+store and a model backend that returns token IDs (see
+[Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
+Token IDs and generation log probabilities reach the Gym capture store when the backend returns them. This was
+checked for one single-turn call without tools; multi-turn tool episodes and compaction calls are not yet validated.
+Configs that call their own provider instead of `model_server`, such as `environments/openclaw_math`, do not capture.
 
 ## Quick start
 
@@ -47,13 +58,17 @@ Session install/close timeouts default to 600/60 seconds.
 - `context_window`: context limit for a generated model entry. Set it to the model server's maximum
   context length (`max_model_len` for vLLM). OpenClaw uses it to lower a call's requested output when
   the input is long, to decide when to compact (summarize) the conversation, and to cap long tool
-  results, so changing it can change rollouts. When unset, OpenClaw 2026.6.11 assumes 200,000 tokens,
-  and on a server with a smaller limit, long episodes can send requests the server rejects. Gym's
+  results, so changing it can change rollouts. When unset, OpenClaw 2026.11.5 assumes 128,000 tokens for the
+  generated entry (2026.6.11 assumed 200,000). If the model server has a smaller limit, long
+  episodes can send requests the server rejects. Gym's
   `vllm_model` turns each rejection into an empty reply by default; OpenClaw does not see that as a
   context overflow, so it does not compact, and the run ends early.
 - `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
   requests less when its estimate of the input leaves less room in `context_window`. When unset,
-  OpenClaw 2026.6.11 uses 8,192.
+  OpenClaw 2026.11.5 requests half of `context_window`, at least 8,192 and at most 32,768 tokens (32,768 with
+  the assumed window); 2026.6.11 requested 8,192.
+- `image_input`: declare image support in sandbox sessions without prompt images (default `false`);
+  prompt images declare it automatically.
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)
@@ -63,23 +78,29 @@ Session install/close timeouts default to 600/60 seconds.
 - `model_timeout_seconds`: request and stream-idle timeout for the generated Gym model provider
   (default: 600 seconds). OpenClaw still caps this by the overall agent deadline. Explicit provider
   `timeoutSeconds` settings in local-mode `openclaw_config` take precedence.
-- `extra_args`: extra flags appended to `openclaw agent`
+- `extra_args`: extra flags appended to `openclaw agent`. Unless they choose the session themselves
+  (`--session-id`, `--session-key` or `--to`), the adapter passes its own `--session-id`, which it uses to find
+  a stopped run's history.
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `openclaw_config`: deep-merged into the generated `openclaw.json`
 - `openclaw_version`: exact version to pin on install (npm ranges such as `^2026.9.0`
   are rejected); overridden by the `OPENCLAW_VERSION` env var, and falls back to
   `setup_openclaw.DEFAULT_OPENCLAW_VERSION`. An already-installed `openclaw` is only
   reused when `openclaw --version` reports exactly the resolved version; anything else
-  is reinstalled on first local use after a restart. After an install, the launcher
-  selected on `PATH` must report the requested version, or that local request fails.
-  Note: releases ≥ 2026.9.0 store session history in SQLite instead of JSONL, which
-  the agent's transcript reader does not support yet — tool results and interrupted
-  sessions are not captured, so stick to 2026.6.11 until that lands.
+  is reinstalled on first local use after a restart. The `node` it would run must also satisfy the
+  release's `engines.node` range, since 2026.11.5 prints its version on an unsupported Node but refuses to run.
+  After an install, the launcher selected on `PATH` must report the requested version, or that local request fails.
+  Gym reads the pinned release's per-agent SQLite transcripts with OpenClaw's SDK after the worker stops
+  (`export_sessions.mjs`). If that export fails, the response keeps the CLI's final text without the tool calls.
+  The export runs the SDK of the OpenClaw that `command` runs: a one-word `command` (the launcher, under `node` from
+  `PATH`) or an interpreter followed by the entrypoint's path (`/opt/node/bin/node .../openclaw/openclaw.mjs`).
+  A package runner such as `npx openclaw` chooses the package itself, so its responses keep only the final text.
+  Older releases that write JSONL sessions remain readable.
 - `node_bin_dir`: directory put before `PATH` when running `openclaw`. Setup uses the
   same order for its version probes and for `npm`, so a bundled runtime is checked
   as the rollout will use it.
 - `OPENCLAW_NODE_VERSION` (env only): Node.js version fetched when `npm` is absent
-  (default `24.21.0`, the newest release of the Node 24 LTS line OpenClaw supports).
+  (default `24.22.3`, the newest release of the Node 24 LTS line OpenClaw supports).
   The build is picked for the host platform — Linux, macOS and Windows on x64 and
   arm64. Other platforms raise, since nodejs.org publishes no build for them;
   install Node.js yourself and put `npm` on `PATH`.
@@ -90,6 +111,9 @@ its `node` satisfies the `engines.node` range of the requested OpenClaw release
 others), and a cached local toolchain is only
 reused when it reports exactly the requested Node version. Incompatible runtimes
 are replaced, not bypassed silently.
+
+Local CLI calls need the same glibc 2.33 or newer on the host for OpenClaw 2026.11.5's `exec` tool; on an older
+glibc each `exec` call fails with "native child reaping is unavailable".
 
 The host installer settings above apply only to local CLI calls, with installation deferred
 until the first call rather than startup. Concurrent callers share one background-thread
@@ -168,9 +192,12 @@ deadline when a task needs more total time; increasing those alone does not rais
 
 The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64. The task image needs no Python:
 the supervisor and harness runner are Bash scripts. Session setup installs a missing Bash with apt-get or apk
-when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 22.19.0 and OpenClaw are installed under
-`/tmp/nemo-gym-openclaw-node-22.19.0-<version>`. Node archives are checked against upstream SHA-256
+when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 24.22.3 and OpenClaw are installed under
+`/tmp/nemo-gym-openclaw-node-24.22.3-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
+OpenClaw 2026.11.5 runs exec-tool commands through a compiled process helper whose glibc build needs glibc 2.33 or
+newer (Debian 12, Ubuntu 22.04 or later); the musl build has no such floor. The installer checks that the helper
+loads, and session setup refuses an image where it does not with HTTP 422 instead of letting every `exec` call fail.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
 attempts. Missing `flock`, `curl`, CA certificates, `tar`, `gzip`, `sha256sum`, and `awk` are installed with `apt-get` or `apk` only when
 running as root. Other images receive an actionable prerequisite error. Installation errors include
@@ -189,11 +216,13 @@ or creating bootstrap files in the task repository. Task HOME, XDG directories, 
 dependencies are preserved for tools and verification.
 The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
 execution and required direct-HTTP tool grants are unsupported. MCP tool grants become streamable-HTTP
-`mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`; `mcp_tool_timeout_seconds` sets
+`mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`: the adapter turns off OpenClaw's tool
+search, which 2026.11.5 enables by default to hide them behind `tool_search`. `mcp_tool_timeout_seconds` sets
 their per-request timeout. Before the agent runs, the adapter connects to each grant with
 `openclaw mcp probe <grant> --json`: a required grant that does not connect fails the activation, and an optional
-one is left out and reported as an `mcp_server_skipped` gap. The pinned `probe --json` exits 0 when a connection
-fails, so a grant counts as connected only when the JSON lists it under `servers` with no diagnostic for it.
+one is left out and reported as an `mcp_server_skipped` gap. `probe --json` exits 0 when a connection fails on
+2026.6.11 and 1 on 2026.11.5, so a grant counts as connected only when the probe exits 0 and its JSON lists the
+grant under `servers` with no diagnostic for it.
 Each probe runs under the same process supervisor as the agent, with its own directory and cleanup receipt, so a
 probe that exceeds its 120-second limit is stopped inside the sandbox (some providers stop only their local client on
 an exec timeout). The agent starts only after the probe's termination is confirmed, and session close stops a probe
@@ -214,7 +243,16 @@ Sandbox request support is deliberately explicit:
   without the original cookie; reusing its ID for different inputs is rejected. Close accepts the
   explicit ID and episode without a cookie, including after a lost seed response. Closing an
   unknown ID prevents a delayed seed from creating it. Filesystem paths use independent random IDs.
-- A text user prompt, optionally preceded by one system message. Text-part arrays are accepted.
+- One user prompt, optionally preceded by one system message. Text-part arrays are accepted. Sandbox sessions
+  also accept base64 data-URI `input_image` parts, with or without text; local execution rejects images with HTTP 422.
+  Each image occurrence gets a separate file under `<session>/home/.openclaw/media/`, removed on close, so repeated
+  images remain repeated. The adapter appends each file's absolute path on its own line after the prompt text;
+  OpenClaw attaches the images it names (2026.11.5 ignores the older `[Image: source: <path>]` marker).
+  These session-specific paths remain visible to the model. Image order is preserved, but text/image interleaving
+  and the requested `detail` are not. For image-capable sessions, the adapter disables OpenClaw's configurable
+  1200 px resize. OpenClaw can still resize or re-encode large images in its own file-loading and
+  byte-limit processing. Exported conversations retain images as data URIs. Completed and output-limit replies
+  must retain every supplied image occurrence; wall-time limits keep their existing behavior.
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.
@@ -252,6 +290,8 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
+Reasoning tokens are reported only when every counted call carries a count. The CLI envelope's total is never used
+for them, because it counts a call without one as zero.
 An explicit wall or model-output limit returns partial output as `incomplete`.
 Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
@@ -289,7 +329,6 @@ Missing evidence or failed release
 retains the session for retry. Releasing a final failed activation does not make it gradable.
 Cached runtime files and preserved task services remain until Resources destroys the sandbox.
 
-This path is eval-only. Working inference does not establish training token-ID/logprob support.
 A tool-and-verifier smoke is required for the actual image/model configuration before review;
 unit tests alone do not establish runtime compatibility or benchmark accuracy. Process/memory/setup
 and close-latency overhead have not been benchmarked at scale.
@@ -310,7 +349,8 @@ other than `inherit` (the default, the provider's network), and it cannot be com
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out.
 Build it into the image with `bash install_openclaw_runtime.sh <dir> <openclaw_version>`; the image also needs `bash`,
 since the session prepare step would otherwise run `apk` or `apt-get`, which the policy blocks. Instead of installing,
-setup checks that the runtime's Node is 22.19.0 or newer, that the CLI runs, and that the package declares
+setup checks that the runtime's Node satisfies the installed package's engine range, that the CLI runs, that the exec
+tool's compiled process helper loads, and that the package declares
 `openclaw_version` (an exact match), and refuses the seed with a 422 when any of these fails.
 
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under

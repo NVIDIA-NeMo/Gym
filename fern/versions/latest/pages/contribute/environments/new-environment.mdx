@@ -2,8 +2,6 @@
 title: "New Environment"
 description: "Compose task and harness components, declare a workload manifest, and validate a contribution."
 ---
-# New Environment
-
 An environment is the logical execution composition of a task, agent harness, model bindings, resources, and episode protocol. A Gym config selects and connects these participants. The task defines what must be done and how it is scored; the harness decides how to solve it.
 In Gym, a benchmark is a special kind of environment: a reproducible evaluation workload that requires a canonical split, a data preparation step, and a fixed prompt configuration so any user can reproduce the same score.
 General-purpose environments and benchmarks are stored in `environments` and `benchmarks` directories, respectively, each composed with a resources server under `resources_servers/`.
@@ -197,6 +195,8 @@ Validate with actual training:
 
 Run `gym env publish my_eval` to confirm the manifest is valid and discoverable before opening the PR. Then include the following in your pull request description:
 
+CI does not start on its own for unverified commits or external contributors: a qualified NVIDIA-NeMo member must comment `/ok to test <full 40-character commit SHA>` on the PR. See [Continuous Integration](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md#continuous-integration-ci).
+
 - Description of the environment
 - Description of the verification logic
 - Description of the prompts/tasks: What is the source? Which domain does it cover?
@@ -355,6 +355,7 @@ The manifest is the place to read this declaration, but not every field is autho
 | Field group | Authority |
 | --- | --- |
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
+| Selection metadata: optional `maintainers`, `capabilities`, `domains`, `overlaps_with`, `primary_metric`, and `requirements` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
 | Configuration selection: `config_path` and optional `dataset_owner` | Manifest |
@@ -405,18 +406,25 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `experimental` | boolean | Optional; defaults to `true` |
 | `kind` | string | Required; `environment` or `benchmark` |
 | `integration_profile` | string | Required; one of the profiles below |
-| `domain` | string | Required; `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, or `other` |
+| `domain` | string | Required; `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `asr`, `e2e`, `rlhf`, or `other` |
 | `description` | string | Required; non-empty |
 | `modality` | string | Required; non-empty |
 | `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |
 | `authors` | list of strings | Required; non-empty and unique |
+| `maintainers` | list of strings or null | Optional; GitHub logins of the current maintainers, non-empty and unique |
+| `capabilities` | list of strings, `unknown`, or null | Optional; the skills the environment exercises, from the capability taxonomy (`capability_taxonomy_v0_1`). Write each as `<capability>` or `<capability>/<specialization>`, for example `reasoning` or `coding/code_generation`; unique. The first entry is the main capability. By convention, its top level (the part before the slash, such as `coding`) is the environment's coarse category, which readers and tools such as catalogs can group by; `gym list` groups by `domain`. An empty list means none applies, for example a speed benchmark that tests no model skill. `unknown` is the whole value (`capabilities: unknown`), never an item in a list. The values are listed in [`nemo_gym/environment/capabilities_and_domains.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/environment/capabilities_and_domains.yaml) |
+| `domains` | list of strings, `unknown`, or null | Optional; the fields of expertise the tasks need, from the domain list (`enrichment_tags_v0_1`), with the main domain first, for example `[finance, law]`; unique. `general` means no specialist field is needed and `other` a field the list does not have. An empty list means none applies. `unknown` is the whole value (`domains: unknown`), never an item in a list. The values are listed in the same file. This field is separate from `domain`, Gym's single category |
+| `overlaps_with` | list of strings or null | Optional; benchmarks that training on this environment would invalidate, for example because their tasks overlap with its data |
+| `primary_metric` | string or null | Optional; the headline score's exact key in the run's [aggregate metrics](/main/evaluation/aggregate-metrics), such as `mean/reward` or `pass@1[avg-of-4]/accuracy`, not a display label. A `pass@k` key includes the repeat count it was computed with |
+| `requirements` | object or null | Optional; what a run needs beyond the model under test. `gpu` (the environment itself needs a GPU) is `true`, `false`, or `unknown`. `network` (outbound access a run needs) is `no-network`; `allowlist` (only specific services, such as a search API or a hosted judge model); `public` (the open internet, for example browsing or downloads); or `unknown`. The `network` values are the same as a Harbor task's `network_mode` |
 | `reward` | object | Required; `range` is two finite numbers ordered `lower <= upper` (a constant range is allowed) and `higher_is_better` is boolean |
 | `determinism` | string | Optional; `seeded`, `stochastic`, or `unknown` (default) |
 | `config_path` | string | Optional; defaults to `config.yaml` beside the manifest; must be relative and stay inside the catalog tree |
+| `harbor_target` | string or null | Optional; mirrored from the config's `harbor_target`: the Harbor task folder, committed entry or `harbor:` reference the benchmark runs. Its tasks are the rows, so `datasets` is empty and `prompt_source` is `prepared` or `agent` |
 | `dataset_owner` | string or null | Optional; selects the dataset-bearing config instance when selection is ambiguous |
 | `resources_server` | string or null | Required; mirrored from config; `null` is permitted except for `custom-gym-verifier` |
 | `agent_server` | string | Required; mirrored from config |
-| `datasets` | list of objects | Required and non-empty; dataset names must be unique |
+| `datasets` | list of objects | Required and non-empty unless `harbor_target` is set, and then empty; dataset names must be unique |
 | `model_server` | string or null | Required for `custom-gym-verifier` and `custom-gym-agent-loop` |
 | `rollout_driver` | string or null | Required only for `external-rollout-driver`; Python `module:function` form |
 | `grading_mode` | string or null | Optional resources-server-specific selector |
@@ -432,6 +440,8 @@ For benchmarks and named configs, additional fields apply — in particular `con
 Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `train`, `validation`, `example`, or `benchmark`; benchmark datasets also require `prepare_script`. `num_repeats` defaults to `1`. `canonical_split` records the source split being measured, while dataset `type: benchmark` selects its role in Gym.
 
 For named configs, put the manifest in the workload's catalog directory and set `config_path` relative to it. For example, `benchmarks/my_benchmark/config_with_system/manifest.yaml` can declare `name: my_benchmark/config_with_system` and `config_path: ../config_with_system.yaml`. Shared prompts and suite fragments are not standalone workloads.
+
+A named config that only changes the harness, such as `benchmarks/my_benchmark/opencode.yaml`, is a run preset of its benchmark and gets no manifest. If the Resources Server in the benchmark's main config declares `allowed_agents`, add the preset's agent there only after a representative rollout with a real model and verifier shows that the pairing works, as the [Terminal Bench 2.1 note](/main/agent-server/integrate-existing-agents#swap-the-agent-or-the-benchmark) describes. Until then, run the preset with `--allow-unsupported-pairing`. A named config that changes the prompt, scoring, task limits, or tools is a benchmark or environment of its own and gets its own manifest, as above. Do not add manifests for `*_legacy_agent` configs.
 
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 
@@ -456,7 +466,7 @@ Choose the source that matches the implemented prompting path. Changing this met
 | `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
 | `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
 
-Every profile declares `resources_server`, `agent_server`, and at least one dataset. If the workload has no resources server, profiles other than `custom-gym-verifier` may explicitly declare `resources_server: null`. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split` and at least one benchmark dataset with `prepare_script`; its prompt requirements depend on `prompt_source` above.
+Every profile declares `resources_server` and `agent_server`. Without `harbor_target`, it also declares at least one dataset. If the workload has no resources server, profiles other than `custom-gym-verifier` may explicitly declare `resources_server: null`. `rollout_driver` is valid only for `external-rollout-driver`. Every benchmark requires `canonical_split`; a benchmark without `harbor_target` additionally requires at least one benchmark dataset with `prepare_script`, and its prompt requirements depend on `prompt_source` above. A Harbor-backed manifest instead has empty `datasets` and uses `prompt_source: prepared` or `agent`.
 
 The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
 

@@ -17,13 +17,13 @@ from fastapi.testclient import TestClient
 from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    SandboxPlatform,
     SandboxPythonRuntime,
     SandboxSession,
     agent_tools,
     raises_agent_failure,
 )
 from nemo_gym.agents.utils import sandbox_python
-from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
@@ -520,7 +520,7 @@ def test_a_run_that_never_finishes_within_its_turns_answers_incomplete(agent, cl
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "incomplete"
-    assert "stop_reason" not in response.json()["metadata"]
+    assert response.json()["metadata"]["stop_reason"] == "max_turns"
     assert closed.json()["agent_observations"]["records"][0]["status"] == "incomplete"
 
 
@@ -562,7 +562,7 @@ class _FakeSandbox:
     async def upload(self, local_path, remote_path):
         pass
 
-    async def disconnect(self):
+    async def disconnect(self, **_):
         self.disconnected = True
 
 

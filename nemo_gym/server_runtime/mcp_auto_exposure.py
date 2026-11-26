@@ -26,7 +26,14 @@ override may filter them (exclude a route), append catch-all-backed tools (dispa
 per-tool schemas live in data: ``harvested + [catchall.tool(name, input_schema, description)]``), or
 return ``None``/``[]`` to expose nothing. A server can narrow one rollout's token to a subset of
 tools by overriding ``mcp_allowed_tools_for_session(seed_body)``; the token minted by that
-/seed_session response then lists and calls only those tools.
+/seed_session response then lists and calls only those tools. For an endpoint that code a model can
+read calls (a harness in a sandbox), two config options make it an ordinary one: ``mcp_server_name``
+is the name clients list it under, and ``mcp_bearer_token`` hands out the token as ``Authorization:
+Bearer``, requires it for tools/list, answers a tool outside the token's grant as an unknown tool,
+and words its errors without naming the framework or the tool's route. With ``mcp_bearer_token``
+the server signs its sessions with a secret made for the run (``SimpleServer.get_session_secret``),
+since code that reads one token could otherwise sign another session's with the public default key;
+exposure refuses to start if an override of ``get_session_secret()`` returns that public key.
 
 Dispatch is direct: the route's handler runs exactly once per MCP call, invoked with a fabricated
 ``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
@@ -96,6 +103,7 @@ from starlette.routing import Mount, Route
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode_context import current_episode_id
+from nemo_gym.core.tool_output_images import split_tool_output_images
 from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
 from nemo_gym.server_runtime.base_resources_server import (
     MCP_TOKEN_EPISODE_CLAIM,
@@ -107,6 +115,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     mcp_session_token_payload,
     mcp_session_token_serializer,
 )
+from nemo_gym.server_runtime.request_handling.session_routing import mcp_session_token
 
 
 LOG = logging.getLogger(__name__)
@@ -117,6 +126,18 @@ TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
 CONTROL_ROUTE_PREFIX = "/ng-control/"
+
+
+def advertised_name(server: Any) -> str:
+    """The name the MCP endpoint lists itself under: the config's ``mcp_server_name``, else the server's own."""
+    return getattr(server.config, "mcp_server_name", None) or server.config.name or type(server).__name__
+
+
+def session_token_header(server: Any) -> str:
+    """The header a session token rides in: ``Authorization``, as a bearer token, with ``mcp_bearer_token``;
+    else TOKEN_HEADER."""
+    return "Authorization" if getattr(server.config, "mcp_bearer_token", False) else TOKEN_HEADER
+
 
 PERMISSIVE_SCHEMA: dict = {"type": "object", "additionalProperties": True}
 
@@ -739,39 +760,57 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
                 "with checkpointing on, a seed that mints an MCP token needs a rollout prefix"
             )
         payload[MCP_TOKEN_EPISODE_CLAIM] = episode_id.capture_key
+    token = serializer.dumps(payload)
+    header = session_token_header(server)
     return MCPServerMetadata(
-        server_name=server.config.name or type(server).__name__,
+        server_name=advertised_name(server),
         url_path=MCP_URL_PATH,
         transport="http",
-        headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: serializer.dumps(payload)},
+        headers={header: f"Bearer {token}" if header == "Authorization" else token},
     ).model_dump()
 
 
 def _parse_session_token(
-    serializer: URLSafeSerializer, token: Optional[str], required: bool
+    serializer: URLSafeSerializer, token: Optional[str], required: bool, *, bearer: bool = False
 ) -> tuple[Optional[str], Optional[frozenset]]:
     """Decode a Gym MCP session token into ``(session id, token allow-list)``.
 
     ``required`` callers (tools/call) raise on a missing/forged token; optional callers (tools/list)
-    fall back to ``(None, None)``. A ``tools`` of None means the session is unrestricted.
+    fall back to ``(None, None)``. A ``tools`` of None means the session is unrestricted. With ``bearer``
+    (``mcp_bearer_token``) the errors name the ``Authorization`` header and no framework.
     """
     if not token:
         if required:
-            raise ValueError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
+            raise ValueError(
+                "Missing session token (Authorization header)."
+                if bearer
+                else f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call."
+            )
         return None, None
     # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
     payload = mcp_session_token_payload(serializer, token)
     if payload is None:
         if required:
-            raise ValueError("Invalid Gym MCP session token.")
+            raise ValueError("Invalid session token." if bearer else "Invalid Gym MCP session token.")
         return None, None
     allowed = payload.get("tools")
     return payload["sid"], None if allowed is None else frozenset(allowed)
 
 
-def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.CallToolResult:
-    """Preserve text content and object-only structured content on both SDK versions."""
-    structured = payload if isinstance(payload, dict) else None
+def to_call_tool_result(
+    payload: Any, *, output_schema: Optional[dict] = None, is_error: bool = False
+) -> types.CallToolResult:
+    """Preserve text content and object-only structured content on both SDK versions.
+
+    ``is_error`` marks a result the agent should see as a failed call.
+
+    Images a tool lists under ``tool_output_images`` leave the text and structured content and follow it as MCP
+    image content, each after its label. A result with images carries no structured content unless the tool declares
+    an output schema: some clients, such as OpenCode, replace the content with the structured content when it is
+    present, which would drop the images.
+    """
+    payload, images = split_tool_output_images(payload)
+    structured = payload if isinstance(payload, dict) and (not images or output_schema is not None) else None
     if output_schema is not None:
         if structured is None:
             raise ValueError("Output validation error: outputSchema defined but no structured output returned")
@@ -780,9 +819,12 @@ def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.C
         except jsonschema.ValidationError as exc:
             raise ValueError(f"Output validation error: {exc.message}") from exc
     text = payload if isinstance(payload, str) else JSONResponse(payload).body.decode("utf-8")
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)], structuredContent=structured, isError=False
-    )
+    content: list[types.TextContent | types.ImageContent] = [types.TextContent(type="text", text=text)]
+    for image in images:
+        if image.label:
+            content.append(types.TextContent(type="text", text=image.label))
+        content.append(types.ImageContent(type="image", data=image.data, mimeType=image.media_type))
+    return types.CallToolResult(content=content, structuredContent=structured, isError=is_error)
 
 
 def _make_mcp_server(
@@ -824,7 +866,7 @@ def _make_mcp_server(
 
 def session_token_serializer(server: Any) -> URLSafeSerializer:
     """The serializer that signs and verifies this server's MCP session tokens."""
-    return mcp_session_token_serializer(server.get_session_middleware_key())
+    return mcp_session_token_serializer(server.session_secret)
 
 
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
@@ -855,6 +897,18 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             "on the same server. Remove the hand-rolled /mcp mount and rely on expose_tools_over_mcp."
         )
 
+    token_header = session_token_header(server)
+    # With bearer tokens, only a session learns which tools exist, and only its own, and errors name no framework.
+    bearer = token_header == "Authorization"
+    if bearer and server.session_secret == server.get_session_middleware_key():
+        # Bearer tokens go to code that can read them. Anyone can compute the session middleware key from the
+        # server's class and name, and the default cookie name shows it, so that code could sign any session's token.
+        raise ValueError(
+            f"{server.config.name!r} sets mcp_bearer_token but signs its MCP session tokens with its public session "
+            f"middleware key: {type(server).__name__}.get_session_secret() must return a secret, as its default does "
+            "with mcp_bearer_token."
+        )
+
     serializer = session_token_serializer(server)
     tools = harvest_tools(app, server)
 
@@ -863,41 +917,61 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
     _wrap_verify(app, server)
 
     def session_claims(ctx_request: Optional[Request], *, required: bool) -> tuple[Optional[str], Optional[frozenset]]:
-        token = ctx_request.headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER) if ctx_request is not None else None
-        return _parse_session_token(serializer, token, required)
+        token = mcp_session_token(ctx_request.headers, token_header) if ctx_request is not None else None
+        return _parse_session_token(serializer, token, required, bearer=bearer)
+
+    def unknown_tool(name: str, allowed: Optional[frozenset]) -> types.CallToolResult:
+        # Models hallucinate tool names, so answer the miss cheaply with a plain isError result
+        # instead of raising. The SDK still refreshes its tool cache and logs one warning per
+        # unknown name before this handler runs; that happens in its wrapper, out of our reach.
+        known = sorted(n for n in tools if allowed is None or n in allowed)
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=f"Unknown tool: {name!r}. Available tools: {known}")],
+            isError=True,
+        )
 
     async def list_tools(ctx_request: Optional[Request]) -> list[types.Tool]:
-        _, allowed = session_claims(ctx_request, required=False)
+        _, allowed = session_claims(ctx_request, required=bearer)
         return [t.tool for t in tools.values() if allowed is None or t.name in allowed]
 
     async def call_tool(ctx_request: Optional[Request], name: str, arguments: dict) -> types.CallToolResult:
         tool = tools.get(name)
         if tool is None:
-            # Models hallucinate tool names, so answer the miss cheaply with a plain isError result
-            # instead of raising. The SDK still refreshes its tool cache and logs one warning per
-            # unknown name before this handler runs; that happens in its wrapper, out of our reach.
-            return types.CallToolResult(
-                content=[
-                    types.TextContent(type="text", text=f"Unknown tool: {name!r}. Available tools: {sorted(tools)}")
-                ],
-                isError=True,
-            )
+            return unknown_tool(name, session_claims(ctx_request, required=True)[1] if bearer else None)
         session_id, allowed = session_claims(ctx_request, required=True)
         if allowed is not None and name not in allowed:
+            if bearer:
+                return unknown_tool(name, allowed)
             raise ValueError(f"Tool {name!r} is not allowed for this session.")
         try:
             payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
         except DirectDispatchError as exc:
-            raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
-        return _to_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
+            raise ValueError(f"HTTP {exc.status} from {name if bearer else f'POST /{name}'}: {exc.detail}")
+        return to_call_tool_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
 
-    mcp_server = _make_mcp_server(server.config.name or type(server).__name__, list_tools, call_tool)
+    mount_mcp_endpoint(app, advertised_name(server), list_tools, call_tool)
+    return tools
+
+
+def mount_mcp_endpoint(
+    app: FastAPI,
+    server_name: str,
+    list_tools: Callable[[Optional[Request]], Awaitable[list[types.Tool]]],
+    call_tool: Callable[[Optional[Request], str, dict], Awaitable[types.CallToolResult]],
+) -> None:
+    """Serve ``list_tools`` and ``call_tool`` at ``/mcp`` on ``app``.
+
+    The endpoint is stateless Streamable HTTP with JSON responses, and runs within the app's lifespan. Each
+    handler receives the HTTP request that carried the MCP message (``None`` outside a request), so it can read
+    the caller's headers, such as a session token.
+    """
+    mcp_server = _make_mcp_server(server_name, list_tools, call_tool)
     manager = StreamableHTTPSessionManager(
         app=mcp_server,
         event_store=None,
         json_response=True,
         stateless=True,
-        # The agent reaches this endpoint server-to-server via the resources server's resolved host
+        # The agent reaches this endpoint server-to-server via the server's resolved host
         # (a routable IP/hostname on multi-node runs); enabling the SDK's Host/Origin allowlist would
         # mean enumerating every such host. DNS-rebinding protection defends browsers, which never
         # talk to this endpoint; disabling it is not what makes the endpoint safe.
@@ -929,4 +1003,10 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
                 yield state
 
     app.router.lifespan_context = lifespan_wrapper
-    return tools
+
+
+# Serves the names this module had before a rename, such as _to_result, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

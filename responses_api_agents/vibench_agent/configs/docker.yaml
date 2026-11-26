@@ -1,4 +1,6 @@
-# Docker sandbox provider for ViBench.
+# Docker sandbox provider for ViBench's legacy relay config,
+# resources_servers/vibench/configs/vibench_legacy_agent.yaml. The default config,
+# resources_servers/vibench/configs/vibench.yaml, takes resources_servers/vibench/configs/docker.yaml instead.
 #
 # Use this INSTEAD OF nemo_gym/sandbox/providers/docker/configs/docker.yaml.
 # Stock docker.yaml uses a 180s exec timeout, which kills long npm/pip installs.
