@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, call
+from uuid import uuid4
 
 import anyio
 from fastapi import Request
@@ -1732,6 +1734,44 @@ class TestOpenCodeSandboxedAgent:
         assert server._sandbox_id_to_run_result == {}
 
 
+def _spawn_with_run_marker(args: list[str], run_marker: str | None) -> subprocess.Popen:
+    """Start ``args`` in a session of its own, with ``run_marker`` (``NAME=value``) as the only run marker it has."""
+    env = {key: value for key, value in os.environ.items() if key != app_module.OPENCODE_RUN_MARKER}
+    if run_marker is not None:
+        key, value = run_marker.split("=", 1)
+        env[key] = value
+    return subprocess.Popen(args, env=env, start_new_session=True)
+
+
+def _process_alive(pid: int) -> bool:
+    # A killed child is reparented and may stay a zombie until the container's init reaps it, which is dead for the
+    # stop script too, so only a live process counts as left over.
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return state != "Z"
+
+
+def _wait_for_pids(path: Path, count: int) -> list[int]:
+    deadline = time.monotonic() + 10
+    while (not path.exists() or len(path.read_text().split()) < count) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    pids = [int(pid) for pid in path.read_text().split()]
+    assert len(pids) == count, pids
+    return pids
+
+
+def _kill_process_groups(*procs: subprocess.Popen) -> None:
+    # Each one runs in a session of its own, so its process group also holds the children it started.
+    for proc in procs:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
 class TestBenchmarkLifecycle:
     _create_config = TestOpenCodeSandboxedAgent._create_config
 
@@ -2528,46 +2568,127 @@ class TestBenchmarkLifecycle:
         assert "session" not in server._sandbox_id_to_run_result
 
     @mark.skipif(not Path("/proc/self/stat").exists(), reason="the stop script reads /proc")
-    def test_terminate_command_stops_the_marked_process_tree_and_nothing_else(self, tmp_path: Path) -> None:
-        # The real pattern would match any "opencode run" process on this machine, so the test swaps in a token
-        # no other process has. The matching, tree walk, kill and confirmation logic are the shipped script's.
-        token = f"opencode-test-{os.getpid()}"
-        script = app_module.TERMINATE_AGENT_COMMAND.replace("opencod[e]\\ run", f"{token[:-1]}[{token[-1]}]")
-        assert script != app_module.TERMINATE_AGENT_COMMAND
-        marker = tmp_path / "pids"
-        # A shell whose command line carries the token, its child, and a bystander without the token.
-        agent = subprocess.Popen(
-            ["sh", "-c", f"sleep 300 & echo $! > {marker}; sleep 301; exit 0 # {token}"], start_new_session=True
+    def test_terminate_command_stops_this_runs_processes_and_nothing_else(self, tmp_path: Path) -> None:
+        # The shipped script, run on this machine. It acts only on processes carrying this run's marker and their
+        # descendants, so it cannot touch anything else here.
+        marker = f"{app_module.OPENCODE_RUN_MARKER}={uuid4().hex}"
+        pids, late = tmp_path / "pids", tmp_path / "late"
+        # This run: a shell that ignores TERM (so only KILL stops it) with a child that inherits the marker and one
+        # that dropped its environment, and a tool left in a session of its own after its OpenCode parent was killed.
+        agent = _spawn_with_run_marker(
+            [
+                "sh",
+                "-c",
+                f"trap '' TERM; sleep 300 & echo $! >> {pids}; "
+                f"env -i sleep 301 & echo $! >> {pids}; sleep 302; exit 0",
+            ],
+            marker,
         )
-        bystander = subprocess.Popen(["sleep", "302"], start_new_session=True)
+        orphaned_tool = _spawn_with_run_marker(["sleep", "303"], marker)
+        # Another rollout's run on the same host (its command line names `opencode run`), and a bystander.
+        other_rollout = _spawn_with_run_marker(
+            ["sh", "-c", "sleep 304; exit 0 # opencode run"], f"{app_module.OPENCODE_RUN_MARKER}={uuid4().hex}"
+        )
+        bystander = _spawn_with_run_marker(["sleep", "305"], None)
+        # One more process of this run starts after the first kill round, while the stop waits: only a later pass
+        # can stop it.
+        start_late_tool = (
+            f"sleep() {{ [ -e {shlex.quote(str(late))} ] || "
+            f'{{ env {marker} sleep 306 & echo $! > {shlex.quote(str(late))}; }}; command sleep "$@"; }}\n'
+        )
         try:
-            deadline = time.monotonic() + 10
-            while not (marker.exists() and marker.read_text().strip()) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            child_pid = int(marker.read_text().strip())
-            done = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+            children = _wait_for_pids(pids, 2)
+            done = subprocess.run(
+                ["sh", "-c", start_late_tool + app_module.terminate_agent_command(marker)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
             assert done.returncode == 0, done.stderr
+            children += _wait_for_pids(late, 1)
             agent.wait(timeout=10)
-
-            # A killed child is reparented and may stay a zombie until the container's init reaps it, which is
-            # dead for the script too, so only a live process counts as left over.
-            def alive(pid: int) -> bool:
-                try:
-                    state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
-                except (FileNotFoundError, ProcessLookupError):
-                    return False
-                return state != "Z"
-
+            orphaned_tool.wait(timeout=10)
             deadline = time.monotonic() + 10
-            while alive(child_pid) and time.monotonic() < deadline:
+            while any(_process_alive(pid) for pid in children) and time.monotonic() < deadline:
                 time.sleep(0.05)
-            assert not alive(child_pid)
+            assert not any(_process_alive(pid) for pid in children)
+            assert other_rollout.poll() is None
             assert bystander.poll() is None
         finally:
-            for proc in (agent, bystander):
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
+            _kill_process_groups(agent, orphaned_tool, other_rollout, bystander)
+            if late.exists() and late.read_text().strip() and _process_alive(int(late.read_text())):
+                os.kill(int(late.read_text()), signal.SIGKILL)
+
+    @mark.skipif(not Path("/proc/self/stat").exists(), reason="the stop script reads /proc")
+    def test_terminate_command_fails_while_a_process_of_the_run_survives(self, tmp_path: Path) -> None:
+        # A child the stop cannot kill (another user's process after sudo, or one in uninterruptible sleep), played
+        # by a `kill` wrapper that spares it. Its marked parent dies, so only the record of what was killed keeps the
+        # child a target, and the stop must fail rather than confirm.
+        marker = f"{app_module.OPENCODE_RUN_MARKER}={uuid4().hex}"
+        pids = tmp_path / "pids"
+        agent = _spawn_with_run_marker(["sh", "-c", f"env -i sleep 300 & echo $! > {pids}; sleep 301; exit 0"], marker)
+        try:
+            [child_pid] = _wait_for_pids(pids, 1)
+            spare_child = f'kill() {{ [ "$2" = {child_pid} ] || command kill "$@"; }}\n'
+            done = subprocess.run(
+                ["sh", "-c", spare_child + app_module.terminate_agent_command(marker)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            assert done.returncode == 1, done.stderr
+            agent.wait(timeout=10)  # the marked parent was stopped
+            assert _process_alive(child_pid)
+        finally:
+            _kill_process_groups(agent)  # the spared child is in the agent's process group
+
+    async def test_agent_deadline_stops_the_run_it_launched(self, tmp_path: Path) -> None:
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        commands: list[str] = []
+        envs: dict[str, dict[str, str] | None] = {}
+
+        async def execute(command: str, **kwargs: Any) -> Any:
+            commands.append(command)
+            envs[command] = kwargs.get("env")
+            if "session list" in command:
+                return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
+            if "opencode export" in command or "nemo-gym-terminate-agent" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "opencode db" in command:
+                return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
+            return SimpleNamespace(stdout="Shell: bash\npartial", stderr="", return_code=124, error_type="timeout")
+
+        async def download(_remote: str, local: Path) -> None:
+            local.write_bytes((Path(__file__).parent / "opencode_export_test_data.json").read_bytes())
+
+        sandbox = MagicMock(
+            upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
+        )
+        server._sandbox_id_to_sandbox = {"session": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        markers = []
+        for _attempt in range(2):
+            commands.clear()
+            request = SimpleNamespace(
+                cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+            )
+            await server.responses(request, body)
+            [launch] = [c for c in commands if "opencode run" in c and "nemo-gym-terminate-agent" not in c]
+            [stop] = [c for c in commands if "nemo-gym-terminate-agent" in c]
+            [marker] = re.findall(rf"{app_module.OPENCODE_RUN_MARKER}=[0-9a-f]{{32}}", launch)
+            assert launch.startswith(f"export {marker} && ")  # everything the command starts inherits it
+            assert envs[launch] == dict([marker.split("=", 1)])  # and so does the shell that runs the command
+            assert stop == app_module.terminate_agent_command(marker)
+            markers.append(marker)
+        assert markers[0] != markers[1]  # each attempt stops only its own run
 
     @mark.parametrize(
         ("return_code", "sandbox_error_type", "expected_error_type"),

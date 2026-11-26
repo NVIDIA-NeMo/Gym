@@ -747,47 +747,70 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
+# Every process an attempt's launch command starts (setup steps, OpenCode, its tools) inherits this variable, set to
+# a value unique to the attempt, including a tool OpenCode starts in a session of its own.
+OPENCODE_RUN_MARKER = "NEMO_GYM_OPENCODE_RUN"
+
 # Stops the OpenCode agent and everything it started, then confirms none of it is left. A provider's command
 # deadline can end only the client side of the exec (the Docker provider kills its local client), so the agent
-# may keep changing task files while they are exported and graded. The bracket in the pattern keeps this
-# script from matching its own command line.
-TERMINATE_AGENT_COMMAND = r"""
-# nemo-gym-terminate-agent: stop the OpenCode agent process tree and confirm it is gone
+# may keep changing task files while they are exported and graded. Processes are found by the attempt's marker and as
+# descendants of a marked process, not by name: a name also matches other rollouts' runs where sandboxes share a
+# process namespace (the local provider), and a provider that kills the exec's process group at the deadline can
+# leave a tool OpenCode started in its own session with no parent left to walk down from. Passes repeat until one
+# finds nothing, so a process started during a pass is caught by the next; after five kill rounds the stop fails. A
+# process a pass killed stays a target until it is gone or a zombie (matched by PID and start time, so a reused PID is
+# not mistaken for it), even once its parent is gone, so one that survives the kill (another user's after sudo, or one
+# in uninterruptible sleep) fails the stop. A process whose environment cannot be read (a zombie, another user's, a
+# non-dumpable one) is a target only as a descendant. Without /proc or tr nothing can be confirmed, so the stop fails.
+_TERMINATE_AGENT_SCRIPT = r"""
+# nemo-gym-terminate-agent: stop the processes of this OpenCode run and confirm none is left
+command -v tr >/dev/null && [ -r /proc/self/stat ] || exit 1
 self=$$
-table=""
-targets=""
-for d in /proc/[0-9]*; do
-  pid=${d#/proc/}
-  [ "$pid" = "$self" ] && continue
-  stat=$(cat "$d/stat" 2>/dev/null) || continue
-  rest=${stat##*) }
-  set -- $rest
-  table="$table $pid:$2"
-  cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
-  case "$cmd" in
-    *opencod[e]\ run*) targets="$targets $pid" ;;
-  esac
-done
-changed=1
-while [ "$changed" = 1 ]; do
-  changed=0
-  for entry in $table; do
-    pid=${entry%%:*}
-    ppid=${entry##*:}
-    case " $targets " in *" $pid "*) continue ;; esac
-    case " $targets " in *" $ppid "*) targets="$targets $pid"; changed=1 ;; esac
+marker=@MARKER@
+nl='
+'
+kills=0
+killed=""
+while :; do
+  table=""
+  targets=""
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    [ "$pid" = "$self" ] && continue
+    read -r stat 2>/dev/null < "$d/stat" || continue
+    rest=${stat##*) }
+    set -- $rest
+    table="$table $pid:$2"
+    case " $killed " in *" $pid:${20} "*) [ "$1" = Z ] || { targets="$targets $pid"; continue; } ;; esac
+    env=$(tr '\0' '\n' 2>/dev/null < "$d/environ") || continue
+    case "$nl$env$nl" in *"$nl$marker$nl"*) targets="$targets $pid" ;; esac
   done
+  changed=1
+  while [ "$changed" = 1 ]; do
+    changed=0
+    for entry in $table; do
+      pid=${entry%%:*}
+      ppid=${entry##*:}
+      case " $targets " in *" $pid "*) continue ;; esac
+      case " $targets " in *" $ppid "*) targets="$targets $pid"; changed=1 ;; esac
+    done
+  done
+  [ -z "$targets" ] && exit 0
+  [ "$kills" -ge 5 ] && exit 1
+  kills=$((kills + 1))
+  for pid in $targets; do
+    read -r stat 2>/dev/null < "/proc/$pid/stat" && { rest=${stat##*) }; set -- $rest; killed="$killed $pid:${20}"; }
+    kill -KILL "$pid" 2>/dev/null
+  done
+  sleep 1
 done
-for pid in $targets; do kill -KILL "$pid" 2>/dev/null; done
-sleep 1
-for pid in $targets; do
-  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
-  rest=${stat##*) }
-  set -- $rest
-  [ "$1" = Z ] || exit 1
-done
-exit 0
 """
+
+
+def terminate_agent_command(run_marker: str) -> str:
+    """The stop script for the processes whose environment holds ``run_marker`` (``NAME=value``) and their
+    descendants. It exits 0 once a pass finds none, or 1 if some are left after five kill rounds."""
+    return _TERMINATE_AGENT_SCRIPT.replace("@MARKER@", quote(run_marker))
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
@@ -998,10 +1021,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             **facts,
         )
 
-    async def _confirm_agent_terminated(self, sandbox: AsyncSandbox) -> None:
-        """After a command deadline, stop the agent process tree and confirm it is gone, or fail before grading."""
+    async def _confirm_agent_terminated(self, sandbox: AsyncSandbox, run_marker: str) -> None:
+        """After a command deadline, stop the processes carrying ``run_marker`` and confirm they are gone, or fail
+        before grading."""
         try:
-            stopped = await sandbox.exec(command=TERMINATE_AGENT_COMMAND, timeout_s=60)
+            stopped = await sandbox.exec(command=terminate_agent_command(run_marker), timeout_s=60)
             confirmed = stopped.return_code == 0 and stopped.error_type is None
         except NgFailureEvent:
             raise
@@ -1511,6 +1535,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             command = f'echo "Shell: $SHELL" && export PATH="$HOME/.opencode/bin:$PATH" && {agent_command}'
         else:
             command = f"{setup_command.strip()} && {agent_command.strip()}"
+        # This attempt's marker, which is how the deadline stop finds the command's processes: the exec's environment
+        # gives it to the shell that runs the command, and the export to everything that shell starts (setup steps,
+        # OpenCode, its tools) even on an exec path that does not apply the environment.
+        run_id = uuid4().hex
+        run_marker = f"{OPENCODE_RUN_MARKER}={run_id}"
+        command = f"export {run_marker} && {command}"
 
         if self.config.debug:
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
@@ -1520,6 +1550,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         try:
             result = await sandbox.exec(
                 command=command,
+                env={OPENCODE_RUN_MARKER: run_id},
                 timeout_s=self.config.sandbox_timeout,
             )
         except NgFailureEvent as exc:
@@ -1637,7 +1668,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 provider_failure, operation="opencode.execute", stage="agent"
             ) from provider_failure
         if result.error_type == "timeout":
-            await self._confirm_agent_terminated(sandbox)
+            await self._confirm_agent_terminated(sandbox, run_marker)
         result_stdout = result.stdout or ""
         stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
         # A confirmed command deadline is the agent reaching its time limit. A provider that returns no output for the
