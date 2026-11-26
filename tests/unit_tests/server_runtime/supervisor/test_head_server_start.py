@@ -70,6 +70,42 @@ def test_a_head_server_that_died_on_a_free_port_reports_no_errno(monkeypatch) ->
     assert raised.value.errno is None and not isinstance(raised.value, HeadServerUnresponsiveError)
 
 
+def test_another_runs_head_server_answering_on_the_port_is_not_ours(monkeypatch) -> None:
+    """Another Gym run holds the port: its head server answers there, but ours never bound, so the start fails with
+    EADDRINUSE (and is moved to a fresh port) instead of waiting on the other run's server."""
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen()
+    port = holder.getsockname()[1]
+    supervisor = waiting_supervisor(monkeypatch, alive=False, statuses=["success"])
+    supervisor._head_server = SimpleNamespace(started=False)
+    supervisor._head_server_instance = SimpleNamespace(config=SimpleNamespace(host="127.0.0.1", port=port))
+    try:
+        with pytest.raises(ServerStartFailedError) as raised:
+            supervisor._wait_for_head_server()
+    finally:
+        holder.close()
+
+    assert (raised.value.server_name, raised.value.errno) == (HEAD_SERVER_KEY_NAME, errno.EADDRINUSE)
+
+
+def test_an_answer_before_our_head_server_started_is_not_ready(monkeypatch) -> None:
+    """An answer on the address while our own head server is still binding doesn't end the wait; ours starting does."""
+    supervisor = waiting_supervisor(monkeypatch, alive=True, statuses=["success", "success", "success"])
+    head_server = SimpleNamespace(started=False)
+    supervisor._head_server = head_server
+    polls = supervisor._server_client.poll_for_status
+
+    def poll(name: str) -> str:
+        if polls.call_count == 2:
+            head_server.started = True
+        return "success"
+
+    polls.side_effect = poll
+    supervisor._wait_for_head_server()
+    assert polls.call_count == 2
+
+
 def test_a_taken_head_server_port_is_retried_once_on_a_fresh_port(taken_port: dict) -> None:
     supervisor = ServerSupervisor()
     supervisor.shutdown = MagicMock()

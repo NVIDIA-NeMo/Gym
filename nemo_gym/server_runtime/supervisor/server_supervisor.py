@@ -981,16 +981,21 @@ class ServerSupervisor:  # pragma: no cover
         A head server thread that ended (a failed bind) never will: that is a typed start failure, with EADDRINUSE when
         its port is taken now, so `start` moves it to a fresh port once. A live head server that never answers is a
         `HeadServerUnresponsiveError`, which stops the run instead of holding its allocation.
+
+        An answer on the head server's address counts only once this process's own head server has bound and started:
+        when another Gym run holds the port, its head server answers there while ours fails to bind.
         """
         print("Waiting for head server to spin up")
         timeout_seconds = getattr(self, "_head_server_spinup_timeout_seconds", _DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC)
         deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
         poll_count = 0
         while True:
+            # Checked before trusting an answer: a dead thread means our head server never bound its port.
+            thread_alive = self._head_server_thread.is_alive()
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            if status == "success":
+            if status == "success" and thread_alive and self._own_head_server_started():
                 return
-            if not self._head_server_thread.is_alive():
+            if not thread_alive or not self._head_server_thread.is_alive():
                 head = getattr(getattr(self, "_head_server_instance", None), "config", None)
                 bind_errno = _port_bind_errno(head.host, head.port) if head is not None else None
                 raise ServerStartFailedError(
@@ -1014,10 +1019,23 @@ class ServerSupervisor:  # pragma: no cover
                 )
 
             if poll_count % 10 == 0:  # Print every 30s
-                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+                if status == "success":
+                    head = getattr(getattr(self, "_head_server_instance", None), "config", None)
+                    where = f"port {head.port}" if head is not None else "its port"
+                    print(
+                        f"Another server already answers on the head server's {where} (another Gym run?); waiting "
+                        "for this run's head server to bind it. Sleeping..."
+                    )
+                else:
+                    print(f"Head server is not up yet (status `{status}`). Sleeping...")
 
             poll_count += 1
             sleep(3)
+
+    def _own_head_server_started(self) -> bool:
+        """Whether this process's head server has bound its port and started serving (uvicorn's `started`)."""
+        head_server = getattr(self, "_head_server", None)
+        return head_server is None or bool(getattr(head_server, "started", True))
 
     def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
         """Mark the head ready only after every managed server and model endpoint is reachable."""
