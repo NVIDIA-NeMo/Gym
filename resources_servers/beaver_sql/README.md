@@ -74,17 +74,17 @@ dataset page, then `hf auth login`. The zip is pinned to revision `86f2c4ec` and
 With `mysql_admin_dsn` set, startup downloads the zip into `cache_dir`, loads each database in `databases` that isn't
 loaded yet (about 15 s for dw), records it with its dump hash in `_beaver_meta.loaded`, and creates the grader's user
 from `mysql_dsn` with `SELECT` on those databases and on the `_beaver_meta.loaded` table only (a grant on all of
-`_beaver_meta` would reach other databases: in a database-level grant `_` is a wildcard unless `partial_revokes` is on). The loader never drops or replaces a database it didn't record
-itself. Without `mysql_admin_dsn`, startup only checks that every database is loaded from the pinned dump and that the
-grader's user sees all its tables.
+`_beaver_meta` would reach other databases: in a database-level grant `_` is a wildcard unless `partial_revokes` is
+on). The loader never drops or replaces a database it didn't record itself. Without `mysql_admin_dsn`, startup only
+checks that every database is loaded from the pinned dump and that the grader's user sees all its tables.
 
 The grader's user can only read: a query that writes or creates a temporary table fails, and is scored as an empty
 result; `LOAD_FILE()` returns NULL. (The official evaluator connects as `MYSQL_USER`, which BEAVER's README example sets
-to root.) Startup reads every table as the grader, and
-refuses a grader user that holds anything beyond `SELECT` on the BEAVER databases and `_beaver_meta.loaded`: another
-privilege, a role, `SELECT` elsewhere, or grant authority (`WITH GRANT OPTION`). The loader creates that user if it doesn't exist and never changes an
-existing user's password; it refuses a grader DSN that names its own (admin) user, runs one loader at a time per server
-(`GET_LOCK`), and creates a database only if no one else has, even between its check and its load.
+to root.) Startup reads every table as the grader, and refuses a grader user that holds anything beyond `SELECT` on the
+BEAVER databases and `_beaver_meta.loaded`: another privilege, a role, `SELECT` elsewhere, or grant authority
+(`WITH GRANT OPTION`). The loader creates that user if it doesn't exist and never changes an existing user's password;
+it refuses a grader DSN that names its own (admin) user, runs one loader at a time per server (`GET_LOCK`), and creates
+a database only if no one else has, even between its check and its load.
 
 ## Configuration
 

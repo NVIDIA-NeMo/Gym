@@ -4,8 +4,10 @@
 
 Per-row output: ``{task_id, id, question, gt_sql, db_id, domain, category, detailed_category, evidence,
 evidence_section, sql_context}``. ``task_id`` is BEAVER's own question id, ``id`` kept as its source copy: it already
-names its domain (``dw_12``, ``dw_real_12``), so it is unique across domains and doesn't depend on row order. The prompt (``prompts/schema_only.yaml``) shows the question, its evidence when there is any, and the
-``CREATE TABLE`` statements of the question's database (``sql_context``): the schema-only setup of auto-ontology-eval.
+names its domain (``dw_12``, ``dw_real_12``), so it is unique across domains and doesn't depend on row order.
+
+The prompt (``prompts/schema_only.yaml``) shows the question, its evidence when there is any, and the ``CREATE TABLE``
+statements of the question's database (``sql_context``): the schema-only setup of auto-ontology-eval.
 
 Sources, both gated on Hugging Face (MIT; accept the terms on each dataset page, then ``hf auth login``), pinned:
 

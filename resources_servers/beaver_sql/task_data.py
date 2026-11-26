@@ -23,7 +23,9 @@ class TaskData(BaseModel):
         json_schema_extra={"consumed_by": ["provenance"]},
     )
     question: str = Field(
-        description="Natural-language question the SQL must answer; shown in the prompt, echoed in the verify response.",
+        description=(
+            "Natural-language question the SQL must answer; shown in the prompt, echoed in the verify response."
+        ),
         json_schema_extra={"consumed_by": ["prompt", "provenance"]},
     )
     gt_sql: str = Field(
@@ -66,6 +68,8 @@ class TaskData(BaseModel):
     )
     sql_context: Optional[str] = Field(
         default=None,
-        description="The database's CREATE TABLE statements, shown in the prompt. Not read by verify(), which drops it.",
+        description=(
+            "The database's CREATE TABLE statements, shown in the prompt. Not read by verify(), which drops it."
+        ),
         json_schema_extra={"consumed_by": ["prompt"]},
     )
