@@ -59,9 +59,11 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     JUDGE_FAILED,
     FailureBoundary,
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    report_for_current_request,
     verifier_invocation_context,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
@@ -807,11 +809,23 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     )
         except Exception as error:
             LOGGER.exception("SWE-Together judge measurement failed")
+            reason = f"{type(error).__name__}: {error}"
+            # Judge-only recovery admits a saved judge failure by its event's ID, so the row needs a typed event.
+            failure = error
+            if not (isinstance(error, NgFailureEvent) and error.failure_kind == JUDGE_FAILED):
+                failure = NgFailureEvent(
+                    boundary=FailureBoundary.ENVIRONMENT,
+                    failure_kind=JUDGE_FAILED,
+                    failure_reason=reason[:2000],
+                    operation="judge.verify",
+                    stage="verification",
+                )
+                failure.__cause__ = error
             result.update(
                 mask_sample=True,
                 evaluation_completed=False,
                 failure_kind=JUDGE_FAILED,
-                failure_reason=f"{type(error).__name__}: {error}",
+                failure_reason=reason,
                 # Only this server's own grading deadline is a grading_timeout; a provider TimeoutError is not.
                 judge_failure_cause=getattr(
                     error,
@@ -824,6 +838,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 ),
                 _ng_failure_class=JUDGE_FAILED,
                 _ng_failure_judge_error=str(error),
+                **FailureReportRow.fields(report_for_current_request(failure)),
             )
         auxiliary = AuxiliaryModel(self.server_client, self.config.interaction_model.name, cookies={}, temperature=0)
         try:

@@ -453,8 +453,12 @@ async def test_verify_keeps_judge_failure_cause_apart_from_valid_zero(tmp_path, 
     if expected is None:
         # The upstream short-patch rule is a measured zero, not a missing measurement.
         assert result["judge_score"] == 0.0 and not result.get("mask_sample")
+        assert "_ng_failure_id" not in result
     else:
         assert result["mask_sample"] is True and result["judge_score"] is None
+        # Judge-only recovery admits the saved failure by this ID; without it the row can never be judged again.
+        event = result["_ng_failure_events"][result["_ng_failure_id"]]
+        assert event["failure_kind"] == app.JUDGE_FAILED and event["boundary"] == "environment"
 
 
 @pytest.mark.asyncio
