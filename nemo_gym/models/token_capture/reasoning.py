@@ -5,6 +5,8 @@
 
 import hashlib
 import json
+import re
+from collections import Counter
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -85,7 +87,62 @@ def _capture_tool_turn(message: dict) -> dict:
     return result
 
 
-def capture_chat_tool_turns(items: list[dict]) -> list[dict]:
+def _hermes_id_aliases(ids: list[str]) -> list[str] | None:
+    """Return the exact aliases Hermes uses for complete parallel vLLM batches."""
+    if len(ids) < 2 or any(not isinstance(call_id, str) for call_id in ids):
+        return None
+    if all(call_id.startswith("chatcmpl-tool-") for call_id in ids):
+        return [f"call_{hashlib.sha256(call_id.encode()).hexdigest()[:12]}" for call_id in ids]
+    if all(re.fullmatch(r"call_[0-9a-f]{12}", call_id) for call_id in ids):
+        return ids
+    return None
+
+
+def _capture_hermes_ids(items: list[dict], normalized: list[dict], *, served_reply: bool) -> list[dict]:
+    if served_reply and len(items) != 1:
+        return normalized
+    batches = {}
+    projected_ids: Counter[str] = Counter()
+    for index, item in enumerate(items):
+        calls = item.get("tool_calls")
+        if item.get("role") != "assistant" or not isinstance(calls, list):
+            continue
+        ids = [call.get("id") for call in calls if isinstance(call, dict)]
+        aliases = _hermes_id_aliases(ids) if normalized[index] is not item and len(ids) == len(calls) else None
+        if aliases is not None:
+            batches[index] = (ids, aliases)
+        projected_ids.update(call_id for call_id in (aliases or ids) if isinstance(call_id, str))
+
+    for index, (ids, aliases) in batches.items():
+        if any(projected_ids[alias] != 1 for alias in aliases):
+            continue
+        end = index + 1 + len(ids)
+        results = items[index + 1 : end]
+        if not served_reply:
+            if len(results) != len(ids) or any(
+                item.get("role") != "tool" or item.get("tool_call_id") != call_id
+                for item, call_id in zip(results, ids, strict=True)
+            ):
+                continue
+            if end < len(items) and items[end].get("role") == "tool":
+                continue
+
+        item = items[index]
+        calls = [{**call, "id": alias} for call, alias in zip(item["tool_calls"], aliases, strict=True)]
+        turn = _capture_tool_turn({**item, "tool_calls": calls})
+        # A marked echo is only eligible when it binds every result in order.
+        turn["content"][0]["verified_parallel_tool_ids"] = True
+        normalized[index] = turn
+        if not served_reply:
+            normalized[index + 1 : end] = [
+                {**result, "tool_call_id": alias} for result, alias in zip(results, aliases, strict=True)
+            ]
+    return normalized
+
+
+def capture_chat_tool_turns(
+    items: list[dict], *, match_hermes_parallel_tool_ids: bool = False, served_reply: bool = False
+) -> list[dict]:
     """Compare a single inline thinking block with its exact echo in the reasoning field.
 
     The model server enables this only when its Chat preprocessor renders both
@@ -93,4 +150,7 @@ def capture_chat_tool_turns(items: list[dict]) -> list[dict]:
     returned items are for capture lookup only. Competing aliases, nested tags,
     and other shapes retain their original evidence.
     """
-    return [_capture_tool_turn(item) for item in items]
+    normalized = [_capture_tool_turn(item) for item in items]
+    if match_hermes_parallel_tool_ids:
+        return _capture_hermes_ids(items, normalized, served_reply=served_reply)
+    return normalized

@@ -137,6 +137,7 @@ class CaptureContext:
     parent_resolution_mode: ParentResolutionMode = "fingerprint"
     allow_system_suffix: bool = False
     match_chat_tool_reasoning: bool = False
+    match_hermes_parallel_tool_ids: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -278,7 +279,9 @@ async def resolve_parent(request_messages: list | None) -> None:
         return
     context.request_items = list(request_messages)
     if context.match_chat_tool_reasoning:
-        request_messages = capture_chat_tool_turns(request_messages)
+        request_messages = capture_chat_tool_turns(
+            request_messages, match_hermes_parallel_tool_ids=context.match_hermes_parallel_tool_ids
+        )
     if context.parent_resolution_mode == "source_history":
         await _admit_candidate(context, request_messages)
         return
@@ -726,7 +729,10 @@ async def capture_tokens(
         )
         if request_messages is not None:
             stamp_continuation(
-                entry, list(request_messages), match_chat_tool_reasoning=context.match_chat_tool_reasoning
+                entry,
+                list(request_messages),
+                match_chat_tool_reasoning=context.match_chat_tool_reasoning,
+                match_hermes_parallel_tool_ids=context.match_hermes_parallel_tool_ids,
             )
     except Exception:
         await _capture_failed(context, "build")

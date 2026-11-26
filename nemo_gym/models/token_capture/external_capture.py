@@ -378,8 +378,14 @@ class _BaseExternalCaptureHandler(ABC):
         )
         # Keep the served reply and its output witnesses intact for attribution.
         if context.match_chat_tool_reasoning:
-            request_items = capture_chat_tool_turns(request_items)
-            match_response_items = capture_chat_tool_turns(response_items)
+            request_items = capture_chat_tool_turns(
+                request_items, match_hermes_parallel_tool_ids=context.match_hermes_parallel_tool_ids
+            )
+            match_response_items = capture_chat_tool_turns(
+                response_items,
+                match_hermes_parallel_tool_ids=context.match_hermes_parallel_tool_ids,
+                served_reply=True,
+            )
             replay_items = capture_chat_tool_turns(replay_items)
         else:
             match_response_items = response_items

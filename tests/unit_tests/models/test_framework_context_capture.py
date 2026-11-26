@@ -38,6 +38,7 @@ async def _serve(
     finish=None,
     model="model",
     match_chat_tool_reasoning=False,
+    match_hermes_parallel_tool_ids=False,
     mode="source_history",
     served_message=None,
     cum_hash=None,
@@ -50,6 +51,7 @@ async def _serve(
         external_staging=True,
         parent_resolution_mode=mode,
         match_chat_tool_reasoning=match_chat_tool_reasoning,
+        match_hermes_parallel_tool_ids=match_hermes_parallel_tool_ids,
     )
     token = set_token_sink(context)
     handler = VLLMWorkerCaptureHandler()
@@ -222,6 +224,77 @@ async def test_chat_tool_reasoning_matches_only_equivalent_transitions(ledger, m
         assert second.mode == "text" and second.parent_call_id is None
     else:
         assert second is None and context.parent_resolution.reason == "no_match"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        None,
+        "original_ids",
+        "wrong_alias",
+        "swapped_results",
+        "missing_result",
+        "extra_result",
+        "reused_alias",
+        "argument_order",
+        "argument_value",
+        "opt_out",
+    ],
+)
+async def test_hermes_parallel_tool_id_replay_preserves_result_bindings(ledger, change):
+    served = _chat_tool_turn("<think>Read both fixtures. </think>")
+    first_tool = served["tool_calls"][0]
+    first_tool["id"] = "chatcmpl-tool-afd263558a1b0e79"
+    served["tool_calls"].append(
+        {**first_tool, "id": "chatcmpl-tool-80ce354a7fccebf0", "function": {"name": "List", "arguments": "{}"}}
+    )
+    original = deepcopy(served)
+    opt_in = change != "opt_out"
+    options = {
+        "mode": "fingerprint",
+        "match_chat_tool_reasoning": True,
+        "match_hermes_parallel_tool_ids": opt_in,
+    }
+    first_context, root = await _serve(ledger, "first", _CHAT_PROMPT, served_message=served, **options)
+    assert root.mode == "text" and first_context.committed
+    assert served == original
+
+    echo = {**deepcopy(served), "content": "", "reasoning_content": "Read both fixtures. "}
+    if change != "original_ids":
+        echo["tool_calls"][0]["id"] = "call_47aae1fbcc99"
+        echo["tool_calls"][1]["id"] = "call_5c5c1600476f"
+    if change == "wrong_alias":
+        echo["tool_calls"][0]["id"] = "call_000000000000"
+    if change == "reused_alias":
+        echo["tool_calls"][1]["id"] = echo["tool_calls"][0]["id"]
+    if change == "argument_order":
+        echo["tool_calls"][0]["function"]["arguments"] = '{"path":"fixture","options":{"second":2,"first":1}}'
+    if change == "argument_value":
+        echo["tool_calls"][0]["function"]["arguments"] = '{"path":"different","options":{"first":1,"second":2}}'
+    results = [
+        {"role": "tool", "tool_call_id": call["id"], "content": f"Result {index}"}
+        for index, call in enumerate(echo["tool_calls"])
+    ]
+    if change == "swapped_results":
+        results[0]["tool_call_id"], results[1]["tool_call_id"] = results[1]["tool_call_id"], results[0]["tool_call_id"]
+    if change == "missing_result":
+        results.pop()
+    if change == "extra_result":
+        results.append(dict(results[0]))
+    history = _CHAT_PROMPT + [echo, *results]
+    original_history = deepcopy(history)
+    follow_up = _chat_tool_turn("<think>Check the result. </think>")
+    matches = change in (None, "original_ids")
+    context, second = await _serve(ledger, "second", history, served_message=follow_up, splice=matches, **options)
+    assert context.request_items == original_history == history
+    if not matches:
+        assert second is None and context.parent_resolution.reason == "no_match"
+        return
+    assert second.mode == "token_in" and second.parent_call_id == "first"
+    next_echo = {**_chat_tool_turn(""), "reasoning_content": "Check the result. "}
+    next_history = history + [next_echo, {"role": "tool", "tool_call_id": "call-1", "content": "Confirmed"}]
+    _, third = await _serve(ledger, "third", next_history, splice=True, **options)
+    assert third.mode == "token_in" and third.parent_call_id == "second"
 
 
 @pytest.mark.parametrize("mode", ["fingerprint", "source_history"])
