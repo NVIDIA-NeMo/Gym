@@ -309,6 +309,15 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    include_response_created: bool = Field(
+        default=True,
+        description=(
+            "Include the full response.created snapshot in buffered Responses SSE output. Disable for "
+            "clients that accept output-item events followed by a terminal event, to avoid echoing tools "
+            "and instructions in an initial snapshot. Applies to all Responses SSE clients of this model "
+            "server. Minimal response.created keepalive events are unaffected."
+        ),
+    )
     stream_keepalive_s: Optional[float] = Field(
         default=None,
         gt=0,
@@ -742,7 +751,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         )
         response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
         streamed = await self._stream_served_response(
-            response_json, synthesize_responses_sse(response_json, include_created=include_created)
+            response_json,
+            synthesize_responses_sse(
+                response_json, include_created=include_created and self.config.include_response_created
+            ),
         )
         if "usage" in response_json:
             # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
