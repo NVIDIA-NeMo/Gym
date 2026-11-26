@@ -249,7 +249,7 @@ class AgentSessionCapabilitiesResponse(BaseModel):
     must continue one harness session needs ``continuation``, as Harbor's multi-step trial refuses
     ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend. An environment
     server that owns the attempt's sandbox reads ``runs_loop_without_sandbox`` to decide whether the agent of a task
-    without tools needs the sandbox at seed.
+    without any tools needs the sandbox at seed: true only for a loop that then just calls the model server.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -766,10 +766,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # The seed reply says so, and an environment server then continues an episode with tool grants after a restore
     # instead of starting it over.
     rebinds_tool_accesses: ClassVar[bool] = False
-    # Whether this agent runs its loop in its own process when its seed lends no sandbox, as Simple Agent does. An
-    # environment server that owns the attempt's sandbox then lends the agent of a task without tools nothing and
-    # starts the sandbox for the verifier alone. A harness that needs a container, such as a CLI, leaves it False and
-    # is lent the sandbox at seed.
+    # Whether this agent's loop, for a task with no tools at all, only calls the model server, so it may run in this
+    # process when its seed lends no sandbox, as Simple Agent's does. An environment server that owns the attempt's
+    # sandbox asks only for such a task: any tool, an HTTP one included, makes the agent borrow the sandbox whatever
+    # this says. It then lends the agent nothing and starts a sandbox for the verifier alone, if any. A harness that
+    # runs commands itself, such as a CLI, leaves it False and is lent the sandbox at seed.
     runs_loop_without_sandbox: ClassVar[bool] = False
     _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
     _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)

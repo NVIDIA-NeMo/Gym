@@ -130,8 +130,8 @@ No setting turns the agent's sandbox off: where the agent runs is fixed per task
 
 | Agent | Verifier | Why |
 |------|------|------|
-| Agent Server process | `none` | No tools, and an agent that runs its loop without a sandbox (Simple Agent); the verifier only reads the answer (rules, a judge call). |
-| Agent Server process | `separate` | No tools; the verifier runs model output (unit tests, an evaluating parser such as SymPy's) in a group of its own. |
+| Agent Server process | `none` | No tools at all, so the agent's loop only calls the model server (Simple Agent); the verifier only reads the answer (rules, a judge call). |
+| Agent Server process | `separate` | No tools at all, as above; the verifier runs model output (unit tests, an evaluating parser such as SymPy's) in a group of its own. |
 | attempt group | `none` | The task has tools or sidecars, or the agent needs a container; the verifier only reads the answer. |
 | attempt group | `shared` | The verifier inspects what the agent left in its group. |
 | attempt group | `separate` | The verifier runs model output but must not see the agent's files. |
@@ -140,9 +140,9 @@ The agent's side is derived:
 
 | The task | The agent | The agent |
 |------|------|------|
-| has tools or sidecars | any | borrows a group started at seed |
+| has tools (HTTP or MCP, declared or granted) or sidecars | any | borrows a group started at seed |
 | has no tools | cannot run its loop without a sandbox (a CLI harness, or an agent server that does not say) | borrows a group started at seed |
-| has no tools | runs its loop in its own process when lent nothing (Simple Agent) | is lent nothing and runs in the Agent Server process |
+| has no tools | only calls the model server when lent nothing (Simple Agent) | is lent nothing and runs in the Agent Server process |
 
 The agent says which it is on `GET /v1/agent_sessions/capabilities` (`runs_loop_without_sandbox`, set by the agent class; DeepAgents answers by tool profile, since its `builtin` profile runs in a sandbox), which this server asks once per process, only for a task without tools. An agent server without the route is lent a group, so an undeclared agent fails closed.
 
