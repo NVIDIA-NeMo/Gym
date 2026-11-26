@@ -3980,8 +3980,8 @@ class TestRolloutCollection:
 
     @pytest.mark.parametrize(
         ("allow", "aggregation"),
-        [(True, "answers"), (False, "answers"), (True, "fails"), (True, "stalls")],
-        ids=["allowed", "not-allowed", "aggregation-fails", "aggregation-stalls"],
+        [(True, "answers"), (False, "answers"), (True, "fails"), (True, "stalls"), (True, "nothing-scored")],
+        ids=["allowed", "not-allowed", "aggregation-fails", "aggregation-stalls", "nothing-scored"],
     )
     async def test_allow_incomplete_aggregate_writes_the_settled_score_of_a_run_with_nothing_left_to_retry(
         self,
@@ -4003,12 +4003,18 @@ class TestRolloutCollection:
             for task_index in range(3)
         ]
         (tmp_path / "output_materialized_inputs.jsonl").write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
-        # Two rollouts are scored, and the third is out of attempts: nothing is left to retry.
-        output_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps({**r, "reward": 1.0}) for r in rows[:2]) + b"\n")
+        # Two rollouts are scored (or none), and the rest are out of attempts: nothing is left to retry.
+        scored = 0 if aggregation == "nothing-scored" else 2
+        output_jsonl_fpath.write_bytes(b"".join(orjson.dumps({**r, "reward": 1.0}) + b"\n" for r in rows[:scored]))
         _failures_path_for(output_jsonl_fpath).write_bytes(
-            orjson.dumps({**rows[2], NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_TERMINAL_KEY: True})
-            + b"\n"
+            b"".join(
+                orjson.dumps({**r, NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_TERMINAL_KEY: True}) + b"\n"
+                for r in rows[scored:]
+            )
         )
+        metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        # An earlier segment's aggregate describes other rows, so it never survives as this run's.
+        metrics_fpath.write_text("[]")
 
         async def post(server_name: str, url_path: str, json: dict, **kwargs):
             assert url_path == "/aggregate_metrics"
@@ -4031,7 +4037,7 @@ class TestRolloutCollection:
                 return []
 
         with pytest.raises(
-            RuntimeError, match="EVAL FAILED: 2/3 samples completed. .*No tasks are eligible for retry"
+            RuntimeError, match=f"EVAL FAILED: {scored}/3 samples completed. .*No tasks are eligible for retry"
         ):
             await Helper().run_from_config(
                 RolloutCollectionConfig(
@@ -4045,24 +4051,23 @@ class TestRolloutCollection:
                 )
             )
 
-        metrics_fpath = tmp_path / "output_aggregate_metrics.json"
         # The run stays rejected as incomplete either way, also when its optional aggregation fails or stalls. Only
-        # the opt-in publishes the score of the two settled rollouts.
-        assert metrics_fpath.exists() == allow
+        # the opt-in publishes the score of the settled rollouts, and only when there are any.
+        assert metrics_fpath.exists() == (allow and scored > 0)
         assert ("allow_incomplete_aggregate is set" in capsys.readouterr().out) == allow
         if allow and aggregation == "answers":
             assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 1.0
-        if aggregation != "answers":
+        if aggregation in ("fails", "stalls"):
             assert "aggregation_error" in orjson.loads(metrics_fpath.read_bytes())[0]
         # No exporter receives the incomplete aggregate as the run's score, live or after the run.
         assert not any(key.endswith("mean/reward") for key in exported)
         (tmp_path / "output_resolved_config.yaml").write_text("require_complete: true\n")  # as the CLI saves it
-        assert "2/3 rollouts settled" in nemo_gym.rollouts.rollout_store.incomplete_run_export_error(
+        assert f"{scored}/3 rollouts settled" in nemo_gym.rollouts.rollout_store.incomplete_run_export_error(
             output_jsonl_fpath
         )
         # The coverage file beside the score is what marks the run as incomplete.
         coverage = orjson.loads((tmp_path / "output_coverage.json").read_bytes())
-        assert (coverage["complete"], coverage["successful"], coverage["expected"]) == (False, 2, 3)
+        assert (coverage["complete"], coverage["successful"], coverage["expected"]) == (False, scored, 3)
 
     async def test_a_complete_strict_run_writes_its_aggregate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -10878,7 +10883,9 @@ class TestRolloutAggregationHelper:
 
         captured: dict[str, list] = {}
 
-        async def fake_call(self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True):
+        async def fake_call(
+            self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True, timeout_s=None
+        ):
             captured["results"] = results
             captured["rows"] = rows
             captured["output_fpath"] = output_fpath
@@ -10938,7 +10945,9 @@ class TestRolloutAggregationHelper:
             )
         )
 
-        async def _noop(self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True):
+        async def _noop(
+            self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True, timeout_s=None
+        ):
             m = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             m.write_text("[]")
             return m
@@ -10986,7 +10995,9 @@ class TestRolloutAggregationHelper:
         shard.write_text(json.dumps(record) + "\n")
         output_fpath = tmp_path / "rollouts.jsonl"
 
-        async def _noop(self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True):
+        async def _noop(
+            self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True, timeout_s=None
+        ):
             m = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             m.write_text("[]")
             return m
@@ -11079,7 +11090,9 @@ class TestRolloutAggregationHelper:
         )
         output_fpath = tmp_path / "rollouts.jsonl"
 
-        async def fake_call(self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True):
+        async def fake_call(
+            self, results, rows, output_fpath, *, raise_on_error: bool = True, export: bool = True, timeout_s=None
+        ):
             metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             metrics_path.write_text("[]")
             return metrics_path

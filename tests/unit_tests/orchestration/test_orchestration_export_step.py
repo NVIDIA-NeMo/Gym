@@ -30,6 +30,7 @@ from nemo_gym.config.config_types import ConfigError, RunExportConfig
 
 
 class FakeExporter:
+    publishes_aggregate = True
     instances: list["FakeExporter"] = []
     outcome: Any = ExportResult.succeeded(run_id="r-1")
     seen_during_export: Any = None
@@ -93,21 +94,35 @@ def test_a_failed_export_is_recorded_with_its_exit_code_and_error(tmp_path: Path
     }
 
 
+def _incomplete_strict_run(tmp_path: Path, monkeypatch: MonkeyPatch, saved: str = "true") -> None:
+    coverage = {"settled": 2, "expected": 3, "intentionally_omitted": 0}
+    store = type("Store", (), {"coverage": lambda self: coverage})()
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_store.RolloutStore.read", lambda output, import_legacy=True: store)
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(f"require_complete: {saved}\n")
+
+
 @pytest.mark.parametrize("saved", ["true", '"true"'], ids=["bool", "quoted"])
 def test_an_incomplete_strict_run_is_refused_and_recorded_as_failed(
     tmp_path: Path, monkeypatch: MonkeyPatch, saved: str
 ) -> None:
     """Collection reads a quoted "true" as strict, so the export step does too."""
-    coverage = {"settled": 2, "expected": 3, "intentionally_omitted": 0}
-    store = type("Store", (), {"coverage": lambda self: coverage})()
-    monkeypatch.setattr("nemo_gym.rollouts.rollout_store.RolloutStore.read", lambda output, import_legacy=True: store)
-    (tmp_path / "rollouts_resolved_config.yaml").write_text(f"require_complete: {saved}\n")
+    _incomplete_strict_run(tmp_path, monkeypatch, saved)
 
     result = runner.run_export("fake", _config(tmp_path))
 
     assert result.state is ExportState.FAILED and "2/3 rollouts settled" in result.error
     assert _result(tmp_path)["state"] == "failed"
     assert FakeExporter.seen_during_export is None  # the exporter never ran
+
+
+def test_an_exporter_that_does_not_publish_the_aggregate_exports_an_incomplete_strict_run(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Trajectory exports such as ATIF carry no score, and failed runs are the ones worth inspecting."""
+    _incomplete_strict_run(tmp_path, monkeypatch)
+    monkeypatch.setattr(FakeExporter, "publishes_aggregate", False)
+
+    assert runner.run_export("fake", _config(tmp_path)).state is ExportState.SUCCEEDED
 
 
 @pytest.mark.parametrize("previous", ["succeeded", "skipped"])

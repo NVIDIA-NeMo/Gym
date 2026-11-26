@@ -5361,6 +5361,9 @@ executions → not run again (left to recovery)
             aggregate_metrics_fpath = None
         else:
             if rejection is not None:
+                # Recomputed below from this segment's rows. With none scored no aggregate is written, so an
+                # earlier segment's must not stay behind.
+                await asyncio.to_thread(aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
                 print(
                     "The run is incomplete and allow_incomplete_aggregate is set: the aggregate covers the scored "
                     "rows (the settled rollouts and any failures counted as zero) and is not exported. Its "
@@ -5399,7 +5402,8 @@ executions → not run again (left to recovery)
             batch_tracker.write_status(
                 batch_completed_rows,
                 batch_failure_rows,
-                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                # An incomplete run's optional aggregate is not the run's score: its aggregation stays pending.
+                aggregate_metrics_fpath=aggregate_metrics_fpath if rejection is None else None,
                 aggregation_deferred=config.disable_aggregation,
                 force=True,
             )
@@ -7203,14 +7207,16 @@ class RolloutAggregationHelper(BaseModel):
         if config.count_missing_rollouts_as_zero:
             print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
         scored = sorted(results + counted, key=_rollout_order_key)
+        incomplete = incomplete_run_export_error(output_fpath) is not None
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(
             scored,
             scored,
             output_fpath,
             raise_on_error=False,
             # A strict run that is still incomplete, re-aggregated after its saved answers were graded again, is not
-            # exported, as at collection.
-            export=incomplete_run_export_error(output_fpath) is None,
+            # exported and its optional aggregate cannot hang the caller, as at collection.
+            export=not incomplete,
+            timeout_s=AGENT_COMPLETE_AGGREGATION_TIMEOUT_S if incomplete else None,
         )
         if batch_tracker is not None:
             batch_tracker.write_status(

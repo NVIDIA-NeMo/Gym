@@ -994,8 +994,6 @@ def _rejudge_saved_judge_failures(
         # pass settled: the aggregation that rewrites it is skipped with the metrics. No completion file can follow
         # it either, so they are removed. An aggregate `allow_incomplete_aggregate` wrote before the pass is
         # recomputed from the new grades instead, and still not exported.
-        if not (scored or raised or changed):
-            return complete
         _remove_completion_files(output)
         if not aggregate_metrics_path_for(output).exists():
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
@@ -1341,7 +1339,7 @@ def export_run() -> None:  # pragma: no cover
     from nemo_gym.artifacts.exporters.base import BaseExporter, ExportResult
     from nemo_gym.rollouts.rollout_store import incomplete_run_export_error
 
-    incomplete = incomplete_run_export_error(artifacts.rollouts_jsonl_fpath)
+    incomplete = incomplete_run_export_error(artifacts.rollouts_jsonl_fpath) if exporter.publishes_aggregate else None
     if incomplete is not None:
         result = ExportResult.failed(incomplete)
     elif isinstance(exporter, BaseExporter) and artifacts.export_done_fpath(name).exists():

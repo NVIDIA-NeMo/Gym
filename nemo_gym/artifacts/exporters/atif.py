@@ -22,6 +22,8 @@ class AtifExporter(Exporter):
 
     name = "atif"
     config_model = ExportAtifConfig
+    # Trajectories only, so a failed run can still be inspected.
+    publishes_aggregate = False
 
     config: ExportAtifConfig
 

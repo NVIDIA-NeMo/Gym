@@ -644,6 +644,7 @@ _COLLECTION_OPTIONS = frozenset(
         "max_resident_rollout_tasks",
         "retain_results_in_memory",
         "require_complete",
+        "allow_incomplete_aggregate",
         "disable_aggregation",
         "disable_health_check",
         "health_check_workers",
