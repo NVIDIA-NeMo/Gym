@@ -149,6 +149,7 @@ def _chat_tool_turn(content):
     [
         None,
         "argument_order",
+        "empty_reasoning",
         "argument_value",
         "tool_name",
         "tool_id",
@@ -173,6 +174,9 @@ async def test_chat_tool_reasoning_matches_only_equivalent_transitions(ledger, m
     assert first.mode == "text"
     assert served == original
     echo = {**_chat_tool_turn(""), "reasoning_content": "Use the fixture. "}
+    if change == "empty_reasoning":
+        echo = {**deepcopy(served), "reasoning_content": ""}
+    matches = change in (None, "empty_reasoning")
     tool = echo["tool_calls"][0]
     if change == "argument_order":
         tool["function"]["arguments"] = '{"path":"fixture","options":{"second":2,"first":1}}'
@@ -202,10 +206,10 @@ async def test_chat_tool_reasoning_matches_only_equivalent_transitions(ledger, m
         mode=mode,
         match_chat_tool_reasoning=True,
         served_message=served,
-        splice=change is None,
+        splice=matches,
     )
     assert context.request_items == wire_history == history
-    if change is None:
+    if matches:
         assert second.mode == ("candidate" if mode == "source_history" else "token_in")
         assert second.parent_call_id == "first"
         assert context.committed

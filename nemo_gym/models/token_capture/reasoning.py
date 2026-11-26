@@ -63,7 +63,7 @@ def _capture_tool_turn(message: dict) -> dict:
     content = message.get("content")
     reasoning = message.get("reasoning_content")
     if (
-        reasoning is None
+        reasoning in (None, "")
         and isinstance(content, str)
         and content.startswith("<think>")
         and content.endswith("</think>")
