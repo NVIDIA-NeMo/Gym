@@ -347,8 +347,13 @@ def ensure_beaver_mysql(
             raise RuntimeError(
                 f"MySQL already has databases {foreign} that this loader didn't create; drop them or use another server"
             )
-        # A recorded database that is gone (dropped, or a backup restored without it) is loaded again too.
-        stale = [db_id for db_id in db_ids if recorded.get(db_id) != _dump(db_id).sha256 or db_id not in existing]
+        # A recorded database that is gone (dropped, or a backup restored without it) is loaded again as a new one: its
+        # record goes first, so one that someone else creates meanwhile makes the CREATE fail instead of being dropped.
+        for db_id in [db_id for db_id in db_ids if db_id in recorded and db_id not in existing]:
+            cur.execute(f"DELETE FROM `{META_DB}`.loaded WHERE db_id = %s", (db_id,))
+            del recorded[db_id]
+        conn.commit()
+        stale = [db_id for db_id in db_ids if recorded.get(db_id) != _dump(db_id).sha256]
         if stale:
             dumps = ensure_beaver_dumps(cache_dir, stale)
             for db_id in stale:

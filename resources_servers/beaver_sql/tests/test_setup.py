@@ -335,6 +335,34 @@ def test_reloads_a_recorded_database_that_is_gone(tmp_path, tiny, fake_mysql) ->
     check_beaver_mysql(READER, ["tiny"])
 
 
+def test_a_gone_database_that_someone_else_creates_meanwhile_is_not_dropped(
+    tmp_path, tiny, fake_mysql, monkeypatch
+) -> None:
+    # Recorded and current, but gone from the server; another client creates one of that name while the dump downloads.
+    server = fake_mysql()
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    server.databases.discard("tiny")
+    server.tables.pop("tiny")
+    real = setup.ensure_beaver_dumps
+
+    def download_then_race(cache_dir, db_ids):
+        paths = real(cache_dir, db_ids)
+        server.databases.add("tiny")
+        return paths
+
+    monkeypatch.setattr(setup, "ensure_beaver_dumps", download_then_race)
+    start = len(server.statements)
+    with pytest.raises(mysql.connector.errors.DatabaseError, match="database exists"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert not any(s.startswith("DROP DATABASE") for s in server.statements[start:])
+    # Its old record went before the load, so the next start sees someone else's database and leaves it alone.
+    assert "tiny" not in server.loaded
+    monkeypatch.setattr(setup, "ensure_beaver_dumps", real)
+    with pytest.raises(RuntimeError, match="didn't create"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert not any(s.startswith("DROP DATABASE") for s in server.statements[start:])
+
+
 def test_wrong_table_count_is_an_error(tmp_path, tiny, fake_mysql, monkeypatch) -> None:
     fake_mysql()
     monkeypatch.setitem(setup.DUMPS, "tiny", BeaverDump("beaver_db/tiny.sql", setup.DUMPS["tiny"].sha256, 2))
