@@ -1973,6 +1973,13 @@ class RunOpenHandsAgent(BaseModel):
             patch = _strip_r2egym_infra_files_from_patch(patch)
         metrics.model_patch = patch
 
+        # [CUSTOM-PATCH-WRITE-ORDER] Write the real patch before the eval-ready signal file
+        # below, not after: the eval container's `until -f output_for_eval_path` gate must
+        # never be able to observe readiness before model_patch_path holds the real content.
+        if patch:
+            with open(self.config.model_patch_path, "w") as f:
+                f.write(patch)
+
         # Create file in the SWE-bench evaluation format
         self.config.output_for_eval_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config.output_for_eval_path.open("w") as f:
@@ -2012,9 +2019,6 @@ class RunOpenHandsAgent(BaseModel):
 
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
-
-        with open(self.config.model_patch_path, "w") as f:
-            f.write(patch)
 
         metrics.final_eval_time = -time.time()
         try:
@@ -2068,6 +2072,11 @@ class RunOpenHandsAgent(BaseModel):
         metrics.patch_exists = True
 
         # Write golden patch where the agent would have written the model patch.
+        # [CUSTOM-PATCH-WRITE-ORDER] Before the eval-ready signal file below, not after --
+        # see the matching comment in the agent-patch path above.
+        with open(self.config.model_patch_path, "w") as f:
+            f.write(golden_patch)
+
         self.config.output_for_eval_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config.output_for_eval_path.open("w") as f:
             f.write(
@@ -2079,8 +2088,6 @@ class RunOpenHandsAgent(BaseModel):
                     }
                 )
             )
-        with open(self.config.model_patch_path, "w") as f:
-            f.write(golden_patch)
 
         metrics.final_eval_apptainer_spinup_time = -time.time()
         metrics.final_eval_time = -time.time()

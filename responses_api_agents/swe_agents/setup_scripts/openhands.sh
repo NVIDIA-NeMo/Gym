@@ -100,6 +100,15 @@ git checkout $agent_framework_commit
 #     isolate its agent actions from the shared, persistent OpenHands orchestrator venv --
 #     fixes a real cross-job venv corruption incident (one rollout's pip activity leaking into
 #     another's).
+#   - swerebench_path_order: fixes that isolation branch's PATH order (/usr/bin was put ahead of
+#     /usr/local/bin) for any dataset still falling through to it. Must run after
+#     isolate_shared_venv_by_default, which is what introduces the text this one edits.
+#   - swerebench_conda_activate: SWE-rebench (V1) and SWE-rebench-V2 were wrongly assumed not to
+#     use a conda testbed-style environment and fell through to the generic isolation branch
+#     above with no task-env activation at all -- confirmed directly against real pulled images
+#     that V1 ships a "testbed" env (same convention as SWE-Gym) and V2 ships one named
+#     "swebench_matterhorn". Adds dedicated activation branches for both. Must run after
+#     isolate_shared_venv_by_default (same reason as swerebench_path_order).
 #   - pythonunbuffered: forces PYTHONUNBUFFERED=1 so a crash during run_infer.py's own startup
 #     surfaces a real traceback
 #   - swebench_pin: fixes poetry.lock's `swebench` git dependency pin, which points at a commit
@@ -112,6 +121,12 @@ python3 "$(dirname "${BASH_SOURCE[0]}")/patch_openhands_swerebench_v1_skip_entry
 
 echo "Applying CUSTOM-ISOLATE-BY-DEFAULT patch to OpenHands' run_infer.py..."
 python3 "$(dirname "${BASH_SOURCE[0]}")/patch_openhands_isolate_shared_venv_by_default.py" "$openhands_dir"
+
+echo "Applying CUSTOM-SWEREBENCH-PATH-ORDER patch to OpenHands' run_infer.py..."
+python3 "$(dirname "${BASH_SOURCE[0]}")/patch_openhands_swerebench_path_order.py" "$openhands_dir"
+
+echo "Applying CUSTOM-SWEREBENCH-CONDA-ACTIVATE patch to OpenHands' run_infer.py..."
+python3 "$(dirname "${BASH_SOURCE[0]}")/patch_openhands_swerebench_conda_activate.py" "$openhands_dir"
 
 echo "Applying CUSTOM-PYTHONUNBUFFERED patch to OpenHands' run_infer.sh..."
 python3 "$(dirname "${BASH_SOURCE[0]}")/patch_openhands_pythonunbuffered.py" "$openhands_dir"
