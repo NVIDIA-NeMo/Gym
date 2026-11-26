@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,31 @@ SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+
+# docker/Dockerfile is the source of truth for the uv pin; every other site must agree with it.
+_V = r"(\d+\.\d+\.\d+)"
+UV_PIN_SOURCES = {
+    "docker/Dockerfile": rf"^ARG UV_VERSION={_V}$",
+    "resources_servers/visual_browser/docker/visual-browser-runtime.Dockerfile": rf"ghcr\.io/astral-sh/uv:{_V}",
+    "scripts/ci/setup_dev.sh": rf"astral\.sh/uv/{_V}/install\.sh|uv-{_V}\"|== \"{_V}\"|= \"{_V}\"",
+    ".github/workflows/component-locks.yml": rf"astral\.sh/uv/{_V}/install\.sh",
+    ".github/workflows/unit-tests.yml": rf"astral\.sh/uv/{_V}/install\.sh",
+    ".github/workflows/full-test-suite.yml": rf"astral\.sh/uv/{_V}/install\.sh",
+}
+[UV_PIN] = set(
+    re.findall(UV_PIN_SOURCES["docker/Dockerfile"], (REPO_ROOT / "docker" / "Dockerfile").read_text(), re.M)
+)
+
+
+def test_uv_pin_is_identical_everywhere() -> None:
+    found: dict[str, set[str]] = {}
+    for rel, pattern in UV_PIN_SOURCES.items():
+        text = (REPO_ROOT / rel).read_text()
+        versions = {v for m in re.finditer(pattern, text, re.M) for v in m.groups() if v}
+        assert versions, f"{rel}: no uv pin matched {pattern!r}"
+        found[rel] = versions
+    assert set().union(*found.values()) == {UV_PIN}, f"uv pin drift: {found}"
+
 
 BEHAVIOR_CHANGING_ENV = {
     "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
@@ -260,7 +286,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         "#!/bin/sh\n"
         'echo "$*" >> "$UV_TEST_CALLS"\n'
         'case "$1" in\n'
-        "  --version) echo 'uv 0.13.4' ;;\n"
+        f"  --version) echo 'uv {UV_PIN}' ;;\n"
         "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
         "  sync) ;;\n"
         "  *) exit 2 ;;\n"
@@ -306,7 +332,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         text=True,
     )
     assert later_step.returncode == 0, later_step.stderr
-    assert later_step.stdout.strip() == "uv 0.13.4"
+    assert later_step.stdout.strip() == f"uv {UV_PIN}"
 
 
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
@@ -587,7 +613,7 @@ def test_notify_failure_ref_check_allows_only_main_and_release_branches(
 
 def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> None:
     expected_action = (
-        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6"
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@b6b4df4160277e1048091f972eda0c51319bc845"
     )
     ref_scripts = []
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
@@ -826,7 +852,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "runs-on: ubuntu-latest" in workflow
     assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
     assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
-    assert "https://astral.sh/uv/0.13.4/install.sh" not in workflow
+    assert not re.search(r"astral\.sh/uv/\d", workflow)  # no hard-coded uv version; read from docker/Dockerfile
     assert "E2E_MODEL: ${{ matrix.model }}" in workflow
     assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
     assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
@@ -1155,7 +1181,7 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
         """#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-    --version) printf '%s\\n' 'uv 0.13.4' ;;
+    --version) printf '%s\\n' 'uv __UV_PIN__' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
         venv_dir="${@: -1}"
@@ -1167,7 +1193,7 @@ case "${1:-}" in
     lock|sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
-""",
+""".replace("__UV_PIN__", UV_PIN),
     )
     _write_executable(
         bin_dir / "ng_test_all",
@@ -1292,13 +1318,13 @@ def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock
         """#!/usr/bin/env bash
 set -eu
 case "$1" in
-    --version) echo 'uv 0.13.4' ;;
+    --version) echo 'uv __UV_PIN__' ;;
     cache) echo "${UV_CACHE_DIR}" ;;
     lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
     sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
     *) echo "unexpected uv command: $*" >&2; exit 2 ;;
 esac
-""",
+""".replace("__UV_PIN__", UV_PIN),
     )
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)

@@ -855,3 +855,27 @@ def test_renamed_converter_resolves_at_each_old_path_with_a_warning(module: str,
         """
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_renamed_sandbox_checkpointer_resolves_with_a_warning() -> None:
+    # In a fresh interpreter: the old name warns only on its first use in a process.
+    code = textwrap.dedent(
+        """
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from nemo_gym.server_runtime import SandboxSessionCheckpointer as old
+        from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes as new
+        assert old is new, (old, new)
+        messages = [
+            str(w.message)
+            for w in caught
+            if w.category is DeprecationWarning and "SandboxSessionCheckpointer`" in str(w.message)
+        ]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "owned_sandboxes.OwnedSandboxes`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
