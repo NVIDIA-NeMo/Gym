@@ -96,6 +96,7 @@ from nemo_gym.trajectory.atif_reverification import (
     load_atif_manifest,
     project_atif_manifest_entries,
 )
+from nemo_gym.trajectory.trajectory_record import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -1128,6 +1129,35 @@ async def _guard_atif_preflight(payloads: List[Dict[str, Any]]) -> None:
 # Very similar to the rollout collection code, but we need to send the request to
 # resources servers instead of the agent server, since the second one might not be started
 # ---------------------------------------------------------------------------
+# Generated content that /aggregate_metrics never reads; rollout collection leaves the same keys out.
+_AGGREGATION_DROPPED_KEYS = frozenset(
+    {
+        "response",
+        "responses_create_params",
+        ATIF_PROVENANCE_KEY,
+        NG_AGENT_OBSERVATIONS_KEY,
+        "ng_model_call_capture",
+        NG_TRAJECTORY_KEY,
+    }
+)
+
+
+def _aggregation_projection(row: dict) -> dict:
+    """The part of a result row that /aggregate_metrics reads: everything but generated content, plus usage and
+    truncation metadata (policy token-limit failures score zero, not as judge failures). Projecting twice is a no-op."""
+    entry = {k: v for k, v in row.items() if k not in _AGGREGATION_DROPPED_KEYS}
+    response = row.get("response") or {}
+    response_metadata = {
+        key: response[key] for key in ("usage", "incomplete_details") if response.get(key) is not None
+    }
+    context_marker = (response.get("metadata") or {}).get("nemo_gym_context_window_exceeded")
+    if context_marker is not None:
+        response_metadata["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
+    if response_metadata:
+        entry["response"] = response_metadata
+    return entry
+
+
 async def _call_aggregate_metrics(
     results: List[Dict],
     rows: List[Dict],
@@ -1160,22 +1190,7 @@ async def _call_aggregate_metrics(
         agent_results.setdefault((agent_name, rs_name), []).append(result)
 
     async def _fetch_agent_metrics(agent_name: str, rs_name: str, agent_result_list: List[Dict]) -> Dict:
-        # Preserve usage and truncation metadata: policy token-limit failures score zero, not as judge failures.
-        stripped = []
-        for r in agent_result_list:
-            entry = {
-                k: v for k, v in r.items() if k not in ("response", "responses_create_params", ATIF_PROVENANCE_KEY)
-            }
-            response = r.get("response") or {}
-            response_metadata = {
-                key: response[key] for key in ("usage", "incomplete_details") if response.get(key) is not None
-            }
-            context_marker = (response.get("metadata") or {}).get("nemo_gym_context_window_exceeded")
-            if context_marker is not None:
-                response_metadata["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
-            if response_metadata:
-                entry["response"] = response_metadata
-            stripped.append(entry)
+        stripped = [_aggregation_projection(r) for r in agent_result_list]
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
         try:
@@ -1330,7 +1345,7 @@ def _source_identity_stamps(
 
 
 def _load_reverified_results(
-    output_fpath: Path, identity_sources: Tuple[Path, ...] = ()
+    output_fpath: Path, identity_sources: Tuple[Path, ...] = (), *, aggregation_only: bool = False
 ) -> Tuple[List[Dict], List[Dict]]:
     """Load the full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
 
@@ -1345,9 +1360,14 @@ def _load_reverified_results(
     rollout has no stamp groups as that rollout does. If an unstamped row has no source rollout at all while other
     rows are stamped, its identity cannot be established and aggregating would split one run, so this raises
     ``ConfigError`` before anything is exported or aggregated; the output file keeps every row.
+
+    With ``aggregation_only``, each row is reduced to ``_aggregation_projection`` as it is read, so memory holds no
+    generated content: a judge-failed-only output carries every saved rollout of the run, which can be larger than a
+    node's memory.
     """
     with output_fpath.open("rb") as f:
-        results = [orjson.loads(line) for line in f if line.strip()]
+        parsed = (orjson.loads(line) for line in f if line.strip())
+        results = [_aggregation_projection(r) for r in parsed] if aggregation_only else list(parsed)
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
     if identity_sources and any(key not in r for r in results for key in _IDENTITY_KEYS):
         stamps_by_key, source_keys = _source_identity_stamps(identity_sources)
@@ -2127,9 +2147,12 @@ class RolloutReverificationHelper(BaseModel):
 
         # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
         # reused for both the rollouts export and aggregate metrics so the file is never re-read.
-        results, agg_rows = _load_reverified_results(output_fpaths.output, identity_sources)
+        export = bool(config.upload_rollouts and get_exporters())
+        results, agg_rows = _load_reverified_results(
+            output_fpaths.output, identity_sources, aggregation_only=config.judge_failed_only and not export
+        )
 
-        if config.upload_rollouts and get_exporters():  # pragma: no cover
+        if export:  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
             export_rollouts([_rollout_for_export(r) for r in results])
 
@@ -2175,5 +2198,6 @@ class RolloutReverificationHelper(BaseModel):
                 "withdrawn": len(settle_binding["withdrawn_operations"]),
             }
 
-        # The full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
+        # The full main jsonl (cached + newly re-verified successes), sorted by (task, rollout); with judge_failed_only
+        # and no rollout export, each row's aggregation projection.
         return results
