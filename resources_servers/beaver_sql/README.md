@@ -75,8 +75,12 @@ With `mysql_admin_dsn` set, startup downloads the zip into `cache_dir`, loads ea
 loaded yet (about 15 s for dw), records it with its dump hash in `_beaver_meta.loaded`, and creates the grader's user
 from `mysql_dsn` with `SELECT` on those databases and on the `_beaver_meta.loaded` table only (a grant on all of
 `_beaver_meta` would reach other databases: in a database-level grant `_` is a wildcard unless `partial_revokes` is
-on). The loader never drops or replaces a database it didn't record itself. Without `mysql_admin_dsn`, startup only
-checks that every database is loaded from the pinned dump and that the grader's user sees all its tables.
+on). The loader never drops or replaces a database it didn't record itself. A database it did record is its own: it is
+dropped and loaded again when its dump changes, so other clients must not reuse those names on the same server. The
+admin user needs `CREATE USER`, and all privileges with `GRANT OPTION` on `_beaver_meta` and the BEAVER databases at the
+database level (root has them): the loader creates and fills those databases, grants the grader `SELECT`, and revokes
+the database-level grant on `_beaver_meta` that earlier versions made. Without `mysql_admin_dsn`, startup only checks
+that every database is loaded from the pinned dump and that the grader's user sees all its tables.
 
 The grader's user can only read: a query that writes or creates a temporary table fails, and is scored as an empty
 result; `LOAD_FILE()` returns NULL. (The official evaluator connects as `MYSQL_USER`, which BEAVER's README example sets
