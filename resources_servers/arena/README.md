@@ -6,7 +6,8 @@ Evaluate a model's chat capabilities on diverse conversational prompts. An LLM j
 
 | Benchmark | Prompts | Main differences |
 |---|---:|---|
-| `lmarena_v3` | 3,713 | Recommended. Exact human-battle opponents, equal verdict weights, `both bad` as a tie, reference-length style control. |
+| [`lmarena_v4`](../../benchmarks/lmarena_v4/README.md) | 2,328 | Recommended. Gemini 3.8 Flash judge, upper-length-only style control. |
+| `lmarena_v3` | 3,713 | Legacy/deprecated. Exact human-battle opponents, equal verdict weights, `both bad` as a tie, reference-length style control. |
 | ↳ Subset of Super3.5's difficulty level | 2,328 | `config_super35_gemini38flash_judge.yaml`; Gemini 3.8 Flash judge. |
 | ↳ Subset of Nano3.5's difficulty level | 1,371 | `config_nano35_gemini38flash_judge.yaml`; Gemini 3.8 Flash judge. |
 | `lmarena_v2` | 1,475 | Legacy/deprecated. Synthetic baselines, strong verdict weight 3, `both bad` excluded, Bradley-Terry style control. |
@@ -171,8 +172,8 @@ No model calls are needed:
 
 ```bash
 resources_servers/arena/.venv/bin/python resources_servers/arena/scripts/compute_rollout_scores.py \
-    results/lmarena_v3/my-model/judged.jsonl \
-    --version lmarena_v3
+    results/lmarena_v4/my-model/judged.jsonl \
+    --version lmarena_v4
 ```
 
 ## Scripts

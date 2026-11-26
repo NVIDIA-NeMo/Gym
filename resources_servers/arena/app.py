@@ -182,7 +182,7 @@ class ArenaResourcesServer(SimpleResourcesServer):
         body.prompt_slices = prompt_slices
 
         # Detect baseline self-comparisons.
-        if body.category in {"lmarena_v3", "vision_arena_v1"}:
+        if body.category in {"lmarena_v3", "lmarena_v4", "vision_arena_v1"}:
             body.self_comparison = body.self_comparison or self._is_self_comparison(body)
 
         # Skip judging when the evaluated model also supplied the baseline answer.
@@ -206,9 +206,9 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 games=None,
             )
 
-        # LMArena v3 and Vision Arena score truncated policy outputs zero.
+        # LMArena v3/v4 and Vision Arena score truncated policy outputs zero.
         if (
-            body.category in {"lmarena_v3", "vision_arena_v1"}
+            body.category in {"lmarena_v3", "lmarena_v4", "vision_arena_v1"}
             and body.response.incomplete_details
             and body.response.incomplete_details.reason == "max_output_tokens"
         ):

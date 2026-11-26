@@ -27,7 +27,7 @@ def is_failed_rollout(row: dict) -> bool:
     # Generation-limit and reasoning-only outputs are deliberate zeros, not failed judging.
     incomplete_reason = ((row.get("response") or {}).get("incomplete_details") or {}).get("reason")
     reasoning_only = bool(row.get("policy_reasoning")) and not row.get("policy_answer")
-    if row.get("category") in {"lmarena_v3", "vision_arena_v1"} and (
+    if row.get("category") in {"lmarena_v3", "lmarena_v4", "vision_arena_v1"} and (
         incomplete_reason == "max_output_tokens" or (incomplete_reason is None and reasoning_only)
     ):
         return False

@@ -610,7 +610,7 @@ class TestArenaResourcesServer:
         # No judge calls should have been made
         server.server_client.post.assert_not_called()
 
-    @mark.parametrize("category", ["lmarena_v3", "vision_arena_v1"])
+    @mark.parametrize("category", ["lmarena_v3", "lmarena_v4", "vision_arena_v1"])
     async def test_verify_self_comparison_from_response_model_skips_judge(
         self, server: ArenaResourcesServer, category
     ):
@@ -676,7 +676,7 @@ class TestArenaResourcesServer:
         # No judge calls should have been made for an empty/whitespace response
         server.server_client.post.assert_not_called()
 
-    @mark.parametrize("category", ["lmarena_v3", "vision_arena_v1"])
+    @mark.parametrize("category", ["lmarena_v3", "lmarena_v4", "vision_arena_v1"])
     async def test_verify_max_token_response_returns_zero_without_judging(
         self, server: ArenaResourcesServer, category
     ):
@@ -1396,7 +1396,8 @@ class TestArenaResourcesServer:
         assert metrics["win_rate"] == approx(0.5, abs=0.05)
         assert metrics["verbosity_acceptance_rate"] == approx(0.5)
 
-    def test_compute_metrics_v3_unjudged_model_outputs_score_zero(self, config: ArenaResourcesServerConfig):
+    @mark.parametrize("category", ["lmarena_v3", "lmarena_v4"])
+    def test_compute_metrics_unjudged_model_outputs_score_zero(self, config: ArenaResourcesServerConfig, category):
         config.style_control_method = "reference_length"
         config.style_length_ratio_range = (0.5, 1.75)
         config.style_short_reference_max_tokens = 100
@@ -1407,7 +1408,7 @@ class TestArenaResourcesServer:
         reference_server = ArenaResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
         win = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
-        win["category"] = "lmarena_v3"
+        win["category"] = category
         win["style_reference_token_count"] = 10
         truncated = {
             "reward": 0.0,
@@ -1418,7 +1419,7 @@ class TestArenaResourcesServer:
             "policy_answer": "Truncated answer",
             "policy_reasoning": "",
             "baseline_answer": "Baseline answer",
-            "category": "lmarena_v3",
+            "category": category,
             "style_reference_token_count": 10,
             "games": None,
         }

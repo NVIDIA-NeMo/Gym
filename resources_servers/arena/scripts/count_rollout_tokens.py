@@ -56,7 +56,7 @@ def count_rollout_tokens(rollouts: Path, tokenizer: str) -> dict:
     for record in records:
         incomplete_reason = ((record.get("response") or {}).get("incomplete_details") or {}).get("reason")
         if record.get("self_comparison") or (
-            record.get("category") == "lmarena_v3" and incomplete_reason == "max_output_tokens"
+            record.get("category") in {"lmarena_v3", "lmarena_v4"} and incomplete_reason == "max_output_tokens"
         ):
             continue
         games = record.get("games") or []

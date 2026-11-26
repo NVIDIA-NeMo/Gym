@@ -35,12 +35,14 @@ BENCHMARK_CONFIGS = {
     "vision_arena_v1": Path("resources_servers/arena/configs/vision_arena_v1.yaml"),
     "lmarena_v2": Path("resources_servers/arena/configs/lmarena_v2.yaml"),
     "lmarena_v3": Path("resources_servers/arena/configs/lmarena_v3.yaml"),
+    "lmarena_v4": Path("resources_servers/arena/configs/lmarena_v4.yaml"),
 }
 # LMArena prompts provide taxonomy metadata used for slice reporting.
 PROMPT_PATHS = {
     "vision_arena_v1": Path("benchmarks/vision_arena_v1/data/vision_arena_v1_validation.jsonl"),
     "lmarena_v2": Path("benchmarks/lmarena_v2/data/lmarena_v2_validation.jsonl"),
     "lmarena_v3": Path("benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl"),
+    "lmarena_v4": Path("benchmarks/lmarena_v4/data/lmarena_v4_validation.jsonl"),
 }
 SCORE_SLICE_ORDER = (*PROMPT_CATEGORY_ORDER, "exclude-ties")
 
@@ -93,7 +95,7 @@ def load_rollout_tasks(
             rollout["prompt_slices"] = {
                 namespace: sorted(labels) for namespace, labels in get_prompt_slices(prompt).items()
             }
-            if benchmark == "lmarena_v3":
+            if benchmark in {"lmarena_v3", "lmarena_v4"}:
                 rollout["style_reference_token_count"] = prompt["style_reference_token_count"]
                 rollout["is_lmarena_v2_prompt"] = prompt["is_lmarena_v2_prompt"]
         tasks[rollout["_ng_task_index"]].append(rollout)
@@ -171,6 +173,7 @@ def main() -> None:
     parser.add_argument("rollouts", type=Path)
     parser.add_argument(
         "--version",
+        "--benchmark",
         dest="benchmark",
         choices=BENCHMARK_CONFIGS,
         required=True,
@@ -205,12 +208,12 @@ def main() -> None:
         "any_both_bad_rate",
         "any_tie_rate",
     ]
-    if args.benchmark in {"lmarena_v3", "vision_arena_v1"}:
+    if args.benchmark in {"lmarena_v3", "lmarena_v4", "vision_arena_v1"}:
         diagnostic_names.insert(0, "context_window_exceeded_rate")
         diagnostic_names.insert(0, "max_token_reached_rate")
     for name in diagnostic_names:
         print(f"{name}: {metrics[name]:.2%}")
-    if args.benchmark == "lmarena_v3":
+    if args.benchmark in {"lmarena_v3", "lmarena_v4"}:
         print(f"verbosity_acceptance_rate: {metrics['verbosity_acceptance_rate']:.2%}")
     print(f"mean/reward: {sum(rollout['reward'] for rollout in rollouts) / len(rollouts):.1%}")
 

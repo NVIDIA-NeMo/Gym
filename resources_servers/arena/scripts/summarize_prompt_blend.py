@@ -31,6 +31,7 @@ from resources_servers.arena.taxonomy import PROMPT_CATEGORY_ORDER, get_prompt_c
 PROMPT_PATHS = {
     "lmarena_v2": Path("benchmarks/lmarena_v2/data/lmarena_v2_validation.jsonl"),
     "lmarena_v3": Path("benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl"),
+    "lmarena_v4": Path("benchmarks/lmarena_v4/data/lmarena_v4_validation.jsonl"),
 }
 CONFIG_PATHS = {name: Path(f"resources_servers/arena/configs/{name}.yaml") for name in PROMPT_PATHS}
 

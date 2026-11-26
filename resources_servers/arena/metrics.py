@@ -133,8 +133,8 @@ class ArenaMetrics:
                 reasoning_only = bool(reasoning) and not response
                 reasoning_only_response_rollouts += int(reasoning_only)
                 incomplete_reason = ((rollout.get("response") or {}).get("incomplete_details") or {}).get("reason")
-                # LMArena v3 and Vision Arena score generation-limit and reasoning-only outputs zero.
-                if rollout.get("category") in {"lmarena_v3", "vision_arena_v1"} and (
+                # LMArena v3/v4 and Vision Arena score generation-limit and reasoning-only outputs zero.
+                if rollout.get("category") in {"lmarena_v3", "lmarena_v4", "vision_arena_v1"} and (
                     incomplete_reason == "max_output_tokens" or (incomplete_reason is None and reasoning_only)
                 ):
                     if incomplete_reason == "max_output_tokens":
@@ -264,8 +264,8 @@ class ArenaMetrics:
                 "Check gen_answer and gen_judgment API errors."
             )
 
-        # Report generation-limit rates for LMArena v3 and Vision Arena only.
-        if any(r.get("category") in {"lmarena_v3", "vision_arena_v1"} for task in tasks for r in task):
+        # Report generation-limit rates for LMArena v3/v4 and Vision Arena only.
+        if any(r.get("category") in {"lmarena_v3", "lmarena_v4", "vision_arena_v1"} for task in tasks for r in task):
             metrics["max_token_reached_rate"] = max_token_reached_rollouts / total_rollouts
             metrics["context_window_exceeded_rate"] = context_window_exceeded_rollouts / total_rollouts
         metrics.update(
