@@ -101,6 +101,19 @@ name, a sandbox with glibc older than 2.28 (no attempt can change the image), an
 `inherit` for a borrowed sandbox, whose network belongs to its owner. `SandboxAccess.env` is applied to every bash
 command.
 
+### Model server sidecar
+
+For an agent session that borrows a Harbor task sandbox, set `model_sidecar` on both the Harbor server and the
+mini-SWE agent to the same mapping. The mapping requires `image`, a trusted image with Gym and the vLLM model
+server already installed. The default Python is `/opt/nemo_gym_venv/bin/python`. The sandbox provider must support
+sidecars and let the task reach the declared model port (19001 by default). If the provider restricts sidecar
+egress, use the sidecar's `provider_options` to allow its upstream.
+
+Gym stages the resolved `policy_model.responses_api_models.vllm_model` settings in the sidecar. Set
+`upstream_base_url` for a separate, network-authorized endpoint that the sidecar can reach without the host's API
+key or default headers. With this option unset, the sidecar uses the endpoint and credentials from the resolved
+model config. Mini-SWE uses the provider's task-local address and waits for the model listener before activation.
+
 ### Installation
 
 The runtime is installed at seed, before the activation, with

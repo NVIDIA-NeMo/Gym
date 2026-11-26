@@ -39,7 +39,7 @@ import yaml
 from fastapi import HTTPException, Request
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.run.extra.swegym_runner import _main as run_swegym
-from pydantic import ConfigDict, Field, JsonValue
+from pydantic import ConfigDict, Field, JsonValue, model_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -52,12 +52,14 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    ModelSidecarConfig,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
     restrict_sandbox_network,
+    start_model_sidecar,
 )
 from nemo_gym.config import (
     ModelServerRef,
@@ -162,9 +164,16 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
             "one refuses any value other than `inherit`."
         ),
     )
+    model_sidecar: ModelSidecarConfig | None = None
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     # The longest a run may take; a task's own agent timeout can only shorten it.
     sandbox_runner_timeout_seconds: float = Field(default=28800, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_model_sidecar(self) -> "MiniSWEAgentConfig":
+        if self.model_sidecar is not None and self.model_server.name != "policy_model":
+            raise ValueError("model_sidecar requires the policy_model vLLM model server")
+        return self
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -291,6 +300,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         mcp_grants = [access for access in grants if isinstance(access, MCPToolAccess)]
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
+            if self.config.model_sidecar is not None:
+                raise AgentSeedRejectedError("mini-SWE model_sidecar requires a borrowed task sandbox")
             if self.config.sandbox_provider is None:
                 raise AgentSeedRejectedError("mini-SWE requires sandbox_access or a configured sandbox_provider")
             provider_ref = self.config.sandbox_provider
@@ -320,10 +331,11 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         # mini-SWE calls the Model Server from inside the sandbox, where a loopback URL is the sandbox itself.
         try:
             provider_config = resolve_provider_config(provider_ref, global_config)
-            assert_model_url_reachable_from_sandbox(
-                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-                provider_name=next(iter(provider_config), None),
-            )
+            if self.config.model_sidecar is None:
+                assert_model_url_reachable_from_sandbox(
+                    self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+                    provider_name=next(iter(provider_config), None),
+                )
             spec = None
             if owns_sandbox:
                 settings = dict(self.config.sandbox_config)
@@ -402,6 +414,15 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             await state.install(timeout=self.config.sandbox_install_timeout_seconds)
             state.task_context = {} if owns_sandbox else await state.read_task_context()
             state.mcp_servers, state.required_mcp_servers = self._mcp_servers(mcp_grants, state.task_context)
+            if self.config.model_sidecar is not None:
+                state.session.model_sidecar = await start_model_sidecar(
+                    sandbox,
+                    global_config,
+                    self.config.model_sidecar,
+                    rollout_id=body.episode_id.capture_key,
+                    run_timeout_s=self.config.sandbox_runner_timeout_seconds
+                    + self.config.session_close_timeout_seconds,
+                )
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -522,9 +543,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             model_kwargs["extra_body"] = {"max_output_tokens": model_kwargs.pop("max_output_tokens")}
         directory = state.session.session_dir
         capture_key = state.request.episode_id.capture_key
+        sidecar = state.session.model_sidecar
         model_kwargs.update(
-            # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
-            api_base=self.resolve_model_base_url(self.config.model_server.name, capture_key),
+            api_base=(
+                sidecar.base_url
+                if sidecar is not None
+                else self.resolve_model_base_url(self.config.model_server.name, capture_key)
+            ),
             api_key="gym",
             timeout=max(1, timeout),
             max_retries=0,

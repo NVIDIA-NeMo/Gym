@@ -32,6 +32,7 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.tests.test_app import COMPOSE_TOML, StubProvider
 from environment_servers.harbor.tests.test_multi_turn import MCP_TOML, THREE_STEPS, multi_turn_server
+from nemo_gym.agents import ModelSidecarConfig
 from nemo_gym.data.tasks.harbor import (
     RECORD_VERSION,
     HarborComposeOverlay,
@@ -41,6 +42,7 @@ from nemo_gym.data.tasks.harbor import (
     materialize_task,
     record_compose_images,
 )
+from nemo_gym.sandbox import AsyncSandbox
 
 
 # A memory stack the way the memory team ships one: a standalone file with host ports and a global network name,
@@ -183,6 +185,70 @@ def entrypoint_exec_of(sandbox: FakeSandbox) -> dict:
         r for r in sandbox.execs if r["command"].startswith("sh ") and r["command"].split()[1].endswith("/run.sh")
     ]
     return record
+
+
+@pytest.mark.parametrize("compose_task", [False, True])
+async def test_model_sidecar_is_lent_only_with_the_task_sandbox(tmp_path, monkeypatch, compose_task):
+    from nemo_gym.sandbox.adapters import docker_compose
+
+    class ModelSidecarProvider(DirectoryProvider):
+        async def serialize_handle(self, handle, *, scope=None):
+            return {"sandbox_id": handle.sandbox_id}
+
+        async def connect(self, descriptor):
+            return self.handles[descriptor["sandbox_id"]]
+
+        async def create(self, spec):
+            handle = await super().create(spec)
+            self.handles[handle.sandbox_id] = handle
+            return handle
+
+        def sidecar_host(self, handle, sidecar):
+            return sidecar
+
+        async def upload_sidecar_file(self, handle, sidecar, source_path, target_path):
+            raise AssertionError("Harbor should leave model setup to the agent")
+
+        async def download_sidecar_file(self, handle, sidecar, source_path, target_path):
+            raise AssertionError("Harbor should leave model setup to the agent")
+
+        async def sidecar_exec(self, handle, sidecar, argv, *, timeout_s, on_stdout=None):
+            raise AssertionError("Harbor should leave model setup to the agent")
+
+    config = ModelSidecarConfig(image="test/gym:sidecar")
+    if compose_task:
+        server, task, main, *_ = overlay_server(
+            tmp_path, monkeypatch, overlay=volume_free_overlay(tmp_path), model_sidecar=config
+        )
+        write_image_config(
+            task.path.parent, "org/memory:1", Cmd=["memory-server"], Healthcheck={"Test": ["CMD", "true"]}
+        )
+    else:
+        server, task, main, _ = make_server(tmp_path, monkeypatch, model_sidecar=config)
+    provider = ModelSidecarProvider(task, main)
+    provider.handles = {}
+    monkeypatch.setattr(harbor_sandboxes, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+    monkeypatch.setattr(docker_compose, "create_provider", lambda config: provider)
+    monkeypatch.setattr(harbor_sandboxes, "AsyncSandbox", lambda config: AsyncSandbox(provider))
+
+    if compose_task:
+        owner = await harbor_app.HarborEnvironmentServer._create_compose(server, task, "rollout")
+        sandbox = owner.services["main"]
+    else:
+        owner = sandbox = await harbor_app.HarborEnvironmentServer._create_sandbox(
+            server, task, task.workdir, episode_key="rollout"
+        )
+    try:
+        assert main_spec_of(provider, task).sidecars == tuple(config.sidecars())
+        assert all(not spec.sidecars for spec in provider.created if spec.image != task.image)
+        assert not server._sandbox_spec(task, None, role="verifier").sidecars
+        borrowed = await AsyncSandbox.connect(await sandbox.serialize(), provider=provider, owns_provider=False)
+        try:
+            assert borrowed.sidecar(config.name).url() == f"http://{config.name}:{config.port}"
+        finally:
+            await borrowed.disconnect()
+    finally:
+        await owner.stop()
 
 
 class TestGroup:

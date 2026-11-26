@@ -268,6 +268,7 @@ class HarborSandboxMixin:
             metadata=metadata,
             resources=resources,
             provider_options=provider_options,
+            sidecars=self.config.model_sidecar.sidecars() if role == "agent" and self.config.model_sidecar else (),
             user=user,
         )
 
@@ -675,6 +676,9 @@ class HarborSandboxMixin:
         """Start the group ``document`` (written at ``path``, where the adapter reads it) describes, for ``_create_compose``:
         the service specs, providers and volume mappings from the task and the document, the overlay's RUN lines on
         ``main`` for an overlay task, then the start with its pull retries."""
+        model_sidecar = self.config.model_sidecar
+        if model_sidecar is not None and model_sidecar.name in document["services"]:
+            raise HarborTaskError(f"Compose service {model_sidecar.name!r} conflicts with the model sidecar")
         # An overlay task's main service starts without the task workdir, as its single sandbox would (see
         # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
         main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
@@ -966,6 +970,7 @@ class HarborSandboxMixin:
             workdir=None,
             metadata=metadata,
             provider_options=dict(self.config.sandbox_provider_options),
+            sidecars=(),
         )
 
     def _compose_platform(self) -> str:
