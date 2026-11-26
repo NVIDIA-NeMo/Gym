@@ -365,11 +365,27 @@ if any `must_pass` dealbreaker failed. Weights come from each criterion's
 `modifiers` in the dataset and are applied after judging — the judge never sees
 them, so a criterion cannot be graded more harshly for being expensive to fail.
 Criteria without `modifiers` default to severity 1.0 and non-gating, so an
-unweighted dataset scores as a plain pass fraction.
+unweighted dataset scores as a plain pass fraction. Set `reward_mode: all_pass`
+for a binary reward instead: `1.0` only when every criterion passes, as in
+`rubric_all_pass`. Set `reward_mode: must_pass` for a binary reward on the
+dealbreakers alone: `1.0` only when every `must_pass` criterion passes, whatever
+the other criteria score. Every criterion is still judged, so the other `rubric_*`
+fields stay comparable across modes. A rubric with no `must_pass` criteria is
+scored as `all_pass`.
+
+Set `reward_mode: binary` to grade against the row's `expected_answer` instead of
+its `rubric`, as `finance_sec_search` does. The expected answer is judged as a
+single criterion with `prompt_templates/finance_agent_v2_judge.yaml`, using the same voting and
+retries, and the reward is `1.0` when it passes, else `0.0`. The reference may be
+a final answer (the judge checks the conclusions and key figures the question asks
+for) or a checklist of facts (every item must hold). Keep the reference to the
+final answer: a long worked solution invites the judge to grade intermediate
+steps. The `rubric_*` fields then describe that one criterion, and a row with no
+`expected_answer` scores 0 with `judge_error` set.
 
 | Field | Meaning |
 |---|---|
-| `reward` | Partial Credit — the weighted pass fraction, zeroed by any failed dealbreaker |
+| `reward` | Partial Credit — the weighted pass fraction, zeroed by any failed dealbreaker; with `reward_mode: all_pass` or `binary`, `rubric_all_pass` as 1.0/0.0; with `must_pass`, 1.0 when `rubric_dealbreakers_failed` is 0 |
 | `rubric_partial_credit` | the same number under Vals's name for it |
 | `rubric_weighted_fraction` | Partial Credit *before* gating; the gap is what the dealbreakers cost |
 | `rubric_all_pass` | `true` only when every criterion resolved and passed — Vals's All-Pass |
@@ -391,8 +407,9 @@ dealbreaker gating a truncated trajectory scores the same as a confidently wrong
 one, so check this before reading a low score as a capability result.
 
 Because both the judge model and its prompt are ours, scores are **not** comparable
-to Vals's published numbers. The prompt lives in
-`prompt_templates/finance_agent_v2_rubric_judge.yaml`.
+to Vals's published numbers. The prompts live in
+`prompt_templates/finance_agent_v2_rubric_judge.yaml` and
+`prompt_templates/finance_agent_v2_judge.yaml`.
 
 `verify` is a pure function of the request body plus this server's config, so the
 server declares `REVERIFY_MODE = STATELESS`: after changing the judge prompt or

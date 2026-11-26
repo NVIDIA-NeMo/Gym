@@ -62,6 +62,7 @@ _TEST_SESSION_ID = "test-session"
 def _prompt_fpaths() -> dict:
     return {
         "rubric_judge_prompt_template_fpath": str(_PROMPT_DIR / "finance_agent_v2_rubric_judge.yaml"),
+        "judge_prompt_template_fpath": str(_PROMPT_DIR / "finance_agent_v2_judge.yaml"),
         "retrieval_system_prompt_fpath": str(_PROMPT_DIR / "finance_agent_v2_retrieval.yaml"),
     }
 
@@ -184,6 +185,7 @@ _ANSWER = "Total revenue reached $391.0B for the year and the stock reacted favo
 _C1 = "Revenue was $391.0 billion"
 _C2 = "Market sentiment was positive"
 _C3 = "Free cash flow was $60.9 billion"
+_REFERENCE = "Answer: FY revenue of $391.0 billion with a positive market reaction"
 
 # Where the template puts the criterion. The judge stub keys off it so it can
 # tell which criterion a concurrent call is grading.
@@ -331,6 +333,16 @@ class TestInitialization:
         assert server._tools["calculator"] is not None
         assert server._tools["parse_html_page"] is not None
         assert server._tools["submit_final_result"] is not None
+
+    def test_reward_mode_defaults_to_partial_credit(self) -> None:
+        assert _make_server().config.reward_mode == "partial_credit"
+        assert _make_server(reward_mode="all_pass").config.reward_mode == "all_pass"
+        assert _make_server(reward_mode="must_pass").config.reward_mode == "must_pass"
+        assert _make_server(reward_mode="binary").config.reward_mode == "binary"
+
+    def test_reward_mode_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_server(reward_mode="allpass")
 
 
 # ============================================================================
@@ -820,6 +832,95 @@ class TestVerifyRubricJudge:
         by_criterion = {j.criteria: j for j in res.rubric_judgements}
         assert by_criterion[_C2].score == 0
         assert by_criterion[_C2].votes == [0, 0, 0]
+
+    @pytest.mark.asyncio
+    async def test_all_pass_mode_zeroes_one_failed_criterion(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0], _C3: [1, 1, 1]}, reward_mode="all_pass")
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2, _C3)))
+
+        assert res.reward == 0.0
+        assert res.rubric_all_pass is False
+        assert res.rubric_partial_credit == pytest.approx(2 / 3)
+
+    @pytest.mark.asyncio
+    async def test_all_pass_mode_rewards_full_pass(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [1, 1, 1]}, reward_mode="all_pass")
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert res.reward == 1.0
+        assert res.rubric_all_pass is True
+
+    @staticmethod
+    def _must_pass_rubric() -> str:
+        return json.dumps(
+            [
+                {"criteria": _C1, "modifiers": {"category": "must_pass"}},
+                {"criteria": _C2},
+                {"criteria": _C3, "modifiers": {"category": "must_pass"}},
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_must_pass_mode_ignores_failed_non_dealbreaker(self) -> None:
+        server, stub = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0], _C3: [1, 1, 1]}, reward_mode="must_pass")
+        res = await server.verify(_mock_request(), _submitted_request(self._must_pass_rubric()))
+
+        assert res.reward == 1.0
+        assert res.rubric_all_pass is False
+        assert res.rubric_partial_credit == pytest.approx(2 / 3)
+        assert stub.calls[_C2] == 3
+
+    @pytest.mark.asyncio
+    async def test_must_pass_mode_zeroes_failed_dealbreaker(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [1, 1, 1], _C3: [0, 0, 0]}, reward_mode="must_pass")
+        res = await server.verify(_mock_request(), _submitted_request(self._must_pass_rubric()))
+
+        assert res.reward == 0.0
+        assert res.rubric_dealbreakers_failed == 1
+
+    @pytest.mark.asyncio
+    async def test_must_pass_mode_without_dealbreakers_scores_as_all_pass(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0]}, reward_mode="must_pass")
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert res.reward == 0.0
+        assert res.rubric_dealbreakers_total == 0
+
+    @staticmethod
+    def _expected_answer_request(expected_answer, rubric=None) -> FinanceAgentV2VerifyRequest:
+        resp = _make_response(_tool_call("submit_final_result", json.dumps({"final_result": _ANSWER})))
+        return _make_verify_request(resp, expected_answer=expected_answer, rubric=rubric)
+
+    @pytest.mark.asyncio
+    async def test_binary_mode_judges_reference_not_rubric(self) -> None:
+        # The stub rejects unscripted criteria, so judging any rubric item would fail the test.
+        server, stub = _rubric_server({_REFERENCE: [1, 1, 1]}, reward_mode="binary")
+        res = await server.verify(_mock_request(), self._expected_answer_request(_REFERENCE, rubric=_rubric(_C1, _C2)))
+
+        assert res.reward == 1.0
+        assert res.rubric_total == 1
+        assert res.rubric_all_pass is True
+        assert res.judge_error is None
+        assert stub.calls[_REFERENCE] == 3
+        assert all("REFERENCE ANSWER:" in p and _REFERENCE in p and _ANSWER in p for p in stub.prompts)
+
+    @pytest.mark.asyncio
+    async def test_binary_mode_majority_fail_scores_zero(self) -> None:
+        server, _ = _rubric_server({_REFERENCE: [1, 0, 0]}, reward_mode="binary")
+        res = await server.verify(_mock_request(), self._expected_answer_request(_REFERENCE))
+
+        assert res.reward == 0.0
+        assert res.rubric_all_pass is False
+        assert res.rubric_judgements[0].votes == [1, 0, 0]
+
+    @pytest.mark.asyncio
+    async def test_binary_mode_without_reference_is_unscorable(self) -> None:
+        server, stub = _rubric_server({}, reward_mode="binary")
+        res = await server.verify(_mock_request(), self._expected_answer_request("  ", rubric=_rubric(_C1)))
+
+        assert res.reward == 0.0
+        assert "no expected_answer" in res.judge_error
+        assert not stub.prompts
 
     @pytest.mark.asyncio
     async def test_severity_and_dealbreakers_flow_from_rubric_to_reward(self) -> None:

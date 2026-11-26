@@ -203,6 +203,15 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         default="prompt_templates/finance_agent_v2_rubric_judge.yaml",
         description="Fallback file path for the rubric judge prompt template.",
     )
+    judge_prompt_template: Optional[str] = Field(
+        default=None,
+        description="Inline judge prompt template for reward_mode binary. Takes priority over "
+        "judge_prompt_template_fpath. Supports {question}, {expected_answer}, {generated_answer} placeholders.",
+    )
+    judge_prompt_template_fpath: str = Field(
+        default="prompt_templates/finance_agent_v2_judge.yaml",
+        description="Fallback file path for the reward_mode binary judge prompt template.",
+    )
     judge_call_timeout: Optional[float] = Field(
         default=60.0,
         description="Per-call timeout in seconds for judge LLM requests. None disables.",
@@ -267,6 +276,15 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         description="Informational only. The upstream finance_agent tools self-clamp dates to their "
         "own MAX_END_DATE (2026-03-01); this server does not re-clamp. A row's as_of_date caps "
         "web_search, edgar_search and price_history dates further.",
+    )
+    reward_mode: Literal["partial_credit", "all_pass", "must_pass", "binary"] = Field(
+        default="partial_credit",
+        description="Reward for judge-graded rows. partial_credit: Vals's Partial Credit (severity-weighted "
+        "pass fraction, 0.0 when any must_pass criterion fails). all_pass: 1.0 only when every criterion "
+        "passes, else 0.0. must_pass: 1.0 only when every must_pass criterion passes, else 0.0; every "
+        "criterion is still judged, and a rubric with no must_pass criteria is scored as all_pass. "
+        "binary: ignores the rubric and judges the answer against the row's expected_answer as a "
+        "single criterion, 1.0 when it matches, else 0.0.",
     )
 
     # --- FrontierFinance grading ---------------------------------------------
@@ -409,10 +427,13 @@ class _JudgeAttempt(NamedTuple):
 class FinanceAgentV2VerifyResponse(BaseVerifyResponse):
     """Verify response for Finance Agent v2 tasks.
 
-    ``reward`` is Vals's Partial Credit: the severity-weighted pass fraction, forced
-    to 0.0 if any ``must_pass`` criterion failed. It is therefore graded, not binary,
+    ``reward`` is Vals's Partial Credit by default: the severity-weighted pass fraction,
+    forced to 0.0 if any ``must_pass`` criterion failed. It is therefore graded, not binary,
     and **not comparable to rewards from runs scored before Aug 2026**, which were
-    all-or-nothing. That older number survives as ``rubric_all_pass``.
+    all-or-nothing. That older number survives as ``rubric_all_pass``, and
+    ``reward_mode: all_pass`` makes it the reward. ``reward_mode: must_pass`` rewards
+    1.0 only when no ``must_pass`` criterion failed. Under ``reward_mode: binary``
+    the ``rubric_*`` fields describe a single criterion: the row's expected answer.
     """
 
     expected_answer: Optional[str] = None
@@ -508,6 +529,14 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         else:
             with open(self.config.rubric_judge_prompt_template_fpath, "r") as f:
                 self._rubric_judge_prompt_template = yaml.safe_load(f)["rubric_judge_prompt_template"].strip()
+
+        self._judge_prompt_template: Optional[str] = None
+        if self.config.reward_mode == "binary":
+            if self.config.judge_prompt_template:
+                self._judge_prompt_template = self.config.judge_prompt_template.strip()
+            else:
+                with open(self.config.judge_prompt_template_fpath, "r") as f:
+                    self._judge_prompt_template = yaml.safe_load(f)["judge_prompt_template"].strip()
 
         self._local_edgar: Optional[LocalEdgarSearch] = None
         if self.config.edgar_search_mode == "local":
@@ -1061,19 +1090,21 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         return _JudgeAttempt(None, error, reply, starved)
 
     async def _judge_criterion(
-        self, question: str, generated_answer: str, criterion: Dict[str, Any]
+        self, question: str, generated_answer: str, criterion: Dict[str, Any], prompt: Optional[str] = None
     ) -> RubricJudgement:
         """Judge one criterion, voting over repeated calls.
 
         Calls until ``judge_required_successes`` replies parse to a 0/1 or
         ``judge_max_attempts`` is spent. Falling short leaves ``score`` None
-        (unresolved) — a judge failure, not a "not met".
+        (unresolved) — a judge failure, not a "not met". ``prompt`` overrides the
+        rendered rubric judge prompt.
         """
-        prompt = (
-            self._rubric_judge_prompt_template.replace("{question}", question)
-            .replace("{generated_answer}", generated_answer)
-            .replace("{criterion}", criterion["criteria"])
-        )
+        if prompt is None:
+            prompt = (
+                self._rubric_judge_prompt_template.replace("{question}", question)
+                .replace("{generated_answer}", generated_answer)
+                .replace("{criterion}", criterion["criteria"])
+            )
 
         record = RubricJudgement(
             criteria=criterion["criteria"],
@@ -1200,7 +1231,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                         generated_answer = args["final_result"]
                     break
 
-        criteria = self._parse_rubric(body.rubric)
+        binary_reward = self.config.reward_mode == "binary"
+        if binary_reward:
+            expected_answer = (body.expected_answer or "").strip()
+            criteria = [{"criteria": expected_answer, "severity": 1.0, "must_pass": False}] if expected_answer else []
+        else:
+            criteria = self._parse_rubric(body.rubric)
 
         # A genuine failure, not a judge failure: the loop nudges the agent until
         # max_steps. Return before spending on the judge. The score fields are
@@ -1221,7 +1257,11 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             return FinanceAgentV2VerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
-                judge_error="no usable rubric criteria — unlabeled dry run, not scorable",
+                judge_error=(
+                    "no expected_answer — unlabeled dry run, not scorable"
+                    if binary_reward
+                    else "no usable rubric criteria — unlabeled dry run, not scorable"
+                ),
             )
 
         if not self.config.judge_model_server:
@@ -1237,8 +1277,16 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         semaphore = asyncio.Semaphore(max(1, self.config.judge_max_concurrency))
 
         async def judge_one(criterion: Dict[str, Any]) -> RubricJudgement:
+            prompt = None
+            if binary_reward:
+                # generated_answer is substituted last so model-authored text cannot inject a placeholder.
+                prompt = (
+                    self._judge_prompt_template.replace("{question}", question)
+                    .replace("{expected_answer}", criterion["criteria"])
+                    .replace("{generated_answer}", generated_answer)
+                )
             async with semaphore:
-                return await self._judge_criterion(question, generated_answer, criterion)
+                return await self._judge_criterion(question, generated_answer, criterion, prompt=prompt)
 
         judgements = await asyncio.gather(*(judge_one(c) for c in criteria))
 
@@ -1261,9 +1309,16 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             scores["rubric_partial_credit"],
         )
 
+        if self.config.reward_mode == "must_pass" and scores["rubric_dealbreakers_total"]:
+            reward = 0.0 if scores["rubric_dealbreakers_failed"] else 1.0
+        elif self.config.reward_mode in ("all_pass", "must_pass", "binary"):
+            reward = 1.0 if scores["rubric_all_pass"] else 0.0
+        else:
+            reward = scores["rubric_partial_credit"]
+
         return FinanceAgentV2VerifyResponse(
             **body.model_dump(),
-            reward=scores["rubric_partial_credit"],
+            reward=reward,
             rubric_judgements=list(judgements),
             **scores,
             judge_error=judge_error,
