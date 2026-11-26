@@ -489,6 +489,48 @@ async def test_real_code_and_resource_outputs_join_to_their_own_invocations(stat
 
 
 @pytest.mark.asyncio
+async def test_real_codeact_sends_an_image_a_cell_showed_as_a_responses_part() -> None:
+    """NOOA attaches a shown image to the cell's output as a Chat Completions part; the model request is Responses."""
+    runner, _ = policy_runner(ResourceUsingAgent)
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    code = (
+        "import base64\nfrom nooa.media import Image\n"
+        f"show(Image.from_bytes(base64.b64decode('{png}'), media_type='image/png'))"
+    )
+    model_requests = []
+
+    async def post(*, json: Any, **_: Any) -> FakeHTTPResponse:
+        model_requests.append(json)
+        first = len(model_requests) == 1
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"fc-{len(model_requests)}",
+            call_id=f"call-{len(model_requests)}",
+            name="execute_python" if first else "return_result",
+            arguments=arguments if first else '{"result":"done"}',
+        )
+        return FakeHTTPResponse(model_response(output, response_id=f"response-{len(model_requests)}"))
+
+    arguments = json.dumps({"code": code})
+    runner._server_client.post = AsyncMock(side_effect=post)
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+    assert result.return_value == "done"
+    assert len(model_requests) == 2
+    shown = [
+        part
+        for item in model_requests[1].model_dump(mode="json", exclude_none=True)["input"]
+        if isinstance(item.get("content"), list)
+        for part in item["content"]
+    ]
+    assert [part["type"] for part in shown] == ["input_text", "input_image"]
+    assert shown[1] == {"type": "input_image", "image_url": f"data:image/png;base64,{png}", "detail": "auto"}
+
+
+@pytest.mark.asyncio
 async def test_real_codeact_recovers_from_resource_http_error(outbound: AsyncMock) -> None:
     runner, _ = policy_runner(ResourceUsingAgent)
     model_requests: list[NeMoGymResponseCreateParamsNonStreaming] = []
