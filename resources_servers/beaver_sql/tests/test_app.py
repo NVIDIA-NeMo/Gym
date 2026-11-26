@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import gc
+import logging
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -333,6 +335,33 @@ class TestBoundedVerifications:
         waiting, events = asyncio.run(main())
         assert waiting  # the cancelled comparison's thread still held both results
         assert "start GOLD-B" in events
+
+    def test_a_cancelled_comparison_that_fails_leaves_no_unretrieved_error(self, monkeypatch, caplog) -> None:
+        release, started = threading.Event(), threading.Event()
+
+        def compare(gold, pred):
+            started.set()
+            release.wait(5)
+            raise ValueError("comparison failed")
+
+        monkeypatch.setattr(app_module, "results_match", compare)
+
+        async def main():
+            verifier = BeaverSqlVerifier()
+            verifier._runner = _GatedRunner(slots=1)
+            request = asyncio.ensure_future(verifier.verify(_request(_sql("SELECT 1"))))
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+            request.cancel()
+            await asyncio.sleep(0)
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+
+        with caplog.at_level(logging.ERROR, logger="asyncio"):
+            asyncio.run(main())
+            gc.collect()
+        assert "never retrieved" not in caplog.text
 
 
 def _row(reward: float, gold_result: str, pred_status: str, category: str = "base", **extra: Any) -> Dict:

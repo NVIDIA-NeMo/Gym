@@ -205,6 +205,7 @@ async def _compare(gold: Any, pred: Any) -> bool:
         except asyncio.CancelledError as e:
             cancelled = e
     if cancelled is not None:
+        comparison.exception()  # read, so a comparison that also failed isn't logged as never retrieved
         raise cancelled
     return comparison.result()
 
@@ -216,7 +217,8 @@ class BeaverSqlVerifier:
     ``_verifications`` (the server's: ``max_concurrency``) bounds the requests verified at once, from the gold query
     to the comparison, so the results held in memory don't grow with the requests waiting: the runner's own limit
     covers one query at a time, and without this every waiting request's gold result would be held until its
-    prediction got a turn. A cancelled request keeps its permit until its query is cleaned up or its comparison ends.
+    prediction got a turn. A cancelled request keeps its permit until its comparison ends, or until the runner is done
+    with its query: cleaned up, or given up on after ``stop_grace_s``, as the runner releases its own slot.
     """
 
     _runner: Any
