@@ -268,7 +268,9 @@ class BeaverSqlVerifier:
                     # empty.
                     raise MySqlUnavailableError(f"gold query failed: {gold.error}")
                 pred = (
-                    missing_prediction() if extracted_sql is None else await self._runner.run(body.db_id, extracted_sql)
+                    missing_prediction()
+                    if extracted_sql is None
+                    else await self._runner.run(body.db_id, extracted_sql)
                 )
                 match = await _compare(gold, pred)
         except MySqlUnavailableError as e:

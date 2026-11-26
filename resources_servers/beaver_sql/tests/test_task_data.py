@@ -54,9 +54,7 @@ def test_a_well_formed_row_is_clean() -> None:
     assert _report({**ROW, "responses_create_params": {"input": []}}).clean
 
 
-@pytest.mark.parametrize(
-    "change", [{"gt_sql": None}, {"question": None}, {"db_id": 7}, {"task_id": 12}], ids=str
-)
+@pytest.mark.parametrize("change", [{"gt_sql": None}, {"question": None}, {"db_id": 7}, {"task_id": 12}], ids=str)
 def test_a_malformed_row_fails_validation(change) -> None:
     row = {**ROW, **change}
     row = {k: v for k, v in row.items() if v is not None}
