@@ -12,11 +12,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.rollouts import enrich_run_result
 from nemo_gym.trajectory import AgentInvocation, ToolCallObservation, TrajectoryRecord
-from responses_api_agents.codex_agent.observability import parse_codex_observations
+from responses_api_agents.codex_agent.observability import (
+    TESTED_CODEX_VERSION,
+    _parse_codex_transcript,
+    parse_codex_observations,
+)
 from responses_api_agents.codex_agent.tests.test_app import _make_agent
 
 
@@ -432,3 +437,10 @@ async def test_generated_streams_attach_outputs_only_to_their_native_request():
         for native, v1_id in zip(natives, v1_ids):
             if natives.count(native) == 1:
                 assert v1_id == native, (transcript, v1_ids)
+
+
+def test_transcript_parser_names_the_pinned_codex_version():
+    config = Path(__file__).resolve().parents[1] / "configs" / "codex_agent.yaml"
+    pinned = yaml.safe_load(config.read_text())["codex_agent"]["responses_api_agents"]["codex_agent"]["codex_version"]
+    assert pinned == TESTED_CODEX_VERSION
+    assert f"Codex {TESTED_CODEX_VERSION} (`TESTED_CODEX_VERSION`" in _parse_codex_transcript.__doc__

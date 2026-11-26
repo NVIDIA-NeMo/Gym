@@ -405,6 +405,9 @@ def _parse_codex_transcript(
 ) -> AgentObservationBundle:
     """Parse one session's transcript, using the caller's final outcome and gaps when supplied.
 
+    Written for and tested with the transcript format of Codex 0.144.4 (`TESTED_CODEX_VERSION`, the
+    `codex_version` that `configs/codex_agent.yaml` pins). Recheck it when that pin changes.
+
     Schema 2.0 keeps one attempt per persisted call record. A request keeps its native call ID
     unless an earlier record used it; a reuse, or a result that no call can own, gets an ID derived
     from its record position that no persisted record or earlier allocation uses. Unlike
