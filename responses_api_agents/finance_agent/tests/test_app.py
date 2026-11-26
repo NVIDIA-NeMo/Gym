@@ -279,6 +279,8 @@ class TestFinanceAgentConfig:
         OmegaConf.set_struct(config, True)
         assert config.finance_agent.responses_api_agents.finance_agent.resources_server_retries == 0
         assert config.finance_agent.responses_api_agents.finance_agent.keep_response_on_verify_failure is False
+        assert config.finance_agent.responses_api_agents.finance_agent.max_output_tokens_behavior == "stop"
+        assert config.finance_agent.responses_api_agents.finance_agent.nudge_turns_without_prose is False
         merged = OmegaConf.merge(
             config,
             {
@@ -288,6 +290,8 @@ class TestFinanceAgentConfig:
                             "continue_if_not_tool_call": False,
                             "resources_server_retries": 2,
                             "keep_response_on_verify_failure": True,
+                            "max_output_tokens_behavior": "continue_with_content",
+                            "nudge_turns_without_prose": True,
                         }
                     }
                 }
@@ -297,6 +301,8 @@ class TestFinanceAgentConfig:
         assert agent_config.continue_if_not_tool_call is False
         assert agent_config.resources_server_retries == 2
         assert agent_config.keep_response_on_verify_failure is True
+        assert agent_config.max_output_tokens_behavior == "continue_with_content"
+        assert agent_config.nudge_turns_without_prose is True
         assert agent_config.prose_only_behavior == "nudge"
         assert agent_config.tool_call_execution == "sequential"
 
