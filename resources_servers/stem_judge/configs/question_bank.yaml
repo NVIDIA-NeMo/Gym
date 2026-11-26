@@ -10,4 +10,5 @@ stem_judge:
       verdict_format: json
       box_parser: last_command
       boxed_judge_input: box
+      # Set math_verify: {} to enable a unit-preserving, bidirectional check.
       verified: false
