@@ -546,6 +546,14 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
             "task_input": row["task_input"],
         },
     }
+    routing = row["task_input"].get("harness_routing")
+    if isinstance(routing, Mapping) and routing.get("group_id") is None:
+        task_input = dict(row["task_input"])
+        task_id = row["task_id"]
+        task_input["harness_routing"] = dict(routing) | {
+            "group_id": row.get("_ng_group_id") or f"{task_id['taskset']}:{task_id['task_id']}"
+        }
+        body["task"]["task_input"] = task_input
     # A training framework's sampling values ride beside the task, which they leave unchanged.
     if row.get(MODEL_SAMPLING_KEY_NAME) is not None:
         body["model_sampling"] = row[MODEL_SAMPLING_KEY_NAME]
@@ -768,6 +776,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
             "_ng_failure_message": failure.get("failure_reason"),
         }
+        if response.get("harness_routing") is not None:
+            record["harness_routing"] = response["harness_routing"]
         if failure_kind:
             # Every Environment Server failure was routed as this class before its kind became the class.
             # Keep it as the legacy class, so existing selectors such as count_failure_classes_as_zero still match.

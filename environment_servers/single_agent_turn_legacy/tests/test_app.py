@@ -172,6 +172,38 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
     assert "ng_agent_observations" not in result
 
 
+@pytest.mark.parametrize("benchmark", ["VideoMME", "Molmo2VideoTrack", "video_caption"])
+async def test_direct_benchmark_result_has_no_external_harness(benchmark) -> None:
+    from nemo_gym.core import HarnessRoutingMetadata
+
+    server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=server.config, server_client=client)
+    routing = HarnessRoutingMetadata(
+        benchmark=benchmark,
+        dataset="native",
+        env="environment",
+        task_type="non_agentic",
+        group_id="direct-prompt-group",
+    ).model_dump(mode="json")
+    result = await adapter.run_legacy(
+        {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "responses_create_params": {"input": "task"},
+            "harness_routing": routing,
+        }
+    )
+    assert result["reward"] == 1.0 and result["benchmark_field"] == "preserved"
+    assert result["harness_routing"] == routing
+    assert result["harness_routing"]["selected_harness"] is None
+    assert result["harness_routing"]["executed_harness"] is None
+    # Routing stays outside the actual verifier's task data.
+    for _, _, kwargs in client.calls:
+        body = kwargs.get("json", {})
+        body = body.model_dump() if hasattr(body, "model_dump") else body
+        assert "harness_routing" not in body.get("task_data", {})
+
+
 def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
     environment_server, client = _environment_server()
     client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]

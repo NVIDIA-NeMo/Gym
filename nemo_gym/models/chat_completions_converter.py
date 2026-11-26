@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.responses_api_types import (
     TOKEN_METADATA_FIELDS,
+    VIDEO_FRAME_METADATA_FIELDS,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -782,7 +783,7 @@ class ChatCompletionsConverter(BaseModel):
         return self._input_image_to_chat(part)
 
     @staticmethod
-    def _input_image_to_chat(part_param: dict) -> NeMoGymChatCompletionContentPartImageParam:
+    def _input_image_to_chat(part_param: dict[str, Any]) -> NeMoGymChatCompletionContentPartImageParam:
         image_url = part_param.get("image_url")
         if image_url is None:
             raise NotImplementedError(
@@ -797,7 +798,11 @@ class ChatCompletionsConverter(BaseModel):
             raise NotImplementedError(
                 "Responses input image detail 'original' has no Chat Completions representation."
             )
-        return {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
+        return {
+            "type": "image_url",
+            "image_url": {"url": image_url, "detail": detail},
+            **{key: part_param[key] for key in VIDEO_FRAME_METADATA_FIELDS if key in part_param},
+        }
 
     def _format_message(
         self,

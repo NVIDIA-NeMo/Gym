@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# N4_AVB_HARBOR_CONFIG is the stock Harbor run config materialized from the AVB DSS task entry.
+# N4_UNIFIED_VIDEO_CONFIG is emitted by environments/unified_video/prepare.py for ClawEval only.
+# Caption rows use their stock video_caption_simple_agent entry; resolve DSS media before collection.
+config_paths:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - environment_servers/harbor/configs/harbor.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environments/harbor/agentic_vbench_train/harbor_train.yaml
+  - ${oc.env:N4_AVB_HARBOR_CONFIG}
+  - resources_servers/video_caption/configs/video_caption_api_judge.yaml
+  - examples/configs/video_grpo/videomme_sessions.yaml
+  - ${oc.env:N4_UNIFIED_VIDEO_CONFIG}
+
+# Keep the coding policy's existing advertised context and output budgets on the stock AVB harness.
+agentic_vbench_context_tokens: 262144
+agentic_vbench_output_tokens: 8192
+
+# The harness calls this endpoint from a task container on a CPU backend.
+absolute_ip_server_types:
+  - responses_api_models
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # Native coding harnesses also advertise hosted and free-form tools. This
+      # training backend accepts function tools; shell tools still edit files.
+      drop_hosted_tools: true
+      drop_custom_tools: true
+      uses_reasoning_parser: true
+      forward_request_chat_template_kwargs: true
+      chat_template_kwargs:
+        enable_thinking: true
+        truncate_history_thinking: false

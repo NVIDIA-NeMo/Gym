@@ -162,7 +162,7 @@ from nemo_gym.trajectory import (
     AtifExportError,
     TrajectoryRecord,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, normalize_hermes_mcp_tool_name
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1053,16 +1053,22 @@ class HarborEnvironmentServer(
         its own. A transcript the converter cannot represent masks the turn instead of grading it; a collection the
         sandbox could not serve masks it as an outage."""
         task = session.task
+        # Verifiers may use Gym's MCP spelling; training must retain exactly the
+        # model-authored names, including in the response returned by this run.
+        verifier_response = agent_response.model_copy(deep=True)
+        for item in verifier_response.output:
+            if getattr(item, "type", None) == "function_call":
+                item.name = normalize_hermes_mcp_tool_name(item.name, verifier_response.metadata)
         try:
             if turn is None:
-                trajectory = self._export_trajectory(request, agent_response)
+                trajectory = self._export_trajectory(request, verifier_response)
             else:
-                trajectory = self._export_trajectory(request, agent_response, turn[1])
+                trajectory = self._export_trajectory(request, verifier_response, turn[1])
         except AtifExportError as error:
             LOGGER.error(f"{task.task_id}: could not export the agent transcript to ATIF: {error}")
             return self._masked(TRAJECTORY_EXPORT_KIND, f"Could not export the agent transcript to ATIF: {error}")
         if turn is None:
-            return await self._run_verifier(session, trajectory, response=agent_response)
+            return await self._run_verifier(session, trajectory, response=verifier_response)
         step = turn[0]
         # Harbor's per-step order: the collection pass (hooks, /logs/artifacts, the task's and the step's artifacts)
         # after the agent and before the verifier, into the turn's own logs folder. Nothing is stopped, except on the

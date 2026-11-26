@@ -95,6 +95,8 @@ from openai.types.responses import (
     ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCallOutputItem,
     ResponseFunctionWebSearch,
+    ResponseInputFileParam,
+    ResponseInputImageParam,
     ResponseInputTextParam,
     ResponseToolSearchCall,
     ResponseToolSearchOutputItem,
@@ -131,7 +133,6 @@ from openai.types.responses.response_function_call_output_item_list_param import
 )
 from openai.types.responses.response_function_tool_call import Caller as FunctionToolCallCaller
 from openai.types.responses.response_function_web_search import ActionFind, ActionOpenPage, ActionSearch
-from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
 )
@@ -348,6 +349,22 @@ class NeMoGymResponseOutputMessage(BaseModel):
     phase: Optional[Literal["commentary", "final_answer"]] = None
 
 
+VIDEO_FRAME_METADATA_FIELDS = ("_is_video_frame", "_video_frame_index", "_video_fps", "_video_source")
+
+
+class _VideoFrameMetadata(TypedDict, total=False):
+    """Optional per-image metadata identifying ordered, sampled video frames."""
+
+    _is_video_frame: bool
+    _video_frame_index: int
+    _video_fps: float
+    _video_source: str
+
+
+class NeMoGymInputImagePart(ResponseInputImageParam, _VideoFrameMetadata):
+    """Responses image content retaining optional video-frame metadata."""
+
+
 class NeMoGymInputVideoPart(TypedDict, total=False):
     """Video content accepted by the Responses-compatible Gym API."""
 
@@ -374,7 +391,7 @@ def _validate_input_video_part(value: Any) -> Any:
 
 
 NeMoGymResponseInputContentPart: TypeAlias = Annotated[
-    Union[ResponseInputContentParam, NeMoGymInputVideoPart],
+    Union[ResponseInputTextParam, NeMoGymInputImagePart, ResponseInputFileParam, NeMoGymInputVideoPart],
     BeforeValidator(_validate_input_video_part),
 ]
 NeMoGymResponseInputContentList: TypeAlias = List[NeMoGymResponseInputContentPart]
@@ -386,6 +403,15 @@ class NeMoGymEasyInputMessage(BaseModel):
     type: Literal["message"] = "message"
     # Preserve the response phase when replaying the item.
     phase: Optional[Literal["commentary", "final_answer"]] = None
+    # Codex can retain an item ID while omitting the provider's output status.
+    id: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_missing_id(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if payload.get("id") is None:
+            payload.pop("id", None)
+        return payload
 
 
 class NeMoGymMessage(BaseModel):
@@ -550,6 +576,10 @@ class NeMoGymResponseComputerCallOutput(ResponseComputerToolCallOutputItem):
 
 class NeMoGymResponseCustomToolCallOutput(ResponseCustomToolCallOutput):
     """The client's result of a custom tool call (``custom_tool_call_output`` item)."""
+
+
+class NeMoGymResponseCustomToolCallOutputInputItem(ResponseCustomToolCallOutput):
+    """A client-shaped tool result emitted in a native harness transcript."""
 
 
 class NeMoGymResponseCustomToolCallOutputItem(ResponseCustomToolCallOutputItem):
@@ -767,7 +797,9 @@ def _discriminate_message_item(value: Dict[str, Any]) -> str:
         if content:
             if _first_content_part_type(content) in _OUTPUT_CONTENT_PART_TYPES:
                 return "output_message"
-        elif isinstance(value.get("id"), str):
+        elif isinstance(value.get("id"), str) and value.get("status") is not None:
+            # An imported transcript can retain an ID without provider status.
+            # Validate explicit output status without inferring it from the ID.
             return "output_message"
     return "easy_message"
 
@@ -834,13 +866,13 @@ def _discriminate_response_output_item(value: Any) -> Optional[str]:
     item_type = value.get("type")
     if item_type == "message":
         tag = _discriminate_message_item(value)
-    elif item_type == "function_call_output":
+    elif isinstance(item_type, str) and item_type in {"function_call_output", "custom_tool_call_output"}:
         # The SDK output item additionally requires an id and a status; results without
         # them only fit the request-input model.
         if isinstance(value.get("id"), str) and value.get("status") in _ITEM_STATUSES:
-            tag = "function_call_output"
+            tag = item_type
         else:
-            tag = "function_call_output_input"
+            tag = item_type + "_input"
     elif isinstance(item_type, str):
         tag = item_type
     else:
@@ -905,11 +937,12 @@ NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 def _normalize_output_item_for_replay(item: Any) -> Any:
     """Convert a provider output item for request replay."""
     if isinstance(item, BaseModel):
-        # Only these two need rewriting; dumping any other typed item without its unset defaults drops its
-        # type and role tags, and the bare remainder validates as a different item.
-        if getattr(item, "type", None) not in {"additional_tools", "computer_call_output"}:
+        # Keep typed items intact unless replay removes output-only metadata.
+        item_type = getattr(item, "type", None)
+        if item_type not in {"additional_tools", "computer_call_output", "custom_tool_call_output"}:
             return item
         item = item.model_dump(exclude_unset=True)
+        item.setdefault("type", item_type)
     if not isinstance(item, dict):
         return item
 
@@ -918,6 +951,13 @@ def _normalize_output_item_for_replay(item: Any) -> Any:
         item = item.copy()
         item["role"] = "developer"
     elif item_type == "computer_call_output" and item.get("status") == "failed":
+        item = item.copy()
+        item.pop("status")
+    elif item_type == "custom_tool_call_output" and "status" in item:
+        # Provider output has a status; the SDK's request-input item does not.
+        # Preserve the tool result and its IDs while removing only that metadata.
+        if item["status"] not in _ITEM_STATUSES:
+            raise ValueError("Invalid provider custom-tool output status")
         item = item.copy()
         item.pop("status")
     return item
@@ -1136,6 +1176,7 @@ NeMoGymResponseOutputItem = Annotated[
         Annotated[NeMoGymEasyInputMessage, Tag("easy_message")],
         Annotated[NeMoGymMessage, Tag("input_message")],
         Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output_input")],
+        Annotated[NeMoGymResponseCustomToolCallOutputInputItem, Tag("custom_tool_call_output_input")],
         Annotated[NeMoGymEasyInputMessageForTraining, Tag("easy_message__training")],
         Annotated[NeMoGymMessageForTraining, Tag("input_message__training")],
         Annotated[NeMoGymResponseOutputMessageForTraining, Tag("output_message__training")],
@@ -1326,8 +1367,8 @@ class NeMoGymChatCompletionContentPartTextParam(ChatCompletionContentPartTextPar
     pass
 
 
-class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam):
-    pass
+class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageParam, _VideoFrameMetadata):
+    """Chat image content retaining optional video-frame metadata."""
 
 
 class NeMoGymInputAudio(TypedDict, total=False):

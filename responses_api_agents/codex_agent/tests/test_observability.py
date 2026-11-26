@@ -6,12 +6,115 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
 from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
+    codex_response_output,
     parse_codex_observations,
     parse_codex_usage,
     read_codex_observations,
 )
+
+
+def test_response_output_preserves_served_tool_arguments_and_literal_message_text() -> None:
+    call = {
+        "type": "function_call",
+        "call_id": "call_model",
+        "name": "exec_command",
+        "arguments": '{"cmd":"printf hello","yield_time_ms":1000}',
+    }
+    message = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "<think>literal</think>\n\n  answer \n", "annotations": []}],
+    }
+    transcript = "\n".join(
+        json.dumps({"type": "response_item", "timestamp": f"2026-11-18T00:00:0{index}Z", "payload": item})
+        for index, item in enumerate(
+            [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+                call,
+                {"type": "function_call_output", "call_id": "call_model", "output": "hello"},
+                message,
+            ]
+        )
+    )
+    observations = parse_codex_observations(transcript, "invocation", returncode=0, timed_out=False)
+    output = [item.model_dump(mode="json") for item in codex_response_output(observations)]
+    assert [item["type"] for item in output] == ["function_call", "function_call_output", "message"]
+    assert output[0]["call_id"] == "call_model"
+    assert output[0]["arguments"] == call["arguments"]
+    assert output[2]["content"][0]["text"] == message["content"][0]["text"]
+    served = completion_items({"output": [call, message]})
+    assert [output_item_fingerprint(item) for item in (output[0], output[2])] == [
+        output_item_fingerprint(item) for item in served
+    ]
+
+
+@pytest.mark.parametrize("item_type", ["message", "custom_tool_call_output"])
+@pytest.mark.parametrize("item_status", ["in_progress", "completed", "incomplete"])
+def test_session_item_export_preserves_supplied_api_envelope(item_type: str, item_status: str) -> None:
+    item = {"type": item_type, "id": "provider-item", "status": item_status}
+    if item_type == "message":
+        item.update(
+            role="assistant",
+            phase="commentary",
+            content=[{"type": "output_text", "text": "  literal <think>text</think>\n", "annotations": []}],
+        )
+    else:
+        item.update(call_id="provider-call", output="Process exited with code 7\nOutput:\nunchanged")
+    transcript = json.dumps({"type": "response_item", "timestamp": "2026-11-18T00:00:00Z", "payload": item})
+    bundle = parse_codex_observations(transcript, "invocation", returncode=0, timed_out=False)
+    assert not bundle.gaps
+    output = codex_response_output(bundle)[0].model_dump(mode="json", exclude_unset=True)
+    assert output == item
+
+
+@pytest.mark.parametrize("native_id", [None, "provider-message"])
+@pytest.mark.parametrize("returncode,timed_out,invocation_status", [(1, False, "failed"), (None, True, "incomplete")])
+def test_statusless_session_items_do_not_complete_a_failed_or_interrupted_invocation(
+    returncode: int | None, timed_out: bool, invocation_status: str, native_id: str | None
+) -> None:
+    items = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "literal\n"}]},
+        {"type": "custom_tool_call_output", "call_id": "provider-call", "output": "tool failed"},
+    ]
+    if native_id is not None:
+        items[0]["id"] = native_id
+    transcript = "\n".join(
+        json.dumps({"type": "response_item", "timestamp": f"2026-11-18T00:00:0{index}Z", "payload": item})
+        for index, item in enumerate(items)
+    )
+    bundle = parse_codex_observations(transcript, "invocation", returncode=returncode, timed_out=timed_out)
+    assert bundle.records[0].status == invocation_status
+    assert not bundle.gaps
+    output = [item.model_dump(mode="json", exclude_unset=True) for item in codex_response_output(bundle)]
+    assert all("status" not in item for item in output)
+    assert output[0].get("id") == native_id
+    assert "id" not in output[1]
+    assert output[0]["content"] == [{"type": "input_text", "text": items[0]["content"][0]["text"]}]
+    assert output[1]["call_id"] == "provider-call" and output[1]["output"] == "tool failed"
+    served = completion_items({"output": [items[0]]})
+    assert output_item_fingerprint(output[0]) == output_item_fingerprint(served[0])
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"id": 123},
+        {"status": "incomplete"},
+        {"content": [{"type": "output_text", "text": "text", "annotations": [{"type": "file_citation"}]}]},
+        {"content": [{"type": "output_text", "text": "text", "logprobs": []}]},
+        {"unexpected_metadata": {"preserve_or_refuse": "must not disappear"}},
+    ],
+)
+def test_statusless_session_message_refuses_unrepresentable_metadata(metadata: dict) -> None:
+    item = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "text"}], **metadata}
+    transcript = json.dumps({"type": "response_item", "timestamp": "2026-11-18T00:00:00Z", "payload": item})
+    bundle = parse_codex_observations(transcript, "invocation", returncode=0, timed_out=False)
+    assert any(gap.code == "agent_artifact_record_unparseable" for gap in bundle.gaps)
+    with pytest.raises(ValueError, match="unsupported records"):
+        codex_response_output(bundle)
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
@@ -412,6 +515,11 @@ def test_codex_child_contexts_and_status_are_not_flattened_into_parent():
     assert len(owners["episode"].conversation) == 3
     assert owners["episode.child"].conversation[0].content[0]["text"] == "Child-only\n α\u2028β"
     assert not any(g.code == "subagent_hierarchy_unavailable" for g in bundle.gaps)
+
+    output = [item.model_dump(mode="json", exclude_unset=True) for item in codex_response_output(bundle)]
+    assert [item["type"] for item in output] == ["function_call", "function_call_output", "message"]
+    assert output[-1]["content"][0]["text"] == "Parent final"
+    assert owners["episode.child"].conversation[0].content[0]["text"] == "Child-only\n α\u2028β"
 
 
 @pytest.mark.parametrize("parent", ["root", "missing", "child"])

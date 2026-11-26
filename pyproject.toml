@@ -163,9 +163,9 @@ dependencies = [
     "httptools",
 
     # UVLoop: a faster async event loop than Python's native asyncio. Used automatically by Uvicorn as an async loop backend.
-    # Updated Fri Aug 01, 2025 with uvloop==0.21.0
+    # uvloop 0.23.0 fixes socket ownership after cancelled connection attempts (MagicStack/uvloop#740).
     # License: Apache 2.0 and MIT https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-APACHE https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-MIT
-    "uvloop",
+    "uvloop>=0.23.0",
 
     # Hydra and OmegaConf: CLI Configuration utilities
     # Updated Mon Nov 16, 2026: hydra-core>=1.4.0rc3 (security bump; the fix only exists on the 1.4

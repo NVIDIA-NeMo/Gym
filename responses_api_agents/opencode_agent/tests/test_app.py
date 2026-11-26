@@ -33,8 +33,10 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    skip_token_capture_context,
 )
 from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
+from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
 from nemo_gym.models.token_capture.consumer import _assemble
 from nemo_gym.models.token_capture.delivery import MASK_SAMPLE_KEY
 from nemo_gym.trajectory import (
@@ -208,6 +210,37 @@ class TestExtractInstruction:
 
 
 GYM_REPLY = "<think>try 2 + 2</think>\n\nthe answer is 4"
+
+
+@pytest.mark.parametrize("text", ["<think>r</think>\n\n  answer \n", "<think>r</think>", "  literal text \n"])
+def test_captured_session_output_preserves_served_chat_content(text: str) -> None:
+    agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+    agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True, "all_agents": True}}
+    export = {"messages": [{"info": {"role": "assistant"}, "parts": [{"type": "text", "text": text}]}]}
+    with skip_token_capture_context(False):
+        output = agent._session_output(export, AgentObservationBundle(source="opencode"))
+    assert [item.type for item in output] == ["message"]
+    assert output[0].content[0].text == text
+    served = completion_items({"choices": [{"message": {"role": "assistant", "content": text}}]})
+    assert output_item_fingerprint(output[0].model_dump(mode="json")) == output_item_fingerprint(served[0])
+
+
+def test_captured_session_output_keeps_typed_reasoning_separate_and_exact() -> None:
+    agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+    agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True, "all_agents": True}}
+    export = {
+        "messages": [
+            {
+                "info": {"role": "assistant"},
+                "parts": [{"type": "reasoning", "text": "  typed reasoning\n"}, {"type": "text", "text": " answer "}],
+            }
+        ]
+    }
+    with skip_token_capture_context(False):
+        output = agent._session_output(export, AgentObservationBundle(source="opencode"))
+    assert [item.type for item in output] == ["reasoning", "message"]
+    assert output[0].summary[0].text == "  typed reasoning\n"
+    assert output[1].content[0].text == " answer "
 
 
 @pytest.mark.parametrize(

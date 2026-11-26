@@ -635,8 +635,8 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
       tokens reach ``context_window`` minus this buffer; unset, the buffer is the smaller of 20000 and
       ``max_output_tokens``. It moves only that trigger. The config refuses the other version's name when it loads
       (``_compaction_buffer_name_error``); the seed refuses it again, and a buffer of ``context_window`` or more,
-      which would compact after every call. ``compaction.prune`` stays refused: it rewrites earlier tool output, so
-      later calls stop extending the earlier calls' prefix.
+      which would compact after every call.
+      ``compaction.prune`` may only be ``false``, preserving earlier tool outputs in the session history.
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
@@ -654,18 +654,23 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     if unsupported:
         return (
             "supports permission, tools, snapshot, attachment, compaction.auto, compaction.reserved (OpenCode 1), "
-            f"compaction.buffer (OpenCode 2), agent.build.steps and subagents only; unsupported: {unsupported}"
+            "compaction.buffer (OpenCode 2), compaction.prune=false, agent.build.steps and subagents only; "
+            f"unsupported: {unsupported}"
         )
     if "snapshot" in opencode_config and type(opencode_config["snapshot"]) is not bool:
         return "snapshot must be a boolean"
     compaction = opencode_config.get("compaction", {})
-    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto", "reserved", "buffer"}:
-        return "compaction supports only auto and reserved (OpenCode 1), or auto and buffer (OpenCode 2)"
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto", "reserved", "buffer", "prune"}:
+        return (
+            "compaction supports only auto and reserved (OpenCode 1), or auto and buffer (OpenCode 2), and prune=false"
+        )
     if "auto" in compaction and not isinstance(compaction["auto"], bool):
         return "compaction.auto must be true or false"
     for key in ("reserved", "buffer"):
         if key in compaction and (type(compaction[key]) is not int or compaction[key] <= 0):
             return f"compaction.{key} must be a positive integer"
+    if "prune" in compaction and compaction["prune"] is not False:
+        return "compaction.prune must be false"
     agent = opencode_config.get("agent", {})
     if not isinstance(agent, Mapping):
         return "agent must be a mapping of agent names to definitions"
@@ -1244,7 +1249,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             output_items, usage = (
                 ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None})
                 if timed_out
-                else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
+                else parse_opencode_session(
+                    db_path,
+                    gym_reasoning=self.config.model_server is not None and not self._token_id_capture_enabled(),
+                )
             )
             observations = AgentObservationBundle(schema_version="2.0", source="opencode")
             if collect_observations:
@@ -2516,7 +2524,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, export: dict[str, Any], observations: AgentObservationBundle
     ) -> list[NeMoGymResponseOutputItem]:
         output = []
-        gym_reasoning = self.config.model_server is not None
+        # Capture describes the Chat content exactly as served, including literal think tags and whitespace.
+        # The separate observation/trajectory parser may still expose its semantic reasoning view.
+        gym_reasoning = self.config.model_server is not None and not self._token_id_capture_enabled()
         for message in export.get("messages", []):
             if message.get("info", {}).get("role") != "assistant":
                 continue
@@ -2741,6 +2751,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
+                "executed_harness": "opencode",
                 "opencode_version": self.config.opencode_version,
                 **(
                     {

@@ -228,13 +228,23 @@ def agent_references(server: dict) -> list[tuple[str, str]]:
 
     Matches `environment_server_agent_refs` in `nemo_gym/config/global_config.py`.
     """
-    return [
-        (field, value["name"])
-        for field, value in server.items()
-        if isinstance(value, dict)
-        and value.get("name")
-        and (value.get("type") == AGENT_SERVER_TYPE or (field == AGENT_SERVER and value.get("type") is None))
-    ]
+    references: list[tuple[str, str]] = []
+
+    def visit(config: dict, *, prefix: str) -> None:
+        for field, value in config.items():
+            if not isinstance(value, dict):
+                continue
+            path = f"{prefix}.{field}" if prefix else field
+            if value.get("type") == AGENT_SERVER_TYPE or (
+                not prefix and field == AGENT_SERVER and value.get("type") is None
+            ):
+                if value.get("name"):
+                    references.append((path, value["name"]))
+            else:
+                visit(value, prefix=path)
+
+    visit(server, prefix="")
+    return references
 
 
 def fronted_agents(document: dict) -> set[str]:

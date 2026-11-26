@@ -76,9 +76,21 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             raise RequestValidationError(error.errors(include_url=False)) from None
         except ValueError as error:
             raise HTTPException(422, str(error)) from None
+        routing = request.task.task_input.harness_routing
+        if routing is not None and routing.task_type != "non_agentic":
+            raise HTTPException(422, "External harness routing requires its configured Harbor environment")
+        if routing is not None and routing.env != self.config.name:
+            raise HTTPException(422, "Harness routing must name the actual environment")
         response = await self.run_request(request)
+        if routing is not None:
+            response.harness_routing = routing.with_execution(None)
+            if response.result is not None:
+                response.result.harness_routing = response.harness_routing
         # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
-        return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
+        result = response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
+        if routing is not None:
+            result["harness_routing"] = response.harness_routing.model_dump(mode="json")
+        return result
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
@@ -118,6 +130,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         agent_ref = {"name": self.config.agent_server.name}
         if response.failure is not None:
             failure = {
+                "mask_sample": True,
                 "_ng_failure_class": response.failure.failure_kind or ENVIRONMENT_SERVER_FAILED,
                 "_ng_failure_kind": response.failure.failure_kind,
                 "_ng_failure_terminal": response.failure.terminal,

@@ -77,9 +77,21 @@ from nemo_gym.server_runtime.supervisor.server_supervisor import (
 def mock_server_process_groups(monkeypatch):
     signal_group = nemo_gym.server_runtime.supervisor.server_supervisor._signal_server_group
     group_exists = nemo_gym.server_runtime.supervisor.server_supervisor._server_group_exists
+    live_mock_groups = {}
 
     def send(process, number):
         if isinstance(process, MagicMock):
+            if process not in live_mock_groups:
+                live_mock_groups[process] = True
+                wait = process.wait
+
+                def wait_and_reap(*args, **kwargs):
+                    result = wait(*args, **kwargs)
+                    live_mock_groups[process] = False
+                    return result
+
+                # Keep the configured mock's iterable/callable/None side-effect semantics.
+                process.wait = MagicMock(side_effect=wait_and_reap)
             if number == nemo_gym.server_runtime.supervisor.server_supervisor.SIGINT:
                 process.send_signal(number)
             else:
@@ -91,7 +103,9 @@ def mock_server_process_groups(monkeypatch):
     monkeypatch.setattr(
         nemo_gym.server_runtime.supervisor.server_supervisor,
         "_server_group_exists",
-        lambda process: bool(process.wait.side_effect) if isinstance(process, MagicMock) else group_exists(process),
+        lambda process: live_mock_groups.get(process, False)
+        if isinstance(process, MagicMock)
+        else group_exists(process),
     )
 
 

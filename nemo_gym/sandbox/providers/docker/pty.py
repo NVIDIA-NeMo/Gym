@@ -723,6 +723,7 @@ async def spawn(
     argv: list[str],
     *,
     use_pty: bool,
+    env: dict[str, str] | None = None,
     rows: int,
     cols: int,
     session_id: str | None = None,
@@ -746,6 +747,7 @@ async def spawn(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=env,
         )
         return DockerPtySession(
             proc=proc,
@@ -784,6 +786,7 @@ async def spawn(
             stdout=slave_fd,
             stderr=stderr_write,
             start_new_session=True,
+            env=env,
         )
     except BaseException:
         for fd in (master_fd, slave_fd, stderr_read, stderr_write):

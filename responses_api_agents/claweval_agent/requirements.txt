@@ -1,0 +1,3 @@
+# Native Gym dependencies plus the task media decoder used by helper tests.
+-e nemo-gym[dev,sandbox] @ ../..
+pillow>=12.3,<13

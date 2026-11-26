@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, m
 
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.core.failure_records import EpisodeFailure
+from nemo_gym.core.harness_routing import HarnessRoutingMetadata
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME, AgentContext
 from nemo_gym.server_runtime.base_resources_server import BaseVerifyResponse
@@ -43,6 +44,7 @@ class SingleAgentTurnTaskInput(BaseModel):
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     task_data: dict[str, JsonValue]
+    harness_routing: HarnessRoutingMetadata | None = Field(default=None, exclude_if=lambda value: value is None)
     # What each participant's session receives beyond its model input, by role. Kept out of task_data, which the
     # Resources Server gets.
     agent_context: SingleAgentTurnAgentContext | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -67,6 +69,8 @@ class SingleAgentTurnTaskInput(BaseModel):
                 raise ValueError(f"Conflicting task field {key!r} inside and outside task_data")
         task_data = dict(task_data) | fields
         task_input = {"responses_create_params": response_params, "task_data": task_data}
+        if (harness_routing := task_data.pop("harness_routing", None)) is not None:
+            task_input["harness_routing"] = harness_routing
         if (agent_context := task_data.pop(AGENT_CONTEXT_KEY_NAME, None)) is not None:
             task_input[AGENT_CONTEXT_KEY_NAME] = agent_context
         return task_input

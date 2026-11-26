@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Bind the stock VideoMME configuration prepared for the selected dataset and grader.
+# Its owner supplies the source/version pin, task rows, and model-server binding.
+config_paths:
+  - ${oc.env:N4_VIDEOMME_GRADER_CONFIG}
