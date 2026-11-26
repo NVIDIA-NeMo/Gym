@@ -1,0 +1,58 @@
+---
+title: "BEAVER Text-to-SQL"
+description: "Prepare and run BEAVER, an enterprise text-to-SQL benchmark scored on MySQL with BEAVER's own execution accuracy."
+position: 21
+---
+
+[BEAVER](https://beaverbench.github.io/) asks for one MySQL query per question over real, anonymized enterprise data
+warehouses with hundreds of tables. Gym's `beaver` benchmark shows the model the question and the database's
+`CREATE TABLE` statements, runs its query and the gold query on MySQL, and scores them with BEAVER's official
+execution accuracy. By default it runs 300 questions of the `dw` split, drawn with BEAVER's own sampling seed.
+
+The [benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/beaver/README.md) has the measurement
+contract, and the [`beaver_sql` README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/beaver_sql/README.md)
+has the scoring rules and the server settings.
+
+## Before you run
+
+- **Gated data.** The questions and the database dumps are gated Hugging Face datasets (MIT):
+  [`beaverbench/beaver-query`](https://huggingface.co/datasets/beaverbench/beaver-query) and
+  [`beaverbench/beaver-table`](https://huggingface.co/datasets/beaverbench/beaver-table). Accept the terms on each
+  dataset page, then run `hf auth login`.
+- **MySQL 8.0 with case-insensitive table names.** BEAVER's dumps come from a case-insensitive server, and many gold
+  queries spell tables in another case, so the server must start with `--lower-case-table-names=1`. That setting can
+  only be chosen when the data directory is created, and the grader refuses a server without it:
+
+  ```bash
+  docker run -d --name beaver-mysql -p 127.0.0.1:3306:3306 \
+      -e MYSQL_ROOT_PASSWORD='<admin password>' mysql:8.0 --lower-case-table-names=1
+  ```
+
+## Prepare and run
+
+```bash
+hf auth login
+gym eval prepare --benchmark beaver
+
+export BEAVER_MYSQL_PASSWORD='<grader password>'
+export BEAVER_MYSQL_ADMIN_PASSWORD='<admin password>'
+export BEAVER_MYSQL_ADMIN_DSN=mysql://root@127.0.0.1:3306
+gym eval run --benchmark beaver --model-type openai_model --split benchmark \
+    --output results/beaver/rollouts.jsonl --num-repeats 1 \
+    '+beaver_sql_resources_server.resources_servers.beaver_sql.mysql_admin_dsn=${oc.env:BEAVER_MYSQL_ADMIN_DSN}'
+```
+
+With the admin DSN, the server loads the pinned dumps into MySQL on its first start and creates a read-only grader
+user. Keep passwords in the environment: the server refuses a DSN that holds one, because a run records its DSNs.
+
+## Read the results
+
+BEAVER reports two accuracies, and so does Gym:
+
+- `pass@1[avg-of-k]/accuracy` covers every task. This is the benchmark's primary metric.
+- `nonempty_gold/pass@1[avg-of-k]/accuracy` covers only tasks whose gold query returns rows. A query that returns
+  nothing, or fails, matches an empty gold result, so this is the stricter number.
+
+Each query gets 10 seconds, as in BEAVER's evaluator. BEAVER's leaderboard gives the model no hints: to compare with
+it, prepare with `'+prepare_script_args.include_evidence=false'` and point the dataset at the file that writes, as the
+benchmark README shows.
