@@ -54,18 +54,12 @@ flowchart LR
   Adapter --> Pools[Optional GitLab approval pools]
 ```
 
-The GitLab adapter pin will move to
-`f6e8ed5837b263566534bf0dff0d83a7c653ca8b`
-([FW-CI-templates PR 631](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/631)).
-The adapter will skip mapped users without active Developer-or-higher project
-membership and report them in `warnings`. Missing identity mappings, empty pools,
-and attempts to replace required approval rules will still block writes. The MR
-author is excluded. The adapter will always reconcile the optional approval pools.
-When the MR has no reviewers, the adapter will additionally assign eligible pool
-members as reviewers. If reviewers already exist, their list will stay unchanged.
-The adapter rechecks the reviewer list immediately before assignment and checks
-the current MR state and head before writes. GitLab has no atomic assign-if-empty
-operation, so a manual assignment in the remaining read/write window can race.
+The GitLab adapter will use [FW-CI-templates commit `b6b4df4160277e1048091f972eda0c51319bc845`](https://github.com/NVIDIA-NeMo/FW-CI-templates/commit/b6b4df4160277e1048091f972eda0c51319bc845).
+The adapter will reconcile optional approval pools and leave reviewer selection to
+the MR participants. It will exclude the MR author, skip mapped users without
+active Developer-or-higher project membership and report them in `warnings`.
+Missing identity mappings, empty pools, or collisions with required approval
+rules will block writes. The adapter will check the MR state and head before writes.
 
 The dispatcher accepts only open, reopen, or update events for non-draft MRs in
 project `191584` targeting `nv-internal-main`. Only a positive integer MR IID is

@@ -38,7 +38,7 @@ on:
         default: true
         type: boolean
       version-bump-branch:
-        description: Branch for version bump
+        description: Target main or a release branch covered by Gym's [rv][0-9].[0-9].[0-9] protection rule
         required: true
         type: string
       gh-release-from-tag:
@@ -51,9 +51,7 @@ defaults:
   run:
     shell: bash -x -e -u -o pipefail {0}
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
@@ -62,13 +60,16 @@ concurrency:
 jobs:
   pre-flight:
     if: github.event_name != 'workflow_dispatch'
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@037094bcc9138c72bc125418e6e3653f9e1c4160 # v1.11.0
-    with:
-      workflow_ref: 037094bcc9138c72bc125418e6e3653f9e1c4160 # pragma: allowlist secret
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@b6b4df4160277e1048091f972eda0c51319bc845
 
   previous-tag:
     if: ${{ !inputs.gh-release-from-tag }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.find.outputs.tag }}
     steps:
@@ -133,7 +134,8 @@ jobs:
            || needs.pre-flight.outputs.is_deployment_workflow == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     steps:
       - name: Validate immutable release ref
         env:
@@ -144,15 +146,43 @@ jobs:
             exit 1
           fi
 
+      - name: Require dispatch from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Select the main branch when starting the release workflow."
+          exit 1
+
+      - name: Verify release commit belongs to the protected target branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.release-ref }}
+          TARGET_BRANCH: ${{ inputs.version-bump-branch }}
+        run: |
+          case "$TARGET_BRANCH" in
+            main|[rv][0-9].[0-9].[0-9]) ;;
+            *) echo "::error::Select main or a branch covered by Gym's release-branch rule."; exit 1 ;;
+          esac
+          target_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/$TARGET_BRANCH" \
+            --jq 'select(.protected == true) | .commit.sha')
+          if [[ ! "$target_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The version bump target must be a protected branch."
+            exit 1
+          fi
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_REF...$target_sha" --jq '.status')
+          if [[ "$status" != identical && "$status" != ahead ]]; then
+            echo "::error::The release commit must be on the version bump target branch."
+            exit 1
+          fi
+
   bump:
     needs: [validate-inputs, release-workflow-tests]
     if: |
       !cancelled() && !failure() && needs.validate-inputs.result == 'success'
       && needs.release-workflow-tests.result == 'success'
     permissions:
-      contents: write
-      pull-requests: write
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
+      contents: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@b6b4df4160277e1048091f972eda0c51319bc845
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
@@ -161,10 +191,10 @@ jobs:
       dry-run: ${{ inputs.dry-run || false }}
       version-bump-branch: ${{ inputs.version-bump-branch || github.ref_name }}
       packaging: uv
-      app-id: ${{ vars.BOT_ID }}
+      release-environment: gym-release
       restrict-to-admins: true
     secrets:
-      BOT_KEY: ${{ secrets.BOT_KEY }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   build-wheel:
     needs: [bump, pre-flight, previous-tag]
@@ -172,7 +202,7 @@ jobs:
       !cancelled() && !failure() && needs.bump.result == 'success'
     permissions:
       contents: read
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_test_wheel.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_test_wheel.yml@b6b4df4160277e1048091f972eda0c51319bc845
     with:
       python-package: nemo_gym
       packaging: uv
@@ -209,22 +239,25 @@ jobs:
       && needs.build-wheel.result == 'success'
       && (github.event_name != 'workflow_dispatch' || inputs.dry-run || needs.publish-wheel.result == 'success')
     permissions:
-      contents: write
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@2eee849aec3da7b625a798188a0e1ba603e448d8
+      contents: read
+      pull-requests: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@b6b4df4160277e1048091f972eda0c51319bc845
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       library-name: NeMo-Gym
       validate-only: ${{ github.event_name != 'workflow_dispatch' }}
       dry-run: ${{ inputs.dry-run || false }}
       create-gh-release: ${{ github.event_name != 'workflow_dispatch' || inputs.create-gh-release }}
-      app-id: ${{ vars.BOT_ID }}
+      release-environment: gym-release
       publish-docs: false
       run-on-version-tag-only: ${{ github.ref_name != 'main' }}
       gh-release-use-changelog-builder: true
       gh-release-from-tag: ${{ inputs.gh-release-from-tag || needs.previous-tag.outputs.tag }}
       release-version: ${{ needs.bump.outputs.release-version || needs.build-wheel.outputs.version }}
       pypi-name: ${{ needs.build-wheel.outputs.pypi-name }}
-    secrets: inherit  # pragma: allowlist secret
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
   release-summary:
     needs: [release-workflow-tests, pre-flight, previous-tag, validate-inputs, bump, build-wheel, publish-wheel, finalize]

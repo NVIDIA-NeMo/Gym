@@ -11,12 +11,15 @@ import re
 import subprocess
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = yaml.safe_load(next((ROOT / ".github/workflows").glob("release.y*ml")).read_text())
 JOBS = WORKFLOW["jobs"]
+FREEZE_JOBS = yaml.safe_load((ROOT / ".github/workflows/release-freeze.yml").read_text())["jobs"]
 
 
 def evaluate(expression: str, context: dict[str, object]) -> bool:
@@ -89,7 +92,14 @@ class ReleaseGuards(unittest.TestCase):
         for publish in (False, True):
             baseline = {name: {"result": "success"} for name in JOBS["release-summary"]["needs"]}
             baseline["publish-wheel"]["result"] = "success" if publish else "skipped"
-            for job in ("release-workflow-tests", "validate-inputs", "bump", "build-wheel", "publish-wheel", "finalize"):
+            for job in (
+                "release-workflow-tests",
+                "validate-inputs",
+                "bump",
+                "build-wheel",
+                "publish-wheel",
+                "finalize",
+            ):
                 for state in ("success", "failure", "cancelled", "skipped"):
                     with self.subTest(publish=publish, job=job, state=state):
                         needs = {name: dict(value) for name, value in baseline.items()}
@@ -130,6 +140,96 @@ class ReleaseGuards(unittest.TestCase):
             self.assertNotIn("run", step)
             self.assertNotIn("password", step.get("with", {}))
             self.assertNotIn("checkout", step["uses"])
+
+    def test_dispatch_ref_guard_preserves_push_rehearsals(self) -> None:
+        """Reject manual runs on non-main refs before the version bump."""
+        guard = next(step for step in JOBS["validate-inputs"]["steps"] if step["name"] == "Require dispatch from main")
+        for event in ("push", "workflow_dispatch"):
+            for ref in ("refs/heads/main", "refs/heads/r0.5.0", "refs/heads/pull-request/123", "refs/tags/main"):
+                with self.subTest(event=event, ref=ref):
+                    rejected = evaluate(guard["if"], {"github.event_name": event, "github.ref": ref})
+                    self.assertEqual(rejected, event == "workflow_dispatch" and ref != "refs/heads/main")
+        self.assertNotEqual(subprocess.run(["bash", "-c", guard["run"]], capture_output=True).returncode, 0)
+
+
+class ReleaseCommitGuards(unittest.TestCase):
+    """Run the real source validation steps against local GitHub API fixtures."""
+
+    target_sha = "2" * 40
+    candidate = "3" * 40
+    api = """
+gh() {
+  [[ $1 == api && $3 == --jq && $# == 4 ]] || return 1
+  case "$2" in
+    "repos/$GITHUB_REPOSITORY/branches/$TARGET_BRANCH") reply=$BRANCH_REPLY ;;
+    "repos/$GITHUB_REPOSITORY/compare/$EXPECTED_COMPARE") reply=$COMPARE_REPLY ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$reply" ]] || return 1
+  jq -r "$4" <<< "$reply"
+}
+"""
+
+    def run_step(self, step, **inputs):
+        """Execute a workflow step, returning its exit status and Actions outputs."""
+        env = dict(
+            os.environ,
+            GITHUB_REPOSITORY="NVIDIA-NeMo/Gym",
+            RELEASE_REF=self.candidate,
+            TARGET_BRANCH="r0.7.0",
+            BRANCH_REPLY=json.dumps({"protected": True, "commit": {"sha": self.target_sha}}),
+            COMPARE_REPLY=json.dumps({"status": "ahead"}),
+            EXPECTED_COMPARE=f"{self.candidate}...{self.target_sha}",
+        )
+        env.update(inputs)
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            output.touch()
+            env["GITHUB_OUTPUT"] = str(output)
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", self.api + step["run"]], env=env, capture_output=True
+            )
+            return result.returncode, output.read_text()
+
+    def test_release_target_ancestry(self):
+        """Only ancestors of the protected target pass."""
+        step = next(s for s in JOBS["validate-inputs"]["steps"] if s["name"].startswith("Verify release commit"))
+        self.assertEqual(step["if"], "github.event_name == 'workflow_dispatch'")
+        for status in ("ahead", "identical", "behind", "diverged"):
+            with self.subTest(status=status):
+                code, _ = self.run_step(step, COMPARE_REPLY=json.dumps({"status": status}))
+                self.assertEqual(code == 0, status in {"ahead", "identical"})
+        for bad_reply in ("", json.dumps({"protected": False, "commit": {"sha": self.target_sha}})):
+            self.assertNotEqual(self.run_step(step, BRANCH_REPLY=bad_reply)[0], 0)
+        self.assertNotEqual(self.run_step(step, COMPARE_REPLY="")[0], 0)
+
+    def test_release_target_uses_the_maintainer_branch_rule(self):
+        """Only main and branches covered by the release rule qualify as targets."""
+        step = next(s for s in JOBS["validate-inputs"]["steps"] if s["name"].startswith("Verify release commit"))
+        for branch in ("main", "r0.7.0", "v0.2.0"):
+            with self.subTest(branch=branch):
+                self.assertEqual(self.run_step(step, TARGET_BRANCH=branch)[0], 0)
+        for branch in ("v1-train-client", "r0.7.0-preview", "r1x2x3", "topic/prepare-release"):
+            with self.subTest(branch=branch):
+                self.assertNotEqual(self.run_step(step, TARGET_BRANCH=branch)[0], 0)
+
+    def test_freeze_uses_main_as_the_source_branch(self):
+        """Gym opts into the shared workflow's cutoff policy for main."""
+        inputs = FREEZE_JOBS["code-freeze"]["with"]
+        self.assertEqual(inputs["freeze-source-branch"], "main")
+        self.assertEqual(inputs["freeze-commit"], "${{ inputs.freeze-commit }}")
+
+    def test_release_jobs_use_the_protected_app(self):
+        """Scope GitHub writes to the release environment and declare its key explicitly."""
+        for job in (FREEZE_JOBS["code-freeze"], JOBS["bump"], JOBS["finalize"]):
+            with self.subTest(workflow=job["uses"]):
+                self.assertEqual(job["with"]["release-environment"], "gym-release")
+                self.assertNotIn("app-id", job["with"])
+                self.assertEqual(job["secrets"]["RELEASE_APP_PRIVATE_KEY"], "${{ secrets.RELEASE_APP_PRIVATE_KEY }}")
+                self.assertNotIn("BOT_KEY", job["secrets"])
+                self.assertNotIn("PAT", job["secrets"])
+        self.assertEqual(JOBS["bump"]["permissions"], {"contents": "read"})
+        self.assertEqual(JOBS["finalize"]["permissions"], {"contents": "read", "pull-requests": "read"})
 
 
 if __name__ == "__main__":
