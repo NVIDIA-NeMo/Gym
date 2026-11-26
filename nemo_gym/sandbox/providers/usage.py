@@ -15,6 +15,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from nemo_gym.sandbox.providers.base import SandboxUsageSample, SandboxUsageScope, SandboxUsageUnavailable
 
@@ -137,16 +138,51 @@ def parse_in_sandbox_cgroup(stdout: str, *, sampled_at: float) -> SandboxUsageSa
     return parse_cgroup_v2(texts, scope="container", sampled_at=sampled_at)
 
 
+ProcessKey = tuple[int, int]
+
+
+class _ProcStat(NamedTuple):
+    # utime + stime + cutime + cstime: the process's own CPU and that of the children it waited for.
+    ticks: int
+    start: int
+    parent_pid: int
+    # Exited with no thread still running: once reaped, its CPU is in its parent's children's CPU.
+    ended: bool
+
+
 @dataclass
 class ProcessTreeState:
-    """Per-sandbox state of process-tree sampling: the most CPU each process was seen to have used.
+    """Per-sandbox state of process-tree sampling.
 
-    A process is keyed by PID and start time, so a reused PID is a new process. A process that exited keeps the
-    CPU it had at its last sample; the CPU it used after that sample, and processes that started and exited
-    between two samples, are missing, so the total is a lower bound.
+    A process is keyed by PID and start time, so a reused PID is a new process. ``cpu_ticks`` holds the most CPU each
+    live process was seen to have used, its own and that of the children it waited for (``cutime``/``cstime``), so a
+    child that starts and exits between two samples is counted once its parent in the sandbox waits for it.
+    ``parents`` holds each process's parent at its last read.
+
+    When a process exits, what it was counted moves onto its nearest ancestor that still runs: that ancestor's
+    children's CPU takes in the whole of it once it is reaped, so it is not counted twice. With no such ancestor
+    it moves to ``exited_ticks``. The CPU a process used after its last sample is missing unless a process in the
+    sandbox waited for it, so the total is a lower bound.
     """
 
-    cpu_ticks: dict[tuple[int, int], int] = field(default_factory=dict)
+    cpu_ticks: dict[ProcessKey, int] = field(default_factory=dict)
+    parents: dict[ProcessKey, ProcessKey | None] = field(default_factory=dict)
+    exited_ticks: int = 0
+
+
+def _parents_first(stats: Mapping[int, _ProcStat]) -> list[int]:
+    """The PIDs of ``stats``, each after its parent when that parent is among them."""
+    depth: dict[int, int] = {}
+    for pid in stats:
+        chain: list[int] = []
+        while pid in stats and pid not in depth and pid not in chain:
+            chain.append(pid)
+            pid = stats[pid].parent_pid
+        level = depth.get(pid, -1)
+        for member in reversed(chain):
+            level += 1
+            depth[member] = level
+    return sorted(stats, key=lambda pid: (depth[pid], pid))
 
 
 @dataclass
@@ -217,13 +253,37 @@ class ProcfsUsageReader:
         )
         return pids, tuple(keys)
 
-    def _stat(self, pid: int) -> tuple[int, int] | None:
-        """(utime + stime ticks, start time) from /proc/<pid>/stat; the command name may hold spaces."""
+    def _read_stat(self, pid: int) -> _ProcStat:
+        """/proc/<pid>/stat, whose command name may hold spaces or parentheses; raises ``OSError`` once it is gone."""
+        fields = (self.proc_root / str(pid) / "stat").read_text().rpartition(")")[2].split()
         try:
-            fields = (self.proc_root / str(pid) / "stat").read_text().rpartition(")")[2].split()
-            return int(fields[11]) + int(fields[12]), int(fields[19])
-        except (OSError, IndexError, ValueError):
+            return _ProcStat(
+                ticks=int(fields[11]) + int(fields[12]) + int(fields[13]) + int(fields[14]),
+                start=int(fields[19]),
+                parent_pid=int(fields[1]),
+                ended=fields[0] in ("Z", "X") and int(fields[17]) <= 1,
+            )
+        except (IndexError, ValueError) as error:
+            raise OSError(f"unparsable /proc/{pid}/stat") from error
+
+    def _stat(self, pid: int) -> _ProcStat | None:
+        try:
+            return self._read_stat(pid)
+        except OSError:
             return None
+
+    def _has_exited(self, key: ProcessKey) -> bool:
+        """Whether the process ``key`` names is gone: its PID is free, belongs to a later process, or has ended.
+
+        An entry that cannot be read for another reason (permissions, I/O) is no proof of an exit.
+        """
+        try:
+            stat = self._read_stat(key[0])
+        except (FileNotFoundError, ProcessLookupError):
+            return True
+        except OSError:
+            return False
+        return stat.start != key[1] or stat.ended
 
     def _memory(self, pid: int) -> dict[str, int]:
         """Resident kB from /proc/<pid>/status: VmRSS, RssAnon and RssFile."""
@@ -243,7 +303,8 @@ class ProcfsUsageReader:
     def process_tree_sample(self, init_pid: int, state: ProcessTreeState) -> SandboxUsageSample | None:
         """CPU and summed resident memory of the sandbox's live processes.
 
-        The CPU is a lower bound of the container's. The memory is the sum of per-process RSS: it leaves out page
+        The CPU, including that of the children the sandbox's processes waited for, is a lower bound of the
+        container's. The memory is the sum of per-process RSS: it leaves out page
         cache and kernel memory but counts a page shared by several processes once per process, so it can be above
         or below the container's charged memory; its sampled peak bounds only this sum's own peak.
         """
@@ -252,35 +313,32 @@ class ProcfsUsageReader:
             return None
         members, keys = matched
         sampled_at = time.time()
+        first = {pid: stat for pid in members if (stat := self._stat(pid)) is not None}
+        observed: dict[ProcessKey, _ProcStat] = {}
         rss = anon = file = 0
-        seen = 0
-        for pid in members:
-            # Read, then check that the PID still is the same process (start time) and still in the sandbox:
-            # a PID that exited and was reused by a host process after ``members()`` is never charged.
-            stat = self._stat(pid)
-            if stat is None:
-                continue
+        # Parents are read before their children: a child reaped between its own read and its parent's would be
+        # counted in both. The CPU is read after the namespace check and must be the same process (start time) as
+        # the first read: a PID that exited and was reused by a host process after ``members()`` is never charged.
+        for pid in _parents_first(first):
             memory = self._memory(pid)
             if not any(self._namespace(pid, kind) == namespace for kind, namespace in keys):
                 continue
-            recheck = self._stat(pid)
-            if recheck is None or recheck[1] != stat[1]:
+            stat = self._stat(pid)
+            if stat is None or stat.start != first[pid].start or stat.ended:
                 continue
-            seen += 1
-            ticks, started = stat
-            key = (pid, started)
-            state.cpu_ticks[key] = max(ticks, state.cpu_ticks.get(key, 0))
+            observed[(pid, stat.start)] = stat
             rss += memory.get("VmRSS", 0)
             anon += memory.get("RssAnon", 0)
             file += memory.get("RssFile", 0)
-        if not seen:
+        if not observed:
             return None
+        self._advance(state, observed)
         return SandboxUsageSample(
             # procfs_pidns, procfs_mntns or procfs_pidns_mntns: the namespaces that selected the processes.
             source="procfs_" + "_".join(kind + "ns" for kind, _ in keys),
             scope="process_tree",
             sampled_at=sampled_at,
-            cpu_usage_usec_total=sum(state.cpu_ticks.values()) * 1_000_000 // self.clock_ticks,
+            cpu_usage_usec_total=(state.exited_ticks + sum(state.cpu_ticks.values())) * 1_000_000 // self.clock_ticks,
             cpu_kind="sampled_lower_bound",
             memory_current_bytes=rss,
             memory_peak_bytes=rss,
@@ -288,8 +346,32 @@ class ProcfsUsageReader:
             memory_anon_bytes=anon,
             memory_file_bytes=file,
             includes_page_cache=False,
-            process_count=seen,
+            process_count=len(observed),
         )
+
+    def _advance(self, state: ProcessTreeState, observed: Mapping[ProcessKey, _ProcStat]) -> None:
+        """Move each exited process's counted CPU onto its nearest running ancestor, then take in this sample.
+
+        Each process's count only grows, so CPU moved onto a parent that has not waited for the child yet is held
+        until the parent's own reading shows it, and the total never goes down.
+        """
+        exited = {key for key in state.cpu_ticks if key not in observed and self._has_exited(key)}
+        for key in exited:
+            ancestor, visited = state.parents.get(key), {key}
+            while ancestor in exited and ancestor not in visited:
+                visited.add(ancestor)
+                ancestor = state.parents.get(ancestor)
+            if ancestor in state.cpu_ticks and ancestor not in exited:
+                state.cpu_ticks[ancestor] += state.cpu_ticks[key]
+            else:
+                state.exited_ticks += state.cpu_ticks[key]
+        for key in exited:
+            del state.cpu_ticks[key]
+            state.parents.pop(key, None)
+        running = {key[0]: key for key in [*state.cpu_ticks, *observed]}
+        for key, stat in observed.items():
+            state.cpu_ticks[key] = max(stat.ticks, state.cpu_ticks.get(key, 0))
+            state.parents[key] = running.get(stat.parent_pid)
 
     def enclosing_cgroup_sample(self, pid: int, *, own_cgroup_scope: SandboxUsageScope) -> SandboxUsageSample | None:
         """Read the cgroup ``pid`` runs in.

@@ -726,8 +726,9 @@ class SupportsSandboxPauseResume(Protocol):
 
 
 # Which processes a usage sample covers. ``container``: the sandbox's own cgroup. ``process_tree``: the live
-# processes in the sandbox's namespaces. Their CPU misses processes that exited between samples, so it is a lower
-# bound of the container's CPU. Their memory is the sum of per-process resident memory: it leaves out page cache and
+# processes in the sandbox's namespaces. Their CPU includes the children they waited for, but misses what a process
+# used after its last sample when no process in the sandbox waited for it, so it is a lower bound of the container's
+# CPU. Their memory is the sum of per-process resident memory: it leaves out page cache and
 # kernel memory but counts a page shared by several processes once per process, so it is not a bound of the
 # container's memory either way. ``shared_step``: the cgroup that encloses the sandbox together with Gym and its
 # sibling sandboxes, never attributable to one sandbox.

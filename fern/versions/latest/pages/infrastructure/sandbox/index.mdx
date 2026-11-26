@@ -460,10 +460,11 @@ Other providers, including OpenSandbox, report no usage yet.
   `SandboxObservation.cpu_time_s` and `peak_memory_mib` repeat them.
 - `process_tree` values come from `/proc`, and `source` names the namespaces that selected the processes:
   `procfs_pidns`, `procfs_mntns` or `procfs_pidns_mntns`. Enroot nested in another container shares Gym's PID
-  namespace, so its processes are found by their mount namespace. The CPU is a lower bound of the container's: the
-  CPU of a process that exits between two samples is missing after its last sample, so short commands are
-  under-counted (on Enroot nested in a Slurm container, process-tree CPU missed 27-57% of the CPU the sandbox's
-  own processes reported). The memory is the sum of per-process resident memory, sampled: it leaves out page
+  namespace, so its processes are found by their mount namespace. The CPU includes the children each process
+  waited for (`cutime` and `cstime`), so a short process started and reaped inside the sandbox is counted, and a
+  process counted while it ran is not counted again once its parent has reaped it. It is still a lower bound of the
+  container's: a process reaped outside the sandbox, such as the command an Enroot `exec` runs, which the process
+  that created the sandbox reaps, is missing after its last sample. The memory is the sum of per-process resident memory, sampled: it leaves out page
   cache and kernel memory but counts a page shared by several processes once per process, so it is not a bound
   of the container's memory, and its `sampled_lower_bound` peak bounds only that sum's own peak.
 - `exec_rusage` (Enroot) is the CPU of the commands `exec` ran to completion in the process that created the

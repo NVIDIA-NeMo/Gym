@@ -99,7 +99,11 @@ class FakeProc:
         pidns: str,
         mntns: str,
         ticks: tuple[int, int] = (0, 0),
+        children_ticks: tuple[int, int] = (0, 0),
         start: int = 1,
+        ppid: int = 0,
+        state: str = "S",
+        threads: int = 1,
         rss_kb: tuple[int, int] = (0, 0),
         cgroup: str = "/job/step",
         comm: str = "sh",
@@ -110,8 +114,16 @@ class FakeProc:
             link = directory / "ns" / kind
             link.unlink(missing_ok=True)
             link.symlink_to(name)
-        # Fields 3..22 of /proc/<pid>/stat: utime is field 14, stime 15, starttime 22.
-        fields = ["S"] + ["0"] * 10 + [str(ticks[0]), str(ticks[1])] + ["0"] * 6 + [str(start)] + ["0"] * 5
+        # Fields 3..27 of /proc/<pid>/stat: state is field 3, ppid 4, utime 14, stime 15, cutime 16, cstime 17,
+        # num_threads 20 and starttime 22.
+        fields = (
+            [state, str(ppid)]
+            + ["0"] * 9
+            + [str(ticks[0]), str(ticks[1]), str(children_ticks[0]), str(children_ticks[1])]
+            + ["0"] * 2
+            + [str(threads), "0", str(start)]
+            + ["0"] * 5
+        )
         (directory / "stat").write_text(f"{pid} ({comm}) " + " ".join(fields) + "\n")
         anon, file = rss_kb
         (directory / "status").write_text(
@@ -232,6 +244,103 @@ def test_a_container_in_gyms_pid_namespace_is_found_by_its_mount_namespace(proc:
 
     assert sample is not None and sample.source == "procfs_mntns" and sample.process_count == 2
     assert sample.cpu_usage_usec_total == 35 * 10_000
+
+
+def _sample_cpu_ticks(reader: ProcfsUsageReader, state: ProcessTreeState) -> int:
+    ProcfsUsageReader._scans.clear()
+    sample = reader.process_tree_sample(100, state)
+    assert sample is not None
+    return sample.cpu_usage_usec_total // 10_000
+
+
+def test_children_reaped_between_samples_are_counted_once(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 5))  # container init
+    proc.add(101, pidns="B", mntns="M1", ticks=(20, 0), start=5, ppid=100)  # a shell
+    reader = _reader(proc, tmp_path)
+    state = ProcessTreeState()
+    assert _sample_cpu_ticks(reader, state) == 35
+
+    # Short commands start and exit between two samples; the shell waited for them.
+    proc.add(101, pidns="B", mntns="M1", ticks=(20, 0), children_ticks=(30, 10), start=5, ppid=100)
+    assert _sample_cpu_ticks(reader, state) == 35 + 40
+
+    # A long command is seen running, then the shell reaps it: its CPU is counted once, not again in the shell's.
+    proc.add(102, pidns="B", mntns="M1", ticks=(50, 10), start=9, ppid=101)
+    assert _sample_cpu_ticks(reader, state) == 35 + 40 + 60
+    proc.remove(102)
+    proc.add(101, pidns="B", mntns="M1", ticks=(20, 0), children_ticks=(110, 30), start=5, ppid=100)
+    assert _sample_cpu_ticks(reader, state) == 35 + 40 + 100  # 102 used 40 more after its last sample
+
+    # Seen exited before the shell has waited for it: what it was counted is kept until the shell's reading shows it.
+    proc.add(103, pidns="B", mntns="M1", ticks=(25, 0), start=12, ppid=101)
+    assert _sample_cpu_ticks(reader, state) == 175 + 25
+    proc.add(103, pidns="B", mntns="M1", ticks=(30, 0), start=12, ppid=101, state="Z")
+    assert _sample_cpu_ticks(reader, state) == 200
+    proc.remove(103)
+    proc.add(101, pidns="B", mntns="M1", ticks=(20, 0), children_ticks=(140, 30), start=5, ppid=100)
+    assert _sample_cpu_ticks(reader, state) == 205
+
+
+def test_an_exited_chain_moves_to_the_nearest_running_ancestor(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 0))
+    proc.add(101, pidns="B", mntns="M1", ticks=(5, 0), start=5, ppid=100)
+    proc.add(102, pidns="B", mntns="M1", ticks=(40, 0), start=6, ppid=101)
+    reader = _reader(proc, tmp_path)
+    state = ProcessTreeState()
+    assert _sample_cpu_ticks(reader, state) == 55
+
+    # 101 reaps 102, then exits and init reaps it, all between two samples.
+    proc.remove(101)
+    proc.remove(102)
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 0), children_ticks=(50, 0))
+    assert _sample_cpu_ticks(reader, state) == 60
+
+    # With no running ancestor in the sandbox, an exited process keeps what it was counted.
+    proc.add(104, pidns="B", mntns="M1", ticks=(7, 0), start=20, ppid=4242)
+    assert _sample_cpu_ticks(reader, state) == 67
+    proc.remove(104)
+    assert _sample_cpu_ticks(reader, state) == 67
+    assert state.exited_ticks == 7 and set(state.cpu_ticks) == {(100, 1)}
+
+
+def test_a_zombie_is_not_counted_until_reaped_but_a_zombie_leader_with_threads_runs(
+    proc: FakeProc, tmp_path: Path
+) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 0))
+    proc.add(101, pidns="B", mntns="M1", ticks=(30, 0), start=5, ppid=100, state="Z")
+    proc.add(102, pidns="B", mntns="M1", ticks=(20, 0), start=6, ppid=100, state="Z", threads=3)
+    reader = _reader(proc, tmp_path)
+
+    sample = reader.process_tree_sample(100, ProcessTreeState())
+
+    assert sample is not None and sample.process_count == 2
+    assert sample.cpu_usage_usec_total == 30 * 10_000
+
+
+def test_a_parent_is_read_before_its_child(proc: FakeProc, tmp_path: Path) -> None:
+    # The child has the lower PID (PIDs wrapped). Reaped between the two reads, it would be in both if read first.
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 0))
+    proc.add(300, pidns="B", mntns="M1", ticks=(5, 0), start=5, ppid=100)
+    proc.add(120, pidns="B", mntns="M1", ticks=(40, 0), start=6, ppid=300)
+    reader = _reader(proc, tmp_path)
+    state = ProcessTreeState()
+    assert _sample_cpu_ticks(reader, state) == 55
+
+    proc.add(120, pidns="B", mntns="M1", ticks=(60, 0), start=6, ppid=300)
+    read_stat = ProcfsUsageReader._read_stat
+    reads: dict[int, int] = {}
+
+    def reap_when_the_parent_is_read_again(self: ProcfsUsageReader, pid: int) -> object:
+        reads[pid] = reads.get(pid, 0) + 1
+        if pid == 300 and reads[pid] == 2 and (self.proc_root / "120").exists():
+            proc.remove(120)
+            proc.add(300, pidns="B", mntns="M1", ticks=(5, 0), children_ticks=(60, 0), start=5, ppid=100)
+        return read_stat(self, pid)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ProcfsUsageReader, "_read_stat", reap_when_the_parent_is_read_again)
+        assert _sample_cpu_ticks(reader, state) == 75
+    assert _sample_cpu_ticks(reader, state) == 75
 
 
 def test_a_sandbox_sharing_every_namespace_with_gym_is_not_measured(proc: FakeProc, tmp_path: Path) -> None:
