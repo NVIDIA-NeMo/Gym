@@ -42,6 +42,7 @@ from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
+from responses_api_agents.nooa_agent.invocation import load_agent_class
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import (
     InProcessNOOARunner,
@@ -52,6 +53,8 @@ from responses_api_agents.nooa_agent.runner import (
 )
 from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
 from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
+from responses_api_agents.nooa_agent.task_context import read_task_context, task_mcp_servers, task_skills_dir
+from responses_api_agents.nooa_agent.task_tools import TaskMCPServer
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
@@ -66,6 +69,9 @@ class NOOASessionState(AgentSessionState):
     execution: asyncio.Task[NeMoGymResponse] | None = None
     result: NOOARunResult | None = None
     runner: NOOARunner | None = None
+    # The task's own MCP servers and skills directory, read from the task sandbox at seed.
+    task_mcp_servers: list[TaskMCPServer] = field(default_factory=list)
+    task_skills_dir: str | None = None
 
 
 class NOOAAgent(SimpleResponsesAPIAgent):
@@ -75,6 +81,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     # Sandboxed mode runs NOOA inside the task sandbox, which calls the model server from there. Embedded mode
     # calls it from this host, which reaches the advertised node address as well.
     calls_model_from_sandbox: ClassVar[bool] = True
+
+    def supports_task_tool_context(self) -> bool:
+        """Sandboxed NOOA gets the task's MCP servers as tools on the agent and its skills directory in the prompt."""
+        return self.config.nooa.execution_mode == "sandboxed"
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
         """Report a trusted model rejection; the environment owns grading and retry policy."""
@@ -144,6 +154,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                     wheelhouse_path=self.config.runtime_wheelhouse,
                 )
                 await runner.prepare()
+                # A declaration NOOA cannot be given refuses the seed here, not at the first activation.
+                task_context = await read_task_context(sandbox)
+                state.task_mcp_servers = task_mcp_servers(task_context, load_agent_class(self.config.nooa.agent_class))
+                state.task_skills_dir = task_skills_dir(task_context)
             except BaseException as error:
                 # Main retains this state for close while rejecting activation
                 # and seed retries against an incompletely initialized runtime.
@@ -196,6 +210,8 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                         tool_access=state.tool_access,
                         task_id=state.request.task_id.task_id,
                         rollout_id=state.request.episode_id.capture_key,
+                        task_mcp_servers=state.task_mcp_servers,
+                        task_skills_dir=state.task_skills_dir,
                     )
                 )
         except asyncio.CancelledError as error:

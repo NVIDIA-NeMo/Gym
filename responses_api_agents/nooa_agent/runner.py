@@ -43,6 +43,13 @@ from responses_api_agents.nooa_agent.resource_tools import (
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
+from responses_api_agents.nooa_agent.task_tools import (
+    TaskMCPServer,
+    agent_class_with_task_tools,
+    close_task_tools,
+    name_task_skills,
+    open_task_tools,
+)
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason, cleanup_errors, policy_termination
 
 
@@ -58,6 +65,9 @@ class NOOARunRequest:
     resource_cookies: dict[str, str] = field(default_factory=dict)
     task_id: str = "unknown"
     rollout_id: str = field(default_factory=lambda: uuid4().hex)
+    # The task's own MCP servers and skills directory, read from the task sandbox at seed.
+    task_mcp_servers: list[TaskMCPServer] = field(default_factory=list)
+    task_skills_dir: str | None = None
 
 
 @dataclass(slots=True)
@@ -185,13 +195,16 @@ class InProcessNOOARunner:
             cookies=request.resource_cookies,
             trace_hooks=trace,
         )
+        # Listed here, connected to by the first call the model makes, and closed when the invocation ends.
+        task_tools, held_sessions = await open_task_tools(request.task_mcp_servers)
         agent_class = create_agent_class_with_resource_methods(
-            self._agent_class,
+            agent_class_with_task_tools(self._agent_class, task_tools),
             dispatcher=dispatcher,
             tools=list(request.responses_create_params.tools),
         )
         agent = agent_class(llm=llm, **copy.deepcopy(self._invocation.init_kwargs))
         validate_agent_resource_method_bindings(agent)
+        name_task_skills(agent, request.task_skills_dir)
 
         termination_reason = None
         termination_error = None
@@ -203,6 +216,8 @@ class InProcessNOOARunner:
         except BaseException as error:
             failure = error
             termination_reason, termination_error = policy_termination(error, model_error=state.fatal_error)
+        finally:
+            await close_task_tools(held_sessions)
 
         fatal_error = dispatcher.fatal_error
         if state.fatal_error is not None and termination_reason is not NOOATerminationReason.MODEL_REJECTED:

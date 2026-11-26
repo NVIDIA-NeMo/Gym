@@ -59,6 +59,19 @@ loopback address. Harbor runs (`gym eval run <target> --agent <name>`) set `use_
 automatically, so this applies only outside Harbor. Runtime packaging runs in a thread so seeding does not block
 other agent requests.
 
+A Harbor task can declare tools of its own: `[[environment.mcp_servers]]` and `skills_dir`, which the `harbor`
+environment server leaves in `/tmp/.nemo-gym/task.json` in the borrowed sandbox. A sandboxed session reads that file
+at seed and declares `supports_task_tool_context`, so the environment server gives it such a task. The worker connects
+to each MCP server of the task once to list its tools (a `url` server over streamable HTTP, or SSE when the task says
+so; a `stdio` server started in the sandbox) and puts them on the agent as one tool object per server, under the
+server's name as a Python identifier (`self.playwright.browser_navigate(...)`). A server that does not answer fails the
+run as a dependency outage. NOOA's own MCP client opens a session for every tool call; the task's tools keep one
+session from the first call to the end of the run, so a server that holds state per session, such as a browser, keeps
+it. NOOA has no loader for `SKILL.md` folders, so `skills_dir` is named in a `task_skills` context block of the prompt.
+A declaration NOOA cannot be given (a server without a name or endpoint, a name that is not a free agent attribute, a
+relative `skills_dir`) refuses the seed, and a file that cannot be read fails it, rather than run the task without its
+tools. Embedded mode does not declare the capability.
+
 Close raises if the worker stop is unconfirmed or the remaining activation cannot be joined within its budget;
 the session stays available for a close retry. The bounded join also applies to embedded mode. An activation
 interrupted by session close returns HTTP 409 to a caller whose request was not itself cancelled.
