@@ -23,6 +23,8 @@ from packaging.utils import canonicalize_name
 
 
 INDEX_VARIABLES = {"UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL"}
+# `uv sync --locked` ignores these, so the mirror path must not let them move an exact lock either.
+RESOLUTION_VARIABLES = {"UV_CONSTRAINT", "UV_OVERRIDE"}
 
 
 def _source_matches(requirement_url: str, direct_url: dict) -> bool:
@@ -213,6 +215,7 @@ def _package_indexes(project: Path) -> dict[str, str | None]:
 
 def _sync_from_mirror(command: list[str], project: Path, venv: Path, env: dict[str, str]) -> None:
     """Install locked versions through the caller's package indexes, except index-pinned packages."""
+    env = {key: value for key, value in env.items() if key not in RESOLUTION_VARIABLES}
     lock_env = {key: value for key, value in env.items() if key not in INDEX_VARIABLES}
     export = [value for value in command[2:] if value != "--inexact"]
     export[export.index("--python") : export.index("--python") + 2] = []

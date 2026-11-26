@@ -539,3 +539,46 @@ def test_mirror_sync_installs_index_pinned_packages_from_their_index(tmp_path, m
         text=True,
     )
     assert versions.split() == ["1.0", "1.0+cpu"]
+
+
+@pytest.mark.parametrize("variable", ["UV_CONSTRAINT", "UV_OVERRIDE"])
+def test_mirror_sync_installs_the_lock_despite_caller_constraints(tmp_path, monkeypatch, variable):
+    """A caller's uv constraint or override file cannot move a lock installed through a mirror, as with uv sync."""
+    directory = tmp_path / "mirror" / "nemo-gym-mirror-plain"
+    directory.mkdir(parents=True)
+    for version in ("1.0", "2.0"):
+        with zipfile.ZipFile(directory / f"nemo_gym_mirror_plain-{version}-py3-none-any.whl", "w") as archive:
+            metadata = f"nemo_gym_mirror_plain-{version}.dist-info/"
+            archive.writestr(
+                metadata + "METADATA", f"Metadata-Version: 2.1\nName: nemo-gym-mirror-plain\nVersion: {version}\n"
+            )
+            archive.writestr(metadata + "WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+            archive.writestr(metadata + "RECORD", "")
+    server = ThreadingHTTPServer(("localhost", 0), partial(SimpleHTTPRequestHandler, directory=str(tmp_path)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="mirror-smoke"\nversion="0"\nrequires-python=">=3.13"\ndependencies=["nemo-gym-mirror-plain==1.0", "packaging"]\n'
+        f'[tool.uv]\npackage=false\n[[tool.uv.index]]\nname="mirror"\nurl="http://{host}:{port}/mirror/"\n'
+    )
+    pin = tmp_path / "pin.txt"
+    pin.write_text("nemo-gym-mirror-plain==2.0\n")
+    venv = tmp_path / "venv"
+    try:
+        subprocess.run(["uv", "lock", "--project", str(project), "--python", sys.executable], check=True)
+        monkeypatch.setenv("UV_INDEX_URL", f"http://{host}:{port}/mirror/")
+        monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+        monkeypatch.setenv(variable, str(pin))
+        _locked_env.sync_environment(project, venv, sys.executable, [], [])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    version = subprocess.check_output(
+        [str(venv / "bin/python"), "-c", "import importlib.metadata as m; print(m.version('nemo-gym-mirror-plain'))"],
+        text=True,
+    )
+    assert version.strip() == "1.0"
