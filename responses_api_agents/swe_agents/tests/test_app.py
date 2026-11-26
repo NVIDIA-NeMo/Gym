@@ -44,6 +44,7 @@ from nemo_gym.core import (
     rollout_context,
 )
 from responses_api_agents.swe_agents.app import (
+    AGENT_COMMAND_FAILED,
     EVAL_TIMEOUT,
     ActiveContainerCommand,
     AgentPromptOverride,
@@ -65,7 +66,7 @@ from responses_api_agents.swe_agents.app import (
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
     _extract_replay_system_content,
-    _masked_failure,
+    _named_failure,
     _parse_replay_messages,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
@@ -3890,26 +3891,121 @@ class TestEvaluatorLaunchFailure:
         assert metrics.eval_launch_failed is False
 
 
+def _record_model_call(params: SWEBenchWrapperInstanceConfig) -> None:
+    _write_completion(
+        params.trajectories_root / "llm_completions" / params.instance_id / "001.json",
+        session_id="main",
+        parent_session_id=None,
+        turn=1,
+        kwargs={"tools": []},
+        provider_specific_fields={
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3, 4],
+            "generation_log_probs": [-0.1, -0.2],
+        },
+    )
+
+
+async def _verify_response(
+    monkeypatch, params: SWEBenchWrapperInstanceConfig, report_file: str | None
+) -> SWEBenchVerifyResponse:
+    """Assemble the verify response of an episode whose worker has written its metrics."""
+    wrapper = _create_wrapper(monkeypatch)
+    wrapper._sem = asyncio.Semaphore(1)
+    wrapper._vllm_converter = swe_app.ChatCompletionsConverter(return_token_id_information=True)
+    with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=report_file):
+        response = await wrapper._inner_responses(params, MagicMock())
+    with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=response):
+        return await wrapper.run(swe_app.BaseRunRequest(responses_create_params=params.body))
+
+
+class TestNamedFailureOnTheResponse:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model_called", "expected_kind"),
+        [(False, PROVIDER_UNAVAILABLE), (True, AGENT_COMMAND_FAILED)],
+        ids=["before_the_model_acted", "after_the_model_acted"],
+    )
+    async def test_failed_agent_command_is_masked(
+        self, tmp_path: Path, monkeypatch, model_called: bool, expected_kind: str
+    ) -> None:
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.metrics_fpath.write_text("{}")
+        agent = RunOpenHandsAgent(config=params)
+        with (
+            patch.object(
+                agent, "_start_container_command", new_callable=AsyncMock, return_value=MagicMock(watchdog_stats={})
+            ),
+            patch.object(
+                agent,
+                "_finish_container_command",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("Command failed with return code 1"),
+            ),
+            patch.object(agent, "_kill_active_command", new_callable=AsyncMock),
+        ):
+            assert await agent.process_single_datapoint() is None
+        if model_called:
+            _record_model_call(params)
+
+        result = await _verify_response(monkeypatch, params, None)
+
+        # Nothing was graded, so the zero is not a measurement.
+        assert result.agent_command_failed is True
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.instance_config.mask_sample is True
+        assert result.failure_kind == expected_kind
+        assert result.failure_reason
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("resolved", "reward"), [(False, 0.0), (True, 1.0)], ids=["unresolved", "resolved"])
+    async def test_agent_limit_masks_only_a_resolved_run(
+        self, tmp_path: Path, monkeypatch, resolved: bool, reward: float
+    ) -> None:
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.metrics_fpath.write_text(json.dumps({"agent_error_kind": "max_iteration", "patch_exists": True}))
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps({params.instance_id: {"resolved": resolved}}))
+        _record_model_call(params)
+
+        result = await _verify_response(monkeypatch, params, str(report_path))
+
+        # The run was graded: an unresolved one is a real zero that keeps its name.
+        assert result.reward == reward
+        assert result.mask_sample is resolved
+        assert result.instance_config.mask_sample is resolved
+        assert result.failure_kind == AGENT_LIMIT
+        assert result.failure_reason
+
+
 @pytest.mark.parametrize(
-    ("metrics", "expected_kind"),
+    ("metrics", "expected"),
     [
         # An unmeasured reward outranks the agent's own limit.
-        ({"eval_launch_failed": True, "agent_error_kind": "max_iteration"}, PROVIDER_UNAVAILABLE),
-        ({"oom_killed": True, "agent_error_kind": "oom"}, PROVIDER_OOM_KILLED),
-        ({"eval_oom_killed": True, "agent_error_kind": "max_iteration"}, PROVIDER_OOM_KILLED),
-        ({"eval_timed_out": True, "agent_error_kind": "context_window"}, EVAL_TIMEOUT),
-        ({"agent_timed_out": True, "resolved": True}, AGENT_TIMEOUT),
-        ({"agent_error_kind": "max_iteration", "resolved": True}, AGENT_LIMIT),
-        ({"agent_error_kind": "context_window", "resolved": False}, MODEL_CONTEXT_LIMIT),
+        ({"eval_launch_failed": True, "agent_error_kind": "max_iteration"}, (PROVIDER_UNAVAILABLE, True)),
+        ({"oom_killed": True, "agent_error_kind": "oom"}, (PROVIDER_OOM_KILLED, True)),
+        ({"eval_oom_killed": True, "agent_error_kind": "max_iteration"}, (PROVIDER_OOM_KILLED, True)),
+        ({"eval_timed_out": True, "agent_error_kind": "context_window"}, (EVAL_TIMEOUT, True)),
+        ({"agent_timed_out": True, "resolved": True}, (AGENT_TIMEOUT, True)),
+        # A timed-out or OOM-killed agent command is flagged as failed too, and keeps its specific kind.
+        ({"agent_command_failed": True, "agent_timed_out": True}, (AGENT_TIMEOUT, True)),
+        ({"agent_command_failed": True, "oom_killed": True}, (PROVIDER_OOM_KILLED, True)),
+        ({"agent_command_failed": True}, (AGENT_COMMAND_FAILED, True)),
+        # A limit was measured: it masks a resolved run only, and an unresolved one keeps its name and its zero.
+        ({"agent_error_kind": "max_iteration", "resolved": True}, (AGENT_LIMIT, True)),
+        ({"agent_error_kind": "max_iteration", "resolved": False}, (AGENT_LIMIT, False)),
+        ({"agent_error_kind": "context_window", "resolved": True}, (MODEL_CONTEXT_LIMIT, True)),
+        ({"agent_error_kind": "context_window", "resolved": False}, (MODEL_CONTEXT_LIMIT, False)),
         ({"agent_error_kind": "stuck_in_loop", "resolved": False}, None),
         ({"agent_error_kind": "other", "resolved": True}, None),
     ],
 )
-def test_masked_failure_names_the_first_matching_kind(metrics: dict, expected_kind: Optional[str]) -> None:
-    masked_failure = _masked_failure(SWEBenchMetrics.model_validate(metrics))
-    if expected_kind is None:
-        assert masked_failure is None
+def test_named_failure_takes_the_first_matching_kind(metrics: dict, expected: Optional[tuple[str, bool]]) -> None:
+    failure = _named_failure(SWEBenchMetrics.model_validate(metrics), model_acted=True)
+    if expected is None:
+        assert failure is None
     else:
-        kind, reason = masked_failure
-        assert kind == expected_kind
+        kind, reason, masked = failure
+        assert (kind, masked) == expected
         assert reason

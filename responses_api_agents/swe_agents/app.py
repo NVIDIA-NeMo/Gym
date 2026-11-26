@@ -341,6 +341,7 @@ class SWEBenchMetrics(BaseModel):
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
     eval_launch_failed: bool = False
+    agent_command_failed: bool = False
 
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
@@ -368,28 +369,38 @@ class SWEBenchMetrics(BaseModel):
 # slow host, so this is not one of the shared policy or infrastructure kinds.
 EVAL_TIMEOUT = "swe_agents:eval_timeout"
 
+# The agent command failed after the model acted and left no output to grade. A model action can end the
+# harness, and so can the host, so this is not one of the shared policy or infrastructure kinds.
+AGENT_COMMAND_FAILED = "swe_agents:agent_command_failed"
 
-def _masked_failure(metrics: SWEBenchMetrics) -> Optional[tuple[str, str]]:
-    """Return the failure_kind and failure_reason that mask this sample, or None when its reward counts.
 
-    Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not
-    reported as a measured policy failure. Max-iteration and context-window runs are masked whether or not
-    the patch resolved the tests, because a resolved patch from an agent that never finished is accidental.
+def _named_failure(metrics: SWEBenchMetrics, *, model_acted: bool) -> tuple[str, str, bool] | None:
+    """Return the failure_kind, the failure_reason and whether the sample is masked, or None when nothing failed.
+
+    A sample is masked when its reward was not measured. Those failures come first, so a run that also hit an
+    agent limit is not reported as a measured policy failure. A failed agent command is the provider's when
+    nothing the model chose had run (``model_acted`` is false), and has its own kind otherwise. A run that
+    reached its iteration limit or context window was measured: unresolved, its zero counts and keeps the name;
+    resolved, it is masked, because a resolved patch from an agent that never finished is accidental.
     """
     if metrics.eval_launch_failed:
-        return PROVIDER_UNAVAILABLE, "The evaluation container failed before its startup marker"
+        return PROVIDER_UNAVAILABLE, "The evaluation container failed before its startup marker", True
     if metrics.oom_killed:
-        return PROVIDER_OOM_KILLED, "The memory watchdog killed the agent container"
+        return PROVIDER_OOM_KILLED, "The memory watchdog killed the agent container", True
     if metrics.eval_oom_killed:
-        return PROVIDER_OOM_KILLED, "The memory watchdog killed the evaluation container"
+        return PROVIDER_OOM_KILLED, "The memory watchdog killed the evaluation container", True
     if metrics.eval_timed_out:
-        return EVAL_TIMEOUT, "The evaluation ran past swebench_tests_timeout"
+        return EVAL_TIMEOUT, "The evaluation ran past swebench_tests_timeout", True
     if metrics.agent_timed_out:
-        return AGENT_TIMEOUT, "The agent ran past swebench_agent_timeout"
+        return AGENT_TIMEOUT, "The agent ran past swebench_agent_timeout", True
+    if metrics.agent_command_failed and not model_acted:
+        return PROVIDER_UNAVAILABLE, "The agent command failed before the model acted", True
+    if metrics.agent_command_failed:
+        return AGENT_COMMAND_FAILED, "The agent command failed after the model acted, and left no output", True
     if metrics.agent_error_kind == "max_iteration":
-        return AGENT_LIMIT, "The agent reached its maximum number of iterations"
+        return AGENT_LIMIT, "The agent reached its maximum number of iterations", bool(metrics.resolved)
     if metrics.agent_error_kind == "context_window":
-        return MODEL_CONTEXT_LIMIT, "The conversation exceeded the model's context window"
+        return MODEL_CONTEXT_LIMIT, "The conversation exceeded the model's context window", bool(metrics.resolved)
     return None
 
 
@@ -2980,6 +2991,7 @@ class RunOpenHandsAgent(BaseModel):
             self._apply_watchdog_stats(metrics, openhands_active_command, mode="agent")
             metrics.openhands_run_time += time.time()
             metrics.patch_exists = False
+            metrics.agent_command_failed = True
             metrics.final_eval_apptainer_spinup_time = None
             # Detect wall-clock agent timeout: openhands_run_time (elapsed since start)
             # reached or exceeded the configured swebench_agent_timeout.
@@ -4100,13 +4112,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         else:
             metrics_to_update["resolved"] = False
 
-        # Decide whether to mask this sample, and record why.
-        persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
-        masked_failure = _masked_failure(persisted_metrics)
-        if masked_failure:
-            params.mask_sample = True
-            params.failure_kind, params.failure_reason = masked_failure
-
         trajectories_dir = params.persistent_dir / "trajectories"
         (
             chat_completions_trajectory,
@@ -4170,6 +4175,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             input_items, output_items = split_responses_input_output_items(responses_items)
 
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
+
+        # Name the failure, if any, and decide whether it masks this sample.
+        # A replay prefix already holds model actions, so such a run never counts as failing
+        # before the model acted.
+        failure = _named_failure(
+            SWEBenchMetrics.model_validate(updated_metrics),
+            model_acted=bool(chat_completions_trajectory) or has_replay_prefix,
+        )
+        if failure:
+            params.failure_kind, params.failure_reason, params.mask_sample = failure
 
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
