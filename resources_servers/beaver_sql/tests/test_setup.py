@@ -234,14 +234,18 @@ class _FakeCur:
         elif sql.startswith("CREATE USER"):
             s.users.setdefault(f"{params[0]}@{params[1]}", params[2])
         elif sql.startswith("GRANT SELECT"):
-            s.grants.append((sql.split("`")[1], f"{params[0]}@{params[1]}"))
+            s.grants.append((sql.split(" ON ")[1].split(" TO ")[0], f"{params[0]}@{params[1]}"))
+        elif sql.startswith("SELECT COUNT(*) FROM mysql.db"):
+            self.result = [(s.grants.count((f"`{params[0]}`.*", f"{params[1]}@{params[2]}")),)]
+        elif sql.startswith("REVOKE SELECT"):
+            s.grants.remove((sql.split(" ON ")[1].split(" FROM ")[0], f"{params[0]}@{params[1]}"))
         elif sql.startswith("SELECT GET_LOCK"):
             self.result = [(1 if s.lock_free else 0,)]
         elif sql == "SHOW GRANTS":
             grants = s.show_grants
             if grants is None:
                 grants = ["GRANT USAGE ON *.* TO `beaver_reader`@`%`"] + [
-                    f"GRANT SELECT ON `{db}`.* TO `beaver_reader`@`%`" for db, _ in s.grants
+                    f"GRANT SELECT ON {on} TO `beaver_reader`@`%`" for on, _ in s.grants
                 ]
             self.result = [(g,) for g in grants]
         elif sql.startswith("SELECT table_name FROM information_schema.tables"):
@@ -280,7 +284,8 @@ def test_load_then_check(tmp_path, tiny, fake_mysql) -> None:
     assert server.connects[0]["user"] == "root" and server.connects[0]["password"] == "pw"
     assert server.loaded["tiny"] == (setup.DUMPS["tiny"].sha256, 1)
     assert server.users == {"beaver_reader@%": "rpw"}
-    assert server.grants == [("_beaver_meta", "beaver_reader@%"), ("tiny", "beaver_reader@%")]
+    # The meta database by its one table: a database-level grant's `_` would be a wildcard.
+    assert server.grants == [("`_beaver_meta`.`loaded`", "beaver_reader@%"), ("`tiny`.*", "beaver_reader@%")]
     assert "INSERT INTO `T` VALUES (1,'a;b'),(2,'c');" in server.statements
     # A new database is recorded as loading only once it is created.
     assert server.statements.index("CREATE DATABASE `tiny` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci") < next(
@@ -427,6 +432,8 @@ def test_check_reads_every_table(tmp_path, tiny, fake_mysql) -> None:
         "GRANT SELECT ON `mysql`.* TO `beaver_reader`@`%`",
         "GRANT FILE ON *.* TO `beaver_reader`@`%`",
         "GRANT `admin_role`@`%` TO `beaver_reader`@`%`",
+        # With partial_revokes off, `_` is a wildcard here: this also reads e.g. a database `zbeaverzmeta`.
+        "GRANT SELECT ON `_beaver_meta`.* TO `beaver_reader`@`%`",
         # Grant authority: the grader could hand its access to other accounts.
         "GRANT SELECT ON `tiny`.* TO `beaver_reader`@`%` WITH GRANT OPTION",
         "GRANT USAGE ON *.* TO `beaver_reader`@`%` WITH GRANT OPTION",
@@ -446,11 +453,22 @@ def test_grader_privilege_problems_accepts_select_on_beaver() -> None:
             [
                 "GRANT USAGE ON *.* TO `beaver_reader`@`%`",
                 "GRANT SELECT ON `dw`.* TO `beaver_reader`@`%`",
-                "GRANT SELECT ON `_beaver_meta`.* TO `beaver_reader`@`%`",
+                "GRANT SELECT ON `_beaver_meta`.`loaded` TO `beaver_reader`@`%`",
             ]
         )
         == []
     )
+
+
+def test_a_grader_with_the_old_meta_database_grant_is_moved_to_the_table(tmp_path, tiny, fake_mysql) -> None:
+    server = fake_mysql()
+    server.users["beaver_reader@%"] = "theirs"
+    server.grants.append(("`_beaver_meta`.*", "beaver_reader@%"))
+    with pytest.raises(RuntimeError, match="must hold only SELECT"):
+        check_beaver_mysql(READER, ["tiny"])
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert server.grants == [("`_beaver_meta`.`loaded`", "beaver_reader@%"), ("`tiny`.*", "beaver_reader@%")]
+    check_beaver_mysql(READER, ["tiny"])
 
 
 def test_check_without_meta_table(tiny, fake_mysql) -> None:

@@ -57,6 +57,8 @@ DUMPS: Dict[str, BeaverDump] = {
 }
 
 META_DB = "_beaver_meta"
+# The grader reads this one table of META_DB, granted as SHOW GRANTS names it.
+_META_TABLE = f"`{META_DB}`.`loaded`"
 # The dump hash recorded while a database is being loaded.
 _LOADING = "loading"
 
@@ -301,7 +303,14 @@ def _ensure_reader(cur, admin_user: str, reader_dsn: str, reader_password: Optio
         raise RuntimeError("the grader's DSN must use its own read-only user, not the loader's")
     # The host is a parameter too: the driver's C extension leaves a literal '%%' as two characters.
     cur.execute("CREATE USER IF NOT EXISTS %s@%s IDENTIFIED BY %s", (user, "%", password))
-    for db in (META_DB, *db_ids):
+    # The meta database is granted by its table: in a database-level grant `_` is a wildcard (unless partial_revokes is
+    # on), so `_beaver_meta`.* would reach every database named like it. That grant, which this loader used to make,
+    # is revoked.
+    cur.execute("SELECT COUNT(*) FROM mysql.db WHERE db = %s AND user = %s AND host = %s", (META_DB, user, "%"))
+    if cur.fetchone()[0]:
+        cur.execute(f"REVOKE SELECT ON `{META_DB}`.* FROM %s@%s", (user, "%"))
+    cur.execute(f"GRANT SELECT ON {_META_TABLE} TO %s@%s", (user, "%"))
+    for db in db_ids:
         cur.execute(f"GRANT SELECT ON `{db}`.* TO %s@%s", (user, "%"))
 
 
@@ -360,8 +369,9 @@ _GRANT = re.compile(r"^GRANT (.+?) ON (\S+) TO ")
 def grader_privilege_problems(grants: List[str]) -> List[str]:
     """The grants (``SHOW GRANTS`` lines) that give the grader's user more than reading BEAVER: a role, any privilege
     but ``SELECT`` and ``USAGE``, ``SELECT`` beyond the BEAVER databases and the meta table (``*.*`` would expose
-    the ``mysql`` system tables), or grant authority (``WITH GRANT OPTION``), which would let it pass its access on."""
-    readable = {f"`{db}`.*" for db in (META_DB, *DUMPS)}
+    the ``mysql`` system tables; ``_beaver_meta``.* every database its wildcards match), or grant authority
+    (``WITH GRANT OPTION``), which would let it pass its access on."""
+    readable = {_META_TABLE, *(f"`{db}`.*" for db in DUMPS)}
     problems = []
     for grant in grants:
         match = _GRANT.match(grant)
