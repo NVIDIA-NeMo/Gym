@@ -58,6 +58,23 @@ async def test_missing_resources_sandbox_is_rejected(setup) -> None:
     sandbox.stop.assert_not_awaited()
 
 
+async def test_sandbox_model_root_has_no_trace_segment_while_traces_export(setup, monkeypatch) -> None:
+    from nemo_gym.client import server_client
+    from nemo_gym.core.correlation import parse_path
+
+    # While traces export, a model URL built for a sandbox client gets the current span's trace segment.
+    trace = "/ng-trace/00-5dd571d301f00f2079273eade02b8da6-6242bd0b7a1dfdad-03"
+    monkeypatch.setattr(server_client, "trace_context_path_segment", lambda: trace)
+    instance, _, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    runner = instance._require_agent_session("session").runner
+    assert runner.model_base_url == "http://model:8000"
+    # The worker posts to root + rollout route; a trace segment before the rollout segment is rejected as out of order.
+    context, rest = parse_path(runner.model_base_url.removeprefix("http://model:8000") + "/ng-rollout/r1/v1/responses")
+    assert (context.capture_key, context.trace_parent, rest) == ("r1", None, "/v1/responses")
+    await close(instance)
+
+
 async def test_sandbox_session_forwards_configured_context_window(setup) -> None:
     instance, sandbox, _, _ = setup
     instance.config.context_window = 262144
