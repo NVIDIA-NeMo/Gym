@@ -733,7 +733,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return sandbox
 
     def _runtime_plugins(self) -> list[str]:
-        plugins = []
+        plugins = ["cached-date.js"]
         if self.config.output_token_policy == "remaining_context":
             plugins.append("remaining-context.js")
         if self.config.tool_servers:

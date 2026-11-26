@@ -539,7 +539,9 @@ class TestOpenCodeSandboxedAgent:
         assert expected_response == actual_response
         assert server._sandbox_id_to_run_result[""]["opencode_runtime"] == 12.5
         # Execution uploads plugins even when a resource supplied this sandbox.
-        expected_uploads = []
+        expected_uploads = [
+            call(Path(app_module.__file__).with_name("cached-date.js"), "/tmp/nemo-gym-cached-date.js")
+        ]
         if remaining_context:
             expected_uploads.append(
                 call(Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js")
@@ -711,11 +713,15 @@ class TestOpenCodeSandboxedAgent:
         )
 
         assert uploaded == {
+            "/tmp/nemo-gym-cached-date.js": (
+                Path(app_module.__file__).with_name("cached-date.js").read_bytes(),
+                0o644,
+            ),
             "/tmp/nemo-gym-attachments/image-1.png": (png, 0o644),
             "/tmp/nemo-gym-attachments/image-2.jpg": (jpeg, 0o644),
         }
         # Uploads precede the run, which is the only exec carrying the launch command.
-        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[:3]] == ["upload", "upload", "exec"]
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[:4]] == ["upload", "upload", "upload", "exec"]
         tokens = shlex.split(sandbox_mock.exec.await_args_list[0].kwargs["command"])
         run_tokens = tokens[tokens.index("run") :]
         assert run_tokens[run_tokens.index("--thinking") :][:6] == [
@@ -753,6 +759,7 @@ class TestOpenCodeSandboxedAgent:
         plain = await server._create_opencode_config(request)
         vision = await server._create_opencode_config(request, image_input=True)
 
+        assert plain["plugin"] == vision["plugin"] == ["file:///tmp/nemo-gym-cached-date.js"]
         plain_model = plain["provider"]["nemo_gym"]["models"]["dummy_model"]
         assert "modalities" not in plain_model
         assert "attachment" not in plain
@@ -801,7 +808,7 @@ class TestOpenCodeSandboxedAgent:
 
     @mark.parametrize("content", ["hello", [{"type": "input_text", "text": "hello"}]])
     async def test_text_only_turns_launch_without_attachment_flags(self, monkeypatch: MonkeyPatch, content) -> None:
-        """A string or single input_text turn stays the bare `-- <query>` launch with nothing uploaded for it."""
+        """A text turn uploads the runtime plugin but no attachments, and launches with bare `-- <query>`."""
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
         sandbox_mock = self._mock_sandbox(monkeypatch, server)
 
@@ -813,7 +820,9 @@ class TestOpenCodeSandboxedAgent:
         command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
         # The f-string's line continuations fold the launch line into one; the query follows `--` directly.
         assert "--thinking -- hello " in command and "nemo-gym-attachments" not in command
-        assert sandbox_mock.upload.await_count == 0
+        sandbox_mock.upload.assert_awaited_once_with(
+            Path(app_module.__file__).with_name("cached-date.js"), "/tmp/nemo-gym-cached-date.js"
+        )
         assert server._sandbox_id_to_run_result[""]["opencode_attachment_count"] == 0
         assert server._create_opencode_config.await_args.kwargs == {"image_input": False}
 
@@ -837,8 +846,13 @@ class TestOpenCodeSandboxedAgent:
         client.post = AsyncMock(return_value=seed)
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
         upload_error = error_type("ripgrep upload failed")
+
+        async def upload(local: Path, remote: str) -> None:
+            if local == binary:
+                raise upload_error
+
         sandbox = MagicMock(
-            upload=AsyncMock(side_effect=upload_error),
+            upload=AsyncMock(side_effect=upload),
             exec=AsyncMock(return_value=SimpleNamespace(stdout="[]", stderr="", return_code=0, error_type=None)),
             download=AsyncMock(),
             stop=AsyncMock(),
@@ -1282,7 +1296,7 @@ class TestBenchmarkLifecycle:
             model_timeout if model_timeout is not None else False
         )
         assert result["agent"]["build"]["prompt"] == "Custom instructions."
-        assert result["plugin"] == ["file:///tmp/nemo-gym-remaining-context.js"]
+        assert result["plugin"] == ["file:///tmp/nemo-gym-cached-date.js", "file:///tmp/nemo-gym-remaining-context.js"]
         assert "plugin" not in config.opencode_config
         config.opencode_config = {"tools": {"websearch": True}, "permission": {"websearch": "deny"}}
         # Keep the existing adapter's native config contract; benchmark presets use permission only.
@@ -1446,6 +1460,7 @@ async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
     config.execution_failure_reward_zero = True
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     sandbox = MagicMock()
+    sandbox.upload = AsyncMock()
     sandbox.exec = AsyncMock(
         side_effect=[
             SimpleNamespace(stdout="Shell: bash\nOpenCode run finished", stderr="", return_code=0, error_type=None),
@@ -1512,9 +1527,10 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
             ),
             body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
         )
-    sandbox.upload.assert_awaited_once_with(
-        Path(app_module.__file__).with_name("required-mcp.js"), "/tmp/nemo-gym-required-mcp.js"
-    )
+    assert sandbox.upload.await_args_list == [
+        call(Path(app_module.__file__).with_name("cached-date.js"), "/tmp/nemo-gym-cached-date.js"),
+        call(Path(app_module.__file__).with_name("required-mcp.js"), "/tmp/nemo-gym-required-mcp.js"),
+    ]
     assert sandbox.exec.await_count == 2
     sandbox.download.assert_not_awaited()
     assert not server._sandbox_id_to_run_result
@@ -1617,6 +1633,15 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     assert Path(result.opencode_results_fpath) == export_path
     assert json.loads(export_path.read_text()) == export
     sandbox.stop.assert_awaited_once()
+
+
+@mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise the OpenCode plugin hooks")
+def test_cached_date_plugin_hooks() -> None:
+    subprocess.run(
+        [shutil.which("node"), "--test", str(Path(__file__).with_name("test_cached_date.mjs"))],
+        check=True,
+        timeout=30,
+    )
 
 
 @mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise the OpenCode plugin hooks")
