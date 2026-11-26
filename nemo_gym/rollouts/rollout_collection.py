@@ -2674,11 +2674,13 @@ def report_run_accepted(output_jsonl_fpath: Path) -> None:
 
     The built-in collector calls this under the run lock, once its store has started the run or accepted its resume.
     A custom ``rollout_collection_driver`` that collects without ``run_from_config`` calls it once it has decided to
-    resume or replace the saved run, and before it writes to it. On a resume of saved rollouts the command writes
-    its resolved config only then, so a resume that stops earlier keeps the saved run's.
+    resume or replace the saved run, after every check of its own that can refuse the run and before it writes to
+    it. On a resume of saved rollouts the command writes its resolved config only then, so a resume that stops
+    earlier keeps the saved run's.
 
     Pass the rollouts file the decision was made for. The command acts only on its own output, so a driver that
-    collects a part of its run under other names reports nothing for the whole run by doing so.
+    collects a part of its run under other names reports nothing for the whole run by doing so, and one that reports
+    only such parts leaves the saved run's resolved config as it was.
     """
     on_run_accepted = _ON_RUN_ACCEPTED.get()
     if on_run_accepted is not None:

@@ -394,8 +394,9 @@ def _resume_of_saved_run(global_config_dict: DictConfig | Mapping[str, Any], out
     Until the collector or the driver takes the saved run over, the saved rollouts are the earlier run's, and so is
     the resolved config beside them. Whichever collects reports it (``report_run_accepted``), the built-in collector
     under the run lock: the resolved config is written then. A collection that fails before that leaves the file as
-    it was. One that ends normally without a report, as a custom driver written before the report existed does, has
-    its resolved config written when it ends.
+    it was. One that ends normally without any report, as a custom driver written before the report existed does,
+    has its resolved config written when it ends. One that reports only other rollouts files, such as the parts of
+    the run it collected, did not take this run over, and leaves the file as it was.
 
     A ``ConfigError`` before the report (the collector refused the resume, a file of the saved run is missing,
     another collector owns the run) sets ``_saved_run_untouched``.
@@ -404,10 +405,11 @@ def _resume_of_saved_run(global_config_dict: DictConfig | Mapping[str, Any], out
     from nemo_gym.rollouts.rollout_collection import _ON_RUN_ACCEPTED
 
     global _saved_run_untouched
-    accepted = False
+    accepted = reported = False
 
     def on_run_accepted(accepted_output: Path) -> None:
-        nonlocal accepted
+        nonlocal accepted, reported
+        reported = True
         if accepted_output.resolve() != output.resolve():
             return  # Another rollouts file, such as a part of the run a driver collects under its own names.
         accepted = True
@@ -421,7 +423,7 @@ def _resume_of_saved_run(global_config_dict: DictConfig | Mapping[str, Any], out
         raise
     finally:
         _ON_RUN_ACCEPTED.reset(token)
-    if not accepted:
+    if not reported:
         write_resolved_config(global_config_dict, output)
 
 
@@ -438,6 +440,14 @@ def e2e_rollout_collection():  # pragma: no cover
     global _saved_run_untouched
     global_config_dict = get_global_config_dict()
 
+    # Until the servers start, a resume has not touched the saved run: whatever stops it before that, the collection
+    # config's own checks included, leaves the run as it was.
+    output_jsonl_fpath = global_config_dict.get("output_jsonl_fpath")
+    resumes_saved_run = bool(output_jsonl_fpath) and _resumes_saved_run(
+        global_config_dict, Path(str(output_jsonl_fpath))
+    )
+    _saved_run_untouched = resumes_saved_run
+
     # Ensure we have the right config first thing
     e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
 
@@ -450,10 +460,6 @@ def e2e_rollout_collection():  # pragma: no cover
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
         data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
-
-    resumes_saved_run = _resumes_saved_run(global_config_dict, output_fpath)
-    # Until the servers start, a resume has not touched the saved run: whatever stops it here leaves the run as it was.
-    _saved_run_untouched = resumes_saved_run
 
     server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
     _validate_split_datasets_declared(e2e_rollout_collection_config.split, server_instance_configs)

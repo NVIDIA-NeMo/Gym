@@ -195,8 +195,6 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         if not snapshot_path.exists():
             # JSON is valid YAML; reuse the atomic private receipt writer.
             write(snapshot_path, OmegaConf.to_container(snapshot, resolve=True))
-        # Under the lock, with the saved run's inventory matched: what sits under the output names is this command's.
-        report_run_accepted(output)
         # failures halt admission; deferred (receipted transport) failures wait for a resume while other tasks run.
         results, failures, deferred, validated_results = [], [], [], {}
         writing_failed = False
@@ -393,6 +391,9 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             # Reject any saved task before dispatching new work or replacing published artifacts.
             for row in rows:
                 validated_results[row["task_id"]] = await collect(row, validate_only=True)
+        # Under the lock, with the saved run's inventory matched and every saved task validated: what sits under the
+        # output names is this command's.
+        report_run_accepted(output)
         with tempfile.TemporaryDirectory(dir=output.parent, prefix=f".{output.stem}-") as pending:
             staged_output = Path(pending) / output.name
             stream = os.fdopen(os.open(staged_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")

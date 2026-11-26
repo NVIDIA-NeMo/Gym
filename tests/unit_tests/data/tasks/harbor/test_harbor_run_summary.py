@@ -1163,6 +1163,15 @@ async def _driver_failing_after_it_took_the_run_over(rollout_collection_config, 
     raise RuntimeError("the driver failed after writing rows of its own")
 
 
+async def _driver_that_reports_only_a_part(rollout_collection_config, global_config_dict):
+    """A custom driver that collects without the built-in collector, reports a part it collected under other names
+    and ends normally, without taking the saved run over."""
+    from nemo_gym.rollouts.rollout_collection import report_run_accepted
+
+    _note_resolved_config("on entry", rollout_collection_config)
+    report_run_accepted(Path(rollout_collection_config.output_jsonl_fpath).with_name("part.jsonl"))
+
+
 async def _driver_that_reports_nothing(rollout_collection_config, global_config_dict):
     """A custom driver that collects without the built-in collector and never reports that it took the run over."""
     _note_resolved_config("on entry", rollout_collection_config)
@@ -1174,7 +1183,9 @@ def test_a_driver_that_collects_on_its_own_has_its_resolved_config_written_once_
     """A custom driver may collect without the built-in collector. On a resume of saved rollouts its command's
     resolved config is written when the driver reports that it took the saved run over, not before the driver runs:
     a driver that refuses the saved run leaves that run's file, and one that fails after it took the run over has
-    its own beside the rows it wrote. A driver that never reports has its file written once it ends normally."""
+    its own beside the rows it wrote. A driver that reports only a part of the run, collected under other names,
+    did not take the run over: the file stays even when it ends normally. A driver that never reports anything has
+    its file written once it ends normally."""
     write_task(tmp_path / "ds" / "a")
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     oracle_collection.payload = lambda row: result(response={"output": []})
@@ -1205,6 +1216,10 @@ def test_a_driver_that_collects_on_its_own_has_its_resolved_config_written_once_
     assert _RESOLVED_CONFIG_SEEN["after reporting a part"] == saved
     taken_over = _RESOLVED_CONFIG_SEEN["after reporting the run"]
     assert b"_driver_failing_after_it_took_the_run_over" in taken_over
+    assert resolved_config_path.read_bytes() == taken_over
+
+    run("_driver_that_reports_only_a_part")
+    assert _RESOLVED_CONFIG_SEEN == {"on entry": taken_over}
     assert resolved_config_path.read_bytes() == taken_over
 
     run("_driver_that_reports_nothing")
@@ -1274,6 +1289,14 @@ def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(
         run("hermes_agent", "+resume_from_cache=true", "+split=train")
     out = capsys.readouterr().out
     assert "No dataset of type `train` is declared" in " ".join(out.split())
+    assert {path: path.read_bytes() for path in run_files} == collected
+    assert "Run summary written" not in out
+
+    # One the collection config itself refuses: `example` is not a split a run collects.
+    with pytest.raises(SystemExit):
+        run("hermes_agent", "+resume_from_cache=true", "+split=example")
+    out = capsys.readouterr().out
+    assert "`--split example` is not runnable end-to-end" in " ".join(out.split())
     assert {path: path.read_bytes() for path in run_files} == collected
     assert "Run summary written" not in out
 
