@@ -1459,6 +1459,151 @@ def test_advisories_remain_visible_on_completion_or_gradable_limits(setup, condi
         assert observations["records"][0]["status"] == "failed"
 
 
+# Codex 0.172.0's notice for the `multi_agent` key of the [features] table, captured from the CLI.
+CODEX_0172_MULTI_AGENT_DEPRECATION = (
+    "`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` "
+    "disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` "
+    "is enabled."
+)
+# Codex 0.172.0's notice for another deprecated key of that table, captured from the CLI.
+CODEX_0172_LEGACY_LANDLOCK_DEPRECATION = (
+    "`[features].use_legacy_landlock` is deprecated and will be removed soon. "
+    "(Remove this setting to stop opting into the legacy Linux sandbox behavior.)"
+)
+# The events of one turn of Codex 0.172.0 with one tool call, captured from the CLI. The capture uses the
+# configuration that the default settings generate, whose [features] table holds `multi_agent = false`, and a
+# local stand-in as the model endpoint. Codex prints the notice twice before the turn starts.
+CODEX_0172_TURN_WITH_DEFAULT_FEATURES = [
+    {"type": "thread.started", "thread_id": "01a21551-7efd-7b52-8836-c8d671b97bad"},
+    {
+        "type": "item.completed",
+        "item": {"id": "item_0", "type": "error", "message": CODEX_0172_MULTI_AGENT_DEPRECATION},
+    },
+    {
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "error", "message": CODEX_0172_MULTI_AGENT_DEPRECATION},
+    },
+    {
+        "type": "item.completed",
+        "item": {
+            "id": "item_2",
+            "type": "error",
+            "message": "Model metadata for `stand-in-model` not found. Defaulting to fallback metadata; "
+            "this can degrade performance and cause issues.",
+        },
+    },
+    {"type": "turn.started"},
+    {
+        "type": "item.started",
+        "item": {
+            "id": "item_3",
+            "type": "command_execution",
+            "command": "/bin/bash -lc true",
+            "aggregated_output": "",
+            "exit_code": None,
+            "status": "in_progress",
+        },
+    },
+    {
+        "type": "item.completed",
+        "item": {
+            "id": "item_3",
+            "type": "command_execution",
+            "command": "/bin/bash -lc true",
+            "aggregated_output": "",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    },
+    {"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "Done."}},
+    {
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 34,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 9,
+            "reasoning_output_tokens": 0,
+        },
+    },
+]
+
+
+# The end of a turn of Codex 0.172.0 whose second reply reaches the output-token limit, captured from the CLI
+# with the same configuration. These events take the place of the last two events above, and Codex exits with
+# code 1. The final error has the text of Codex 0.163.0.
+CODEX_0172_OUTPUT_CAP_ENDING = [
+    {"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "I will now"}},
+    *codex_error(CODEX_0163_OUTPUT_CAP),
+]
+# Codex 0.172.0's final error for a model endpoint that answers every request with HTTP 500, captured from the
+# CLI. Codex prints five retry notices with this text first, and it exits with code 1.
+CODEX_0172_HIGH_DEMAND = "We’re currently experiencing high demand, which may cause temporary errors."
+
+
+@pytest.mark.parametrize(
+    "condition", ["completed", "timed-out", "output-cap", "model-error", "failed-exit", "in-turn", "other-notice"]
+)
+def test_multi_agent_deprecation_notice_is_a_warning_or_returns_to_the_errors(setup, condition) -> None:
+    agent, sandbox = setup
+    transcript = [dict(event) for event in CODEX_0172_TURN_WITH_DEFAULT_FEATURES]
+    notice = CODEX_0172_MULTI_AGENT_DEPRECATION
+    if condition == "timed-out":
+        sandbox.result["timed_out"] = True
+    elif condition == "output-cap":
+        sandbox.result["return_code"] = 1
+        transcript[-2:] = CODEX_0172_OUTPUT_CAP_ENDING
+    elif condition == "model-error":
+        sandbox.result["return_code"] = 1
+        transcript[5:] = [
+            *(retry_notice(CODEX_0172_HIGH_DEMAND, attempt) for attempt in range(1, 6)),
+            *codex_error(CODEX_0172_HIGH_DEMAND),
+        ]
+    elif condition == "failed-exit":
+        sandbox.result["return_code"] = 1
+    elif condition == "in-turn":
+        transcript.insert(4, transcript.pop(1))
+    elif condition == "other-notice":
+        notice = CODEX_0172_LEGACY_LANDLOCK_DEPRECATION
+        transcript[1:3] = [{"type": "item.completed", "item": {"id": "item_0", "type": "error", "message": notice}}]
+    # The response's status and error message of each run that keeps the notice as a warning.
+    kept = {
+        "completed": ("completed", None),
+        "timed-out": ("incomplete", None),
+        "output-cap": ("incomplete", None),
+        "model-error": ("failed", CODEX_0172_HIGH_DEMAND),
+    }.get(condition)
+    sandbox.events = "\n".join(json.dumps([float(index), event]) for index, event in enumerate(transcript))
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == (200 if kept else 502), result.text
+        body = result.json()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    observations = closed.json()["agent_observations"]
+    notices = [gap["detail"] for gap in observations["gaps"] if gap["code"] == "config_key_deprecated"]
+    if kept:
+        status, error = kept
+        assert body["status"] == status
+        assert (body["error"] or {}).get("message") == error
+        if condition == "output-cap":
+            assert body["incomplete_details"]["reason"] == "max_output_tokens"
+            assert body["usage"] is None
+        elif condition != "model-error":
+            assert body["usage"]["total_tokens"] == 43
+        if condition != "model-error":
+            assert [item["type"] for item in body["output"]] == ["function_call", "function_call_output", "message"]
+        assert notices == [notice, notice]
+        assert [gap["code"] for gap in observations["gaps"]].count("model_metadata_fallback") == 1
+        assert observations["records"][0]["status"] == status
+    else:
+        # A notice that was set aside before the turn is among the errors again.
+        assert body["detail"].count(notice) == (1 if condition == "other-notice" else 2)
+        assert not notices
+        assert observations["records"][0]["status"] == "failed"
+
+
 @pytest.mark.parametrize(
     "override",
     [
