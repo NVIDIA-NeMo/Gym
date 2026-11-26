@@ -61,7 +61,8 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxUsage,
     create_provider,
 )
-from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
+from nemo_gym.sandbox.providers.base import EXEC_USAGE_SOURCE, SupportsSandboxExecScopedProcesses
+from nemo_gym.sandbox.providers.usage import sampling_enabled
 from nemo_gym.sandbox.resource_telemetry import (
     ResourceProvider,
     ResourceSampler,
@@ -72,7 +73,6 @@ from nemo_gym.sandbox.resource_telemetry import (
 from nemo_gym.sandbox.usage import (
     SandboxUsageSummary,
     SandboxUsageTracker,
-    sampling_enabled,
     usage_sample_interval,
     usage_span_attributes,
 )
@@ -1156,6 +1156,10 @@ class AsyncSandbox:
             raise RuntimeError(f"provider {name!r} does not support serialize()/connect()")
         descriptor = await provider.serialize_handle(self._require_handle(), scope=scope)
         self._lent = True
+        if self._usage_tracker is not None:
+            # The borrower's commands bypass this handle, so the CPU of the execs run through it is no longer the
+            # sandbox's; the provider stops reporting it, and the samples taken so far go with it.
+            self._usage_tracker.discard_source(EXEC_USAGE_SOURCE)
         # Carry the working directory so a reattached sandbox lands in the same
         # place, even for providers whose descriptor does not include it (the
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).

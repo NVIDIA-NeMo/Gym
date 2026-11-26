@@ -132,6 +132,7 @@ def _make_handle(
     env: dict[str, str] | None = None,
     container_pid: int | None = FAKE_PID,
     start_pgid: int | None = None,
+    measure_exec_cpu: bool = False,
 ) -> SandboxHandle:
     inst = enroot_provider._EnrootInstance(
         name=name,
@@ -143,6 +144,7 @@ def _make_handle(
         container_pid=container_pid,
         start_pgid=start_pgid,
         proc=None,
+        measure_exec_cpu=measure_exec_cpu,
     )
     return SandboxHandle(sandbox_id=name, provider_name="enroot", raw=inst)
 
@@ -385,6 +387,8 @@ async def test_create_builds_argv_and_runs_probe(
     assert handle.raw.container_pid == FAKE_PID
     assert handle.raw.start_pgid == FAKE_PID
     assert handle.raw.env == {"FOO": "bar"}
+    # The readiness probe ran unwrapped; the workload's commands are measured from here on.
+    assert all(call["argv"][0] != "/bin/sh" for call in rec.calls) and handle.raw.measure_exec_cpu
 
     # create rootfs
     create_argv = next(c["argv"] for c in rec.calls if "create" in c["argv"])
@@ -597,7 +601,7 @@ async def test_ensure_image_import_timeout_raises(
 # --------------------------------------------------------------------------- #
 async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "hello", ""), tmp_path)
-    handle = _make_handle(tmp_path)
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
 
     result = await provider.exec(handle, "echo hi", cwd="/work", env={"A": "b"})
 
@@ -606,7 +610,9 @@ async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytes
     assert result.error_type is None
 
     argv = rec.calls[0]["argv"]
-    assert argv[:2] == [FAKE_BINARY, "exec"]
+    # The host shell around enroot exec writes the exec's CPU to a report file of its own.
+    assert argv[:4] == ["/bin/sh", "-c", enroot_provider.EXEC_TIMES_SCRIPT, "sh"]
+    assert Path(argv[4]).name.startswith("nemo-gym-exec-cpu-") and argv[5:7] == [FAKE_BINARY, "exec"]
     assert _contains_seq(argv, ["-e", "A=b"])
     assert str(FAKE_PID) in argv
     assert argv[-3:] == ["sh", "-c", "cd /work && echo hi"]
@@ -1215,3 +1221,199 @@ async def test_a_cancelled_enroot_command_is_killed(fake_binary: str, tmp_path: 
     assert not is_running(cli.last_pid())
     cli.hang.unlink()
     assert (await provider._run([str(cli.path)], timeout_s=10))[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("report", "cpu_usec"),
+    [
+        ("0m0.01s 0m0.00s\n0m1.500000s 1m0.25s\n", 61_750_000),
+        ("", None),  # no report (killed before it ran): nothing is counted
+        ("times: not found\n", None),
+        ("0m 0.01s 0m 0.00s\n0m 2.00s 0m 0.50s\n", 2_500_000),  # busybox ash spaces its times
+    ],
+)
+async def test_exec_cpu_is_read_from_the_report_file_and_stderr_is_never_touched(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, report: str, cpu_usec
+) -> None:
+    reports = []
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        assert argv[:3] == ["/bin/sh", "-c", enroot_provider.EXEC_TIMES_SCRIPT], "a measured exec is wrapped"
+        Path(argv[4]).write_text(report)
+        reports.append(Path(argv[4]))
+        return 3, "out", "warn"
+
+    provider, _rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
+
+    result = await provider.exec(handle, "true")
+    await provider.exec(handle, "true")
+
+    assert (result.return_code, result.stdout, result.stderr) == (3, "out", "warn")
+    assert not any(path.exists() for path in reports), "each report file is removed"
+    samples = await provider.usage(handle)
+    if cpu_usec is None:
+        assert samples == ()
+    else:
+        (sample,) = samples
+        assert (sample.source, sample.scope, sample.cpu_kind) == ("exec_rusage", "process_tree", "counter")
+        # The count of completed execs is not a process count, so the sample reports none.
+        assert (sample.cpu_usage_usec_total, sample.process_count) == (2 * cpu_usec, None)
+
+
+async def test_an_exec_runs_unwrapped_when_no_report_file_can_be_made(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (3, "out", "warn"), tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
+
+    def no_space(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(enroot_provider.tempfile, "mkstemp", no_space)
+    result = await provider.exec(handle, "true")
+
+    assert (result.return_code, result.stdout, result.stderr, result.error_type) == (3, "out", "warn", None)
+    assert rec.calls[0]["argv"][:2] == [FAKE_BINARY, "exec"]
+    assert await provider.usage(handle) == ()
+
+
+async def _run_wrapped(provider, tmp_path: Path, command: str, *, stdin: bytes | None = None):
+    report = tmp_path / "report"
+    code, out, err = await provider._run(
+        ["/bin/sh", "-c", enroot_provider.EXEC_TIMES_SCRIPT, "sh", str(report), "/bin/sh", "-c", command],
+        timeout_s=60,
+        stdin=stdin,
+    )
+    return code, out, err, enroot_provider._exec_cpu_usec(report.read_text())
+
+
+@pytest.mark.skipif(not Path("/bin/sh").exists(), reason="no /bin/sh")
+async def test_the_exec_cpu_report_counts_a_real_child_and_keeps_its_exit_code(
+    fake_binary: str, tmp_path: Path
+) -> None:
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "home")})
+    burn = "i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done; echo err >&2; exit 4"
+
+    code, _out, err, cpu_usec = await _run_wrapped(provider, tmp_path, burn)
+
+    assert (code, err) == (4, "err\n") and cpu_usec > 0
+
+
+@pytest.mark.skipif(not Path("/bin/sh").exists(), reason="no /bin/sh")
+async def test_stderr_a_background_child_writes_after_the_command_exits_is_kept(
+    fake_binary: str, tmp_path: Path
+) -> None:
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "home")})
+
+    code, _out, err, cpu_usec = await _run_wrapped(
+        provider, tmp_path, "printf 'nemo-gym-exec-cpu: 0m1s\\n' >&2; (sleep 0.2; printf late >&2) & exit 4"
+    )
+
+    assert code == 4 and err == "nemo-gym-exec-cpu: 0m1s\nlate" and cpu_usec is not None
+
+
+async def test_a_timed_out_exec_counts_no_cpu(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        raise TimeoutError("enroot command timed out")
+
+    provider, _rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
+
+    result = await provider.exec(handle, "sleep 100", timeout_s=1)
+
+    # The killed shell never reports, so the exec's CPU stays with the process-tree samples.
+    assert (result.error_type, result.stdout) == ("timeout", None)
+    assert await provider.usage(handle) == ()
+
+
+@pytest.mark.skipif(not Path("/bin/sh").exists(), reason="no /bin/sh")
+async def test_the_exec_cpu_report_passes_stdin_and_keeps_stderr_without_a_final_newline(
+    fake_binary: str, tmp_path: Path
+) -> None:
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "home")})
+
+    code, out, err, cpu_usec = await _run_wrapped(provider, tmp_path, "cat; printf partial >&2", stdin=b"piped")
+
+    assert (code, out, err) == (0, "piped", "partial") and cpu_usec is not None
+
+
+@pytest.mark.skipif(not Path("/bin/sh").exists(), reason="no /bin/sh")
+async def test_an_unwritable_report_loses_the_sample_not_the_command_output_or_status(
+    fake_binary: str, tmp_path: Path
+) -> None:
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "home")})
+    report = tmp_path / "gone" / "report"
+
+    code, out, err = await provider._run(
+        ["/bin/sh", "-c", enroot_provider.EXEC_TIMES_SCRIPT, "sh", str(report), "/bin/sh", "-c"]
+        + ["printf out; printf partial >&2; exit 4"],
+        timeout_s=60,
+    )
+
+    assert (code, out, err) == (4, "out", "partial") and not report.exists()
+
+
+async def test_only_a_measured_handle_wraps_its_execs_and_a_lent_one_reports_no_exec_cpu(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if argv[0] == "/bin/sh":
+            Path(argv[4]).write_text("0m0.00s 0m0.00s\n0m1.00s 0m0.00s\n")
+        return 0, "", ""
+
+    provider, rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: True)
+
+    # A handle rebuilt with connect(), or one made with sampling off, never wraps an exec.
+    unmeasured = _make_handle(tmp_path)
+    await provider.exec(unmeasured, "true")
+    assert rec.calls[-1]["argv"][:2] == [FAKE_BINARY, "exec"] and await provider.usage(unmeasured) == ()
+
+    # The creator's setup commands are measured until it lends the sandbox; from then on its own exec CPU would be
+    # a part reported as the whole, so it reports none, and stops measuring.
+    creator = _make_handle(tmp_path, measure_exec_cpu=True)
+    await provider.exec(creator, "chmod +x setup.sh")
+    assert [sample.source for sample in await provider.usage(creator)] == ["exec_rusage"]
+    await provider.serialize_handle(creator)
+    await provider.exec(creator, "git diff")
+    assert rec.calls[-1]["argv"][:2] == [FAKE_BINARY, "exec"] and await provider.usage(creator) == ()
+
+
+async def test_a_lent_sandbox_has_no_exec_cpu_summary_even_after_measuring_setup_commands(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if argv[0] == "/bin/sh":
+            Path(argv[4]).write_text("0m0.00s 0m0.00s\n0m1.00s 0m0.00s\n")
+        return 0, "", ""
+
+    monkeypatch.setenv("NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS", "0.01")
+    provider, _rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: True)
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
+
+    async def create(spec: SandboxSpec) -> SandboxHandle:
+        return handle
+
+    monkeypatch.setattr(provider, "create", create)
+    owner = await AsyncSandbox(provider, SandboxSpec(image="test")).start()
+    # Setup commands before the sandbox is lent, as a task seed or an environment normalisation runs them.
+    await owner.exec("chmod +x setup.sh")
+    for _ in range(100):
+        if ("exec_rusage", "process_tree") in owner._usage_tracker.samples:
+            break
+        await anyio.sleep(0.01)
+    assert ("exec_rusage", "process_tree") in owner._usage_tracker.samples
+    await owner.serialize()
+    await owner.stop()
+
+    assert all(summary.source != "exec_rusage" for summary in owner.resource_usage)
+    assert all(summary.unavailable_reason != "final_read_failed" for summary in owner.resource_usage)
