@@ -10,7 +10,9 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -250,24 +252,33 @@ def test_private_python_ignores_task_python_and_ambient_environment(tmp_path: Pa
     assert record["argv"][:7] == ["-I", "-B", "-m", "pip", "--isolated", "install", "--no-cache-dir"]
 
 
-def test_warm_check_uses_private_scratch_without_writing_read_only_runtime(tmp_path: Path) -> None:
-    call = make_call(tmp_path / "cold")
+@pytest.fixture
+def world_readable_tmp() -> Iterator[Path]:
+    """A directory under /tmp that uid 65534 can reach.
+
+    Opening up tmp_path is not enough: any other pytest session that uses tmp_path resets /tmp/pytest-of-<user>
+    to 0700, and CI runs several server suites at once.
+    """
+    path = Path(tempfile.mkdtemp(prefix="nooa-warm-check-", dir="/tmp"))
+    path.chmod(0o755)
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def test_warm_check_uses_private_scratch_without_writing_read_only_runtime(world_readable_tmp: Path) -> None:
+    call = make_call(world_readable_tmp / "cold")
     result = call.run()
     assert result.returncode == 0, result.stdout + result.stderr
-    warm = make_call(tmp_path / "warm", runtime=call.runtime)
+    warm = make_call(world_readable_tmp / "warm", runtime=call.runtime)
     shutil.rmtree(warm.scratch)
-    for parent in [tmp_path, *tmp_path.parents]:
-        if parent == Path("/tmp") or parent == Path("/"):
-            break
-        parent.chmod(0o755)
     warm.script.parent.chmod(0o777)
     paths = [call.runtime.parent, *call.runtime.parent.rglob("*")]
-    for path in paths:
-        if not path.is_symlink():
-            path.chmod(0o555 if path.is_dir() or path.name == "python3" else 0o444)
-    snapshot = {str(p): (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None) for p in paths}
     kwargs = {"user": 65534, "group": 65534, "extra_groups": []} if os.geteuid() == 0 else {}
     try:
+        for path in paths:
+            if not path.is_symlink():
+                path.chmod(0o555 if path.is_dir() or path.name == "python3" else 0o444)
+        snapshot = {str(p): (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else None) for p in paths}
         result = warm.run(
             "check", health="import pathlib; pathlib.Path.home().joinpath('health-write').touch()", **kwargs
         )
