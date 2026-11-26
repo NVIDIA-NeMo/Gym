@@ -101,7 +101,7 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
    - Resolve any prompt/agent-class override (see [Prompt and agent-class diversity](#prompt-and-agent-class-diversity)).
    - Build both Apptainer command strings.
 2. **Spawn agent + eval containers** in parallel via `asyncio.create_subprocess_shell`, each streaming logs to `<persistent_dir>/apptainer_logs/<instance_id>_{agent,eval}.log`.
-3. **Wait for the agent** to finish or hit `swebench_agent_timeout` (default 45 min). Copy the produced `output.jsonl` and the most recent `llm_completions/*.json` back from OpenHands' eval-output dir into the per-instance trajectories root.
+3. **Wait for the agent** to finish or hit `swebench_agent_timeout` (default 45 min). An OpenHands agent that reported completion and wrote its output is stopped and scored on that output, even if a command it left running keeps the container open. Copy the produced `output.jsonl` and the most recent `llm_completions/*.json` back from OpenHands' eval-output dir into the per-instance trajectories root.
 4. **Extract the patch** from `out_dict["test_result"]["git_patch"]` and rewrite it in SWE-bench-prediction format at `output_for_eval.jsonl`. This file is what the eval container is waiting for.
 5. **Wait for the eval container** to finish or hit `swebench_tests_timeout` (default 30 min). It produces a `report.json` whose location is dataset-specific.
 6. **Postprocess** the report (per-dataset; e.g. SWE-rebench / NV-internal / SWE-bench-Ext do their parsing host-side because the eval images may not have python3).

@@ -2657,6 +2657,12 @@ class ActiveContainerCommand(BaseModel):
     watchdog_stats: Dict[str, Any] = Field(default_factory=dict)
 
 
+_CONTAINER_COMMAND_POLL_INTERVAL_S = 5.0
+# OpenHands logs this once every instance is processed; its output file is complete by then or soon after.
+_OPENHANDS_COMPLETION_MARKER = b"Instances processed: 100%"
+_OPENHANDS_OUTPUT_GRACE_S = 60.0
+
+
 class RunOpenHandsAgent(BaseModel):
     config: SWEBenchWrapperInstanceConfig
 
@@ -2807,22 +2813,77 @@ class RunOpenHandsAgent(BaseModel):
             )
         return active_command
 
+    async def _kill_process(self, active_command: ActiveContainerCommand) -> None:
+        if active_command.process.returncode is None:
+            _kill_container_tree(active_command.process.pid)
+            try:
+                active_command.process.kill()
+            except ProcessLookupError:
+                pass
+            await active_command.process.wait()
+
+    def _completion_reported(self, active_command: ActiveContainerCommand, offset: int) -> tuple[bool, int]:
+        """Scan the log from ``offset`` for the completion marker; return whether it is there and where to resume."""
+        try:
+            with open(active_command.log_file_path, "rb") as log:
+                log.seek(offset)
+                new = log.read()
+        except OSError:
+            return False, offset
+        # Resume a marker's length early, so that a marker split across two reads is still found.
+        return _OPENHANDS_COMPLETION_MARKER in new, max(offset, offset + len(new) - len(_OPENHANDS_COMPLETION_MARKER))
+
+    def _newest_complete_output(self, command: ExecuteContainerCommandArgs) -> str | None:
+        """Return the newest expected output file if it parses, else None: its writer may not be done."""
+        try:
+            pred_file = max(
+                glob.glob(command.expected_file_pattern, recursive=True), key=os.path.getmtime, default=None
+            )
+            if pred_file is not None:
+                orjson.loads(Path(pred_file).read_text().strip())
+        except (OSError, UnicodeDecodeError, orjson.JSONDecodeError):
+            return None
+        return pred_file
+
     async def _finish_container_command(
         self, active_command: ActiveContainerCommand, command: ExecuteContainerCommandArgs
     ) -> str:
         data_point = self.config.problem_info
+        loop = asyncio.get_running_loop()
+        rescued_file: str | None = None
+        completion_seen_at: float | None = None
+        log_offset = 0
 
         try:
-            # Wait for completion with timeout
-            await asyncio.wait_for(active_command.process.communicate(), timeout=command.timeout)
-        except asyncio.TimeoutError:
-            if active_command.process.returncode is None:
-                _kill_container_tree(active_command.process.pid)
+            # Poll rather than block: an agent that finished while a command it left running holds the container
+            # open is scored on its output, instead of waiting out the timeout and failing.
+            deadline = loop.time() + command.timeout
+            while active_command.process.returncode is None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
                 try:
-                    active_command.process.kill()
-                except ProcessLookupError:
-                    pass
-                await active_command.process.wait()
+                    await asyncio.wait_for(
+                        active_command.process.wait(), timeout=min(_CONTAINER_COMMAND_POLL_INTERVAL_S, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    if command.mode != "agent":
+                        continue
+                    if completion_seen_at is None:
+                        reported, log_offset = self._completion_reported(active_command, log_offset)
+                        if not reported:
+                            continue
+                        completion_seen_at = loop.time()
+                    rescued_file = self._newest_complete_output(command)
+                    if rescued_file is None and loop.time() - completion_seen_at < _OPENHANDS_OUTPUT_GRACE_S:
+                        continue
+                    await self._kill_process(active_command)
+                    if rescued_file is None:
+                        raise RuntimeError(
+                            "OpenHands finished without complete output; killed its lingering container"
+                        )
+        except asyncio.TimeoutError:
+            await self._kill_process(active_command)
             raise ValueError("Command timed out")
         finally:
             active_command.log_file.close()
@@ -2836,6 +2897,10 @@ class RunOpenHandsAgent(BaseModel):
                 f"{command.mode} container killed by the memory watchdog (OOM). "
                 f"Peak tree RSS: {active_command.watchdog_stats.get('agent_peak_rss_mb')}MB."
             )
+
+        # The output that was checked before the kill is the one returned, whatever was written after it.
+        if rescued_file is not None:
+            return rescued_file
 
         if active_command.process.returncode != 0:
             raise RuntimeError(

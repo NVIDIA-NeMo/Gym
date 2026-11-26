@@ -2185,6 +2185,63 @@ class TestRunOpenHandsAgent:
                 await agent._finish_container_command(active, cmd)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("before", "after", "grace_s"),
+        [
+            # No output at all: the lingering container is killed after the grace and the run fails.
+            ({}, {}, 0.1),
+            # Complete output while a command the model left running holds the container open: scored.
+            ({"output.jsonl": b"{}"}, {}, 60.0),
+            # Output that is still being written: the grace lets its writer finish.
+            ({"output.jsonl": b""}, {"output.jsonl": b"{}"}, 5.0),
+            # A write cut inside a multi-byte character is not ready yet either.
+            ({"output.jsonl": b'{"patch": "\xe2\x82'}, {"output.jsonl": '{"patch": "€"}'.encode()}, 5.0),
+            # The newest output is the one returned, so an older complete one does not end the wait for it.
+            ({"output1.jsonl": b"{}", "output2.jsonl": b'{"patch"'}, {"output2.jsonl": b'{"patch": "x"}'}, 5.0),
+        ],
+        ids=["missing", "complete", "late", "cut_multibyte", "newer_unfinished"],
+    )
+    async def test_finish_agent_rescues_or_fails_lingering_containers(
+        self, monkeypatch, tmp_path: Path, before: dict[str, bytes], after: dict[str, bytes], grace_s: float
+    ) -> None:
+        monkeypatch.setattr(swe_app, "_CONTAINER_COMMAND_POLL_INTERVAL_S", 0.05)
+        monkeypatch.setattr(swe_app, "_OPENHANDS_OUTPUT_GRACE_S", grace_s)
+        agent = self._make_agent(str(tmp_path))
+        agent.config.persistent_dir.mkdir(parents=True, exist_ok=True)
+        for age_s, (name, content) in zip(range(len(before), 0, -1), before.items()):
+            (tmp_path / name).write_bytes(content)
+            os.utime(tmp_path / name, (time.time() - age_s, time.time() - age_s))  # the last one is the newest
+
+        cmd = ExecuteContainerCommandArgs(
+            command="agent",
+            expected_file_pattern=str(tmp_path / "output*.jsonl"),
+            mode="agent",
+            timeout=10,
+        )
+        active = await agent._start_container_command(cmd, "printf 'Instances processed: 100%%\\n'; sleep 100")
+        alive_at_write = []
+
+        async def finish_write() -> None:
+            await asyncio.sleep(0.2)
+            alive_at_write.append(active.process.returncode is None)
+            for name, content in after.items():
+                (tmp_path / name).write_bytes(content)
+
+        writer = asyncio.create_task(finish_write())
+        if before:
+            result = await agent._finish_container_command(active, cmd)
+            assert result == str(tmp_path / list(before)[-1])
+            json.loads(Path(result).read_text())
+        else:
+            with pytest.raises(RuntimeError, match="finished without complete output"):
+                await agent._finish_container_command(active, cmd)
+        await writer
+        assert active.process.returncode is not None
+        if after:
+            # The container was not killed while its output was still unfinished.
+            assert alive_at_write == [True]
+
+    @pytest.mark.asyncio
     async def test_finish_container_command_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
