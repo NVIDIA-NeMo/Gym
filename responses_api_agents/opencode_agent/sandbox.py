@@ -218,6 +218,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     activation_id: int | None = None
     close_requested_at: float | None = None
     export_dir: str | None = None
+    # The task's own MCP servers and skills directory, as the borrowed sandbox's task context file declares them.
+    task_context: dict[str, JsonValue] = field(default_factory=dict)
     # POSIX sh that gives OpenCode's import and export their environment (see ``cli_environment``).
     opencode_environment: str = ""
     # Whether the session runs OpenCode 2: its store is translated (``opencode2.store``) before it is read.

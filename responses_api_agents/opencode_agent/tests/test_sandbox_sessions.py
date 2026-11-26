@@ -2114,7 +2114,8 @@ async def test_caller_assigned_seed_is_serialized_and_binds_all_inputs(setup):
         agent.seed_agent_session(first_request, body), agent.seed_agent_session(retry_request, body)
     )
     assert first.agent_session_id == retry.agent_session_id == body.agent_session_id
-    assert sandbox.exec.await_count == 2
+    # One seed ran: preparation, the runtime install and the read of the task's own tool declarations.
+    assert sandbox.exec.await_count == 3
     changed = body.model_copy(deep=True)
     changed.sandbox_access.workdir = "/different"
     with pytest.raises(HTTPException, match="another seed request"):

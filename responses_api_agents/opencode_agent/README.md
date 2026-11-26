@@ -201,7 +201,25 @@ fails after about 300 seconds, Bun's default `fetch` timeout. Before the first m
 their status: a required grant that did not connect fails the activation, and an optional one is
 reported as an `mcp_server_skipped` gap. A run that called the model but left no readable status
 also fails, because nothing confirms its required tools; a run that failed for another reason keeps
-that cause. `context_window` and `max_output_tokens` are independent
+that cause.
+
+A Harbor task can declare tools of its own: `[[environment.mcp_servers]]` and `skills_dir`, which the `harbor`
+environment server leaves in `/tmp/.nemo-gym/task.json` in the borrowed sandbox. An OpenCode 1 session reads that
+file at seed and declares `supports_task_tool_context`, so the environment server gives it such a task:
+
+- Each MCP server of the task becomes an OpenCode MCP server under its own name, required like a required grant: a
+  server with a `url` (`sse` or `streamable-http`) is a `remote` entry, which tries streamable HTTP and then SSE, and
+  a `stdio` server is a `local` entry that OpenCode starts in the sandbox. A server a grant already names keeps the
+  grant's connection and becomes required.
+- `skills_dir` is added to OpenCode's `skills.paths`, and that session may call the `skill` tool, which the default
+  permission profile otherwise denies: the skills are part of the task.
+
+A declaration OpenCode cannot be given (a server without a name or endpoint, a relative `skills_dir`) refuses the
+seed with a 422, and a file that cannot be read fails the seed, rather than run the task without its tools. A session
+in a sandbox the adapter created has no such file. OpenCode 2 sessions do not read it yet and do not declare
+`supports_task_tool_context`, so the environment server keeps refusing those tasks to them.
+
+`context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
 Session `opencode_config` permits only `permission`, `tools`, a boolean `snapshot`, `attachment`, `compaction.auto`,
