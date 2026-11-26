@@ -9,8 +9,9 @@ import pytest
 from harbor.models.task.config import NetworkMode, NetworkPolicy
 
 from benchmarks.skillsbench.environment import (
+    MAVEN_HTTP_MIRROR,
+    MAVEN_HTTP_MIRROR_TASKS,
     MAVEN_MIRROR_SETTINGS,
-    MAVEN_MIRROR_SKIPPED_TASKS,
     SkillsBenchSandboxEnvironment,
 )
 from responses_api_agents.harbor_agent.tests.test_environment import _make_environment, _provider
@@ -117,13 +118,29 @@ class TestSkillsBenchMavenMirror:
         assert _maven_mirror_commands() == []
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("task", sorted(MAVEN_MIRROR_SKIPPED_TASKS))
-    async def test_skipped_task_keeps_maven_central(self, tmp_path, task):
+    @pytest.mark.parametrize("task", sorted(MAVEN_HTTP_MIRROR_TASKS))
+    async def test_http_mirror_task_adds_the_mirror_to_global_settings_once(self, tmp_path, task):
         env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
         env.environment_name = task
         await env.start(force_build=False)
         await env.stop(delete=True)
         assert _maven_mirror_commands() == []
+        [command] = [call["command"] for call in _provider().exec_calls if "conf/settings.xml" in call["command"]]
+
+        maven_home = tmp_path / "maven"
+        (maven_home / "bin").mkdir(parents=True)
+        (maven_home / "conf").mkdir()
+        (maven_home / "bin" / "mvn").write_text("#!/bin/sh\n")
+        (maven_home / "bin" / "mvn").chmod(0o755)
+        settings = maven_home / "conf" / "settings.xml"
+        settings.write_text("<settings>\n  <mirrors>\n  </mirrors>\n</settings>\n")
+        run = {"env": {"PATH": f"{maven_home / 'bin'}:/usr/bin:/bin"}, "check": True}
+        subprocess.run(["bash", "-c", command], **run)
+        subprocess.run(["bash", "-c", command], **run)
+        assert settings.read_text() == f"<settings>\n  <mirrors>{MAVEN_HTTP_MIRROR}\n  </mirrors>\n</settings>\n"
+
+        settings.write_text("<settings/>\n")
+        assert subprocess.run(["bash", "-c", command], env=run["env"]).returncode != 0
 
     @pytest.mark.asyncio
     async def test_install_failure_stops_sandbox(self, tmp_path):

@@ -26,8 +26,14 @@ MAVEN_MIRROR_SETTINGS = (
     Path(__file__).resolve().parents[2] / "responses_api_agents" / "swe_agents" / "maven_mirror" / "settings.xml"
 )
 MAVEN_SETTINGS_PATH = "/root/.m2/settings.xml"
-# OpenJDK 7 in this task cannot download from the mirror at all; it keeps Maven Central.
-MAVEN_MIRROR_SKIPPED_TASKS = frozenset({"fix-build-google-auto"})
+# OpenJDK 7 sends no SNI, so TLS to the mirror fails, and its own settings name dead Travis mirrors. Its Maven 3.6
+# allows HTTP, so the global settings send every repository to the mirror's HTTP endpoint (covers the verifier too).
+MAVEN_HTTP_MIRROR_TASKS = frozenset({"fix-build-google-auto"})
+MAVEN_HTTP_MIRROR_ID = "google-maven-central-http"
+MAVEN_HTTP_MIRROR = (
+    f"<mirror><id>{MAVEN_HTTP_MIRROR_ID}</id><mirrorOf>*</mirrorOf>"
+    "<url>http://maven-central.storage-download.googleapis.com/maven2/</url></mirror>"
+)
 
 
 class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
@@ -53,7 +59,9 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
     async def start(self, force_build: bool) -> None:
         await super().start(force_build)
         try:
-            if self._maven_mirror and self.environment_name not in MAVEN_MIRROR_SKIPPED_TASKS:
+            if self._maven_mirror and self.environment_name in MAVEN_HTTP_MIRROR_TASKS:
+                await self._install_global_http_maven_mirror()
+            elif self._maven_mirror:
                 await self._install_maven_mirror()
             await self._stage_skills()
         except BaseException:
@@ -92,6 +100,17 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
         result = await self.exec(
             f"[ -e {target} ] || {{ mkdir -p /root/.m2 && printf '%s' "
             f"{shlex.quote(MAVEN_MIRROR_SETTINGS.read_text())} > {target}; }}",
+            timeout_sec=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Failed to install the Maven mirror: {result.stderr or result.stdout}")
+
+    async def _install_global_http_maven_mirror(self) -> None:
+        # Maven's global settings live in <maven home>/conf; their single <mirrors> element gets the entry.
+        result = await self.exec(
+            's="$(dirname "$(dirname "$(readlink -f "$(command -v mvn)")")")/conf/settings.xml" && '
+            f'{{ grep -q {MAVEN_HTTP_MIRROR_ID} "$s" || {{ grep -q "<mirrors>" "$s" && '
+            f'sed \'s|<mirrors>|<mirrors>{MAVEN_HTTP_MIRROR}|\' "$s" > "$s.gym" && mv "$s.gym" "$s"; }}; }}',
             timeout_sec=60,
         )
         if result.return_code != 0:

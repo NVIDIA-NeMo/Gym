@@ -205,8 +205,13 @@ the read-through Google mirror of Central that the SWE servers already use
 settings file from the task image or the provider is kept. Set the environment
 kwarg `maven_mirror: false` to turn this off.
 
-`fix-build-google-auto` keeps Maven Central: its OpenJDK 7 build cannot download
-from the mirror, so with it every build fails and scores a false zero.
+`fix-build-google-auto` builds with OpenJDK 7, which sends no TLS server name, so
+HTTPS to the mirror fails. Its own Maven settings name retired Travis CI mirrors,
+and Maven Central rate-limits the sandbox pool, so its verifier stalls on Maven
+retries. For this task the environment adds the mirror's plain-HTTP endpoint to
+Maven's global settings (`<maven home>/conf/settings.xml`) for every repository.
+The global settings also apply to the verifier's own settings file. The task
+image ships Maven 3.6, which still allows HTTP repositories.
 
 ### Run locally
 
