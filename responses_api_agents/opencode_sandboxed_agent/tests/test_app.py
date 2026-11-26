@@ -2904,6 +2904,18 @@ def test_stable_date_extension():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode plugin")
+def test_turn_budget_plugin():
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name("test_turn_budget.mjs"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
 def test_required_mcp_extension():
     result = subprocess.run(

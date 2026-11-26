@@ -77,6 +77,28 @@ sandbox_row_option_keys: [volumes]
 
 `sandbox_uploads` maps a sandbox path to a file on the agent server host, which must resolve under `sandbox_upload_roots` (empty roots refuse all; relative paths resolve from the agent server's directory). On OpenSandbox each upload must finish within `request_timeout_s`, so raise it for large files. Row `sandbox_provider_options` override `sandbox_config.provider_options` at creation only, only for top-level keys the operator lists in `sandbox_row_option_keys` (default empty: any row option is rejected; `network_policy` is also rejected when `network_access` is restricted), and are rejected for a sandbox supplied by the resources server. A listed key gives every row that provider option as is, for example host mounts through Docker `volumes` or `run_args`. A row value replaces the configured value of the same key; lists are not merged. With `network_access: model_only` or `model_and_tools`, a configured deny-default `network_policy` keeps its egress and gets the model/tool hosts appended; with the default `inherit` it is applied as written, so it must allow the model host itself. `opencode_provider_id` and `opencode_model_id` default to `nemo_gym` and `dummy_model`; `opencode_config` overrides must use `provider.<opencode_provider_id>.models.<opencode_model_id>`.
 
+## End a run whose model ignores the step limit
+
+OpenCode's own step limit (`agent.build.steps`) only asks the model to answer in text: the tools stay in the request,
+so a model that ignores the request keeps calling them until the sandbox times out. `plugins/nemo_gym_turn_budget.js`
+enforces the limit inside OpenCode instead:
+
+```yaml
+opencode_plugins:
+  - nemo_gym_sentinel.js      # first: attests that the plugins below loaded
+  - nemo_gym_turn_budget.js
+opencode_env:
+  NEMO_GYM_MAX_TURNS: "500"         # model calls per session that keep their tools
+  NEMO_GYM_MAX_TURNS_GRACE: "5"     # optional, default 5
+```
+
+- After `NEMO_GYM_MAX_TURNS` model calls, every later call is sent with no tools, so the model answers in text and the
+  run ends with that answer. The stderr line `[nemo-gym-plugin] terminal=max_iteration` records it.
+- A model that keeps going anyway (for example one that reports `finish_reason: tool_calls` without a tool call) is
+  aborted once `NEMO_GYM_MAX_TURNS_GRACE` more calls have passed: a hard stop at cap + grace calls, recorded as
+  `terminal=max_iteration_abort`.
+- Each session (the main one and each subagent) has its own budget. Unset `NEMO_GYM_MAX_TURNS` turns the plugin off.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The plain-named HLE and APEX Shortlist presets (`hle/opencode`, `hle/opencode_search`, `hle/pi`, `hle/pi_search`,
