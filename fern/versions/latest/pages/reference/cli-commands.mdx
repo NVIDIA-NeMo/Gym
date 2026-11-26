@@ -1327,7 +1327,7 @@ See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) f
 
 Compare a baseline eval run against a candidate run and write a report.
 
-The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Each side's separate intervals stay at 95%: recorded intervals for a single run, recomputed intervals for pooled repeats. For eligible metrics with at least two finite repeat-level values on each side and cross-repeat means, the command also computes a two-sided unpaired Welch confidence interval for candidate minus baseline, at 95% by default. Use `--confidence-level` to change the delta confidence level; the JSON report records it in the top-level `confidence_level` field. The command does not issue a pass/fail verdict.
+The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. The report shows a 95% interval for each side's own mean. It reads that interval from a single run or recomputes it from pooled repeats. For eligible metrics with at least two finite repeat-level values on each side and cross-repeat means, the command also computes a two-sided unpaired Welch confidence interval for candidate minus baseline, at 90% by default. A single endpoint of that interval corresponds to 5% significance for a prespecified one-sided test. Use `--confidence-level` to change the delta confidence level; the JSON report records it in the top-level `confidence_level` field. The command does not issue a pass/fail verdict.
 
 See [Compare Results](/main/evaluation/compare-results) for the evaluation workflow and interpretation of the confidence interval.
 
@@ -1344,7 +1344,7 @@ See [Compare Results](/main/evaluation/compare-results) for the evaluation workf
 | `--baseline-agent NAME` | Agent to read from every baseline source. Takes precedence over `--agent`; use `--baseline-agents` for different names per source. |
 | `--baseline-agents NAME[,NAME...]` | Agent to read from each pooled baseline source, in `--baseline-runs` order. |
 | `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate source, in `--candidates` or `--candidate-runs` order. Takes precedence over `--agent`. |
-| `--confidence-level FLOAT` | Confidence level for delta intervals as a fraction strictly between `0` and `1` (default: `0.95`). For example, `0.90` requests 90%. |
+| `--confidence-level FLOAT` | Confidence level for delta intervals as a fraction strictly between `0` and `1` (default: `0.90`). For example, `0.95` requests 95%. |
 | `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the last candidate source, so `--candidate-runs` order affects the default. Use a dedicated directory for pooled reports. |
 | `--report-format` | `md`, `json`, or `both` (default). |
 
@@ -1369,7 +1369,7 @@ If a run was collected with `--disable-aggregation` it has no `*_aggregate_metri
 
 ### `gym eval compare-suite`
 
-Compare candidate and baseline runs across several benchmarks for each model, and across a declared set of model–benchmark pairs. This command normalizes selected metrics, weights benchmarks equally, and reports `delta = candidate - baseline` with unpaired Welch confidence intervals at a default confidence level of 90%.
+Compare candidate and baseline runs across several benchmarks for each model, and across a declared set of model–benchmark pairs. This command normalizes selected metrics, weights benchmarks equally, and reports `delta = candidate - baseline` with unpaired Welch confidence intervals at a default confidence level of 90%. The default 90% interval corresponds to 5% significance when using one endpoint for a prespecified directional test.
 
 ```bash
 gym eval compare-suite \
@@ -1387,7 +1387,7 @@ gym eval compare-suite \
 
 Run paths and optional agent or environment-server selectors come from the suite YAML. See [Compare Results](/main/evaluation/compare-results#compare-a-benchmark-suite) for a complete multi-model suite YAML, source options, theoretical metric bounds, normalization, equal weighting, statistical assumptions, and coverage/exclusion behavior.
 
-Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance. The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and defaults to 95% difference intervals.
+Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance.
 
 ### `gym eval plan-repeats`
 

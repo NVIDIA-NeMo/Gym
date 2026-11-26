@@ -24,7 +24,7 @@ gym eval plan-repeats --plan planning.yaml --output-dir results/repeat-planning
 
 Read both the human report and full-precision JSON. Check the selected entries, resolved SDs, weights, new versus existing passes, counts per candidate, all-candidate cost, and the search method. The exact single-benchmark search and suite local search have different optimality claims.
 
-Read analytic power alongside simulated power and its Monte Carlo interval. Simulations retain fixed supplied variance forecasts; agreement does not establish that those forecasts are accurate. Alpha 0.05 corresponds to a one-sided 95% lower bound, or the lower endpoint of a two-sided 90% interval. Set `--confidence-level 0.90` in either final comparison command for this alpha.
+Read analytic power alongside simulated power and its Monte Carlo interval. Simulations retain fixed supplied variance forecasts; agreement does not establish that those forecasts are accurate. Alpha 0.05 corresponds to a one-sided 95% lower bound, or the lower endpoint of a two-sided 90% interval. Both final comparison commands default to 90%. For a different alpha, set `--confidence-level` to `1 - 2 * alpha`.
 
 The simulation redraws both arms in hypothetical normal experiments even with existing baseline counts; it is not conditional power given the collected baseline observations. Evaluate composite, model, and suite claims with `compare-suite` using the same metric selection, bounds, directions, and entries. A benchmark claim uses a one-cell manifest; a model claim uses its per-model aggregate. `compare` reports separate raw-unit metric intervals; a one-point normalized margin uses threshold −0.01 for a single higher-is-better 0–1 reward metric.
 

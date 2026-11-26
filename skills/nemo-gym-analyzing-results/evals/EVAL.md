@@ -35,6 +35,6 @@ Near misses that mention NeMo Gym, evaluation or statistics but need a different
 - `trunc/`: baseline collected with `--max-output-tokens 512`; tasks 12 to 23 need longer outputs and stop at the limit.
 - `diag/`: tasks 8 and 9 answer with the correct letter as `Answer: X`; in tasks 16 to 19, failing repeats put the answer only in the reasoning.
 - `managed/`: an input of questions 0, 9, 16 and 20 (renumbered 0 to 3), collected with `--num-repeats 2` and `+route_failures_to_sidecar=true`, then edited as a collector timeout and a crash would leave the run: in task 1, repeat 1, the retry (attempt 1, reward 0) is followed by a late result of attempt 0 with reward 1, and in task 0, repeat 1, attempt 1 is reserved in the manifest and never answered. The coverage file was rewritten from Gym's `RolloutStore` after the edits. Its rows keep their null fields.
-- `compare_base_cand/`, `compare_base_candfail/`, `compare_base_zero_cand/`, `compare_base_limit/`, `compare_single/`: `gym eval compare` reports for those pairs, at the default 95%.
+- `compare_base_cand/`, `compare_base_candfail/`, `compare_base_zero_cand/`, `compare_base_limit/`, `compare_single/`: `gym eval compare` reports for those pairs, at the 95% level used when collecting these fixtures.
 
 No model calls were captured, so every health verdict is `unobserved`. The examples in `SKILL.md` use other runs, so the skill text does not contain these answers.

@@ -38,7 +38,7 @@ from nemo_gym.eval.comparison.loading import (
 )
 from nemo_gym.eval.comparison.report import render_key_metrics_tables, render_markdown, summary_lines, write_reports
 from nemo_gym.eval.comparison.runner import build_comparison_result, resolve_output_dir
-from nemo_gym.eval.comparison.schema import ComparisonConfig
+from nemo_gym.eval.comparison.schema import ComparisonConfig, ComparisonResult
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
 
@@ -539,9 +539,9 @@ class TestMetricRows:
         assert row.candidates[0].delta == pytest.approx(-0.20)
         assert row.candidates[0].delta_pct == pytest.approx(-25.0)
         # With two repeats per side and sample variance 0.02, df=2 and
-        # the 95% margin is t_0.975,2 * sqrt(0.02) ~= 0.6085.
-        assert row.candidates[0].delta_ci_low == pytest.approx(-0.2 - 0.6085, abs=1e-4)
-        assert row.candidates[0].delta_ci_high == pytest.approx(-0.2 + 0.6085, abs=1e-4)
+        # the 90% margin is t_0.95,2 * sqrt(0.02) ~= 0.41295.
+        assert row.candidates[0].delta_ci_low == pytest.approx(-0.2 - 0.41295, abs=1e-4)
+        assert row.candidates[0].delta_ci_high == pytest.approx(-0.2 + 0.41295, abs=1e-4)
         # The repeat-level key is present, so loading does not supplement this file.
         assert row.candidates[0].ci_low is None
         assert row.candidates[0].ci_high is None
@@ -1030,7 +1030,7 @@ class TestComparisonConfig:
         config = ComparisonConfig.model_validate(self._config())
         assert config.report_format == "both"
         assert config.output_dirpath is None
-        assert config.confidence_level == 0.95
+        assert config.confidence_level == 0.90
 
     @pytest.mark.parametrize(
         "confidence_level", [-0.1, 0.0, 1.0, 1.1, float("nan"), float("inf"), -float("inf"), True, False]
@@ -1091,9 +1091,9 @@ class TestCliFlagTranslation:
         )
         assert config.baseline_rollouts_jsonl_fpath == "runs/a/rollouts.jsonl"
         assert config.candidate_rollouts_jsonl_fpaths == ["runs/b/rollouts.jsonl"]
-        assert config.confidence_level == 0.95
+        assert config.confidence_level == 0.90
 
-    @pytest.mark.parametrize("confidence_level", [0.90, 0.99])
+    @pytest.mark.parametrize("confidence_level", [0.95, 0.99])
     def test_confidence_level_round_trips_through_hydra(self, confidence_level):
         config = self._config(
             [
@@ -1117,7 +1117,7 @@ class TestCliFlagTranslation:
         assert exit_info.value.code == 0
         output = capsys.readouterr().out
         assert "--confidence-level" in output
-        assert "(default: 0.95)." in output
+        assert "(default: 0.90)." in output
         assert "95%" in output
 
     @pytest.mark.parametrize(
@@ -1234,13 +1234,22 @@ class TestEndToEnd:
     def test_result_carries_both_sides_and_the_flip(self, tmp_path):
         _, result = self._result(tmp_path)
         assert result.schema_version == "1"
-        assert result.confidence_level == 0.95
+        assert result.confidence_level == 0.90
         assert result.baseline.label == "run_a" and result.candidates[0].label == "run_b"
         comparison = result.comparisons[0]
         key_row = next(row for row in comparison.metrics if row.is_key_metric)
         assert key_row.metric == "pass@1[avg-of-2]/accuracy"
         assert key_row.candidates[0].delta == pytest.approx(-50.0)
         assert comparison.flips[0].pass_to_fail_count == 1
+
+    def test_saved_report_without_confidence_level_keeps_95_percent_delta_labels(self, tmp_path):
+        _, result = self._result(tmp_path, confidence_level=0.95)
+        payload = result.model_dump_json(exclude={"confidence_level"})
+
+        historical_report = ComparisonResult.model_validate_json(payload)
+
+        assert historical_report.confidence_level == 0.95
+        assert "| 95% CI for Δ (cand − base) |" in render_markdown(historical_report)
 
     @pytest.mark.parametrize(
         "confidence_level, label", [(0.90, "90%"), (0.99, "99%"), (0.995, "99.5%"), (0.9999999, "99.99999%")]
@@ -1389,7 +1398,7 @@ class TestEndToEnd:
         assert [column.header for column in table.columns] == [
             "Metric",
             "Δ (cand − base)",
-            "95% CI for Δ (cand − base)",
+            "90% CI for Δ (cand − base)",
             "Baseline",
             "Baseline 95% CI",
             "Candidate",
@@ -1456,13 +1465,13 @@ class TestEndToEnd:
         assert "# gym eval compare" in markdown
         assert "### Key metrics" in markdown
         assert (
-            "| Metric | Δ (cand − base) | 95% CI for Δ (cand − base) | Baseline | Baseline 95% CI | "
+            "| Metric | Δ (cand − base) | 90% CI for Δ (cand − base) | Baseline | Baseline 95% CI | "
             "Candidate | Candidate 95% CI |" in markdown
         )
         # A metric with no recorded interval renders an em dash rather than a fabricated one.
         assert "| `pass@1[avg-of-2]/accuracy` | -50.00 (-66.7%) | — | 75.00 | — | 25.00 | — |" in markdown
         assert (
-            "| `mean/reward` | -0.5000 (-66.7%) | [-0.8042, -0.1958] | "
+            "| `mean/reward` | -0.5000 (-66.7%) | [-0.7065, -0.2935] | "
             "0.7500 | [0.7000, 0.8000] | 0.2500 | — |" in markdown
         )
         assert "### Sample flips" in markdown

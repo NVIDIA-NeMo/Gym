@@ -21,6 +21,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.eval.comparison import DEFAULT_CONFIDENCE_LEVEL
 from nemo_gym.eval.comparison.schema import ReportFormat
 
 
@@ -37,7 +38,11 @@ class SuiteComparisonConfig(BaseNeMoGymCLIConfig):
 
     suite_fpath: str = Field(description="Suite YAML naming baseline and candidate runs per model and benchmark.")
     confidence_level: float = Field(
-        default=0.90, gt=0, lt=1, allow_inf_nan=False, description="Two-sided confidence level for delta intervals."
+        default=DEFAULT_CONFIDENCE_LEVEL,
+        gt=0,
+        lt=1,
+        allow_inf_nan=False,
+        description="Two-sided confidence level for delta intervals.",
     )
     output_dirpath: str | None = Field(
         default=None, description="Report directory; defaults to the suite YAML's directory."

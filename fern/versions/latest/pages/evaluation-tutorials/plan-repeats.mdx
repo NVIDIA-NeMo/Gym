@@ -186,13 +186,12 @@ The minimum allowed new counts already meet the target: **eight GPQA passes and 
 
 Keep the input YAML and report with the experiment. Collect the reported baseline and per-candidate counts using the evaluation workflow appropriate to your benchmark, keeping tasks, scoring, sampling, and other comparison settings fixed. The commands above only plan the budget.
 
-If your benchmark uses a single higher-is-better reward metric on a 0–1 scale, use the same decision level:
+Both comparison commands default to a two-sided 90% interval, whose lower endpoint gives the planned 5% one-sided non-inferiority test. If your benchmark uses a single higher-is-better reward metric on a 0–1 scale, run:
 
 ```bash
 gym eval compare \
     --baseline results/baseline/rollouts.jsonl \
     --candidates results/candidate/rollouts.jsonl \
-    --confidence-level 0.90 \
     --output-dir results/final-comparison
 ```
 
@@ -201,7 +200,6 @@ For multi-metric benchmarks, metrics with other bounds or directions, model aver
 ```bash
 gym eval compare-suite \
     --suite collected-suite.yaml \
-    --confidence-level 0.90 \
     --output-dir results/final-suite-comparison
 ```
 

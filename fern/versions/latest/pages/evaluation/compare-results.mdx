@@ -10,7 +10,7 @@ Before collecting an experiment, use [Plan Repeats](/main/evaluation/plan-repeat
 
 | Goal | Command | Confidence level |
 | --- | --- | --- |
-| Inspect one benchmark's metrics and task changes | `gym eval compare --baseline ... --candidates ...` | 95% by default; adjustable |
+| Inspect one benchmark's metrics and task changes | `gym eval compare --baseline ... --candidates ...` | 90% by default; adjustable |
 | Aggregate selected benchmarks and models | `gym eval compare-suite --suite suite.yaml` | 90% by default; adjustable |
 
 ## Prepare Comparable Runs
@@ -48,7 +48,7 @@ gym eval compare \
 
 Despite the plural option name, `--candidates` currently accepts one candidate run. Omit `--agent` to compare every agent name shared by the two runs. When the names differ, select each side with `--baseline-agent` and `--candidate-agents` instead.
 
-Delta confidence intervals default to 95%. To request 90%, add `--confidence-level 0.90`. Supply a fraction strictly between `0` and `1`. This option changes the delta intervals; each run's separate confidence intervals remain the recorded 95% intervals.
+Delta intervals default to 90% two-sided confidence. To request a different level, supply a fraction strictly between `0` and `1`, such as `--confidence-level 0.95`. The report also shows each run's recorded 95% interval for its own mean.
 
 The command prints key metrics and writes:
 
@@ -96,7 +96,7 @@ Pool independent collections with the same dataset, task ordering, limit, scorin
 
 For each metric, the rendered report and delta use each run's mean across repeats when available, otherwise its recorded point estimate. JSON exposes `value` and, when available, `mean_across_repeats`; use the latter to reproduce the delta when present. The two fields can differ for uneven task coverage or nonlinear metrics.
 
-The **CI for the delta** is a two-sided Welch t confidence interval computed from the per-repeat metric values at the selected confidence level (95% by default). Each repeat is one observation. The method treats baseline and candidate repeat sets as independent; it does not pair repeats by index.
+The **CI for the delta** is a two-sided Welch t confidence interval computed from the per-repeat metric values at the selected confidence level (90% by default). Each repeat is one observation. The method treats baseline and candidate repeat sets as independent; it does not pair repeats by index.
 
 A delta CI requires `mean_across_repeats/<metric>` on both sides after loading and at least two finite, same-named metric values in each side's `repeat_level_metrics`. For legacy aggregate entries without the `repeat_level_metrics` key, comparison first reconstructs generic repeat statistics in memory from stored per-rollout summaries. An explicitly present list is not recomputed. If the required statistics remain unavailable, the delta CI is unavailable (`—` in Markdown and `null` endpoints in JSON). A custom metric computed only for the whole run may have a point estimate without a delta CI. See [Repeat-Level Metrics](/main/evaluation/aggregate-metrics#repeat-level-metrics) for how these values are produced.
 
@@ -108,18 +108,18 @@ Check that both runs completed the intended tasks before interpreting the interv
 
 ## Interpretation of the Confidence Interval
 
-The example below uses the default 95% confidence level.
+The example below uses the default 90% two-sided confidence level.
 
 ### Start with the Difference
 
 When evaluating a change such as quantization, an observed score difference may reflect both the change and variation between repeated evaluations. Consider a GPQA example in which both models answer the same 198 questions in each of eight repeats. A correct answer earns `1`, and an incorrect answer earns `0`.
 
-| Metric | Baseline | Candidate | Candidate − baseline | 95% CI for the difference |
+| Metric | Baseline | Candidate | Candidate − baseline | 90% CI for the difference |
 |---|---:|---:|---:|---:|
-| `mean/reward` | 0.7645 | 0.7689 | +0.0044 | [-0.0140, +0.0228] |
-| As a percentage | 76.45% | 76.89% | +0.442 percentage points | [-1.400, +2.284] percentage points |
+| `mean/reward` | 0.7645 | 0.7689 | +0.0044 | [-0.0107, +0.0195] |
+| As a percentage | 76.45% | 76.89% | +0.442 percentage points | [-1.070, +1.954] percentage points |
 
-The baseline answered 1,211 of 1,584 responses correctly; the candidate answered 1,218 correctly. Seven additional correct responses produce the observed gain of 0.442 percentage points (pp). The interval, calculated from the spread of the eight repeat scores per model, spans a 1.400 pp loss to a 2.284 pp gain. The higher observed score alone does not establish an improvement.
+The baseline answered 1,211 of 1,584 responses correctly; the candidate answered 1,218 correctly. Seven additional correct responses produce the observed gain of 0.442 percentage points (pp). The interval, calculated from the spread of the eight repeat scores per model, spans a 1.070 pp loss to a 1.954 pp gain. The higher observed score alone does not establish an improvement.
 
 ### Could the Candidate Be Too Much Worse? (Noninferiority)
 
@@ -127,9 +127,9 @@ Choose the largest acceptable loss **before** examining the result. For a metric
 
 | Largest acceptable drop | Required lower bound | Example lower bound | Interpretation |
 |---|---:|---:|---|
-| 2 pp (`0.02` in reward units) | Above -2 pp | -1.400 pp | Rules out a loss of 2 pp or more. |
-| 1 pp (`0.01`) | Above -1 pp | -1.400 pp | Inconclusive: a loss of 1 pp or more is not ruled out. |
-| 0 pp (`0`) | Above 0 pp | -1.400 pp | Does not establish that the candidate is at least as good. |
+| 2 pp (`0.02` in reward units) | Above -2 pp | -1.070 pp | Rules out a loss of 2 pp or more. |
+| 1 pp (`0.01`) | Above -1 pp | -1.070 pp | Inconclusive: a loss of 1 pp or more is not ruled out. |
+| 0 pp (`0`) | Above 0 pp | -1.070 pp | Does not establish that the candidate is at least as good. |
 
 An inconclusive result does not demonstrate that the candidate exceeds the allowed loss. It means the evaluation cannot rule that loss out. The acceptable margin is an evaluation criterion you justify; the command does not choose it or issue a pass/fail verdict.
 
@@ -139,15 +139,15 @@ For a metric where higher is better, the whole delta interval must be above zero
 
 Use the interval for the **difference** to answer this question. Overlap between the baseline's and candidate's separate confidence intervals is not the corresponding comparison test. For a metric where lower is better, reverse the direction: an interval entirely below zero supports improvement.
 
-### What Does 95% Mean?
+### What Does 90% Mean?
 
-Imagine repeating the entire eight-versus-eight evaluation many times under the same conditions. Under the method's assumptions, about 95 out of 100 intervals constructed this way would contain the fixed, unknown true difference. About 2.5 would lie entirely below it and 2.5 entirely above it.
+Imagine repeating the entire eight-versus-eight evaluation many times under the same conditions. Under the method's assumptions, about 90 out of 100 intervals constructed this way would contain the fixed, unknown true difference. About 5 would lie entirely below it and 5 entirely above it.
 
-This is a statement about the method over repeated evaluations. It does not assign a 95% probability to the true difference lying inside this particular interval.
+This is a statement about the method over repeated evaluations. It does not assign a 90% probability to the true difference lying inside this particular interval.
 
 ### Connection to Statistical Testing
 
-Using the lower end of the two-sided 95% CI in this example for either decision above corresponds to a **one-sided test at the 2.5% significance level**. If the true difference were exactly the -2 pp acceptable-loss cutoff, about 2.5% of repeated evaluations would incorrectly place the lower bound above -2 pp. At a true difference of zero, about 2.5% would incorrectly place it above zero and support improvement. These rates change when you select a different confidence level.
+A **two-sided 90% confidence interval** puts 5% in each tail. Using one endpoint for a direction and threshold chosen before examining the results corresponds to a **one-sided test at the 5% significance level**. If the true difference were exactly the −2 pp acceptable-loss cutoff, about 5% of repeated evaluations would incorrectly place the lower bound above −2 pp. At a true difference of zero, about 5% would incorrectly place the lower bound above zero and support improvement. A test for a difference in either direction uses both tails and has 10% significance at this confidence level.
 
 These are long-run false-positive rates at the specified cutoff, not the probability that this particular candidate fails a criterion. They rely on the Welch method's assumptions: repeat scores are independent within each run, and the baseline and candidate repeat sets are independent of each other. The t approximation must also be appropriate for the repeat-score distributions, especially with few repeats; approximately normal repeat scores support that approximation. The interval describes variation from rerunning the evaluated task set; it does not account for sampling a new set of questions. If those assumptions fail, the actual error rates can differ.
 
@@ -214,7 +214,7 @@ gym eval compare-suite \
     --output-dir results/suite-95
 ```
 
-`--confidence-level` accepts a fraction strictly between zero and one; the default is `0.90`. The separate `gym eval compare` command defaults to 95% difference intervals. For `compare-suite`, sources and aggregate-entry selection come from the YAML. See the [CLI reference](/main/reference/cli-commands#gym-eval-compare-suite) for all command options.
+Both comparison commands default to 90% two-sided confidence. `--confidence-level` accepts a fraction strictly between zero and one. For `compare-suite`, sources and aggregate-entry selection come from the YAML. See the [CLI reference](/main/reference/cli-commands#gym-eval-compare-suite) for all command options.
 
 ### Source options
 
@@ -304,7 +304,7 @@ The numerical method, including normalization and metric averaging, is isolated 
 The interval quantifies repeat uncertainty for the fixed selected benchmarks, models, and task sets. It assumes independent repeats within each side, independent baseline/candidate collections, and independent cell estimates. It does not include uncertainty from sampling different benchmarks or models. Shared conditions or genuinely paired samples can require covariance terms beyond this method.
 </Note>
 
-A positive delta favors the candidate. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative deltas can cancel.
+A positive delta favors the candidate. At the default 90% confidence level, using the lower endpoint for a prespecified improvement or non-inferiority claim corresponds to 5% one-sided significance. For an improvement claim, require a lower endpoint above zero. For non-inferiority, require it to be above the negative of the prespecified margin. An interval crossing the threshold leaves the claim inconclusive. Inspect individual benchmark results alongside the aggregate, because positive and negative deltas can cancel.
 
 Confidence intervals are not clipped to the score bounds. A constant-score cell retains its weight; when total empirical variance is zero, suite comparison reports the point estimate and zero SE with an unavailable interval and degrees of freedom.
 

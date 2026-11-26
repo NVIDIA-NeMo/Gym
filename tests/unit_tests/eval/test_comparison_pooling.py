@@ -458,7 +458,7 @@ def test_missing_token_accounting_preserves_quality_samples(tmp_path: Path, miss
     comparison = result.comparisons[0]
     baseline_sample = [0.205 + 0.1 * repeat + offset for offset in (0, 0.04) for repeat in range(3)]
     candidate_sample = [0.305 + 0.1 * repeat for repeat in range(3)]
-    interval = ttest_ind(candidate_sample, baseline_sample, equal_var=False).confidence_interval(0.95)
+    interval = ttest_ind(candidate_sample, baseline_sample, equal_var=False).confidence_interval(0.90)
     reward = _reward_row(result)
     assert comparison.baseline_repeat_count == 6
     assert comparison.candidate_repeat_counts == [3]
@@ -522,7 +522,7 @@ def test_producer_token_accounting_does_not_change_pooled_quality_samples(
     result = build_comparison_result(config, "gym eval compare")
     baseline = [0.205 + 0.1 * repeat + offset for offset in baseline_offsets for repeat in scored_repeats]
     candidate = [0.205 + 0.1 * repeat + offset for offset in candidate_offsets for repeat in scored_repeats]
-    interval = ttest_ind(candidate, baseline, equal_var=False).confidence_interval(0.95)
+    interval = ttest_ind(candidate, baseline, equal_var=False).confidence_interval(0.90)
     reward = _reward_row(result)
     comparison = result.comparisons[0]
     assert comparison.baseline_repeat_count == comparison.candidate_repeat_counts[0] == 2 * len(scored_repeats)

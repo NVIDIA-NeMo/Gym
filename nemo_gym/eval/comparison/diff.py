@@ -27,6 +27,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INFOS_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.eval.comparison import DEFAULT_CONFIDENCE_LEVEL
 from nemo_gym.eval.comparison.loading import LoadedRun
 from nemo_gym.eval.comparison.schema import (
     MAX_FLIPS_SHOWN,
@@ -148,7 +149,7 @@ def _candidate_metric_value(
 
 
 def build_metric_rows(
-    baseline: LoadedRun, candidates: Sequence[LoadedRun], *, confidence_level: float = 0.95
+    baseline: LoadedRun, candidates: Sequence[LoadedRun], *, confidence_level: float = DEFAULT_CONFIDENCE_LEVEL
 ) -> List[MetricRow]:
     """One row per metric reported by any side, key metrics flagged.
 
@@ -385,7 +386,7 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
 
 
 def compare_runs(
-    baseline: LoadedRun, candidates: Sequence[LoadedRun], confidence_level: float = 0.95
+    baseline: LoadedRun, candidates: Sequence[LoadedRun], confidence_level: float = DEFAULT_CONFIDENCE_LEVEL
 ) -> AgentComparison:
     """Build one agent's comparison block: metric rows, flips, and anything worth flagging."""
     rows = build_metric_rows(baseline, candidates, confidence_level=confidence_level)
