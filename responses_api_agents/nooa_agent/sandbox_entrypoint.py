@@ -6,6 +6,8 @@ A missing or malformed result plus a nonzero exit is an infrastructure failure,
 including invalid input, transport setup, finalization, or publication failures.
 The controller must not grade a recovered checkpoint or infer success from it;
 process status and stderr distinguish these failures from an abrupt worker kill.
+The one exception is a worker its supervisor stopped at the deadline: its last
+checkpoint is then the work to grade, as an incomplete, time-limited result.
 
 The worker has no independent wall-clock deadline. Its caller must supervise it:
 SandboxNOOARunner (introduced in PR #3851) supplies the shared supervisor's

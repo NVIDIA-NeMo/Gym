@@ -67,7 +67,11 @@ interrupted by session close returns HTTP 409 to a caller whose request was not 
 ## Sandbox worker supervision
 
 `sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. Exhausting that
-budget is an ungradable, non-retryable execution failure, rather than a retryable model or provider outage.
-Partial checkpoints remain available for failure inspection; they never authorize grading. Transient artifact
+budget is a time limit, not a retryable model or provider outage. When the supervisor confirms that it stopped the
+worker at the deadline, the work the worker saved (its final result, or else its last checkpoint) is returned as an
+`incomplete` response with the `timeout_exceeded` reason, and the environment grades the task as it stands, as it does
+for other harnesses' wall-time limits. A deadline that left no saved response, or evidence that could not be read in
+full, stays an ungraded, non-retryable execution failure. A checkpoint recovered after any other worker exit remains
+available for failure inspection and never authorizes grading. Transient artifact
 transfer failures receive one retry within the existing capture deadline. Worker startup and supervisor failures
 retain up to 2,000 characters of output-log diagnostics after artifact capture.
