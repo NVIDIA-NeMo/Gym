@@ -19,6 +19,14 @@ revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
 The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
 Native task execution is an external dependency, not vendored here.
 
+## PerceptionBench judge prompt
+
+`resources_servers/perceptionbench/prompt_templates/judge_prompt.txt` copies `eval/judge_prompt.txt`
+unchanged from [MoonshotAI/PerceptionBench](https://github.com/MoonshotAI/PerceptionBench),
+revision `ba032c06e9b6ee3679171ff6ba643b7a0cfebe2e`, under Apache-2.0.
+`resources_servers/perceptionbench/app.py` and `benchmarks/perceptionbench/prepare.py`
+adapt the prompt construction and answer-judging protocol from `eval/eval.py` at the same revision.
+
 ## MM-Lifelong grader prompt and agentic runner note
 
 `benchmarks/mm_lifelong_v1_1/grading.yaml` retains the grader's system prompt and user template from
@@ -78,6 +86,24 @@ one, looking helpers up on `ether0.rewards` at call time, and comment formatting
 `get_largest_mol` in the same file are independent implementations that replace the upstream
 functions of the same name. The ether0 package itself is not vendored: `setup_ether0.py` clones
 it into an ignored local directory at runtime.
+
+## VisGym external source dependency
+
+`resources_servers/visgym/` installs the
+[VisGym packaging fork](https://github.com/aroshanghias-nvd/VisGym/commit/33f996cda320db5f127b1e2a858c5653bebc90fc)
+at `33f996cda320db5f127b1e2a858c5653bebc90fc`, based on upstream revision
+`927271d107ad0196ad6aa597095ca57d01c6ddbb`. No provider source or wheel is vendored
+in Gym. The fork removes only three duplicate optional-dependency aliases;
+provider Python code and assets are unchanged.
+
+The upstream Apache-2.0 LICENSE and NOTICE (Copyright 2026, The VisGym Authors)
+remain unchanged in the external repository. Upstream package metadata still
+says MIT; that discrepancy is recorded without assigning new license terms.
+The original MIT notice from
+[Gymnasium v1.1.1](https://github.com/Farama-Foundation/Gymnasium/blob/17eff00220d210beda933f78b0e52850022b0690/LICENSE)
+is retained in `resources_servers/visgym/vendor_licenses/gymnasium-v1.1.1-LICENSE`
+for the inherited Gymnasium code. The source pin and installation checks prevent
+confusing the fork with the similarly named stock Gymnasium distribution.
 
 ## Python Package Dependencies
 

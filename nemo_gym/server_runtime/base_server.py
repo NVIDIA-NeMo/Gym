@@ -24,7 +24,7 @@ import socket
 import sys
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from functools import cached_property, partial
 from ipaddress import ip_network
@@ -337,6 +337,14 @@ class SimpleServer(BaseServer):
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
+    # Whether this server lends sandboxes it owns, as an Environment Server lends an attempt's sandbox to the agent and
+    # to the Resources Server, so startup refuses a provider that never reconnects.
+    lends_sandboxes: ClassVar[bool] = False
+    # The sandbox blocks whose sandboxes this server starts through its own sandboxes, as
+    # self.sandboxes.on(<provider field>).spec(<block>): each config field holding a SandboxConfig (a dotted path for
+    # a nested one), mapped to the config field that names its provider. Startup checks each block against that
+    # provider, and refuses a restricted network rule in any block not listed, since nothing would apply it.
+    owned_sandbox_blocks: ClassVar[Mapping[str, str]] = {}
     # The sandboxes this server owns, one OwnedSandboxes per provider field, created on first use.
     _owned_sandboxes: dict[str, "OwnedSandboxes"] = PrivateAttr(default_factory=dict)
     # Set when the shutdown sweep begins: no instance is built after it, so none is left that nothing closes.
@@ -399,6 +407,79 @@ class SimpleServer(BaseServer):
                 await self.aclose_sandboxes()
 
         app.router.lifespan_context = lifespan
+
+    def check_sandbox_provider(self) -> None:
+        """Refuse at startup what the server's sandbox providers cannot do for the sandboxes its config declares.
+
+        Each block in ``owned_sandbox_blocks`` is checked against the provider its provider field names: the block is
+        resolved, the provider class checked for the block's network rule, and the model and tool servers the rule
+        allows resolved to hosts a sandbox reaches. A server that sets ``lends_sandboxes`` is checked for lending on
+        ``sandbox_provider``. A ``SandboxConfig`` anywhere else in the config may not set a restricted rule. A rule
+        that allows a host other servers also listen on is logged. No provider is created.
+
+        Raises:
+            ValueError: Naming the first need a provider cannot meet, a server the rule cannot reach, or a restricted
+                rule in a block the server does not start through ``self.sandboxes``.
+        """
+        from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
+        from nemo_gym.sandbox.providers.base import NETWORK_RULES
+        from nemo_gym.sandbox.providers.registry import get_provider_class
+        from nemo_gym.server_runtime.owned_sandboxes import (
+            check_provider,
+            rule_hosts,
+            sandbox_blocks,
+            servers_sharing_hosts,
+        )
+
+        blocks_by_field: dict[str, list[SandboxConfig]] = {}
+        declared: set[int] = set()
+        for path, provider_field in self.owned_sandbox_blocks.items():
+            block: Any = self.config
+            for name in path.split("."):
+                block = getattr(block, name, None)
+            if block is None:
+                continue
+            if not isinstance(block, SandboxConfig):
+                raise ValueError(
+                    f"{type(self).__name__}.owned_sandbox_blocks names {path!r}, which is no SandboxConfig"
+                )
+            declared.add(id(block))
+            blocks_by_field.setdefault(provider_field, []).append(block)
+        for path, block in sandbox_blocks(self.config):
+            if id(block) not in declared and block.network in NETWORK_RULES and block.network != "inherit":
+                raise ValueError(
+                    f"{self.config.name} sets network {block.network!r} in {path}, but {type(self).__name__} does not "
+                    "start that block's sandboxes through self.sandboxes (owned_sandbox_blocks), the only place a "
+                    "network rule is applied"
+                )
+        if self.lends_sandboxes:
+            blocks_by_field.setdefault("sandbox_provider", [])
+        if not blocks_by_field:
+            return
+        global_config = self._global_config()
+        for provider_field, blocks in blocks_by_field.items():
+            reference = getattr(self.config, provider_field, None)
+            if reference is None:
+                if any(block.network in NETWORK_RULES for block in blocks):
+                    raise ValueError(f"{self.config.name} sets a network rule but no {provider_field} to apply it")
+                continue
+            ((provider_name, provider_config),) = resolve_provider_config(reference, global_config).items()
+            lends = self.lends_sandboxes and provider_field == "sandbox_provider"
+            check_provider(
+                get_provider_class(provider_name), configs=blocks, lends=lends, provider_config=provider_config
+            )
+            for block in blocks:
+                if block.network not in NETWORK_RULES:
+                    continue
+                rule_hosts(block, global_config)
+                for host, servers in servers_sharing_hosts(block, global_config).items():
+                    logger.warning(
+                        "network %r of %s allows host %s, where %s also listen; its sandboxes reach them too",
+                        block.network,
+                        self.config.name,
+                        host,
+                        ", ".join(servers),
+                    )
 
     async def aclose_sandboxes(self) -> None:
         """Stop every sandbox of every ``OwnedSandboxes`` this server created; see ``OwnedSandboxes.aclose``.
@@ -705,6 +786,7 @@ repr(e): {repr(e)}"""
         startup.mark("init_server")
         # Before the dry-run return, so a dry run reports the misconfiguration too.
         refuse_unsupported_num_workers(server)
+        server.check_sandbox_provider()
         reuse_port = server.config.uvicorn_reuse_port
         if reuse_port is None:
             reuse_port = UvicornReusePortConfig.model_validate(global_config_dict).uvicorn_reuse_port

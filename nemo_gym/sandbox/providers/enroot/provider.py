@@ -38,9 +38,10 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, ClassVar
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
@@ -313,6 +314,8 @@ def _coerce_mounts(value: Any) -> list[str]:
 
 class EnrootProvider:
     """Sandbox provider backed by the local Enroot CLI."""
+
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="same_host")
 
     name = "enroot"
 
