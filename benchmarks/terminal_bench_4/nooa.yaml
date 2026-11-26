@@ -1,0 +1,33 @@
+# Terminal-Bench 4.1 with NOOA, run through the Harbor environment server on the pinned task folders of
+# environments/harbor/terminal_bench_4, as terminal_bench_4/opencode and terminal_bench_4/miniswe. The server owns
+# each task sandbox, its Compose group and the separate verifier, and lends the sandbox to nooa_agent's agent
+# session, where NOOA's BenchAgent works. See README.md, "Run".
+harbor_target: terminal_bench_4
+config_paths:
+- responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+
+# The Harbor environment server binds the agent; NOOA's own environment instance would start beside it.
+nooa_environment_server: null
+
+nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      nooa:
+        # NOOA runs in the task sandbox the environment server lends, not in the agent server's process.
+        execution_mode: sandboxed
+      # An offline bundle of NOOA's runtime built for this checkout, when the run provides one; without it NOOA
+      # installs from the package index, which the task sandboxes can reach.
+      runtime_wheelhouse: ${oc.env:NOOA_SWE_RUNTIME_WHEELHOUSE,null}
+      # The longest agent run, as terminal_bench_4/miniswe and terminal_bench_4/opencode: the shipped 21,420 s
+      # would end a run two hours before the tasks' 8-hour agent budget does. A smaller value caps smoke runs.
+      sandbox_runner_timeout_seconds: ${oc.select:tb4_agent_max_timeout_sec,28800}
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # As terminal_bench_4/miniswe: an episode runs under its task's budget (harness setup, the 8-hour agent budget,
+      # the verifier's timeout and grace), capped here; the server's default cap (21600 s) would cut a long run short.
+      default_episode_timeout_seconds: ${oc.select:tb4_episode_timeout_sec,54000}
+      # NOOA's runtime install takes a few minutes per sandbox; the server's default allowance (300 s) would end
+      # a slow install as a task deadline.
+      harness_setup_allowance_s: 900
