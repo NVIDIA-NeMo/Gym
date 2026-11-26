@@ -130,13 +130,10 @@ class SandboxNOOARunner:
                 await self._collect_diagnostics()
             if cleanup["timed_out"]:
                 evidence = self.artifact or self.checkpoint
-                if (
-                    cleanup["error"] is None
-                    and capture_failure is None
-                    and evidence is not None
-                    and evidence.response is not None
-                    and evidence.error is None
-                ):
+                # A worker stopped by the supervisor's SIGTERM publishes its work as a cancelled result. A fatal
+                # or transient error in that result is the run's own failure and is not graded.
+                stopped = evidence is not None and (evidence.error is None or evidence.error.kind == "cancelled")
+                if cleanup["error"] is None and capture_failure is None and stopped and evidence.response is not None:
                     # The supervisor stopped the worker at its deadline: a time limit, not a retryable
                     # dependency outage. The work it saved is graded as it stands.
                     return self._deadline_result(request, evidence)
@@ -192,6 +189,8 @@ class SandboxNOOARunner:
         request.resource_cookies.update(evidence.resource_cookies)
         result = evidence.run_result()
         observations = (self.observations or result.episode.observations).model_copy(deep=True)
+        # The worker recorded its stop as a cancellation; the deadline is the reason reported instead.
+        observations.gaps = [gap for gap in observations.gaps if gap.code != NOOATerminationReason.CANCELLED]
         if isinstance(evidence, SandboxCheckpoint):
             # A checkpoint recovered after an unexplained exit is marked not gradable. At the deadline it is the
             # worker's result, so say what it is instead.

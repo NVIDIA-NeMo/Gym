@@ -68,7 +68,7 @@ interrupted by session close returns HTTP 409 to a caller whose request was not 
 
 `sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. Exhausting that
 budget is a time limit, not a retryable model or provider outage. When the supervisor confirms that it stopped the
-worker at the deadline, the work the worker saved (its final result, or else its last checkpoint) is returned as an
+worker at the deadline, the work the worker saved (the result it publishes when stopped, or else its last checkpoint) is returned as an
 `incomplete` response with the `timeout_exceeded` reason, and the environment grades the task as it stands, as it does
 for other harnesses' wall-time limits. A deadline that left no saved response, or evidence that could not be read in
 full, stays an ungraded, non-retryable execution failure. A checkpoint recovered after any other worker exit remains
