@@ -381,6 +381,7 @@ Wrap the **call**, not the scoring around it: `reraise_judge_errors` relabels ev
 | Call `call_judge` can't express (external SDK, own timeout) | wrap it in `reraise_judge_errors` |
 | Judge answered, verdict unparseable | a real score — map it to `reward_if_unclear` |
 | Judge answered with nothing | your call; `raise JudgeError(...)` if an empty verdict is meaningless |
+| Judge still gave no verdict when asked again, and the row should count against your failure-rate limit | return the row unmasked with reward 0 and `failure_kind: judge_no_verdict`; it is an evaluation-side failure and is never judged again. Mark each reply you ask again with `record_rejected_judge_reply()` |
 | Bug in your own scoring code | let it raise |
 
 ---

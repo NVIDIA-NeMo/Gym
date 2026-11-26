@@ -102,7 +102,7 @@ Each JSONL row contains:
 
 Each benchmark config also sets `health_check_max_not_final_failure_fraction` and `health_check_max_final_failure_fraction` to the same limit; an outage counts as final once its retries are used up. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
 
-A judge game without a verdict (output cut at its token cap, blocked by the provider's content filter, empty or without a label) is asked once more. If it still has no verdict, the row stays in the main output with reward 0, `failure_kind: arena:judge_no_verdict`, a `failure_reason` naming the game and both games. The win rates leave it out and count it in `rollout_failure_rate`, so `max_rollout_failure_rate` bounds how many such rows a run accepts; `mean/reward` counts it as zero.
+A judge game without a verdict (output cut at its token cap, blocked by the provider's content filter, empty or without a label) is asked once more. If it still has no verdict, the row stays in the main output with reward 0, `failure_kind: judge_no_verdict`, a `failure_reason` naming the game and both games. The win rates leave it out and count it in `rollout_failure_rate`, so `max_rollout_failure_rate` bounds how many such rows a run accepts; `mean/reward` counts it as zero.
 
 `lmarena_v3` keeps the judge score when `0.5 < response length / reference length < 1.75`; otherwise it assigns zero. The reference length is the median length from reference models. For short references (at most 100 tokens), responses from 0 to 175 tokens are accepted.
 

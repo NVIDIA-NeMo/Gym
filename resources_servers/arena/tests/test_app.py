@@ -28,6 +28,7 @@ from pytest import approx, fixture, mark, raises
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
+    JUDGE_NO_VERDICT,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -39,7 +40,6 @@ from nemo_gym.core import (
 from nemo_gym.server_runtime import observe_verifier
 from nemo_gym.verification import judge_failsafe
 from resources_servers.arena.app import (
-    JUDGE_NO_VERDICT,
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
     ArenaVerifyRequest,

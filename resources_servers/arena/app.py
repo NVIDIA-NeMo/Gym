@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.config import Domain, ModelServerRef
 from nemo_gym.core import (
+    JUDGE_NO_VERDICT,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -49,8 +50,6 @@ from resources_servers.arena.taxonomy import get_prompt_slices
 
 
 logger = logging.getLogger(__name__)
-
-JUDGE_NO_VERDICT = "arena:judge_no_verdict"
 
 
 class ArenaResourcesServerConfig(BaseResourcesServerConfig):
