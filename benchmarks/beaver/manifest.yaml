@@ -11,6 +11,17 @@ modality: text
 licensing: MIT
 authors:
 - abelatnvidia
+maintainers:
+- abelatnvidia
+capabilities:
+- coding/data_query_coding
+domains:
+- data_science
+- computer_science
+primary_metric: pass@1[avg-of-1]/accuracy
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0
