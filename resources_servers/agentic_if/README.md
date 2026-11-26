@@ -28,7 +28,8 @@ A row whose instruction stops the work, so that the task's tests measure nothing
 `agentic_if.outcome_tracked: false`. Only the `task_and_if` reward reads it (see Training reward).
 
 `data/example.jsonl` holds 5 public examples, 3 terminal and 2 repository tasks, each with a synthetic system prompt
-and instruction checks that exercise the features the benchmark rows use.
+and instruction checks that exercise the features the benchmark rows use. `data/feature_examples.jsonl` holds 4 more
+for the opt-in features (see Feature examples).
 
 ## Tools
 
@@ -156,11 +157,68 @@ agentic_if_resources:
       cut_run_reward: zero  # optional
 ```
 
+## Feature examples
+
+`data/feature_examples.jsonl` holds 4 public rows that, together, exercise every opt-in feature: the check forms,
+plants, continuation fields and tool renaming above, and a row whose outcome is not tracked. They are not part of the
+`example` split. Each row's `agentic_if.provenance` names its example and lists, as a label only, what it exercises.
+`tests/test_feature_examples.py` checks that they stay sealed, compile, grade their scripted sessions and still cover
+every feature.
+
+| Row (`feature_example`) | Task | Features |
+| --- | --- | --- |
+| `rename-tools-and-replace-plant` | Terminal-Bench 2.1 `cobol-modernization` | `tool_names` aliases, with a description per tool and a system message; a `replace` plant; an `after_event` `then` with `calls_include` (the arg spec `{field: command, writes: P, by: shell}`) and `calls_avoid`; `unquoted: true`; `parts: true` with `as_written: true`; length in `characters` |
+| `append-plant-and-final-message` | Terminal-Bench 2.1 `raman-fitting` | an `append` plant followed by `then: no_calls`; `element_absent` `{end_before_call: P}` and `{element: any_code_block}`; a list of length bounds; a judge rule with `evidence: true` |
+| `index-relative-continuation` | Scale-SWE `cthoyt_pystow_pr43` | a continuation with `workspace_diff_base: index` and a non-empty prefix diff; `calls` `mode: alone` with `writes_file`, which reads the change marks after the restored prefix; a judge rule from the continuation with `whole_run: true`; `marks: code_reference` with `mark_parts`; the ending `closing_sentence` |
+| `status-only-continuation` | Terminal-Bench 2.1 `fix-git` | a continuation with `replay_timeouts: "mismatch"` and `unreceipted_rejected_calls`; `outcome_tracked: false`; `then: no_calls` from the continuation; the ending `{last_line: X}` |
+
+The continuation prefixes are synthetic, in the form `opencode_sandboxed_agent` recorded: an OpenCode export with
+per-call workspace diffs, and shell commands that seed replays.
+
+To run them with the training reward, save an overlay that replaces the example dataset, for example as
+`feature_examples.yaml`:
+
+```yaml
+config_paths:
+  - resources_servers/agentic_if/configs/agentic_if.yaml
+
+agentic_if_resources:
+  resources_servers:
+    agentic_if:
+      reward_mode: task_and_if
+      datasets:
+        - name: feature_examples
+          type: example
+          jsonl_fpath: resources_servers/agentic_if/data/feature_examples.jsonl
+          taskset: agentic_if:example
+          num_repeats: 1
+          license: TBD
+```
+
+Then collate and collect as in Run the examples, with the overlay in place of `--resources-server agentic_if`:
+
+```bash
+python benchmarks/terminal_bench_2_1/prepare.py
+gym dataset collate --config feature_examples.yaml --mode example_validation \
+    --output-dir results/agentic_if_feature_data
+gym env start --config feature_examples.yaml --model-type vllm_model \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml +use_absolute_ip=true
+# In a second shell, once the servers are ready:
+gym eval run --no-serve --config feature_examples.yaml --model-type vllm_model \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml +use_absolute_ip=true \
+    --input results/agentic_if_feature_data/example.jsonl --output results/agentic_if_feature_examples.jsonl
+```
+
+Each result's `reward` is then the task verdict times the run's IF score, `status-only-continuation` earns its IF
+score alone, and `task_reward` keeps the task verdict. Collation keeps the dataset's metrics in
+`data/feature_examples_metrics.json`.
+
 # Licensing information
 
 Code: Apache 2.0
-Data: the example instructions and system prompts are synthetic (Apache 2.0). Their tasks come from Terminal-Bench 2.1
-(Apache 2.0) and Scale-SWE (no declared license, as in `scale_swe`).
+Data: the instructions, system prompts and recorded prefixes of the example and feature-example rows are synthetic
+(Apache 2.0). Their tasks come from Terminal-Bench 2.1 (Apache 2.0) and Scale-SWE (no declared license, as in
+`scale_swe`).
 
 Dependencies
 - nemo_gym: Apache 2.0
