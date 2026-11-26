@@ -73,6 +73,11 @@ test patch's binary files are uploaded to the verification sandbox and copied in
 the test patch, as SWE-bench 5 does. `benchmarks/swebench/multimodal_test/` uses this source; the dev recipes keep
 the harness.
 
+When a run includes any of the SWE-bench Multimodal test split's OpenLayers tasks whose FAIL_TO_PASS lists only
+rendering cases (`OPENLAYERS_RENDERING_ONLY_INSTANCE_IDS` in `app.py`), the server also reports
+`mean/resolved_without_openlayers_rendering_only`: the mean `resolved` over every other task's rollouts. The unpatched
+code passes those rendering cases too, so these tasks are resolved without a fix.
+
 
 # Licensing information
 Code: ?

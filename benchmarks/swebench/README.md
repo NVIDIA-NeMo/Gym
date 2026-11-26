@@ -19,6 +19,10 @@ Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
   see [Rows that define their evaluation](../../resources_servers/swebench/README.md#rows-that-define-their-evaluation)).
   `multimodal_test/hermes.yaml` runs the same tasks with Hermes. Run the dev and test recipes separately: each
   recipe's `--split benchmark` covers its own split.
+  For 50 OpenLayers tasks, FAIL_TO_PASS lists only rendering cases (`./cases/<name>/main.js`), none of them a case
+  the test patch adds, and the unpatched code passes them too: with no patch, 42 of the 47 such tasks graded were
+  resolved. The recipes keep the dataset as published, so `mean/resolved` is the score on all 480 tasks.
+  `mean/resolved_without_openlayers_rendering_only` is the score on the other 430; report which one you quote.
 
 ## Harnesses
 

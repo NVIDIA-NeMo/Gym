@@ -177,6 +177,39 @@ class SWEBenchInstanceRequest(BaseModel):
 # The fields of a row's own evaluation, which only the `row` evaluation spec source reads.
 _ROW_EVALUATION_FIELDS = frozenset({"image", "eval_script", "log_parser", "eval_type"})
 
+# SWE-bench Multimodal test tasks whose FAIL_TO_PASS lists only OpenLayers rendering cases (`./cases/<name>/main.js`)
+# and no test that the test patch adds. The unpatched code passes those cases too, so these tasks score as resolved
+# without a fix. The dataset keeps them; RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC reports the score
+# without them next to the official one.
+OPENLAYERS_RENDERING_ONLY_INSTANCE_IDS = frozenset(
+    f"openlayers__openlayers-{number}"
+    for number in (
+        *(12194, 12373, 12393, 12467, 12683, 12962, 12965, 13013, 13020, 13069),
+        *(13119, 13150, 13198, 13212, 13226, 13269, 13333, 13509, 13547, 13648),
+        *(13654, 13669, 13823, 13974, 13975, 13981, 14015, 14051, 14066, 14332),
+        *(14414, 14619, 14659, 14719, 14932, 14945, 15114, 15168, 15229, 15234),
+        *(15271, 15365, 15466, 15484, 15614, 15683, 15685, 15787, 15796, 15825),
+    )
+)
+RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC = "mean/resolved_without_openlayers_rendering_only"
+
+
+def resolved_without_openlayers_rendering_only(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+    """The mean `resolved` over the rollouts of every task except the OpenLayers rendering-only ones.
+
+    Returns nothing unless the run includes one of those tasks, so other SWE-bench benchmarks gain no metric.
+    """
+    rollouts = [rollout for task in tasks for rollout in task if rollout.get("instance_id")]
+    if not any(rollout["instance_id"] in OPENLAYERS_RENDERING_ONLY_INSTANCE_IDS for rollout in rollouts):
+        return {}
+    kept = [rollout for rollout in rollouts if rollout["instance_id"] not in OPENLAYERS_RENDERING_ONLY_INSTANCE_IDS]
+    if not kept:
+        return {}
+    return {
+        RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC: sum(bool(rollout.get("resolved")) for rollout in kept)
+        / len(kept)
+    }
+
 
 class SWEBenchVerifyRequest(SWEBenchInstanceRequest, BaseVerifyRequest):
     pass
@@ -374,6 +407,12 @@ class SwebenchResourcesServer(CheckpointedSandboxSessionResourcesServer):
         super().model_post_init(context)
 
         self._session_id_to_seed_head: Dict[str, str] = dict()
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return resolved_without_openlayers_rendering_only(tasks)
+
+    def compute_repeat_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return resolved_without_openlayers_rendering_only(tasks)
 
     async def _create_sandbox(
         self,

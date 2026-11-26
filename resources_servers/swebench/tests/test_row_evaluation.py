@@ -24,8 +24,10 @@ import pytest
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.swebench.app import (
+    RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC,
     DockerContainer,
     SwebenchResourcesServer,
     SwebenchResourcesServerConfig,
@@ -464,3 +466,42 @@ class TestRunInstance:
         result, applying = await self._apply(monkeypatch, tmp_path, ())
         assert result["patch_apply_failed"] is True and result["resolved"] is False
         assert applying.count(RESET_WORKTREE_COMMAND) == 3
+
+
+class TestResolvedWithoutOpenLayersRenderingOnly:
+    @staticmethod
+    def rollout(task_index: int, repeat: int, instance_id: str, resolved: bool, **extra: Any) -> dict:
+        return {
+            "_ng_task_index": task_index,
+            "_ng_rollout_index": repeat,
+            "instance_id": instance_id,
+            "resolved": resolved,
+            "reward": float(resolved),
+            **extra,
+        }
+
+    async def test_reports_the_score_without_the_rendering_only_tasks(self) -> None:
+        rows = []
+        for repeat in (0, 1):
+            rows += [
+                # Rendering-only: resolved without a fix, left out of the second score.
+                self.rollout(0, repeat, "openlayers__openlayers-15365", True),
+                self.rollout(1, repeat, "openlayers__openlayers-16000", repeat == 0),
+                self.rollout(2, repeat, "PrismJS__prism-1500", False),
+            ]
+        # A masked rollout is no measurement in either score.
+        rows.append(self.rollout(2, 2, "PrismJS__prism-1500", True, mask_sample=True))
+
+        result = await make_server().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+        assert result.agent_metrics["mean/resolved"] == pytest.approx(3 / 6)
+        assert result.key_metrics[RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC] == pytest.approx(1 / 4)
+        summarized = f"mean_across_repeats/{RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC}"
+        assert result.agent_metrics[summarized] == pytest.approx(1 / 4)
+
+    async def test_other_benchmarks_gain_no_metric(self) -> None:
+        rows = [self.rollout(0, 0, "astropy__astropy-12907", True), self.rollout(1, 0, "django__django-11099", False)]
+
+        result = await make_server().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+        assert not any("openlayers" in key for key in result.agent_metrics)
