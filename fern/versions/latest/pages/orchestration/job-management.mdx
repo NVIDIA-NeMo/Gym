@@ -35,9 +35,12 @@ The index is per machine and per user. A submission made from another machine do
 
 ```bash
 gym job status [ID ...] [--benchmark NAME[,NAME...]] [--limit N | --all] [--json]
+gym job status --record PATH [--record PATH ...] [--benchmark NAME[,NAME...]] [--json]
 ```
 
 With ids, `status` shows each submission as a block: a header with its cluster and rolled-up state, then one row per benchmark. With no ids it shows the same blocks for the newest submissions in the index (10 by default, or `--all`).
+
+`--record PATH` reads a submission from its record file instead of the index: the run's `gym-job.json`, or a copy of it, for a run submitted from another machine or one whose index entry is gone. Repeat it for more submissions; it cannot be combined with ids, `--limit` or `--all`.
 
 ```text
 gym-job-20261029T093012Z-4f1a9c  cluster-a  RUNNING (1 RUNNING, 2 SUCCEEDED)
@@ -57,7 +60,7 @@ The job id shown is the one the scheduler reports. When it differs from the id i
 
 A submission has one state, rolled up from its benchmarks: running wins, then queued, failed, cancelled, and only a submission whose benchmarks all succeeded is `SUCCEEDED`. The counts beside it show a mixed result.
 
-`--benchmark` limits every submission to the named benchmarks. With ids it is strict: a submission that lacks one fails the whole call, before anything is asked, and the error lists each offender with the benchmarks it has. With no ids it selects: only submissions that have all of the named benchmarks are shown.
+`--benchmark` limits every submission to the named benchmarks. With ids or `--record` it is strict: a submission that lacks one fails the whole call, before anything is asked, and the error lists each offender with the benchmarks it has. With no ids it selects: only submissions that have all of the named benchmarks are shown.
 
 `--json` prints one object per submission, with the record and every benchmark's status.
 

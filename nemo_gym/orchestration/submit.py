@@ -109,15 +109,25 @@ def resubmit(gym_job_id: str, benchmark: str) -> BenchmarkJob:
 
 @experimental
 def status(
-    ids: list[str] | None = None, *, benchmarks: list[str] | None = None, limit: int | None = 10
+    ids: list[str] | None = None,
+    *,
+    records: list[SubmissionRecord] | None = None,
+    benchmarks: list[str] | None = None,
+    limit: int | None = 10,
 ) -> list[SubmissionStatus]:
     """The live status of the submissions `ids`, or with no ids of the newest `limit` in the local index.
 
-    `benchmarks` limits each submission to those benchmarks. With ids it is strict: a submission that lacks
-    one fails the whole call. Without ids it selects: only submissions that have all of them are considered,
-    and `limit` applies after that.
+    `records` gives the submissions' records instead of ids, for example a run's `gym-job.json` copied from the
+    machine that submitted it: the local index is not read, `limit` does not apply, and `ids` must be empty.
+
+    `benchmarks` limits each submission to those benchmarks. With ids or records it is strict: a submission
+    that lacks one fails the whole call. Otherwise it selects: only submissions that have all of them are
+    considered, and `limit` applies after that.
     """
-    records = _records_to_inspect(ids, benchmarks, limit)
+    if records is None:
+        records = _records_to_inspect(ids, benchmarks, limit)
+    elif ids:
+        raise ValueError("Give submission ids or records, not both.")
     by_executor: dict[str, list[int]] = {}
     for index, record in enumerate(records):
         by_executor.setdefault(record.executor, []).append(index)

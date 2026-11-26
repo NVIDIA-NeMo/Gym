@@ -865,12 +865,20 @@ def _split_names(value: str | None) -> list[str] | None:
     return names or None
 
 
-def _add_limit_or_all(parser: argparse.ArgumentParser) -> None:
-    how_many = parser.add_mutually_exclusive_group()
-    how_many.add_argument(
+def _add_limit_all_or_record(parser: argparse.ArgumentParser) -> None:
+    which = parser.add_mutually_exclusive_group()
+    which.add_argument(
         "--limit", type=int, default=10, metavar="N", help="With no ids, show the newest N submissions (default 10)."
     )
-    how_many.add_argument("--all", action="store_true", help="With no ids, show every submission.")
+    which.add_argument("--all", action="store_true", help="With no ids, show every submission.")
+    which.add_argument(
+        "--record",
+        action="append",
+        type=Path,
+        metavar="PATH",
+        help="Read the submission from this record file (a run's gym-job.json, or a copy of it) instead of this "
+        "machine's job index. Repeat for more submissions.",
+    )
 
 
 def _job_list(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -883,10 +891,13 @@ def _job_list(args: argparse.Namespace, overrides: list[str]) -> None:
 @exit_cleanly_on_job_error
 def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
     _reject_overrides(args, overrides, "job status")
+    if args.record and args.gym_job_ids:
+        args._parser.error("give submission ids or --record, not both")
     from nemo_gym.orchestration import job_commands
 
     job_commands.status_command(
         args.gym_job_ids,
+        record_paths=args.record,
         benchmarks=_split_names(args.benchmark),
         limit=None if args.all else args.limit,
         as_json=getattr(args, "json", False),
@@ -2397,18 +2408,19 @@ COMMANDS = {
                     "gym_job_ids",
                     nargs="*",
                     metavar="ID",
-                    help="Submission ids, as printed by `gym eval submit`. With none, the newest submissions.",
+                    help="Submission ids, as printed by `gym eval submit`. With none and no --record, the newest "
+                    "submissions.",
                 ),
             ),
             Flag(
                 register=lambda p: p.add_argument(
                     "--benchmark",
                     metavar="NAME[,NAME...]",
-                    help="Only these benchmarks. With ids, a submission that lacks one is an error; "
-                    "without ids, only submissions that have all of them are shown.",
+                    help="Only these benchmarks. With ids or --record, a submission that lacks one is an error; "
+                    "otherwise only submissions that have all of them are shown.",
                 ),
             ),
-            Flag(register=lambda p: _add_limit_or_all(p)),
+            Flag(register=lambda p: _add_limit_all_or_record(p)),
             JOB_JSON,
         ),
     ),

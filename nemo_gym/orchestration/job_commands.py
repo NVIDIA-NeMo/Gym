@@ -23,6 +23,7 @@ and `logs` prints one of a benchmark's logs. What they print is rendered by `job
 
 import json
 import sys
+from pathlib import Path
 
 from nemo_gym.orchestration.job_render import (
     could_not_stop,
@@ -43,16 +44,33 @@ def list_command(*, limit: int | None, as_json: bool) -> None:
         print(render_list(records))
 
 
-def status_command(ids: list[str], *, benchmarks: list[str] | None, limit: int | None, as_json: bool) -> None:
+def status_command(
+    ids: list[str],
+    *,
+    record_paths: list[Path] | None,
+    benchmarks: list[str] | None,
+    limit: int | None,
+    as_json: bool,
+) -> None:
     # Imported here because `submit` loads every executor, which `gym job list` does not need.
-    from nemo_gym.orchestration.submit import status
+    from nemo_gym.orchestration.submit import load_original_submission_record, status
 
-    results = status(ids or None, benchmarks=benchmarks, limit=limit)
+    records = None
+    if record_paths is not None:
+        records, problems = [], []
+        for path in record_paths:
+            try:
+                records.append(load_original_submission_record(path)[0])
+            except (OSError, ValueError) as error:
+                problems.append(f"Cannot read the submission record {path}: {error}")
+        if problems:
+            raise ValueError(" ".join(problems))
+    results = status(ids or None, records=records, benchmarks=benchmarks, limit=limit)
     if as_json:
         print(json.dumps([result.model_dump(mode="json") for result in results], indent=2))
         return
     note = None
-    if not ids and limit is not None:
+    if not ids and records is None and limit is not None:
         eligible = list_submissions()
         if benchmarks:
             wanted = set(benchmarks)

@@ -406,6 +406,60 @@ def test_status_on_an_executor_without_the_capability_says_so(tmp_path, cluster,
     assert "kubernetes executor does not support status" in err
 
 
+def test_status_reads_a_submission_from_its_record_file_without_the_job_index(tmp_path, cluster, monkeypatch, capsys):
+    for n in range(2):
+        _submitted(tmp_path, f"gym-job-local-{n}", {"gpqa": str(n)}, submitted_at=f"2026-10-0{n + 1}T00:00:00Z")
+    # Submitted from another machine: this one has its job directory and a copy of its gym-job.json, no index entry.
+    run_dir = tmp_path / "runs" / "gym-job-remote"
+    (run_dir / "ruler").mkdir(parents=True)
+    copy = tmp_path / "copy" / "gym-job.json"
+    copy.parent.mkdir()
+    copy.write_text(_record("gym-job-remote", {"ruler": "300"}, run_dir=str(run_dir)).dumps())
+    (cluster / "sacct_rows").write_text("300|FAILED|1:0\n")
+    index = tmp_path / "cache" / "nemo-gym" / "jobs"
+    indexed = sorted(index.iterdir())
+
+    out, _ = _gym(monkeypatch, capsys, "status", "--record", str(copy), "--json")
+
+    (result,) = json.loads(out)
+    assert result["record"]["gym_job_id"] == "gym-job-remote"
+    assert [(job["benchmark"], job["state"]) for job in result["jobs"]] == [("ruler", "FAILED")]
+
+    out, _ = _gym(monkeypatch, capsys, "status", "--record", str(copy))
+    assert "gym-job-remote" in out and "gym-job-local" not in out and "submissions shown" not in out
+    assert sorted(index.iterdir()) == indexed
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["gym-job-a", "--record", "gym-job.json"], "give submission ids or --record, not both"),
+        (["--record", "gym-job.json", "--all"], "argument --all: not allowed with argument --record"),
+        (["--limit", "5", "--record", "gym-job.json"], "argument --record: not allowed with argument --limit"),
+    ],
+)
+def test_status_takes_ids_or_record_files_and_no_limit_with_record_files(
+    tmp_path, cluster, monkeypatch, capsys, args, message
+):
+    _submitted(tmp_path, "gym-job-a", {"ruler": "1"}, submitted_at="2026-10-29T00:00:00Z")
+
+    out, err = _gym(monkeypatch, capsys, "status", *args, ok=False)
+
+    assert out == ""
+    assert message in err
+
+
+def test_status_names_every_record_file_it_cannot_read(tmp_path, cluster, monkeypatch, capsys):
+    missing, broken = tmp_path / "missing.json", tmp_path / "broken.json"
+    broken.write_text("{not json")
+
+    out, err = _gym(monkeypatch, capsys, "status", "--record", str(missing), "--record", str(broken), ok=False)
+
+    assert out == ""
+    assert f"Cannot read the submission record {missing}" in err
+    assert f"Cannot read the submission record {broken}" in err
+
+
 def test_info_hides_the_config_unless_asked_and_reads_it_from_the_run_directory(
     tmp_path, cluster, monkeypatch, capsys
 ):

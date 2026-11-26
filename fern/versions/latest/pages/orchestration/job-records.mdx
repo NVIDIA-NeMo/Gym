@@ -28,7 +28,7 @@ The local index is written first, because it cannot fail the submit: a failure t
 
 ### Restoring a lost index entry
 
-A machine that loses its index (a recycled pod, a cleared cache) no longer finds the submission: `gym eval resubmit` fails with `No submission '<id>' in this machine's job index`. Where the run directory is mounted, add `--run-dir <run directory>`. The entry is rebuilt from the run's `gym-job.json` only when that record names the submission, the directory is named after it and is the record's `run_dir`, and every benchmark's job directory lies inside it. Each restore appends a line (source, SHA-256, user, host) to `index-restores.jsonl` in the index directory. An entry that exists is left as it is.
+A machine that loses its index (a recycled pod, a cleared cache) no longer finds the submission: `gym eval resubmit` fails with `No submission '<id>' in this machine's job index`. Where the run directory is mounted, add `--run-dir <run directory>`. The entry is rebuilt from the run's `gym-job.json` only when that record names the submission, the directory is named after it and is the record's `run_dir`, and every benchmark's job directory lies inside it. Each restore appends a line (source, SHA-256, user, host) to `index-restores.jsonl` in the index directory. An entry that exists is left as it is. To only check on the run, `gym job status --record <path>` reads its `gym-job.json`, or a copy of it, and leaves the index alone.
 
 ## Manifest fields
 
