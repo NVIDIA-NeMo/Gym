@@ -17,6 +17,7 @@ loaded and visible to the grader's user, so a setup gap fails there rather than 
 """
 
 import asyncio
+import contextlib
 import logging
 import re
 from enum import Enum
@@ -192,11 +193,34 @@ _FAILURE_SCORE_NAMES = (
 )
 
 
+async def _compare(gold: Any, pred: Any) -> bool:
+    """``results_match`` off the event loop: a large result takes a while to compare. Its thread can't be stopped, so
+    a cancellation meanwhile waits for it to end (holding the caller's permit, and both results, until then) and is
+    raised after."""
+    comparison = asyncio.ensure_future(asyncio.to_thread(results_match, gold, pred))
+    cancelled: Optional[asyncio.CancelledError] = None
+    while not comparison.done():
+        try:
+            await asyncio.wait({comparison})
+        except asyncio.CancelledError as e:
+            cancelled = e
+    if cancelled is not None:
+        raise cancelled
+    return comparison.result()
+
+
 class BeaverSqlVerifier:
     """Scores one model answer with ``self._runner`` (a ``MySqlRunner``, or a ``CannedRunner`` in tests). Holds no
-    state between requests."""
+    state between requests.
+
+    ``_verifications`` (the server's: ``max_concurrency``) bounds the requests verified at once, from the gold query
+    to the comparison, so the results held in memory don't grow with the requests waiting: the runner's own limit
+    covers one query at a time, and without this every waiting request's gold result would be held until its
+    prediction got a turn. A cancelled request keeps its permit until its query is cleaned up or its comparison ends.
+    """
 
     _runner: Any
+    _verifications: Optional[asyncio.Semaphore] = None  # None: no bound (the verifier fixture)
 
     async def verify(self, body: BeaverSqlVerifyRequest) -> BeaverSqlVerifyResponse:
         generated = body.response.output_text or ""
@@ -235,15 +259,18 @@ class BeaverSqlVerifier:
             )
 
         try:
-            gold = await self._runner.run(body.db_id, body.gt_sql)
-            if gold.status == "error":
-                # Every gold query runs on a correctly set-up server (benchmarks/beaver/gold_check.py), so one that
-                # fails here means the data or server isn't what was checked. (Officially it would be an empty result,
-                # which an empty or failed answer matches.) A gold query that times out is still scored as empty.
-                raise MySqlUnavailableError(f"gold query failed: {gold.error}")
-            pred = missing_prediction() if extracted_sql is None else await self._runner.run(body.db_id, extracted_sql)
-            # Off the event loop: a large result takes a while to compare.
-            match = await asyncio.to_thread(results_match, gold, pred)
+            async with self._verifications or contextlib.nullcontext():
+                gold = await self._runner.run(body.db_id, body.gt_sql)
+                if gold.status == "error":
+                    # Every gold query runs on a correctly set-up server (benchmarks/beaver/gold_check.py), so one that
+                    # fails here means the data or server isn't what was checked. (Officially it would be an empty
+                    # result, which an empty or failed answer matches.) A gold query that times out is still scored as
+                    # empty.
+                    raise MySqlUnavailableError(f"gold query failed: {gold.error}")
+                pred = (
+                    missing_prediction() if extracted_sql is None else await self._runner.run(body.db_id, extracted_sql)
+                )
+                match = await _compare(gold, pred)
         except MySqlUnavailableError as e:
             return _verifier_failure(FailureCode.DATABASE_UNAVAILABLE, "BEAVER MySQL is unavailable", e)
         except Exception as e:
@@ -304,6 +331,7 @@ class BeaverSqlResourcesServer(BeaverSqlVerifier, SimpleResourcesServer):
             timeout_s=self.config.query_timeout_s,
             connection_timeout_s=self.config.connection_timeout_s,
         )
+        self._verifications = asyncio.Semaphore(self.config.max_concurrency)
 
     @staticmethod
     def _resolve_dir(path: str) -> Path:

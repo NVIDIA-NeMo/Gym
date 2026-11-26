@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 from omegaconf import OmegaConf
 
@@ -27,7 +29,7 @@ from resources_servers.beaver_sql.app import (
     FailureCode,
     extract_sql_from_response,
 )
-from resources_servers.beaver_sql.ex_acc import CannedRunner
+from resources_servers.beaver_sql.ex_acc import CannedRunner, QueryOutcome, results_match
 
 
 def _make_response(text: str) -> NeMoGymResponse:
@@ -215,6 +217,124 @@ class TestVerify:
         assert verifier._runner.calls == [("dw", "GOLD"), ("dw", "SELECT 1")]
 
 
+class _GatedRunner:
+    """A runner like MySqlRunner: ``slots`` queries at a time, and a cancelled query keeps its slot until its cleanup
+    is done. Counts the gold results returned whose comparison hasn't finished (``live``), and records events."""
+
+    def __init__(self, slots: int) -> None:
+        self._slots = asyncio.Semaphore(slots)
+        self.lock = threading.Lock()
+        self.live = self.peak = 0
+        self.events: List[str] = []
+        self.gate: Optional[asyncio.Event] = None  # when set, gold queries wait for it
+
+    async def run(self, db_id: str, sql: str):
+        async with self._slots:
+            self.events.append(f"start {sql}")
+            try:
+                if sql.startswith("GOLD") and self.gate is not None:
+                    await self.gate.wait()
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.01)  # stopping the query on the server
+                self.events.append(f"cleaned {sql}")
+                raise
+            if sql.startswith("GOLD"):
+                with self.lock:
+                    self.live += 1
+                    self.peak = max(self.peak, self.live)
+            return QueryOutcome(status="ok", frame=pd.DataFrame([(1,)], columns=["x"]))
+
+
+@pytest.fixture
+def counted_comparisons(monkeypatch):
+    """Patch the verifier's results_match to tell the runner when a comparison has finished."""
+
+    def install(runner: _GatedRunner, block: Optional[threading.Event] = None, started=None):
+        def compare(gold, pred):
+            if started is not None:
+                started.set()
+            if block is not None:
+                block.wait(5)
+            matched = results_match(gold, pred)
+            with runner.lock:
+                runner.live -= 1
+            return matched
+
+        monkeypatch.setattr(app_module, "results_match", compare)
+
+    return install
+
+
+class TestBoundedVerifications:
+    """At most ``max_concurrency`` verifications hold their results at once: the permit covers the gold query, the
+    prediction and the comparison, and is released only once the work it covers has stopped."""
+
+    def test_results_held_at_once_stay_within_the_limit(self, counted_comparisons) -> None:
+        async def main():
+            runner = _GatedRunner(slots=2)
+            counted_comparisons(runner)
+            verifier = BeaverSqlVerifier()
+            verifier._runner = runner
+            verifier._verifications = asyncio.Semaphore(2)
+            rows = await asyncio.gather(*(verifier.verify(_request(_sql("SELECT 1"))) for _ in range(40)))
+            return runner, rows
+
+        runner, rows = asyncio.run(main())
+        assert [r.reward for r in rows] == [1.0] * 40
+        # Without the permit, all 40 gold queries ran (and their results were held) before the first prediction.
+        assert runner.peak <= 2
+        assert runner.events.index("start SELECT 1") < 4
+
+    def test_a_cancelled_verification_releases_its_permit_after_the_query_is_cleaned_up(self) -> None:
+        async def main():
+            runner = _GatedRunner(slots=8)
+            runner.gate = asyncio.Event()
+            verifier = BeaverSqlVerifier()
+            verifier._runner = runner
+            verifier._verifications = asyncio.Semaphore(1)
+            first = asyncio.ensure_future(verifier.verify(_request(_sql("SELECT 1"), gt_sql="GOLD-A")))
+            while "start GOLD-A" not in runner.events:
+                await asyncio.sleep(0)
+            second = asyncio.ensure_future(verifier.verify(_request(_sql("SELECT 1"), gt_sql="GOLD-B")))
+            await asyncio.sleep(0)
+            first.cancel()
+            runner.gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            await second
+            return runner.events
+
+        events = asyncio.run(main())
+        assert events.index("cleaned GOLD-A") < events.index("start GOLD-B")
+
+    def test_a_cancelled_comparison_keeps_the_permit_until_its_thread_ends(self, counted_comparisons) -> None:
+        release, started = threading.Event(), threading.Event()
+
+        async def main():
+            runner = _GatedRunner(slots=8)
+            counted_comparisons(runner, block=release, started=started)
+            verifier = BeaverSqlVerifier()
+            verifier._runner = runner
+            verifier._verifications = asyncio.Semaphore(1)
+            first = asyncio.ensure_future(verifier.verify(_request(_sql("SELECT 1"), gt_sql="GOLD-A")))
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+            second = asyncio.ensure_future(verifier.verify(_request(_sql("SELECT 1"), gt_sql="GOLD-B")))
+            first.cancel()
+            await asyncio.sleep(0.05)
+            waiting = "start GOLD-B" not in runner.events
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            await second
+            return waiting, runner.events
+
+        waiting, events = asyncio.run(main())
+        assert waiting  # the cancelled comparison's thread still held both results
+        assert "start GOLD-B" in events
+
+
 def _row(reward: float, gold_result: str, pred_status: str, category: str = "base", **extra: Any) -> Dict:
     return {
         "reward": reward,
@@ -282,6 +402,7 @@ class TestStartup:
         assert isinstance(server._runner, app_module.MySqlRunner)
         assert server._runner.timeout_s == 10.0
         assert server._runner._params["user"] == "r" and server._runner._params["password"] == "rpw"
+        assert isinstance(server._verifications, asyncio.Semaphore)
 
     def test_admin_dsn_loads_first(self, monkeypatch) -> None:
         from resources_servers.beaver_sql import setup_beaver_mysql

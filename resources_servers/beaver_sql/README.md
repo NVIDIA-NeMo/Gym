@@ -96,7 +96,7 @@ existing user's password; it refuses a grader DSN that names its own (admin) use
 | `mysql_admin_password` | `${oc.env:BEAVER_MYSQL_ADMIN_PASSWORD,null}` | The admin user's password |
 | `databases` | `[dw]` | Databases checked (and loaded) at startup; add `neutron` or `nova` for those questions |
 | `cache_dir` | `resources_servers/beaver_sql/.beaver` | Download cache for `beaver_db.zip` (git-ignored) |
-| `max_concurrency` | `8` | Queries at a time |
+| `max_concurrency` | `8` | Queries at a time, and requests verified at a time (gold query, prediction and comparison), which bounds the results held in memory |
 | `query_timeout_s` | `10.0` | BEAVER's limit; change it only on purpose |
 
 **Passwords never go in a DSN.** A run records its configuration, DSNs included, beside its rollouts (the identity file
