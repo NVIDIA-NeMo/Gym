@@ -68,8 +68,6 @@ class BoundaryRun:
     records: BoundaryRecords
     global_probe: dict | None = None
     bundle: Path = field(default_factory=Path)
-    dispatch: dict[str, dict | None] = field(default_factory=dict)
-    """The boundary's dispatch record of each model call, by ``<session>/<call ID>``."""
 
     def returned(self, index: int) -> bytes | None:
         """The bytes OpenCode received for call ``index``."""
@@ -141,5 +139,4 @@ def run_boundary(
         records=boundary_records(rows),
         global_probe=result.get("global_probe"),
         bundle=bundle,
-        dispatch=result["dispatch"],
     )

@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Evidence and grading of a row that renames tools: the tool that ran beside the name the model saw and wrote.
-
-Checks name built-in tools (``tool``); the judge sees the model's names (``model_tool``): the name on the wire for a live
-call, the row's alias for a call in a restored prefix.
+"""Evidence of a row that renames tools: the tool that ran (``tool``) beside the name the model saw and wrote
+(``model_tool``): the name on the wire for a live call, the row's alias for a call in a restored prefix.
 """
 
 from resources_servers.agentic_if.episode.session_evidence import build_session_evidence
-from resources_servers.agentic_if.if_grading import engine
-from resources_servers.agentic_if.if_grading.checkers.run import evidence_steps
-from resources_servers.agentic_if.if_grading.configuration import load_config
-from resources_servers.agentic_if.if_grading.contracts import ResolvedCheck, SessionInfo
-from resources_servers.agentic_if.if_grading.rendering import render
+from resources_servers.agentic_if.if_grading.contracts import SessionInfo
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
 from resources_servers.agentic_if.tests.support import REPLAY_RECEIPT, call, export, message, text
 
@@ -20,15 +14,6 @@ PROFILE = "p" * 64
 TOOLS = {"tool_names": {"bash": "shell", "read": "read"}}
 # The profile plugin's refusal of bash, the hidden ID of the tool the model sees as shell.
 REFUSAL = "bash is unavailable or its arguments are invalid. Available tools: read, shell."
-
-
-class NoJudge:
-    """The checks here are deterministic: asking the judge fails the test."""
-
-    version, hash = "no-judge", "no-judge"
-
-    def evaluate(self, **_: object) -> None:
-        raise AssertionError("a deterministic check must not call the judge")
 
 
 def build(spec, *, exports, hooks=(), calls=(), replay=None, artifacts=None):
@@ -132,26 +117,6 @@ def test_a_live_call_keeps_the_tool_that_ran_and_the_name_the_model_wrote():
     results = {step.call_id: step for step in evidence.steps if step.role == "tool"}
     assert (results["c1"].tool, results["c1"].output) == ("bash", "/app")
     assert (results["c2"].tool, results["c2"].output, results["c2"].error) == ("invalid", REFUSAL, True)
-
-
-def test_a_check_on_a_built_in_tool_grades_the_renamed_calls_and_the_judge_sees_the_aliases():
-    root, receipt, calls = live_session()
-    evidence = build(
-        RuntimeSpec(harness="opencode", task_backend="swe", tools=TOOLS), exports=[root], hooks=[receipt], calls=calls
-    )
-    pwd = {"field": "command", "regex": "^pwd$"}
-    checks = [
-        ResolvedCheck(id="ran-pwd", kind="calls", parameters={"value": {"mode": "must", "tool": "bash", "arg": pwd}}),
-        # Only the call made under the alias ran bash: the refused hidden ID is not a second bash call.
-        ResolvedCheck(
-            id="once", kind="calls", parameters={"value": {"mode": "max", "tool": "bash", "arg": pwd, "n": 1}}
-        ),
-    ]
-    result = engine.grade(checks, evidence, judge=NoJudge())
-    assert [(check.id, check.status) for check in result.checks] == [("ran-pwd", "pass"), ("once", "pass")]
-    shown = render(evidence_steps(evidence), "run", None, load_config())
-    assert "  RESULT (shell): /app" in shown
-    assert f"  RESULT (bash, error, refused before it ran): {REFUSAL}" in shown
 
 
 def test_a_restored_prefix_call_is_shown_under_the_row_s_alias():

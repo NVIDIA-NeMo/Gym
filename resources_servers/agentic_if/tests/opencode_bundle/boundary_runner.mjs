@@ -10,7 +10,7 @@
 //             provider_id?, global_probe?, calls: [{session, agent, assistant|null, body, url?, cancel?, duplicate_assistant?, skip_headers?,
 //             upstream: {status, content_type, body_b64, chunk}}]}
 // result.json: {permission, provider_fetch_installed, global_probe?, calls: [{sent, sent_headers, status, content_type,
-//               body_b64, error}], dispatch: {"<session>/<call ID>": the boundary's dispatch record (or null)}}
+//               body_b64, error}]}
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -115,11 +115,6 @@ for (const [index, call] of spec.calls.entries()) {
     hooks.event({ event: { type: "session.idle", properties: { sessionID: call.session } } });
   }
 }
-// The process registry's dispatch records, which the profile plugin's gate reads (keys: pyKey(session) NUL call ID).
-const dispatch = globalThis[Symbol.for("nemo-gym.agentic-if.bundle")].dispatch || new Map();
-result.dispatch = Object.fromEntries(
-  [...dispatch].map(([key, record]) => [key.slice(1).replace("\u0000", "/"), record]),
-);
 if (spec.global_probe) {
   // A model call that bypasses the provider wrapper must be refused by the process guard.
   try {

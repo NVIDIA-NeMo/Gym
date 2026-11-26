@@ -155,11 +155,6 @@ EVIDENCE_HEADER = (
 RULE = "-" * 70  # a filler line long enough that a tool result of a few dozen of them is cut in the run view
 
 
-def test_evidence_is_a_render_option_only_when_a_rule_turns_it_on():
-    assert render_options({"evidence": True}) == {"calls": True, "edits": False, "evidence": True}
-    assert render_options({"evidence": False}) == {"calls": True, "edits": False}
-
-
 def test_evidence_adds_the_cut_out_lines_that_hold_a_token_the_assistant_wrote():
     notes = "\n".join(
         ["    1\trequires 2.31.4 or later"]

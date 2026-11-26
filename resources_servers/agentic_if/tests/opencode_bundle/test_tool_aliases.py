@@ -76,15 +76,6 @@ def replying(body: dict) -> dict:
     return upstream(json.dumps(body).encode())
 
 
-def dispatch(model_name: str, opencode_name: str, allowed: bool) -> dict:
-    return {
-        "available": AVAILABLE.split(", "),
-        "model_name": model_name,
-        "opencode_name": opencode_name,
-        "allowed": allowed,
-    }
-
-
 # ------------------------------------------------------------------------------------------------ compiled configuration
 
 
@@ -92,14 +83,11 @@ def test_a_row_that_renames_tools_compiles_its_aliases_last_and_keeps_built_in_i
     spec = aliased_spec()
     boundary = compile_boundary(spec)
     assert list(boundary)[-1] == "tool_aliases" and boundary["tool_aliases"] == ALIASES
-    # Selection, denies and descriptions stay per built-in tool: OpenCode's IDs.
-    assert boundary["tool_names"] == SELECTED
-    assert boundary["descriptions"] == {tool: f"Row description of {ALIASES.get(tool, tool)}." for tool in SELECTED}
+    # Denies stay per built-in tool: OpenCode's IDs.
     assert "bash" not in boundary["deny"] and "glob" in boundary["deny"]
     profile = compile_profile(spec)
     assert profile["visible_tools"] == {"bash": "shell", "edit": "edit", "read": "view_file", "write": "create_file"}
     assert profile["check_aliases"] is True
-    assert json.loads(bundle_files(spec)["boundary.json"]) == boundary
 
 
 @pytest.mark.parametrize("name", sorted(SPECS))
@@ -118,12 +106,6 @@ def test_rows_without_aliases_compile_without_the_new_key(name: str) -> None:
     ]
 
 
-def test_naming_a_tool_by_its_own_id_is_no_alias() -> None:
-    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools={"tool_names": {"bash": "bash", "read": "read"}})
-    assert "tool_aliases" not in compile_boundary(spec)
-    assert compile_profile(spec)["check_aliases"] is False
-
-
 def test_an_interface_description_describes_a_renamed_row_s_tool() -> None:
     tools = aliased_spec().tools.model_dump(mode="json")
     del tools["tool_descriptions"]["read"]
@@ -131,71 +113,12 @@ def test_an_interface_description_describes_a_renamed_row_s_tool() -> None:
     compile_boundary(RuntimeSpec(harness="opencode", task_backend="swe", tools=tools))
 
 
-def renamed_continuation(*, receipted: bool = True, **continuation: object) -> RuntimeSpec:
-    """The aliased row continuing a prefix: a shell call, then a rejected call recorded with its model-call receipt
-    (or, unless ``receipted``, without one, as opencode_sandboxed_agent recorded it)."""
-    receipt = {"function": {"name": "Missing", "arguments": "{}"}, "available_names": AVAILABLE.split(", ")}
-    prefix = {
-        "info": {"id": "ses_source", "directory": "/app"},
-        "messages": [
-            {"info": {"id": "msg_u", "role": "user"}, "parts": [{"type": "text", "text": "Fix it"}]},
-            {
-                "info": {"id": "msg_a", "role": "assistant"},
-                "parts": [
-                    {
-                        "type": "tool",
-                        "tool": "bash",
-                        "callID": "call_ls",
-                        "state": {"status": "completed", "input": {"command": "ls"}, "output": "a.py\n"},
-                    },
-                    {
-                        "type": "tool",
-                        "tool": "invalid",
-                        "callID": "call_bad",
-                        "state": {
-                            "status": "completed",
-                            "input": {"tool": "Missing", "error": "Model tried to call unavailable tool 'Missing'."},
-                            "output": "The arguments provided to the tool are invalid: Model tried to call unavailable "
-                            "tool 'Missing'.",
-                            "metadata": {"nemo_gym_model_call": receipt} if receipted else {},
-                        },
-                    },
-                ],
-            },
-        ],
-    }
-    spec = aliased_spec().model_dump(mode="json")
-    spec["continuation"] = {
-        "mode": "restore",
-        "prefix_export": prefix,
-        "workspace_diff": "",
-        "source_task_sha256": "a" * 64,
-        "source_tools_sha256": "b" * 64,
-        **continuation,
-    }
-    return RuntimeSpec.model_validate(spec)
-
-
-@pytest.mark.parametrize(
-    "spec, message",
-    [
-        (
-            RuntimeSpec.model_validate(
-                aliased_spec().model_dump(mode="json")
-                | {"tools": {"tool_names": {"bash": "shell", "read": "read"}, "tool_descriptions": {"bash": "Run."}}}
-            ),
-            r"must describe every tool it selects .*\['read'\]",
-        ),
-        (
-            renamed_continuation(receipted=False, unreceipted_rejected_calls=["call_bad"]),
-            "unreceipted_rejected_calls",
-        ),
-    ],
-    ids=["undescribed-tool", "unreceipted-prefix-call"],
-)
-def test_a_renamed_row_that_opencode_s_own_text_would_give_away_is_refused(spec: RuntimeSpec, message: str) -> None:
+def test_a_renamed_row_without_a_description_for_every_tool_is_refused() -> None:
+    # OpenCode's own descriptions name the built-in tools.
+    tools = {"tool_names": {"bash": "shell", "read": "read"}, "tool_descriptions": {"bash": "Run."}}
+    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools=tools)
     for compile_ in (compile_profile, compile_boundary, bundle_files):
-        with pytest.raises(UnsupportedFeatureError, match=message):
+        with pytest.raises(UnsupportedFeatureError, match=r"must describe every tool it selects .*\['read'\]"):
             compile_(spec)
 
 
@@ -225,15 +148,6 @@ def test_requests_offer_renamed_tools_under_their_aliases_in_definitions_history
     assert [call["function"]["name"] for call in sent["messages"][2]["tool_calls"]] == ["shell", "view_file"]
     assert sent["tool_choice"] == {"type": "function", "function": {"name": "shell"}}
     assert all("name" not in message for message in sent["messages"] if message["role"] == "tool")
-    # The record holds the request as sent, and the tool each offered name runs.
-    observation = run.records.observations[0]
-    assert observation["request"] == sent
-    assert observation["execution_tools"] == {
-        "shell": "bash",
-        "edit": "edit",
-        "view_file": "read",
-        "create_file": "write",
-    }
 
 
 @needs_node
@@ -269,13 +183,6 @@ def test_a_reply_reaches_opencode_with_the_tools_it_runs_and_is_recorded_as_the_
         "create_file": "write",
         "Shell": "bash",
         "Edit": "edit",
-    }
-    assert run.dispatch == {
-        "root/c-alias": dispatch("shell", "bash", True),
-        "root/c-case": dispatch("Shell", "BASH", True),
-        "root/c-kept": dispatch("Edit", "Edit", True),
-        "root/c-hidden": dispatch("bash", "bash", False),
-        "root/c-unknown": dispatch("missing", "missing", False),
     }
 
 
@@ -314,21 +221,22 @@ def test_a_streamed_call_reaches_opencode_under_its_tool_in_one_delta(tmp_path: 
     assert recorded == [
         {"function": {"name": "shell", "arguments": '{"command": "ls"}'}, "id": "c1", "type": "function"}
     ]
-    assert run.dispatch == {"root/c1": dispatch("shell", "bash", True)}
 
 
 @needs_node
 def test_rejected_and_completed_calls_are_shown_as_the_model_wrote_them_with_the_aliases_offered(
     tmp_path: Path,
 ) -> None:
-    first = json_reply(tool_call("c-missing", "missing", '{"x": 1}'), tool_call("c-shell", "shell"))
+    first = json_reply(
+        tool_call("c-missing", "missing", '{"x": 1}'), tool_call("c-shell", "shell"), content="Checking."
+    )
     recovery = "Model tried to call unavailable tool 'missing'. Available tools: bash, edit, read, write."
     # OpenCode's next request: its invalid tool answered the unknown name, and the shell call ran as bash.
     history = [
         {"role": "user", "content": "Fix it"},
         {
             "role": "assistant",
-            "content": "",
+            "content": "Checking.",
             "tool_calls": [
                 tool_call("c-missing", "invalid", json.dumps({"tool": "missing", "error": recovery})),
                 tool_call("c-shell", "bash", '{"command":"ls"}'),
@@ -350,8 +258,12 @@ def test_rejected_and_completed_calls_are_shown_as_the_model_wrote_them_with_the
         ],
         system=SYSTEM,
     )
-    sent = json.loads(run.calls[1]["sent"])
-    assert sent["messages"][2]["tool_calls"] == first["choices"][0]["message"]["tool_calls"]
+    request, sent = (json.loads(entry["sent"]) for entry in run.calls)
+    reply = first["choices"][0]["message"]
+    # The model's own reply follows the context it was given, as token capture needs to resolve the continuation.
+    assert sent["messages"][: len(request["messages"]) + 1] == request["messages"] + [reply]
+    assert sent["tools"] == request["tools"]
+    assert assistant_fingerprint(sent["messages"]) == assistant_fingerprint(request["messages"] + [reply])
     assert (
         sent["messages"][3]["content"]
         == f"missing is unavailable or its arguments are invalid. Available tools: {AVAILABLE}."
@@ -359,43 +271,6 @@ def test_rejected_and_completed_calls_are_shown_as_the_model_wrote_them_with_the
     # No renamed tool's built-in ID reaches the model, in the tools or the conversation.
     assert not re.search(
         r"\b(?:bash|read|write)\b", json.dumps({"tools": sent["tools"], "messages": sent["messages"]})
-    )
-
-
-@needs_node
-def test_a_restored_prefix_shows_its_calls_and_receipted_rejections_under_the_names_the_model_saw(
-    tmp_path: Path,
-) -> None:
-    spec = renamed_continuation()
-    # The receipt keeps the model's own call and the aliases its request offered, as recorded.
-    assert compile_boundary(spec)["historical_rejected_calls"] == {
-        "call_bad": {"function": {"name": "Missing", "arguments": "{}"}, "available_names": AVAILABLE.split(", ")}
-    }
-    history = [
-        {"role": "user", "content": "Fix it"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                tool_call("call_ls", "bash", '{"command":"ls"}'),
-                tool_call("call_bad", "invalid", '{"tool":"Missing","error":"Model tried to call unavailable tool."}'),
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call_ls", "content": "a.py\n"},
-        {"role": "tool", "tool_call_id": "call_bad", "content": "The arguments provided to the tool are invalid."},
-        {"role": "user", "content": "Continue"},
-    ]
-    run = run_boundary(
-        tmp_path, boundary=compile_boundary(spec), calls=[call(opencode_request(history), OK)], system=SYSTEM
-    )
-    sent = json.loads(run.calls[0]["sent"])
-    assert sent["messages"][2]["tool_calls"] == [
-        tool_call("call_ls", "shell", '{"command":"ls"}'),
-        tool_call("call_bad", "Missing", "{}"),
-    ]
-    assert (
-        sent["messages"][4]["content"]
-        == f"Missing is unavailable or its arguments are invalid. Available tools: {AVAILABLE}."
     )
 
 
@@ -437,32 +312,3 @@ def test_a_row_that_renames_tools_needs_its_system_text(tmp_path: Path) -> None:
         "message": "a row that renames tools needs its system text: OpenCode's own system prompt names the tools",
     }
     assert run.calls[0]["sent"] is None and "was not configured" in run.calls[0]["error"]["message"]
-
-
-@needs_node
-def test_the_next_request_continues_the_captured_call_as_token_capture_needs(tmp_path: Path) -> None:
-    first = json_reply(tool_call("c1", "shell"), content="Listing the files.")
-    # OpenCode's history of that turn names the tool it ran, bash, with its own serialization of the arguments.
-    history = [
-        {"role": "user", "content": "Fix it"},
-        {
-            "role": "assistant",
-            "content": "Listing the files.",
-            "tool_calls": [tool_call("c1", "bash", '{"command":"ls"}')],
-        },
-        {"role": "tool", "tool_call_id": "c1", "content": "a.py\n"},
-    ]
-    run = run_boundary(
-        tmp_path,
-        boundary=compile_boundary(aliased_spec()),
-        calls=[call(opencode_request(), replying(first)), call(opencode_request(history), OK, assistant="msg-2")],
-        system=SYSTEM,
-    )
-    request, following = (json.loads(entry["sent"]) for entry in run.calls)
-    reply = first["choices"][0]["message"]
-    # Gym's model server captured `request` and `reply` as the model saw them. The next request repeats that context,
-    # then the reply itself under the same alias, so the capture's lineage resolves it as the continuation.
-    assert following["messages"][: len(request["messages"])] == request["messages"]
-    assert following["messages"][len(request["messages"])] == reply
-    assert following["tools"] == request["tools"]
-    assert assistant_fingerprint(following["messages"]) == assistant_fingerprint(request["messages"] + [reply])

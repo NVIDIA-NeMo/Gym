@@ -19,7 +19,7 @@ from resources_servers.agentic_if.opencode_bundle.boundary import (
 from resources_servers.agentic_if.opencode_bundle.profile import compile_plants, compile_profile, profile_sha256
 from resources_servers.agentic_if.task_variants.catalog import BUILTIN_TOOLS
 from resources_servers.agentic_if.task_variants.interfaces import installed_interfaces
-from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
+from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec, ToolEvent
 
 from .specs import SPECS, continuation_spec, private_like_spec, unrestricted_spec
 
@@ -85,28 +85,16 @@ def test_plants_are_the_events_as_the_profile_plugin_reads_them() -> None:
 
 
 def test_replaced_and_appended_results_are_plants_and_leave_the_profile_as_the_failures_alone_compile_it() -> None:
-    fail = {
-        "id": "push",
-        "match": {"tool": "bash", "arg": {"field": "command", "regex": "^git push"}},
-        "nth": 2,
-        "action": "fail",
-        "text": "Blocked: pushing is not allowed here.",
-    }
+    failures = private_like_spec()
     replace = {"id": "build-down", "match": {"tool": "bash"}, "nth": 3, "action": "replace", "text": "Error: offline."}
-    append = {
-        "id": "disk",
-        "match": {"tool": "read", "arg": {"field": "filePath", "regex": "\\.py$"}},
-        "action": "append",
-        "text": "NOTICE: the disk is 95% full.",
-    }
-    tools = {"tool_names": {"read": "read", "bash": "bash"}}
-    spec = RuntimeSpec(harness="opencode", task_backend="swe", tools=tools, events=[fail, replace, append])
-    # The plugin reads each event's action from plants.json.
-    assert compile_plants(spec) == [fail, replace, append | {"nth": 1}]
-    # Only a failure's text is shown as an error; the profile gets no new key and no new hash input.
-    profile = compile_profile(spec)
-    assert profile["literal_errors"] == ["Blocked: pushing is not allowed here."]
-    assert profile == compile_profile(RuntimeSpec(harness="opencode", task_backend="swe", tools=tools, events=[fail]))
+    append = {"id": "disk", "match": {"tool": "read"}, "nth": 1, "action": "append", "text": "NOTICE: disk 95% full."}
+    spec = failures.model_copy(
+        update={"events": [*failures.events, *map(ToolEvent.model_validate, (replace, append))]}
+    )
+    # The plugin reads each event's action from plants.json; only a failure's text is shown as an error, so the profile
+    # gets no new key and no new hash input.
+    assert compile_plants(spec)[1:] == [replace, append]
+    assert compile_profile(spec) == compile_profile(failures)
 
 
 def test_boundary_of_a_private_shaped_row() -> None:

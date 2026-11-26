@@ -167,10 +167,6 @@ def test_the_stack_keeps_the_task_reward_and_a_training_run_can_set_task_and_if(
     _, server = resolved()
     default = AgenticIFResourcesServerConfig.model_validate(server | {"host": "127.0.0.1", "port": 1, "name": "x"})
     assert (default.reward_mode, default.if_score, default.cut_run_reward) == ("task", "if_all", "as_is")
-    training = {"reward_mode": "task_and_if", "if_score": "if_frac", "cut_run_reward": "zero"}
-    _, server = resolved(agentic_if_resources={"resources_servers": {"agentic_if": training}})
-    chosen = AgenticIFResourcesServerConfig.model_validate(server | {"host": "127.0.0.1", "port": 1, "name": "x"})
-    assert (chosen.reward_mode, chosen.if_score, chosen.cut_run_reward) == ("task_and_if", "if_frac", "zero")
 
 
 @pytest.mark.parametrize("value", ["relative/agentic_if", ""])

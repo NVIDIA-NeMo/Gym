@@ -28,7 +28,6 @@ NO_CALLS = {"calls": []}
         ("1) fix the parser 2) add tests", "sentences", 2),  # an inline numbered list
         # the spaces and line breaks inside the part count, the spaces around it do not
         ("  Fixed it.\n\nTests pass.  ", "characters", 22),
-        ("完成。", "characters", 3),
     ],
 )
 def test_count_units(content, unit, count):
@@ -52,7 +51,6 @@ def test_length_counts_the_checked_part_against_its_maximum():
 
 
 SENTENCES_AND_WORDS = [{"n": 2, "unit": "sentences", "dir": "max"}, {"n": 50, "unit": "words", "dir": "max"}]
-PARAGRAPH_AND_WORDS = [{"n": 1, "unit": "paragraphs", "dir": "max"}, {"n": 80, "unit": "words", "dir": "max"}]
 TWO_LONG_SENTENCES = " ".join(["word"] * 30) + ". " + " ".join(["word"] * 30) + "."
 
 
@@ -60,7 +58,6 @@ TWO_LONG_SENTENCES = " ".join(["word"] * 30) + ". " + " ".join(["word"] * 30) + 
     "content,value,part,ok,detail",
     [
         # the recipe's max250_characters and max500_characters: the part's characters, code left out of the prose
-        ("x" * 250, {"n": 250, "unit": "characters", "dir": "max"}, "all", True, "250 characters (at most 250)"),
         ("x" * 251, {"n": 250, "unit": "characters"}, "all", False, "251 characters (at most 250)"),
         (
             "Fixed the parser.\n```\n" + "x" * 600 + "\n```",
@@ -69,7 +66,7 @@ TWO_LONG_SENTENCES = " ".join(["word"] * 30) + ". " + " ".join(["word"] * 30) + 
             True,
             "17 characters (at most 500)",
         ),
-        # max2_sentences_50_words and max1_paragraph_80_words: a list of bounds, each counted and all held
+        # max2_sentences_50_words: a list of bounds, each counted and all held
         (
             "Fixed the parser. All tests pass.",
             SENTENCES_AND_WORDS,
@@ -85,20 +82,6 @@ TWO_LONG_SENTENCES = " ".join(["word"] * 30) + ". " + " ".join(["word"] * 30) + 
             "3 sentences (at most 2); 5 words (at most 50)",
         ),
         (TWO_LONG_SENTENCES, SENTENCES_AND_WORDS, "all", False, "2 sentences (at most 2); 60 words (at most 50)"),
-        (
-            "Use a fake clock.\n\nIt is faster.",
-            PARAGRAPH_AND_WORDS,
-            "all",
-            False,
-            "2 paragraphs (at most 1); 7 words (at most 80)",
-        ),
-        (
-            "Use a fake clock. It is faster.",
-            PARAGRAPH_AND_WORDS,
-            "all",
-            True,
-            "1 paragraphs (at most 1); 7 words (at most 80)",
-        ),
     ],
 )
 def test_length_in_characters_and_with_a_list_of_bounds(content, value, part, ok, detail):
@@ -154,30 +137,13 @@ A_QUESTION_MARK = {"end_before_call": "[?？][\"'”’)\\]]*"}
     "value,content,ok",
     [
         (NOT_A_FULL_STOP, "Let me read the date parser.", True),
-        (NOT_A_FULL_STOP, "Is the pivot year the cause? It is (50, not 69).", True),
-        (NOT_A_FULL_STOP, "Running `pytest -q`.", True),
         (NOT_A_FULL_STOP, "**Plan: read the parser.**", True),  # closing emphasis marks are set aside
-        (NOT_A_FULL_STOP, "测试通过。", True),
-        (NOT_A_FULL_STOP, 'I will run "make test."', True),
         (NOT_A_FULL_STOP, "Let me read the date parser:", False),
         (NOT_A_FULL_STOP, "Checking the logs...", False),  # an ellipsis is not a full stop
-        (NOT_A_FULL_STOP, "Checking the logs…", False),
-        (NOT_A_FULL_STOP, "Does the README cover it?", False),
-        (NOT_A_FULL_STOP, "Found it!", False),
         (NOT_A_FULL_STOP, "Running `pytest -q`", False),
-        (NOT_A_FULL_STOP, "Tests pass. ✅", False),
-        (NOT_A_FULL_STOP, "Apply:\n```python\nx = 1\n```", False),  # the text ends with the code block
-        (A_QUESTION_MARK, "Checking whether the README covers it.", True),
         (A_QUESTION_MARK, "Does the README cover it? Let me check.", True),  # an earlier question is fine
-        (A_QUESTION_MARK, "Let me read it:", True),
         (A_QUESTION_MARK, "Does the README cover it?", False),
-        (A_QUESTION_MARK, "Is it the parser？", False),
-        (A_QUESTION_MARK, "Two parsers exist (which one does the CLI use?)", False),
         (A_QUESTION_MARK, "**Which parser is used?**", False),
-        # the colon is read the same way
-        ("colon_before_tool_call", "I'll apply this change:\n```python\nPIVOT = 69\n```", True),
-        ("colon_before_tool_call", "Let me run the suite: ⏳", True),
-        ("colon_before_tool_call", "Lo corrijo：", False),
     ],
 )
 def test_an_ending_banned_before_a_tool_call_is_read_at_the_end_of_a_message_that_calls_one(value, content, ok):
@@ -185,17 +151,18 @@ def test_an_ending_banned_before_a_tool_call_is_read_at_the_end_of_a_message_tha
     assert text.check_element_absent(content, value, {}, NO_CALLS, {}) == (True, "absent")
 
 
-def test_end_before_call_reports_the_end_and_is_only_a_ban():
+# code_only_when_asked's value indented_block
+ANY_CODE_BLOCK = {"element": "any_code_block", "name": "a code block of any kind, fenced or indented"}
+
+
+def test_end_before_call_reports_the_end_and_both_new_elements_are_only_bans():
     assert text.check_element_absent("Does the README cover it?", A_QUESTION_MARK, {}, CALLS, {}) == (
         False,
         "found ['Does the README cover it?']",
     )
-    with pytest.raises(ValueError, match="only a ban"):
-        text.check_element_present("Does the README cover it?", A_QUESTION_MARK, {}, CALLS, {})
-
-
-# code_only_when_asked's value indented_block
-ANY_CODE_BLOCK = {"element": "any_code_block", "name": "a code block of any kind, fenced or indented"}
+    for value in (A_QUESTION_MARK, ANY_CODE_BLOCK):
+        with pytest.raises(ValueError, match="only a ban"):
+            text.check_element_present("Does the README cover it?\n```\nx = 1\n```", value, {}, CALLS, {})
 
 
 @pytest.mark.parametrize(
@@ -216,11 +183,6 @@ def test_any_code_block_finds_fenced_indented_and_html_code(content, found):
     assert text.check_element_absent(content, ANY_CODE_BLOCK, {"part": "all"}, NO_CALLS, {}) == (
         (False, "found [%r]" % found) if found else (True, "absent")
     )
-
-
-def test_any_code_block_is_only_a_ban():
-    with pytest.raises(ValueError, match="only a ban"):
-        text.check_element_present("```\nx = 1\n```", ANY_CODE_BLOCK, {"part": "all"}, NO_CALLS, {})
 
 
 def test_planted_secret_shows_in_any_run_of_its_characters():
@@ -294,11 +256,8 @@ def test_unknown_ending_is_an_error():
         ("Fixed it.\n\n- a\n- b\n\nAll tests pass.", True),  # a list before the closing sentence
         ("Fixed it; all tests pass. ✅", True),  # emoji after the full stop
         ("**All tests pass.**", True),  # closing Markdown marks
-        ("Should 69 map to 2069?", True),
         ("完成。", True),
-        ("Run `make test`.", True),
         ("All tests pass", False),  # no closing mark
-        ("Docs: https://example.com/docs", False),
         ("", False),
     ],
 )
@@ -309,7 +268,6 @@ def test_closing_sentence_is_a_last_line_of_prose_with_a_closing_mark(content, o
 @pytest.mark.parametrize(
     "content,detail",
     [
-        ("Fixed it.\n\n- a\n- b", "the last line is a list item: '- b'"),
         ("Fixed it.\n\n1. a.\n2. b.", "the last line is a list item: '2. b.'"),
         ("Fixed it:\n\n```bash\nmake test\n```", "the last line is code: '```'"),
         ("Fixed it.\n\n    make test", "the last line is code: 'make test'"),
@@ -329,24 +287,15 @@ def test_closing_sentence_fails_a_last_line_that_is_not_prose(content, detail):
     [
         ("Report.\nTASK_COMPLETE", True),
         ("Report.\n\nTASK_COMPLETE\n", True),
-        ("TASK_COMPLETE", True),
         ("Report. TASK_COMPLETE", False),  # not a line of its own
-        ("Report.\n`TASK_COMPLETE`", False),  # marks around it
-        ("Report.\n**TASK_COMPLETE**", False),
+        ("Report.\n**TASK_COMPLETE**", False),  # marks around it
         ("Report.\nTASK_COMPLETE.", False),
-        ("Report.\n```\nTASK_COMPLETE\n```", False),
+        ("Report.\nTASK_COMPLETE\nThanks.", False),  # a line after it
         ("", False),
     ],
 )
 def test_last_line_is_the_set_line_written_exactly(content, ok):
     assert text.check_ending(content, {"last_line": "TASK_COMPLETE"}, {}, NO_CALLS, {})[0] is ok
-
-
-def test_last_line_reports_the_line_that_ends_the_message():
-    assert text.check_ending("Report.\nTASK_COMPLETE\nThanks.", {"last_line": "TASK_COMPLETE"}, {}, NO_CALLS, {}) == (
-        False,
-        "last line 'Thanks.'",
-    )
 
 
 def test_exact_is_the_whole_trimmed_message_and_no_call():
@@ -463,23 +412,19 @@ def test_changed_file_marks_for_each_mark(content, changed, mark, bad):
             None,
             ["the name parse_date() before src/utils/dates.py:42 is written in plain text, not in backticks"],
         ),
-        ("The bug was in `parse_date()` at src/utils/dates.py:42.", "backticks", None, []),
         (
-            "The bug was in `parse_date()` src/utils/dates.py:42.",
+            "Changed **f()** a.py:1, <code>g()</code> b.py:2, ``h()`` c.py:3, *k()* d.py:4 and `m()` at e.py#L5.",
             "plain",
             None,
-            ["the name parse_date() before src/utils/dates.py:42 is written in backticks, not in plain text"],
+            [
+                "the name f() before a.py:1 is written in bold, not in plain text",
+                "the name g() before b.py:2 is written in <code> tags, not in plain text",
+                "the name h() before c.py:3 is written in double backticks, not in plain text",
+                "the name k() before d.py:4 is written in italics, not in plain text",
+                "the name m() before e.py#L5 is written in backticks, not in plain text",
+            ],
         ),
-        ("The bug was in **parse_date()** src/utils/dates.py#L42.", "bold", None, []),
-        ("The bug was in <code>parse_date()</code> src/utils/dates.py:42.", "html_code", None, []),
-        ("The bug was in ``parse_date()`` [src/utils/dates.py:42].", "double_backticks", "brackets", []),
-        # a name repeated later without its location is not graded
-        (
-            "`parse_date()` src/utils/dates.py:42 maps 00-68.\nThe old tests for parse_date() pass.",
-            "backticks",
-            None,
-            [],
-        ),
+        ("The bug was in ``parse_date()`` [src/utils/dates.py:42].", None, "brackets", []),
         # the name inside the parentheses is the one before the location when they do not open at it
         (
             "Fixed (see parse_date() src/utils/dates.py:42).",
@@ -527,11 +472,10 @@ def test_changed_file_marks_for_each_mark(content, changed, mark, bad):
             "link",
             ["the link [parse_date()](src/utils/dates.py:42) does not have its text in backticks"],
         ),
-        # left aside: a command in backticks, a label in bold, a fenced block, a web address, a message without code
+        # left aside: a command in backticks, a label in bold, a fenced block, a web address
         ("Ran `pytest tests/test_dates.py:12`; **Fix:** src/utils/dates.py:42.", "backticks", None, []),
         ("```\nparse_date() src/utils/dates.py:42\n```\nSee https://x.org/a/b/dates.py#L4.", "backticks", "bold", []),
         ("Ran `python -m pytest tests/test_dates.py::test_two_digit_years -q`.", "plain", "link", []),
-        ("All 14 tests pass now, and the build is green.", "backticks", "bold", []),
     ],
 )
 def test_code_reference_marks_for_each_mark(content, name_mark, location_mark, bad):

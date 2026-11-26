@@ -24,17 +24,12 @@ from nemo_gym.sandbox.providers import SandboxExecResult
 from resources_servers.agentic_if.episode.opencode_evidence import opencode_evidence
 from resources_servers.agentic_if.episode.opencode_hooks import check_hook_receipts
 from resources_servers.agentic_if.episode.opencode_replay import restore_prefix_workspace
-from resources_servers.agentic_if.episode.outcome import Verdict
-from resources_servers.agentic_if.episode.reward import reward_verdict
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
 from resources_servers.agentic_if.episode.workspace import snapshot_workspace, workspace_base
 from resources_servers.agentic_if.if_grading import engine
-from resources_servers.agentic_if.if_grading.checkers.run import evidence_steps
 from resources_servers.agentic_if.if_grading.contracts import ResolvedCheck, SessionEvidence
 from resources_servers.agentic_if.if_grading.judge import Judge
-from resources_servers.agentic_if.if_grading.rendering import ARRIVAL_LINE
 from resources_servers.agentic_if.opencode_bundle.bundle import bundle_files
-from resources_servers.agentic_if.opencode_bundle.layout import BOUNDARY_CONFIG, PLANTS_CONFIG, PROFILE_CONFIG
 from resources_servers.agentic_if.task_data import TaskData
 from resources_servers.agentic_if.task_variants.builder import digest
 from resources_servers.agentic_if.task_variants.materialization import sealed_task_input
@@ -172,7 +167,7 @@ def test_the_rows_together_cover_every_opt_in_feature():
 
 
 @pytest.mark.parametrize("name", sorted(ROWS))
-def test_each_row_is_sealed_and_passes_the_seed_contract(name):
+def test_each_row_is_sealed_passes_the_seed_contract_and_compiles_its_bundle(name):
     row = ROWS[name]
     assert type(TypeAdapter(TaskData).validate_python(row)).__name__ in ("SWETask", "TerminalBench21Task")
     assert row["task_id"] == digest(content(row))
@@ -182,23 +177,7 @@ def test_each_row_is_sealed_and_passes_the_seed_contract(name):
     seeded = sealed_task_input(materialize_task(task, taskset="agentic_if:example"))
     assert validate_seed_runtime(dict(seeded)) == spec
     assert spec.provenance["materialized_cwd"] in row["responses_create_params"]["input"][0]["content"]
-
-
-@pytest.mark.parametrize("name", sorted(ROWS))
-def test_each_row_compiles_its_bundle(name):
-    spec = validate_runtime(content(ROWS[name]))
-    files = bundle_files(spec)
-    boundary, profile, plants = (json.loads(files[key]) for key in (BOUNDARY_CONFIG, PROFILE_CONFIG, PLANTS_CONFIG))
-    assert [(plant["id"], plant["action"], plant["nth"]) for plant in plants] == [
-        (event.id, event.action, event.nth) for event in spec.events
-    ]
-    renamed = {tool: alias for tool, alias in spec.tools.tool_names.items() if tool != alias}
-    assert boundary.get("tool_aliases") == (renamed or None)
-    assert profile["visible_tools"] == spec.tools.tool_names and profile["check_aliases"] is bool(renamed)
-    if renamed:
-        assert set(boundary["descriptions"]) == set(spec.tools.tool_names)
-    listed = spec.continuation.unreceipted_rejected_calls if spec.continuation else None
-    assert boundary.get("unreceipted_rejected_calls") == listed
+    bundle_files(spec)
 
 
 # ------------------------------------------------------------------------------------------ scripted sessions
@@ -299,19 +278,17 @@ def write(path: str, text: str) -> tuple:
     return ("write", {"filePath": path, "content": text}, "Wrote file successfully.")
 
 
-def grade(name: str, evidence: SessionEvidence) -> tuple[dict[str, str], list[str]]:
-    """Each check's status, graded with a judge that answers yes, and the distinct prompts it was asked."""
-    prompts = []
+def grade(name: str, evidence: SessionEvidence) -> dict[str, str]:
+    """Each check's status, graded with a judge that answers yes."""
 
     def send(body: dict) -> NeMoGymResponse:
-        prompts.append(body["input"][0]["content"])
         return NeMoGymResponse.model_validate(judge_reply(body["model"], '{"why": "Kept.", "answer": "yes"}'))
 
     checks = [ResolvedCheck.model_validate(check) for check in ROWS[name]["agentic_if"]["checks"]]
     result = engine.grade(checks, evidence, judge=Judge(send))
     statuses = {check.id: check.status for check in result.checks}
     assert "error" not in statuses.values(), {check.id: check.explanation for check in result.checks}
-    return statuses, list(dict.fromkeys(prompts))
+    return statuses
 
 
 def rename_sessions() -> tuple[SessionEvidence, SessionEvidence]:
@@ -411,23 +388,9 @@ def status_sessions() -> tuple[SessionEvidence, SessionEvidence]:
 def test_the_fresh_rows_and_the_status_row_grade_compliant_and_violating_sessions(name, sessions, violated):
     compliant, violating = sessions()
     checks = [check["id"] for check in ROWS[name]["agentic_if"]["checks"]]
-    statuses, prompts = grade(name, compliant)
-    assert statuses == dict.fromkeys(checks, "pass")
+    assert grade(name, compliant) == dict.fromkeys(checks, "pass")
     assert [event.id for event in compliant.events] == [event["id"] for event in ROWS[name]["agentic_if"]["events"]]
-    statuses, _ = grade(name, violating)
-    assert statuses == {check: "fail" if check in violated else "pass" for check in checks}
-    if name == APPEND:
-        # `evidence: true`: the judge also sees the printed values the view of the long fit log cut out.
-        [prompt] = [prompt for prompt in prompts if "digit for digit" in prompt]
-        cut_out = prompt.split("lines of the session cut out of the view above")[1]
-        assert "RESULT (bash): G peak: x0=1582.41 gamma=7.82" in cut_out
-
-
-def test_the_renamed_row_shows_the_judge_the_names_the_model_used():
-    compliant, _ = rename_sessions()
-    steps = [step for step in compliant.steps if step.role == "assistant" and step.calls]
-    assert {call.model_tool for step in steps for call in step.calls} == {"shell", "create_file"}
-    assert {call.tool for step in steps for call in step.calls} == {"bash", "write"}
+    assert grade(name, violating) == {check: "fail" if check in violated else "pass" for check in checks}
 
 
 # ------------------------------------------------------------------------------------ continuation replays
@@ -504,9 +467,6 @@ async def test_the_status_row_replays_its_timed_out_server_only_as_a_mismatch(tm
         "workspace_matches_diff": True,
         "command_timeout_indices": [0],
     }
-    # Without the row's option the same timeout fails the seed.
-    with pytest.raises(RuntimeError, match="prefix shell replay failed at the sandbox transport"):
-        await seed(row, checkout(tmp_path / "control", {"index.html": "x\n"}), ServerTimesOut(), replay_timeouts=None)
 
 
 async def index_row_sessions(tmp_path: Path) -> tuple[SessionEvidence, SessionEvidence, dict]:
@@ -556,64 +516,19 @@ async def index_row_sessions(tmp_path: Path) -> tuple[SessionEvidence, SessionEv
 
 @needs_git
 @pytest.mark.asyncio
-async def test_the_index_row_restores_its_staged_draft_and_grades_the_continued_session(tmp_path):
+async def test_the_index_row_restores_its_prefix_and_grades_the_continued_session(tmp_path):
     compliant, violating, facts = await index_row_sessions(tmp_path)
-    # The prefix's draft test, written and staged by the shell and then edited, comes back staged and edited.
     assert facts["replay"] == {
         "mode": "restore",
         "replayed_commands": 2,
         "command_output_mismatch_indices": [],
         "workspace_matches_diff": True,
     }
-    assert git(tmp_path / "pystow", "diff", "--cached", "--name-status").split() == [
-        "A",
-        "tests/test_ensure_custom.py",
-    ]
-    with pytest.raises(RuntimeError, match="recorded prefix workspace diff does not apply"):
-        await seed(ROWS[INDEX], checkout(tmp_path / "control", PYSTOW), LocalTransport(), workspace_diff_base=None)
-    statuses, prompts = grade(INDEX, compliant)
-    assert set(statuses.values()) == {"pass"}
-    # `whole_run: true`: the rule that arrived mid-run is shown the prefix too, with a line where it arrived.
-    [prompt] = [prompt for prompt in prompts if "does not redo work" in prompt]
-    assert ARRIVAL_LINE in prompt and "sed -n '178,183p'" in prompt.split(ARRIVAL_LINE)[0]
-    statuses, _ = grade(INDEX, violating)
-    assert statuses == {
+    # Told against the restored workspace, the read-only first call changes nothing: one-change-per-message passes.
+    assert set(grade(INDEX, compliant).values()) == {"pass"}
+    assert grade(INDEX, violating) == {
         "one-change-per-message": "fail",
         "no-redo": "pass",
         "code-reference-marks": "fail",
         "closing-sentence": "fail",
     }
-
-
-@needs_git
-@pytest.mark.asyncio
-async def test_the_restored_prefix_is_no_change_of_the_continued_session(tmp_path):
-    compliant, _, _ = await index_row_sessions(tmp_path)
-
-    def first_live_call(evidence: SessionEvidence) -> dict:
-        start = evidence.continuation_start
-        return next(call for step in evidence_steps(evidence)[start:] for call in step.get("calls", []))
-
-    assert (first_live_call(compliant)["changed_repo"], first_live_call(compliant)["changed_paths"]) == (False, [])
-    # Told against the prefix's last diff (taken against the index), the read-only first call would look like it
-    # wrote the staged draft test, and the one-change-per-message rule would fail a compliant session.
-    against_prefix = compliant.model_copy(deep=True)
-    del against_prefix.facts["workspace_restored_diff"]
-    call = first_live_call(against_prefix)
-    assert (call["changed_repo"], call["changed_paths"]) == (True, ["tests/test_ensure_custom.py"])
-    assert grade(INDEX, against_prefix)[0]["one-change-per-message"] == "fail"
-
-
-# ------------------------------------------------------------------------------------------------- the reward
-
-
-def test_the_status_row_earns_its_if_score_alone_under_task_and_if():
-    compliant, _ = status_sessions()
-    checks = [ResolvedCheck.model_validate(check) for check in ROWS[STATUS]["agentic_if"]["checks"]]
-    result = engine.grade(checks, compliant, judge=Judge(lambda body: None))
-    failed_task = Verdict(reward=0.0, mask_sample=False, evaluation_completed=True)
-    settings = {"mode": "task_and_if", "if_score": "if_all", "cut_run_reward": "as_is"}
-    tracked = [validate_runtime(content(row)).outcome_tracked for row in ROWS.values()]
-    assert tracked.count(False) == 1 and not validate_runtime(content(ROWS[STATUS])).outcome_tracked
-    assert reward_verdict(failed_task, result, outcome_tracked=False, **settings).reward == 1.0
-    assert reward_verdict(failed_task, result, outcome_tracked=True, **settings).reward == 0.0

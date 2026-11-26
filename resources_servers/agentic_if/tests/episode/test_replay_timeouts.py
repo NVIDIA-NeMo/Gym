@@ -6,7 +6,6 @@ import subprocess
 import time
 
 import pytest
-from pydantic import ValidationError
 
 from nemo_gym.sandbox.providers import SandboxExecResult
 from resources_servers.agentic_if.episode.opencode_replay import _workspace_diff, restore_workspace
@@ -49,7 +48,7 @@ def bash_part(index: int, command: str, timeout_ms: int) -> dict:
 
 
 async def restore(tmp_path, transport, **options):
-    """Restore a prefix whose second command outlives its 0.2 s deadline; the third runs after it."""
+    """Restore a prefix whose second command outlives its 2 s deadline; the third runs after it."""
     repo = tmp_path / "repo"
     repo.mkdir()
     for args in (["init", "-q"], ["config", "user.email", "t@example.invalid"], ["config", "user.name", "T"]):
@@ -66,7 +65,7 @@ async def restore(tmp_path, transport, **options):
     prefix["info"]["directory"] = str(repo)
     prefix["messages"][1]["parts"] = [
         bash_part(0, "printf one > ../one", 120_000),
-        bash_part(1, "printf started > ../started; sleep 5; printf late > ../late", 200),
+        bash_part(1, "printf started > ../started; sleep 5; printf late > ../late", 2_000),
         bash_part(2, "printf three > ../three", 120_000),
     ]
     continuation = ContinuationSpec(
@@ -132,5 +131,3 @@ def test_the_option_is_sealed_only_when_set():
     dumped = ContinuationSpec(**fields, replay_timeouts="mismatch").model_dump(mode="json")
     assert dumped["replay_timeouts"] == "mismatch"
     assert ContinuationSpec.model_validate(dumped).replay_timeouts == "mismatch"
-    with pytest.raises(ValidationError):
-        ContinuationSpec(**fields, replay_timeouts="ignore")

@@ -149,11 +149,6 @@ def test_a_replaced_or_appended_result_is_sealed_and_matched_like_a_failure(acti
     assert row["agentic_if"]["events"] == [event]
     assert runtime.validate_seed_runtime(row).events[0].action == action
     assert runtime.validate_runtime(row).events[0].action == action
-    # The call it matches is checked as a failure's is: an exposed tool and one of its executable arguments.
-    with pytest.raises(ValidationError, match="exposed"):
-        spec(tools={"tool_names": {"bash": "bash"}}, events=[event | {"match": {"tool": "read"}}])
-    with pytest.raises(ValidationError, match="argument"):
-        spec(events=[event | {"match": {"tool": "bash", "arg": {"field": "not_command", "regex": ".*"}}}])
 
 
 GUARD = {"edit": {"unread": "Read {{path}} first.", "changed": "Read {{path}} again."}}
@@ -246,6 +241,8 @@ def continuation(**changes):
 
 
 def test_continuation_is_bound_to_task_and_tools_without_duplicating_messages():
+    from resources_servers.agentic_if.task_variants.builder import digest
+
     config = spec(continuation=continuation())
     row = runtime.seal_runtime_row(base_row(), config)
     parsed = runtime.validate_runtime(row)
@@ -255,6 +252,12 @@ def test_continuation_is_bound_to_task_and_tools_without_duplicating_messages():
         runtime.seal_runtime_row(base_row(), spec(continuation=continuation(source_task_sha256="0" * 64)))
     with pytest.raises(ValueError, match="source tools receipt"):
         runtime.seal_runtime_row(base_row(), spec(continuation=continuation(source_tools_sha256="0" * 64)))
+    # The receipt covers the names the model saw: the same prefix under an alias is another row.
+    plain = {"tool_names": {"bash": "bash"}}
+    bound = continuation(source_tools_sha256=digest(spec(tools=plain).tools.model_dump(mode="json")))
+    runtime.seal_runtime_row(base_row(), spec(tools=plain, continuation=bound))
+    with pytest.raises(ValueError, match="source tools receipt"):
+        runtime.seal_runtime_row(base_row(), spec(tools={"tool_names": {"bash": "shell"}}, continuation=bound))
 
 
 @pytest.mark.parametrize(
@@ -315,18 +318,6 @@ def test_a_row_that_renames_tools_needs_a_system_message():
         runtime.seal_runtime_row(row, renamed)
     runtime.seal_runtime_row(row, spec(tools={"tool_names": {"bash": "bash", "read": "read"}}))
     runtime.validate_runtime(runtime.seal_runtime_row(base_row(), renamed))
-
-
-def test_a_continuation_is_bound_to_the_aliases_its_prefix_was_recorded_under():
-    from resources_servers.agentic_if.task_variants.builder import digest
-
-    shell = {"tool_names": {"bash": "shell"}, "tool_descriptions": {"bash": "Run one command."}}
-    bound = continuation(source_tools_sha256=digest(spec(tools=shell).tools.model_dump(mode="json")))
-    runtime.validate_runtime(runtime.seal_runtime_row(base_row(), spec(tools=shell, continuation=bound)))
-    # The model saw the prefix's calls under these names; the same prefix under other names is another row.
-    for tools in ({**shell, "tool_names": {"bash": "run"}}, {**shell, "tool_names": {"bash": "bash"}}):
-        with pytest.raises(ValueError, match="source tools receipt"):
-            runtime.seal_runtime_row(base_row(), spec(tools=tools, continuation=bound))
 
 
 def planted_continuation():

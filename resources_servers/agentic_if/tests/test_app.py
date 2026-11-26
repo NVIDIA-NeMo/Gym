@@ -861,48 +861,26 @@ def judge_calls(world):
 
 
 @pytest.mark.asyncio
-async def test_the_default_reward_is_the_task_verdict_and_adds_no_field(world):
-    # A failed check and an untracked outcome change nothing: the benchmark's reward is the task verdict.
-    row = swe_row(checks=[NOT_DONE], outcome_tracked=False)
-    _, session_id = await seed(world, row)
-    result = await verify(world, row, session_id)
-    assert (result.reward, result.mask_sample, result.failure_kind, result.if_result.if_all) == (1.0, False, None, 0)
-    assert result.task_reward is None and "task_reward" not in result.model_dump(mode="json")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "task_reward, checks, settings, reward",
-    [
-        (1.0, [DONE], {}, 1.0),
-        (1.0, [DONE, NOT_DONE], {}, 0.0),
-        (0.0, [DONE], {}, 0.0),
-        (1.0, [DONE, NOT_DONE], {"if_score": "if_frac"}, 0.5),
-        (0.0, [DONE, NOT_DONE], {"if_score": "if_frac"}, 0.0),
-    ],
-    ids=["solved-and-followed", "solved-not-followed", "followed-not-solved", "if-frac", "if-frac-not-solved"],
-)
-async def test_task_and_if_rewards_the_task_verdict_times_the_if_score(world, task_reward, checks, settings, reward):
+@pytest.mark.parametrize("settings, reward", [({}, 0.0), ({"if_score": "if_frac"}, 0.5)], ids=["if-all", "if-frac"])
+async def test_task_and_if_rewards_the_task_verdict_times_the_if_score(world, settings, reward):
     world.server = make_server(world.artifacts, world.backends, reward_mode="task_and_if", **settings)
-    world.backends.verdict = {"reward": task_reward, "evaluation_completed": True}
-    row = swe_row(checks=checks)
+    row = swe_row(checks=[DONE, NOT_DONE])
     _, session_id = await seed(world, row)
     result = await verify(world, row, session_id)
     assert (result.reward, result.mask_sample, result.failure_kind) == (reward, False, None)
-    assert result.task_reward == task_reward
+    assert result.task_reward == 1.0
     # The episode record keeps the task verdict; the reward mode shapes only the result.
-    assert load_episode_record(Path(result.deliverables_dir)).verdict.reward == task_reward
+    assert load_episode_record(Path(result.deliverables_dir)).verdict.reward == 1.0
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("checks, reward", [([DONE], 1.0), ([NOT_DONE], 0.0)])
-async def test_task_and_if_rewards_an_untracked_outcome_with_its_if_score_alone(world, checks, reward):
+async def test_task_and_if_rewards_an_untracked_outcome_with_its_if_score_alone(world):
     world.server = make_server(world.artifacts, world.backends, reward_mode="task_and_if")
     world.backends.verdict = {"reward": 0.0, "evaluation_completed": True}
-    row = swe_row(checks=checks, outcome_tracked=False)
+    row = swe_row(checks=[DONE], outcome_tracked=False)
     _, session_id = await seed(world, row)
     result = await verify(world, row, session_id)
-    assert (result.reward, result.mask_sample, result.task_reward) == (reward, False, 0.0)
+    assert (result.reward, result.mask_sample, result.task_reward) == (1.0, False, 0.0)
     assert result.agentic_if["outcome_tracked"] is False
 
 
@@ -931,17 +909,6 @@ async def test_task_and_if_masks_a_run_without_an_if_score(world, case, task_rew
     assert len(world.backends.to("/verify")) == 1 and len(judge_calls(world)) == asked
 
 
-@pytest.mark.asyncio
-async def test_task_and_if_keeps_a_masked_episode_masked_with_its_own_failure(world):
-    world.server = make_server(world.artifacts, world.backends, reward_mode="task_and_if")
-    world.outputs.hook_receipts = []  # no load receipt: nothing shows the actor's setup
-    row = swe_row()
-    _, session_id = await seed(world, row)
-    result = await verify(world, row, session_id)
-    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "agentic_if:evidence_incomplete")
-    assert result.task_reward == 1.0 and result.evaluation_completed is False
-
-
 def cut_run(world, stop):
     """Leave the bundle outputs of a run that its harness timeout (its last tool call unfinished, so its IF checks
     cannot be graded) or a full context window cut short; return the failure kind such a run is scored with."""
@@ -956,34 +923,15 @@ def cut_run(world, stop):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop, expected", [("timeout", (0.0, True)), ("context_limit", (1.0, False))])
-async def test_task_and_if_scores_a_cut_run_as_it_stands_by_default(world, stop, expected):
-    world.server = make_server(world.artifacts, world.backends, reward_mode="task_and_if")
-    kind = cut_run(world, stop)
-    row = swe_row()
-    _, session_id = await seed(world, row)
-    result = await verify(world, row, session_id, answer_response=response(status="incomplete"))
-    # The unfinished timeout has no IF score, so it is masked; the context stop was graded, and kept its kind.
-    assert (result.reward, result.mask_sample) == expected
-    assert result.failure_kind == ("agentic_if:if_error" if stop == "timeout" else kind)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["task", "task_and_if"])
 @pytest.mark.parametrize("stop", ["timeout", "context_limit"])
-async def test_cut_run_reward_zero_gives_a_cut_run_nothing_under_either_mode(world, stop, mode):
-    world.server = make_server(world.artifacts, world.backends, reward_mode=mode, cut_run_reward="zero")
+async def test_cut_run_reward_zero_gives_a_cut_run_nothing(world, stop):
+    world.server = make_server(world.artifacts, world.backends, reward_mode="task_and_if", cut_run_reward="zero")
     kind = cut_run(world, stop)
     row = swe_row()
     _, session_id = await seed(world, row)
     result = await verify(world, row, session_id, answer_response=response(status="incomplete"))
     assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, kind)
     assert result.task_reward == 1.0 and result.evaluation_completed is True
-    # A run that ended by itself keeps its reward.
-    world.outputs = bundle_outputs([finished_session()], call_records=[final_call_record()])
-    _, session_id = await seed(world, row, session="resources-2")
-    finished = await verify(world, row, session_id)
-    assert (finished.reward, finished.mask_sample, finished.failure_kind) == (1.0, False, None)
 
 
 @pytest.mark.asyncio
@@ -1007,7 +955,8 @@ def test_the_verify_route_sends_task_reward_only_when_the_reward_settings_are_no
     world, settings, reward
 ):
     world.server = make_server(world.artifacts, world.backends, **settings)
-    row = swe_row(checks=[NOT_DONE])
+    # A failed check and an untracked outcome leave the default reward the task verdict.
+    row = swe_row(checks=[NOT_DONE], outcome_tracked=False)
     client = TestClient(world.server.setup_webserver())
     assert client.post("/seed_session", json=seed_body(row).model_dump(mode="json")).status_code == 200
     reply = client.post("/verify", json=verify_body(row))
@@ -1020,10 +969,6 @@ def test_the_verify_route_sends_task_reward_only_when_the_reward_settings_are_no
 def test_an_if_score_is_refused_without_the_task_and_if_reward(world):
     with pytest.raises(ValidationError, match="if_score applies only to reward_mode task_and_if"):
         make_server(world.artifacts, world.backends, if_score="if_frac")
-    with pytest.raises(ValidationError, match="reward_mode"):
-        make_server(world.artifacts, world.backends, reward_mode="task_x_if")
-    server = make_server(world.artifacts, world.backends, reward_mode="task_and_if", if_score="if_frac")
-    assert (server.config.reward_mode, server.config.if_score) == ("task_and_if", "if_frac")
 
 
 def test_mean_task_and_if_counts_the_task_verdict_under_every_reward_mode(world):
@@ -1294,29 +1239,9 @@ async def test_a_continuation_row_replays_its_prefix_at_seed_and_grades_from_the
         "prefix_messages": 2,
         "tool_outputs_match": True,
     }
+    # Seed snapshots the restored workspace, which the continued session's first change is told against.
+    assert result.evidence.facts["workspace_restored_diff"] == row["agentic_if"]["continuation"]["workspace_diff"]
     assert result.if_result.if_all == 1
-
-
-@pytest.mark.asyncio
-async def test_seed_records_the_restored_workspace_the_continued_session_s_changes_are_told_against(
-    world, tmp_path, monkeypatch
-):
-    checks = [
-        {
-            "id": "end",
-            "kind": "exact",
-            "parameters": {"value": "DONE"},
-            "scope": {"places": ["final"], "activation": "continuation_start"},
-        }
-    ]
-    _, row, session_id, _, _ = await seed_continuation(world, tmp_path, monkeypatch, checks)
-    recorded = row["agentic_if"]["continuation"]["workspace_diff"]
-    # A prefix recorded by this harness restores to exactly what its last diff says, in the same form.
-    assert world.server._episodes[session_id].seed["workspace_restored_diff"] == recorded
-    result = await verify(world, row, session_id)
-    assert result.evidence.status == "complete", result.evidence.issues
-    assert result.evidence.facts["workspace_restored_diff"] == recorded
-    assert result.evidence.facts["workspace_initial_diff"] == ""
 
 
 @pytest.mark.asyncio

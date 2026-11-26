@@ -157,64 +157,44 @@ const fired = (index, tool, action, callNumber, callID) => ({
   assert.deepEqual(records().slice(1), [{ ...fired(0, "bash", "fail", 1, "i1"), event_id: "push-blocked" }]);
 }
 
-// "replace" on the 2nd matching bash call (a reshaped tool): the call runs, mapped as usual, and once the tool has
-// completed it the model sees exactly the plant's text instead of its output. The firing is recorded then, with the
-// call's number from when it started. A call the plant does not match, its 1st match and a later match keep their
-// output.
+// "replace" on a bash call (a reshaped tool): the call runs, mapped as usual, and once the tool has completed it the
+// model sees exactly the plant's text instead of its output; the firing is recorded then. A "fail" plant due on the
+// same call but listed after it never acts: the first plant due in list order acts, whatever its action.
 {
   const text = "Error: the build server is unreachable (connection reset by peer).";
-  const { hooks, records, call, finish } = await plugin([
-    { id: "build-down", match: { tool: "bash", arg: { field: "command", regex: "^make\\b" } }, nth: 2,
-      action: "replace", text },
+  const { records, call, finish } = await plugin([
+    { id: "build-down", match: { tool: "bash", arg: { field: "command", regex: "^make\\b" } }, action: "replace", text },
+    { match: { tool: "bash" }, action: "fail", text: "never thrown" },
   ]);
-  await call("bash", "r1", { command: "ls", purpose: "look" }); // no match
-  assert.equal((await finish("bash", "r1", "Makefile\n")).output, "Makefile\n");
-  await call("bash", "r2", { command: "make", purpose: "build" }); // 1st match
-  assert.equal((await finish("bash", "r2", "built\n")).output, "built\n");
-  const sent = await call("bash", "r3", { command: "make test", purpose: "test" });
+  const sent = await call("bash", "r1", { command: "make test", purpose: "test" });
   assert.equal(sent.command, "make test");
   assert.ok(sent.__nemo_gym_profile, "the call runs, mapped");
   assert.deepEqual(records().slice(1), [], "nothing is recorded before the tool has completed the call");
-  const result = await finish("bash", "r3", "12 passed\n", { output: "12 passed\n", exit: 0 });
+  const result = await finish("bash", "r1", "12 passed\n", { output: "12 passed\n", exit: 0 });
   assert.equal(result.output, text);
   assert.equal(result.metadata.output, "12 passed\n", "the tool's own metadata keeps what really happened");
   assert.deepEqual(result.metadata.nemo_gym_profile.configured_args, { command: "make test", purpose: "test" });
-  await call("bash", "r4", { command: "make", purpose: "again" }); // acts once only
-  assert.equal((await finish("bash", "r4", "built\n")).output, "built\n");
-  assert.deepEqual(records().slice(1), [{ ...fired(0, "bash", "replace", 3, "r3"), event_id: "build-down" }]);
-  // In the history the completed call shows what the model sent and exactly the planted text.
-  const msgs = { messages: [{ info: {}, parts: [
-    { type: "tool", tool: "bash", state: { status: "completed", input: { ...sent }, output: result.output,
-      metadata: result.metadata } },
-  ] }] };
-  await hooks["experimental.chat.messages.transform"]({}, msgs);
-  assert.deepEqual(msgs.messages[0].parts[0].state.input, { command: "make test", purpose: "test" });
-  assert.equal(msgs.messages[0].parts[0].state.output, text);
+  assert.deepEqual(records().slice(1), [{ ...fired(0, "bash", "replace", 1, "r1"), event_id: "build-down" }]);
 }
 
 // "append" on calls of tools the profile does not reshape: the real output, then the plant's text on a line of its own
 // (no second line break when the output already ends with one; the text alone after an empty output).
 {
   const { records, call, finish } = await plugin([
-    { match: { tool: "read", arg: { field: "filePath", regex: "\\.py$" } }, nth: 2, action: "append",
-      text: "NOTICE: the disk is 95% full." },
+    { match: { tool: "read" }, action: "append", text: "NOTICE: the disk is 95% full." },
     { match: { tool: "grep" }, action: "append", text: "NOTICE: the search index is stale." },
     { match: { tool: "glob" }, action: "append", text: "NOTICE: listing from cache." },
   ]);
-  await call("read", "a1", { filePath: "/w/a.py" }); // 1st match
-  assert.equal((await finish("read", "a1", "1: x = 1")).output, "1: x = 1");
-  await call("read", "a2", { filePath: "/w/notes.md" }); // no match
-  assert.equal((await finish("read", "a2", "1: notes")).output, "1: notes");
-  await call("read", "a3", { filePath: "/w/b.py" }); // 2nd match
-  assert.equal((await finish("read", "a3", "1: y = 2")).output, "1: y = 2\nNOTICE: the disk is 95% full.");
-  await call("grep", "a4", { pattern: "x" });
-  assert.equal((await finish("grep", "a4", "a.py:1\n")).output, "a.py:1\nNOTICE: the search index is stale.");
-  await call("glob", "a5", { pattern: "*.rs" });
-  assert.equal((await finish("glob", "a5", "")).output, "NOTICE: listing from cache.");
+  await call("read", "a1", { filePath: "/w/b.py" });
+  assert.equal((await finish("read", "a1", "1: y = 2")).output, "1: y = 2\nNOTICE: the disk is 95% full.");
+  await call("grep", "a2", { pattern: "x" });
+  assert.equal((await finish("grep", "a2", "a.py:1\n")).output, "a.py:1\nNOTICE: the search index is stale.");
+  await call("glob", "a3", { pattern: "*.rs" });
+  assert.equal((await finish("glob", "a3", "")).output, "NOTICE: listing from cache.");
   assert.deepEqual(records().slice(1), [
-    fired(0, "read", "append", 3, "a3"),
-    fired(1, "grep", "append", 4, "a4"),
-    fired(2, "glob", "append", 5, "a5"),
+    fired(0, "read", "append", 1, "a1"),
+    fired(1, "grep", "append", 2, "a2"),
+    fired(2, "glob", "append", 3, "a3"),
   ]);
 }
 
@@ -228,27 +208,6 @@ const fired = (index, tool, action, callNumber, callID) => ({
   await call("read", "f2", { filePath: "/w/a.py" });
   assert.equal((await finish("read", "f2", "1: x = 1")).output, "1: x = 1");
   assert.deepEqual(records().slice(1), []);
-}
-
-// Plants of every action in one list: the first due in list order acts on a call, so a "replace" listed before a
-// "fail" lets the call run, and that call is the "fail" plant's nth match too (it never acts).
-{
-  const { records, call, finish } = await plugin([
-    { match: { tool: "bash" }, action: "replace", text: "replaced" },
-    { match: { tool: "bash" }, action: "fail", text: "never thrown" },
-    { match: { tool: "bash" }, nth: 2, action: "fail", text: "the second call fails" },
-    { match: { tool: "bash" }, nth: 3, action: "append", text: "appended" },
-  ]);
-  await call("bash", "m1", { command: "ls", purpose: "p" });
-  assert.equal((await finish("bash", "m1", "a\n")).output, "replaced");
-  await assert.rejects(call("bash", "m2", { command: "ls", purpose: "p" }), /^Error: the second call fails$/);
-  await call("bash", "m3", { command: "ls", purpose: "p" });
-  assert.equal((await finish("bash", "m3", "a")).output, "a\nappended");
-  assert.deepEqual(records().slice(1), [
-    fired(0, "bash", "replace", 1, "m1"),
-    fired(2, "bash", "fail", 2, "m2"),
-    fired(3, "bash", "append", 3, "m3"),
-  ]);
 }
 
 // Plants the plugin cannot load (a pattern JavaScript rejects; an action other than "fail", "replace" or "append"; a

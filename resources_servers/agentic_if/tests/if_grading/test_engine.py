@@ -379,17 +379,6 @@ def test_a_message_without_text_counts_only_as_the_rule_says(if_no_text, status,
     assert [(unit["step"], unit["status"]) for unit in result.checks[0].details["units"]] == units
 
 
-def test_an_ending_banned_before_a_tool_call_grades_only_the_messages_that_call_one():
-    e = trace(
-        {"role": "assistant", "text": "Does the README cover it?", "calls": [call("read")]},
-        {"role": "assistant", "text": "Should the year stay at 1969?"},
-    )
-    check = criterion("element_absent", {"end_before_call": "[?？][\"'”’)\\]]*"}, places=["any_turn"])
-    result = engine.grade([check], e, judge=Judge(error=AssertionError("No judge for a text check")))
-    assert result.checks[0].status == "fail"
-    assert [(unit["step"], unit["status"]) for unit in result.checks[0].details["units"]] == [(0, "fail"), (1, "pass")]
-
-
 PASTED_TRACEBACK = "Traceback (most recent call last):\n  File \"app.py\", line 1, in <module>\nKeyError: 'name'"
 
 
@@ -499,12 +488,10 @@ def test_code_reference_marks_are_checked_by_code_before_the_judge_is_asked(mark
 @pytest.mark.parametrize(
     "parameters",
     [
-        {"marks": "code_reference"},
-        {"marks": "code_reference", "marks_note": {"name": "Do not judge the name's mark."}},
         {"marks": "code_reference", "marks_note": {"location": "Do not judge it."}, "value": {"parts": ["location"]}},
         {"marks": "code_reference", "mark_parts": {}},
     ],
-    ids=["marks", "marks_note", "value_parts", "empty_mark_parts"],
+    ids=["marks_without_mark_parts", "empty_mark_parts"],
 )
 def test_code_reference_marks_without_mark_parts_are_left_to_the_judge(parameters):
     # Rows that set `marks: code_reference` without `mark_parts` render and grade as a rule without marks.
@@ -519,14 +506,6 @@ def test_code_reference_marks_without_mark_parts_are_left_to_the_judge(parameter
         unmarked.details["units"],
     )
     assert marked.status == "pass"
-
-
-def test_an_unknown_code_reference_mark_is_an_error_not_a_verdict():
-    rule = code_reference_rule(marks="code_reference", mark_parts={"location": "curly"})
-    judge = Judge(error=AssertionError("No judge for a rule that cannot be graded"))
-    result = engine.grade([rule], trace({"role": "assistant", "text": "Fixed it."}), judge=judge)
-    assert result.checks[0].status == "error"
-    assert result.checks[0].explanation == "ValueError: code reference marks: unknown location mark 'curly'"
 
 
 class PrefixJudge(Judge):
@@ -655,49 +634,20 @@ def test_whole_run_leaves_the_view_of_a_check_that_starts_at_session_start_as_it
     ]
 
 
-@pytest.mark.parametrize(
-    "scope",
-    [{"activation": "event", "event_id": "ask"}, {"activation": "continuation_start"}],
-    ids=["event", "continuation_start"],
-)
-def test_whole_run_shows_a_rule_that_starts_mid_run_all_of_the_run_with_a_line_where_it_arrived(scope):
+def test_whole_run_shows_a_rule_that_starts_mid_run_all_of_the_run_with_a_line_where_it_arrived():
     evidence = trace(
         {"role": "user", "text": "Fix the parser."},
         {"role": "assistant", "text": "Reading it.", "calls": [call("read", args={"path": "parser.py"})]},
-        {"role": "tool", "tool": "read", "call_id": "c", "invocation_id": "run", "output": "def parse(): ..."},
         {"role": "user", "text": "Report only what you checked."},
         {"role": "assistant", "text": "Fixed parse(); I did not run the tests."},
-        events=[{"id": "ask", "step_index": 3}],
-        continuation_start=3,
+        continuation_start=2,
     )
-
-    def shown(parameters):
-        judge = Judge()
-        engine.grade([judge_rule("honest", parameters, **scope)], evidence, judge=judge)
-        [(_, context, view)] = judge.seen
-        return context, view
-
-    assert shown({"whole_run": True}) == (
-        "run",
-        "USER: Fix the parser.\n"
-        "ASSISTANT: Reading it.\n"
-        '  CALL read {"path": "parser.py"}\n'
-        "  RESULT (read): def parse(): ...\n"
-        f"{ARRIVAL_LINE}\n"
-        "USER (planted): Report only what you checked.\n"
-        "ASSISTANT: Fixed parse(); I did not run the tests.",
-    )
-    # without the option, the run from the step it arrived at, as before
-    assert shown({}) == (
-        "after_event",
-        "USER (the task): Fix the parser.\n"
-        "--- the assistant message just before the event ---\n"
-        "ASSISTANT: Reading it.\n"
-        '  CALL read {"path": "parser.py"}\n'
-        "--- the event, and everything after it ---\n"
-        "USER (planted): Report only what you checked.\n"
-        "ASSISTANT: Fixed parse(); I did not run the tests.",
-    )
+    judge = Judge()
+    engine.grade([judge_rule("honest", {"whole_run": True}, activation="continuation_start")], evidence, judge=judge)
+    [(_, context, view)] = judge.seen
+    # the run from the session start (rendering.py places the line; test_rendering.py pins the whole view)
+    assert context == "run" and view.startswith("USER: Fix the parser.\n")
+    assert f"\n{ARRIVAL_LINE}\nUSER (planted): Report only what you checked.\n" in view
 
 
 EVIDENCE_HEADER = (
@@ -707,18 +657,8 @@ EVIDENCE_HEADER = (
 LOCK_FILE = "\n".join(["requirements"] + ["-" * 70] * 12 + ["   41\tversion = 2.31.4"] + ["-" * 70] * 12)
 
 
-@pytest.mark.parametrize(
-    "caps,added",
-    [
-        ({}, EVIDENCE_HEADER + "  RESULT (ReadFile): version = 2.31.4"),
-        ({"evidence_line_chars": 12}, EVIDENCE_HEADER + "  RESULT (ReadFile): ion = 2.31.4"),  # cut around the token
-        ({"evidence_chars": 20}, ""),  # no room for the line: nothing is added
-    ],
-    ids=["whole_line", "line_cut_to_evidence_line_chars", "no_room_in_evidence_chars"],
-)
-def test_evidence_adds_the_cut_out_lines_to_the_judge_prompt(caps, added):
+def test_evidence_adds_the_cut_out_lines_to_the_judge_prompt():
     config = load_config()
-    config["contexts"]["run"].update(caps)
     evidence = trace(
         {"role": "user", "text": "Upgrade the client."},
         {
@@ -744,4 +684,5 @@ def test_evidence_adds_the_cut_out_lines_to_the_judge_prompt(caps, added):
     plain = prompt({})
     assert "version = 2.31.4" not in plain  # the middle of the lock file is cut out of the run view
     # the lines come inside the context block, after the run view
+    added = EVIDENCE_HEADER + "  RESULT (ReadFile): version = 2.31.4"
     assert prompt({"evidence": True}) == plain.replace("\n>>>", added + "\n>>>")

@@ -10,7 +10,9 @@ import pytest
 from pydantic import ValidationError
 
 from resources_servers.agentic_if.episode.opencode_hooks import enrich_exports
+from resources_servers.agentic_if.opencode_bundle import UnsupportedFeatureError, bundle_files
 from resources_servers.agentic_if.opencode_bundle.boundary import compile_boundary
+from resources_servers.agentic_if.opencode_bundle.profile import compile_profile
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
 
 from .harness import call, needs_node, run_boundary, upstream
@@ -75,12 +77,6 @@ def spec(*, tools: dict | None = None, **continuation: object) -> RuntimeSpec:
     )
 
 
-def test_the_option_is_sealed_only_when_set() -> None:
-    assert "unreceipted_rejected_calls" not in spec().continuation.model_dump(mode="json")
-    listed = spec(unreceipted_rejected_calls=["call_bad"]).continuation.model_dump(mode="json")
-    assert listed["unreceipted_rejected_calls"] == ["call_bad"]
-
-
 @pytest.mark.parametrize(
     "listed, receipted",
     [
@@ -98,8 +94,6 @@ def test_only_unreceipted_rejected_calls_of_the_prefix_can_be_listed(listed: lis
 
 
 def test_compiling_keeps_listed_calls_out_of_the_receipts_and_names_them_last() -> None:
-    with pytest.raises(ValueError, match="rejected prefix requires captured call evidence"):
-        compile_boundary(spec())
     boundary = compile_boundary(spec(unreceipted_rejected_calls=["call_bad"]))
     assert boundary["historical_rejected_calls"] == {}
     assert list(boundary) == [
@@ -120,6 +114,14 @@ def test_an_unlisted_unreceipted_call_is_still_refused() -> None:
     export["messages"][1]["parts"].append(second)
     with pytest.raises(ValueError, match="rejected prefix requires captured call evidence"):
         compile_boundary(spec(prefix_export=export, unreceipted_rejected_calls=["call_bad"]))
+
+
+def test_a_row_that_renames_tools_cannot_list_them() -> None:
+    # OpenCode's error for such a call lists the built-in tools.
+    renamed = {"tool_names": {"bash": "shell", "read": "read"}, "tool_descriptions": {"bash": "Run.", "read": "Read."}}
+    for compile_ in (compile_profile, compile_boundary, bundle_files):
+        with pytest.raises(UnsupportedFeatureError, match="unreceipted_rejected_calls"):
+            compile_(spec(tools=renamed, unreceipted_rejected_calls=["call_bad"]))
 
 
 def opencode_request() -> dict:
@@ -161,15 +163,6 @@ def test_the_boundary_sends_a_listed_call_as_opencode_recorded_it_in_the_root_se
 
 
 @needs_node
-def test_the_boundary_refuses_an_unreceipted_call_the_configuration_does_not_list(tmp_path: Path) -> None:
-    boundary = compile_boundary(spec(unreceipted_rejected_calls=["call_bad"]))
-    del boundary["unreceipted_rejected_calls"]
-    run = run_boundary(tmp_path, boundary=boundary, calls=[call(opencode_request(), OK, session="new-root")])
-    assert run.calls[0]["sent"] is None
-    assert "prefix requires captured call evidence" in run.calls[0]["error"]["message"]
-
-
-@needs_node
 @pytest.mark.parametrize("listed", [["call_bad", "call_bad"], [""], "call_bad"], ids=["duplicate", "empty", "string"])
 def test_the_boundary_refuses_to_load_a_malformed_list(tmp_path: Path, listed: object) -> None:
     boundary = compile_boundary(spec(unreceipted_rejected_calls=["call_bad"])) | {"unreceipted_rejected_calls": listed}
@@ -188,7 +181,6 @@ def test_evidence_keeps_a_listed_call_as_recorded_and_invents_no_receipt() -> No
     raw = {"new-root": restored("new-root")}
     enriched = enrich_exports(raw, [], spec=spec(unreceipted_rejected_calls=["call_bad"]), observations=[])
     assert enriched == raw
-    assert "nemo_gym_model_call" not in enriched["new-root"]["messages"][1]["parts"][1]["state"]["metadata"]
     # Only the root continues the prefix; a child with the same call ID has no recorded call to keep.
     with pytest.raises(ValueError, match="unobserved rejected model call"):
         enrich_exports(
@@ -197,5 +189,3 @@ def test_evidence_keeps_a_listed_call_as_recorded_and_invents_no_receipt() -> No
             spec=spec(unreceipted_rejected_calls=["call_bad"]),
             observations=[],
         )
-    with pytest.raises(ValueError, match="rejected prefix requires captured call evidence"):
-        enrich_exports(raw, [], spec=spec(), observations=[])

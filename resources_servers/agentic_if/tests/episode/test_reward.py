@@ -109,22 +109,9 @@ def test_a_run_without_an_if_score_is_masked_whatever_its_task_verdict(task_rewa
 
 
 def test_a_masked_task_verdict_stays_masked_with_its_own_failure():
-    verdict = Verdict(
-        reward=1.0,
-        mask_sample=True,
-        evaluation_completed=True,
-        failure_kind="model_request_error",
-        failure_reason="HTTP 400",
-    )
+    verdict = replace(task(1.0, failure_kind="model_request_error", failure_reason="HTTP 400"), mask_sample=True)
     for if_result in (graded("pass"), graded("error")):
-        result = rewarded(verdict, if_result)
-        assert result == Verdict(
-            reward=0.0,
-            mask_sample=True,
-            evaluation_completed=True,
-            failure_kind="model_request_error",
-            failure_reason="HTTP 400",
-        )
+        assert rewarded(verdict, if_result) == replace(verdict, reward=0.0)
 
 
 CUT_RUNS = [
