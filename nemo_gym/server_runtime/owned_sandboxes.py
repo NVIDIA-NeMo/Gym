@@ -90,7 +90,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -100,20 +100,32 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config.global_config import SERVER_TYPE_KEYS, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
-from nemo_gym.sandbox.config import OwnerConcurrency, resolve_provider_config, resolve_provider_owner_concurrency
+from nemo_gym.sandbox.config import (
+    NetworkRuleOptions,
+    OwnerConcurrency,
+    SandboxConfig,
+    resolve_provider_config,
+    resolve_provider_metadata,
+    resolve_provider_owner_concurrency,
+)
 from nemo_gym.sandbox.providers.base import (
+    NETWORK_RULES,
     ConnectableProvider,
+    NetworkRule,
     SandboxProvider,
     SandboxSnapshotInUseError,
     SandboxSnapshotNotFoundError,
     SandboxSpec,
+    SupportsSandboxNetworkRules,
     SupportsSandboxSnapshot,
     provider_capabilities,
 )
 from nemo_gym.sandbox.providers.registry import create_provider
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.utils.network_policy import reachable_host
 
 
 LOGGER = logging.getLogger(__name__)
@@ -171,8 +183,9 @@ class SandboxCheckpointState(BaseModel):
     a restore can stop it; it is never restored in place. ``snapshot_ready_ts`` is the Unix time the snapshot became
     ready. ``version`` is the version of this record's format; a restore refuses one it does not know.
 
-    ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) in plain text: a
-    checkpoint directory holds whatever the sandboxes were started with.
+    ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) and each sidecar's
+    ``env`` and ``provider_options`` (registry credentials too) in plain text: a checkpoint directory holds whatever
+    the sandboxes were started with.
 
     ``keeps_processes`` says the provider's snapshot kept the sandbox's running processes as well as its files, so
     the fork starts with them running (``"processes"`` in the provider's ``capabilities.snapshot_keeps``). States
@@ -249,7 +262,8 @@ def spec_to_json(spec: SandboxSpec) -> dict[str, JsonValue]:
     """Serialize a spec for a checkpoint record, leaving out what a fork never reads.
 
     Files were uploaded at creation and the snapshot has them; the snapshot also replaces the image, so the image and
-    its registry credentials (``provider_options["image_auth"]``) are dropped too.
+    its registry credentials (``provider_options["image_auth"]``) are dropped too. Sidecars are kept whole, their
+    ``image_auth`` included: the snapshot is of the sandbox alone, and a fork starts each sidecar from its image again.
     """
     data = dataclasses.asdict(spec)
     data["image"] = None
@@ -446,6 +460,140 @@ async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, snapshot_
         raise
 
 
+def check_network_rule(
+    provider: object, rule: NetworkRule, *, provider_config: Mapping[str, Any] | None = None
+) -> None:
+    """Refuse ``rule`` unless ``provider``, a provider or its class, can apply it when it creates a sandbox.
+
+    Raises:
+        ValueError: If it cannot, so no sandbox starts with open egress in place of the rule.
+    """
+    capabilities = provider_capabilities(provider, config=provider_config)
+    expressible = rule in capabilities.network_rules and (rule == "inherit" or hasattr(provider, "network_options"))
+    if not expressible:
+        raise ValueError(
+            f"sandbox provider {_name_of(provider)!r} cannot apply network {rule!r}; "
+            f"it applies {sorted(capabilities.network_rules)}"
+        )
+
+
+def check_lending(provider: object) -> None:
+    """Refuse lending a sandbox of ``provider``, a provider or its class, when no other process can connect to it.
+
+    A provider that reconnects only on the same host passes: whether the borrower runs there shows at its first
+    connect.
+
+    Raises:
+        ValueError: If the provider never reconnects, or has no ``serialize_handle`` and ``connect`` to do it with.
+    """
+    connects = hasattr(provider, "serialize_handle") and hasattr(provider, "connect")
+    if provider_capabilities(provider).reconnect == "never" or not connects:
+        raise ValueError(
+            f"sandbox provider {_name_of(provider)!r} cannot lend a sandbox: no other process can connect to one"
+        )
+
+
+def check_provider(
+    provider: object,
+    *,
+    configs: Iterable[SandboxConfig] = (),
+    lends: bool = False,
+    provider_config: Mapping[str, Any] | None = None,
+) -> None:
+    """The checks of :meth:`OwnedSandboxes.check_provider`, against a provider or its class, which startup uses so
+    that a server checks its provider without creating it."""
+    for config in configs:
+        # A subclass's own network setting is not a typed rule (see SandboxConfig): its server checks it.
+        if config.network in NETWORK_RULES:
+            check_network_rule(provider, config.network, provider_config=provider_config)
+    if lends:
+        check_lending(provider)
+
+
+def rule_hosts(config: SandboxConfig, global_config: Mapping[str, Any]) -> list[str]:
+    """The hosts ``config``'s network rule allows: its model and tool servers, read from ``global_config``, then its
+    ``allowed_hosts``. Nothing is connected to.
+
+    Raises:
+        ValueError: If ``global_config`` defines no host and port for a server, or a server listens on an address a
+            sandbox cannot reach, such as a loopback.
+    """
+    hosts = []
+    for server in [*([config.model_server] if config.model_server is not None else []), *config.tool_servers]:
+        try:
+            server_config = get_first_server_config_dict(global_config, server)
+            url = f"http://{server_config['host']}:{server_config['port']}"
+        except (KeyError, IndexError, TypeError, AttributeError) as error:
+            raise ValueError(
+                f"the network rule names server {server!r}, for which the config defines no host and port"
+            ) from error
+        hosts.append(reachable_host(url))
+    return [*hosts, *config.allowed_hosts]
+
+
+def sandbox_blocks(value: Any, path: str = "config") -> Iterator[tuple[str, SandboxConfig]]:
+    """Every ``SandboxConfig`` in a server's config, at any depth, with its dotted path.
+
+    Only models, dicts, lists and tuples are walked: an OmegaConf node is not, since reading it can resolve an
+    interpolation the server never reads.
+    """
+    if isinstance(value, SandboxConfig):
+        yield path, value
+    elif isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            yield from sandbox_blocks(getattr(value, name, None), f"{path}.{name}")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from sandbox_blocks(item, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from sandbox_blocks(item, f"{path}[{index}]")
+
+
+def servers_sharing_hosts(config: SandboxConfig, global_config: Mapping[str, Any]) -> dict[str, list[str]]:
+    """For each host ``config``'s rule allows for its model and tool servers, the other servers in ``global_config``
+    that listen on that host too: a rule allows a whole host, so a sandbox reaches them as well."""
+    named = {*([config.model_server] if config.model_server is not None else []), *config.tool_servers}
+    if not named:
+        return {}
+    hosts_of: dict[str, str] = {}
+    for name, instance in global_config.items():
+        if not isinstance(name, str) or not isinstance(instance, Mapping):
+            continue
+        if not any(key in instance for key in SERVER_TYPE_KEYS):
+            continue
+        try:
+            server_config = get_first_server_config_dict(global_config, name)
+            hosts_of[name] = reachable_host(f"http://{server_config['host']}:{server_config['port']}")
+        except (KeyError, IndexError, TypeError, AttributeError, ValueError):
+            continue  # no host yet, or one no sandbox reaches: not reachable through the rule either
+    shared: dict[str, list[str]] = {}
+    for server in sorted(named):
+        host = hosts_of.get(server)
+        others = sorted(other for other, other_host in hosts_of.items() if other_host == host and other not in named)
+        if host is not None and others:
+            shared[host] = others
+    return shared
+
+
+def _suggested_rule(config: SandboxConfig) -> str:
+    """The typed rule that keeps what a block without one does today, for the deprecation warning."""
+    policy = config.provider_options.get("network_policy")
+    if not isinstance(policy, Mapping):
+        return "network: inherit"
+    egress = policy.get("egress", [])
+    if policy.get("defaultAction") == "deny" and isinstance(egress, (list, tuple)):
+        if not egress:
+            return "network: no_network"
+        if all(isinstance(rule, Mapping) and rule.get("action") == "allow" and rule.get("target") for rule in egress):
+            return f"network: hosts_only with allowed_hosts {[rule['target'] for rule in egress]}"
+    return "review the ordered network_policy manually before choosing a typed rule"
+
+
+def _name_of(provider: object) -> str:
+    return getattr(provider, "name", None) or getattr(provider, "__name__", type(provider).__name__)
+
+
 @dataclass
 class _Entry:
     sandbox: AsyncSandbox
@@ -513,6 +661,8 @@ class OwnedSandboxes:
         owns_provider: bool = False,
         max_concurrent_starts: int | None = None,
         max_concurrent_stops: int | None = None,
+        default_metadata: Mapping[str, str] | None = None,
+        global_config: Mapping[str, Any] | None = None,
         provider_field: str | None = None,
     ) -> None:
         concurrency = OwnerConcurrency(starts=max_concurrent_starts, stops=max_concurrent_stops)
@@ -524,6 +674,12 @@ class OwnedSandboxes:
         self._provider = provider
         self._owns_provider = owns_provider
         self._provider_config_ref = provider_config_ref
+        # The provider block's default_metadata, which every spec() starts from.
+        self._default_metadata = dict(default_metadata or {})
+        # The config the server was started with, where spec() finds the servers a network rule names.
+        self._global_config = global_config
+        # The config classes and suggested rules of blocks that set no network rule, warned about once each.
+        self._warned_untyped_network: set[tuple[str, str]] = set()
         # Set by the server that holds this instance, so :meth:`on` can give its instance for another provider.
         self._on: Callable[[str], "OwnedSandboxes"] | None = None
         self._server_name = _path_component(server_name, "server name")
@@ -620,6 +776,7 @@ class OwnedSandboxes:
         # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
         provider_config = resolve_provider_config(reference, global_config)
         concurrency = resolve_provider_owner_concurrency(reference, global_config)
+        default_metadata = resolve_provider_metadata(reference, global_config)
         state_dir = _configured_state_dir(global_config)
         server_name = _path_component(config.name, "server name")
         other_field = None if provider_field == "sandbox_provider" else _path_component(provider_field, "field")
@@ -640,6 +797,8 @@ class OwnedSandboxes:
             owns_provider=True,
             max_concurrent_starts=concurrency.starts,
             max_concurrent_stops=concurrency.stops,
+            default_metadata=default_metadata,
+            global_config=global_config,
             provider_field=other_field,
         )
         owned._on = on
@@ -654,6 +813,79 @@ class OwnedSandboxes:
         if self._on is None:
             raise RuntimeError("only an instance a server holds as self.sandboxes knows the server's other providers")
         return self._on(provider_field)
+
+    def spec(
+        self,
+        config: SandboxConfig,
+        *,
+        image: str | None,
+        workdir: str | None,
+        metadata: Mapping[str, str] | None = None,
+        files: Mapping[str, str | bytes] | None = None,
+    ) -> SandboxSpec:
+        """The spec of a sandbox started from ``config``, with its network rule in the provider's own format.
+
+        ``model_server`` and ``tool_servers`` become the hosts those servers are reachable at, which the rule allows
+        together with ``allowed_hosts``. ``metadata`` overrides the provider block's and the config's metadata. A
+        block without a rule keeps today's behavior, the provider's default or its ``provider_options``, and logs a
+        deprecation warning that names the rule to switch to, once per config class and rule. A subclass's own
+        ``network`` setting, which is not a typed rule, is left to its server.
+
+        Raises:
+            ValueError: If the provider cannot apply the rule, or a server's URL is one a sandbox cannot reach.
+        """
+        rule = config.network
+        # An inline provider block with the default metadata beside the provider, all SandboxConfig.spec reads of it.
+        provider_block = {self._provider_name(): {}, "default_metadata": self._default_metadata}
+        if rule is None:
+            self._warn_untyped_network(config)
+        if rule not in NETWORK_RULES or rule == "inherit":
+            return config.spec(provider_block, image=image, workdir=workdir, metadata=metadata, files=files)
+        check_network_rule(self._provider, rule)
+        provider = self._provider
+        assert isinstance(provider, SupportsSandboxNetworkRules)  # check_network_rule refuses a provider without
+        # The rule reaches the provider through its options: provider_options["network_policy"] on OpenSandbox, run_args
+        # on Docker.
+        global_config = self._global_config if self._global_config is not None else get_global_config_dict()
+        options = NetworkRuleOptions(
+            rule, provider.network_options(rule, rule_hosts(config, global_config), config.provider_options)
+        )
+        return config.spec(
+            provider_block,
+            image=image,
+            workdir=workdir,
+            metadata=metadata,
+            files=files,
+            network_options=options,
+        )
+
+    def check_provider(self, *, configs: Iterable[SandboxConfig] = (), lends: bool = False) -> None:
+        """Refuse what this provider cannot do for its owner, at startup where the owner's config shows the need.
+
+        Each block's network rule is checked on its own, and lending (``lends``) needs a provider that reconnects.
+        Exporting is checked at the first export of a key, and lending again at the first :meth:`access`, since only
+        the owner's code decides those.
+
+        Raises:
+            ValueError: Naming the first need the provider cannot meet.
+        """
+        check_provider(self._provider, configs=configs, lends=lends)
+
+    def _warn_untyped_network(self, config: SandboxConfig) -> None:
+        suggestion = _suggested_rule(config)
+        warned = (type(config).__qualname__, suggestion)
+        if warned in self._warned_untyped_network:
+            return
+        self._warned_untyped_network.add(warned)
+        LOGGER.warning(
+            "a %s of server %s sets no network rule, so its sandboxes keep the provider's default egress or the "
+            "network_policy of its provider_options. This is deprecated. A later release requires a typed rule. "
+            "Migration guidance: "
+            "%s",
+            type(config).__name__,
+            self._server_name,
+            suggestion,
+        )
 
     @property
     def provider(self) -> SandboxProvider:
@@ -806,6 +1038,7 @@ class OwnedSandboxes:
             ValueError: If neither this call nor the instance names the provider's config block, as for a server
                 whose ``sandbox_provider`` is an inline block rather than a named one.
         """
+        check_lending(self._provider)
         entry = self._entries.get(key)
         # A key is tracked from before its start, so being tracked does not mean there is a sandbox to lend.
         if entry is None or not entry.ready or not entry.sandbox.started:

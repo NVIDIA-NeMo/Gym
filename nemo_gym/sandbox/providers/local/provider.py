@@ -24,8 +24,10 @@ import tempfile
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
+from typing import ClassVar
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
@@ -43,6 +45,8 @@ REAP_TIMEOUT_S = 5.0
 
 class LocalProvider:
     """Runs commands on the host. No isolation: use a container provider for untrusted code."""
+
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="never")
 
     name = "local"
     _semaphores: dict[int, asyncio.Semaphore] = {}

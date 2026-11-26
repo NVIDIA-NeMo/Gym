@@ -440,6 +440,31 @@ def test_codex_cli_default_features_and_session_state_reach_the_sandbox_launch(s
     assert payload["command"][-2:] == ["--", "-"]
 
 
+@pytest.mark.parametrize(
+    "settings, expected",
+    [
+        ({}, {}),
+        (
+            # The fixture's Codex 0.144.4 rejects the [agents] key, so the switch needs another version.
+            {"model_catalog_json": "/opt/models/catalog.json", "agents_enabled": False, "codex_version": "0.163.0"},
+            {"model_catalog_json": "/opt/models/catalog.json", "agents": {"enabled": False}},
+        ),
+    ],
+    ids=["defaults", "set"],
+)
+def test_model_catalog_and_agents_table_reach_sandbox_config_only_when_set(setup, settings, expected) -> None:
+    # extra_config is refused in sandbox sessions, so these keys have fields of their own.
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(**(agent.config.model_dump() | settings))
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert {key: config[key] for key in ("model_catalog_json", "agents") if key in config} == expected
+
+
 def test_direct_run_without_resources_rejected_before_execution(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -974,6 +999,9 @@ CODEX_0154_ENDPOINT_FAILURES = {
 # Printed while the endpoint refuses connections; Codex keeps waiting rather than failing the turn.
 CODEX_0154_WAITING_FOR_NETWORK = "Reconnecting... waiting for network (Connection failed: error sending request)"
 CODEX_OUTPUT_CAP = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+# Codex 0.163.0's final error for the output cap, captured from the CLI. It sends the capped request once, and its
+# message has no stream-disconnect prefix.
+CODEX_0163_OUTPUT_CAP = "Incomplete response returned, reason: max_output_tokens"
 
 
 def codex_error(message: str) -> list[dict]:
@@ -1020,6 +1048,7 @@ def test_codex_0154_endpoint_failures_are_model_endpoint_errors(message) -> None
     "message",
     [
         CODEX_OUTPUT_CAP,  # the output cap is a gradable outcome, not an endpoint failure
+        CODEX_0163_OUTPUT_CAP,
         "",  # 0.154.0's message for a 400
         "unexpected status 400 Bad Request: Unknown error, url: http://127.0.0.1:1/v1/responses",
         "unexpected status 404 Not Found: Unknown error, url: http://127.0.0.1:1/v1/responses",
@@ -1208,14 +1237,15 @@ def test_codex_0154_killed_while_waiting_for_the_network_is_rerun(setup) -> None
     assert not probed
 
 
-def test_codex_0154_output_cap_after_a_recovered_retry_is_gradable(setup) -> None:
+@pytest.mark.parametrize("cap", [CODEX_OUTPUT_CAP, CODEX_0163_OUTPUT_CAP], ids=["0.154.0", "0.163.0"])
+def test_output_cap_after_a_recovered_retry_is_gradable(setup, cap) -> None:
     agent, sandbox = setup
     sandbox.result["return_code"] = 1
     transcript = [
         {"type": "turn.started"},
         retry_notice(CODEX_0154_ENDPOINT_FAILURES["idle"][0]),
         {"type": "item.completed", "item": {"id": "partial", "type": "reasoning", "text": "Inspect first"}},
-        *codex_error(CODEX_OUTPUT_CAP),
+        *codex_error(cap),
     ]
     result, _, probed = run_codex_transcript(agent, sandbox, transcript)
     assert result.status_code == 200, result.text
@@ -1228,9 +1258,13 @@ def test_codex_0154_output_cap_after_a_recovered_retry_is_gradable(setup) -> Non
     assert not probed
 
 
-def test_incomplete_model_response_retains_reasoning_and_reports_usage_gap(setup) -> None:
+@pytest.mark.parametrize(
+    "ending",
+    [[{"type": "turn.failed", "error": {"message": CODEX_OUTPUT_CAP}}], codex_error(CODEX_0163_OUTPUT_CAP)],
+    ids=["0.144.4", "0.163.0"],
+)
+def test_incomplete_model_response_retains_reasoning_and_reports_usage_gap(setup, ending) -> None:
     agent, sandbox = setup
-    message = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
     sandbox.result["return_code"] = 1
     sandbox.events = "\n".join(
         json.dumps([float(index), event])
@@ -1238,7 +1272,7 @@ def test_incomplete_model_response_retains_reasoning_and_reports_usage_gap(setup
             [
                 {"type": "turn.started"},
                 {"type": "item.completed", "item": {"id": "partial", "type": "reasoning", "text": "Inspect first"}},
-                {"type": "turn.failed", "error": {"message": message}},
+                *ending,
             ]
         )
     )
@@ -3479,6 +3513,63 @@ def test_sandbox_environment_inheritance_is_opt_in(setup, inherit) -> None:
         "CODEX_HOME": f"{sandbox.directory}/home/.codex",
         "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
     }
+
+
+def test_sandbox_access_env_reaches_codex(setup) -> None:
+    agent, sandbox = setup
+    request = seed()
+    # The last name contains a reserved prefix without beginning with it.
+    env = {"TASK_API_TOKEN": "task-value", "HOME": "/task-home", "TASK_OPENAI_BASE_URL": "http://task.example"}
+    request.sandbox_access.env = env
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert payload["env"] == {
+        **env,
+        "CODEX_HOME": f"{sandbox.directory}/home/.codex",
+        "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+    }
+
+
+@pytest.mark.parametrize(
+    ("env", "rejected"),
+    [
+        ({"HOME": "/task-home", "OPENAI_BASE_URL": "http://model.invalid"}, "OPENAI_BASE_URL"),
+        ({"CODEX_HOME": "/codex-home-value"}, "CODEX_HOME"),
+        ({"OPENAI_API_KEY": "openai-key-value"}, "OPENAI_API_KEY"),  # pragma: allowlist secret
+        ({"NEMO_GYM_SUPERVISOR": "supervisor-value"}, "NEMO_GYM_SUPERVISOR"),
+        (
+            {
+                "OPENAI_BASE_URL": "http://model.invalid",
+                "TASK_API_TOKEN": "task-value",
+                "NEMO_GYM_SUPERVISOR": "supervisor-value",
+                "CODEX_OTHER": "codex-other-value",
+            },
+            "CODEX_OTHER, NEMO_GYM_SUPERVISOR, OPENAI_BASE_URL",
+        ),
+    ],
+    ids=["allowed_and_reserved", "codex", "openai", "nemo_gym", "several_sorted"],
+)
+def test_sandbox_access_env_with_reserved_names_is_rejected_before_connecting(setup, env, rejected) -> None:
+    agent, sandbox = setup
+    request = seed()
+    request.sandbox_access.env = env
+    with (
+        patch("responses_api_agents.codex_agent.app.AsyncSandbox") as factory,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        refused = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+    assert refused.status_code == 422, refused.text
+    # The refusal names only the reserved variables, in sorted order, and none of the values.
+    assert refused.json()["detail"].endswith(f": {rejected}")
+    assert not any(value in refused.text for value in env.values())
+    factory.connect.assert_not_awaited()
+    sandbox.exec.assert_not_awaited()
+    assert request.agent_session_id not in agent._session_records
 
 
 @pytest.mark.parametrize("status", [400, 401, 429, 503])
