@@ -99,6 +99,7 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
+from responses_api_agents.codex_agent.relay import CodexRelayConfig, relay_files
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession, harness_kill_evidence
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 from responses_api_agents.codex_agent.tool_host import (
@@ -627,6 +628,7 @@ _TOOL_HOST_DETAIL_CHARS = 4000
 
 
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
+    relay: CodexRelayConfig = Field(default_factory=CodexRelayConfig)
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).
@@ -1045,6 +1047,40 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             await sandbox.upload(Path(__file__).with_name(LAUNCHER_FILE), f"{directory}/{LAUNCHER_FILE}")
+            if self.config.relay.enabled:
+                relay_installer = "install_relay_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(relay_installer), f"{directory}/{relay_installer}")
+                relay_command = (
+                    f"mkdir -p -- {shlex.quote(directory + '/relay')} && "
+                    f"bash {shlex.quote(directory + '/' + relay_installer)} {shlex.quote(runtime)} "
+                    f"{shlex.quote(self.config.relay.version)}"
+                )
+                if self.config.relay.executable is not None:
+                    relay_command += " " + shlex.quote(self.config.relay.executable)
+                relay_installed = await sandbox.exec(
+                    relay_command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds
+                )
+                if relay_installed.return_code != 0 or relay_installed.error_type:
+                    raise RuntimeError(
+                        f"Cannot prepare Relay: exit={relay_installed.return_code}, "
+                        f"error_type={relay_installed.error_type}; {relay_installed.stderr or relay_installed.stdout}"
+                    )
+                receipt = (relay_installed.stdout or "").strip().splitlines()
+                if not receipt or not receipt[-1].startswith("/"):
+                    raise RuntimeError("Relay installation did not return an absolute executable path")
+                state.relay_executable = receipt[-1]
+                codex_command = [
+                    f"{runtime}/node/bin/node",
+                    f"{runtime}/codex/node_modules/@openai/codex/bin/codex.js",
+                ]
+                for name, text in relay_files(
+                    self.config.relay, session_dir=directory, codex_command=codex_command
+                ).items():
+                    await state.upload_text(name, text)
+                launcher = shlex.quote(f"{directory}/relay/codex")
+                prepared = await sandbox.exec(f"chmod 700 -- {launcher}", cwd=workdir, timeout_s=30)
+                if prepared.return_code != 0 or prepared.error_type:
+                    raise RuntimeError("Cannot prepare the session-private Relay Codex launcher")
             if tool_bwrap is not None:
                 await self._prepare_tool_host(sandbox, directory=directory, runtime=runtime, bwrap=tool_bwrap)
         except BaseException as error:
@@ -1232,6 +1268,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "inherit_env": self.config.inherit_sandbox_environment,
             "raise_oom_score_adj": self.config.raise_oom_score_adj,
         }
+        if state.relay_executable is not None:
+            payload["relay_executable"] = state.relay_executable
         raw = ""
         failure = None
         try:
@@ -1856,6 +1894,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         this rollout.
         """
         timeout = self.config.timeout if timeout is None else timeout
+        if self.config.relay.enabled:
+            raise HTTPException(422, "Relay recording currently requires a Codex task sandbox session")
         await self._ensure_local_runtime()
         base_url = self._resolve_call_base_url(rollout_id)
         # Report the name the config actually pins (so response.model matches what Codex was told);

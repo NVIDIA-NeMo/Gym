@@ -48,6 +48,7 @@ from responses_api_agents.codex_agent.app import (
     CodexAgentConfig,
     _model_endpoint_error,
 )
+from responses_api_agents.codex_agent.relay import CodexRelayConfig
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 
 
@@ -243,6 +244,55 @@ def setup():
 
 def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
+
+
+def test_relay_session_uses_private_config_and_existing_supervisor(setup):
+    agent, sandbox = setup
+    agent.config.relay = CodexRelayConfig(enabled=True, executable="/usr/local/bin/nemo-relay")
+    sandbox.exec.return_value.stdout = "/usr/local/bin/nemo-relay\n"
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert payload["relay_executable"] == "/usr/local/bin/nemo-relay"
+        assert payload["model_base_url"].endswith("/v1")
+        assert payload["invocation_id"] == "codex-smoke-a2"
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/relay/config.toml"])
+        assert config["agents"]["codex"]["command"] == f"{sandbox.directory}/relay/codex"
+        plugins = tomllib.loads(sandbox.files[f"{sandbox.directory}/relay/plugins.toml"])
+        assert plugins["components"][0]["config"]["atif"]["output_directory"] == (
+            f"/logs/artifacts/relay/{Path(sandbox.directory).name}"
+        )
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stdout", ["", "relative/relay"])
+def test_invalid_relay_install_receipt_closes_borrowed_connection(setup, stdout):
+    agent, sandbox = setup
+    agent.config.relay = CodexRelayConfig(enabled=True)
+    sandbox.exec.return_value.stdout = stdout
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert response.status_code == 500
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
+
+
+async def test_relay_requires_sandbox_before_any_host_runtime_setup(setup):
+    agent, sandbox = setup
+    agent.config.relay = CodexRelayConfig(enabled=True)
+    with patch.object(agent, "_ensure_local_runtime", AsyncMock()) as install:
+        with pytest.raises(HTTPException) as error:
+            await agent._run_codex("task")
+    assert error.value.status_code == 422
+    install.assert_not_awaited()
+    sandbox.exec.assert_not_awaited()
 
 
 def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):

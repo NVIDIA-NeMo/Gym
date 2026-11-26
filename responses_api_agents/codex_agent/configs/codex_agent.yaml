@@ -22,6 +22,11 @@ codex_agent:
       verify_after_agent_error: false  # sandbox sessions: grade a failed run while its sandbox still runs (see README)
       raise_oom_score_adj: false  # sandbox sessions: make Codex and its tools the OOM killer's preferred victims
       codex_version: 0.144.4  # required: npm version pinned on auto-install for reproducibility
+      relay:
+        enabled: false
+        version: 0.11.0
+        executable: null  # null installs the pinned standalone CLI inside the sandbox
+        output_dir: /logs/artifacts/relay  # include this directory in task artifact collection
       cwd: null  # working root for `codex exec --cd`; null -> fresh temp dir per request
       stream_idle_timeout_ms: null  # provider stream idle budget; null -> timeout * 1000
       request_max_retries: null  # provider retries before a stream starts; null -> Codex's default
