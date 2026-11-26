@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, PrivateAttr, ValidationError
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode_types import EpisodeId, TaskId
@@ -41,6 +41,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSessionLocks,
     ResourcesSessionLostError,
     ReverifyMode,
+    SegmentReward,
     SimpleResourcesServer,
     lost_session_verification,
 )
@@ -72,6 +73,43 @@ class TestBaseVerifyResponse:
         rescued = response.model_copy(update={"failure_reason": "judge response unparseable after 3 attempts"})
         assert rescued.model_dump()["failure_reason"] == "judge response unparseable after 3 attempts"
         assert rescued.reward == 0.0
+
+    def _scored(self, **fields) -> BaseVerifyResponse:
+        return BaseVerifyResponse(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            response=NeMoGymResponse.model_construct(id="resp-1", output=[]),
+            reward=1.0,
+            **fields,
+        )
+
+    def test_segment_rewards_are_omitted_until_a_verifier_sets_them(self) -> None:
+        assert "segment_rewards" not in self._scored().model_dump()
+        scored = self._scored(segment_rewards=[{"output_index": 3, "reward": 0.25}])
+        assert scored.model_dump()["segment_rewards"] == [{"reward": 0.25, "output_index": 3}]
+
+    def test_segment_rewards_survive_an_agents_own_result_type(self) -> None:
+        class AgentResult(BaseVerifyResponse):
+            turns_used: int = 0
+
+        # An agent's /run validates the verify reply into its own subclass, as claude_code_agent does.
+        verified = self._scored(segment_rewards=[SegmentReward(launched_by="toolu_a", reward=0.25)])
+        result = AgentResult.model_validate(verified.model_dump() | {"response": verified.response, "turns_used": 3})
+
+        assert result.segment_rewards == [SegmentReward(launched_by="toolu_a", reward=0.25)]
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"reward": 0.5},
+            {"reward": 0.5, "output_index": 0, "launched_by": "toolu_a"},
+            {"reward": float("nan"), "output_index": 0},
+            {"reward": 0.5, "output_index": -1},
+        ],
+        ids=["no target", "two targets", "non-finite", "negative index"],
+    )
+    def test_a_malformed_segment_reward_is_rejected(self, entry: dict) -> None:
+        with pytest.raises(ValidationError, match="segment_rewards"):
+            self._scored(segment_rewards=[entry])
 
 
 class TestBaseMultiRewardVerifyResponse:
