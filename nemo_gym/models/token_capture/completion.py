@@ -3,6 +3,7 @@
 
 """Token-free evidence from the response actually served by the model gateway."""
 
+import re
 from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
@@ -104,6 +105,56 @@ def output_validation_item(item: dict[str, Any]) -> OutputValidationItem:
                 {"text": part["text"]} if isinstance(part, dict) and isinstance(part.get("text"), str) else {}
                 for part in parts
             ]
+    return result
+
+
+# A model server's Chat Completions reply carries the model's reasoning as one <think>...</think> block at the start
+# of its text (vllm_model wraps the parsed reasoning that way). A Chat client may return that text verbatim, or, like
+# opencode_agent, return the block as a reasoning item and the rest as the answer.
+_LEADING_REASONING_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+def _assistant_text_parts(item: dict[str, Any]) -> list[dict] | None:
+    """Return an assistant message's content parts when every one is a text part, else None."""
+    if item.get("type", "message") != "message" or item.get("role") != "assistant":
+        return None
+    content = item.get("content")
+    if not isinstance(content, list) or not all(
+        isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str)
+        for part in content
+    ):
+        return None
+    return content
+
+
+def output_evidence_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put generated output items in the one form that compares served output with a harness's returned output.
+
+    Served evidence and returned history both pass through this function before their items are fingerprinted, so an
+    output compares equal in either presentation of a Chat reply's leading reasoning block:
+
+    - the block at the start of an assistant message's first text part becomes a reasoning item ahead of the message;
+    - assistant message text is compared without surrounding whitespace;
+    - an assistant message left with only empty text right after a reasoning item is dropped.
+
+    Any other think tag stays the model's literal text. The function is idempotent and copies the items it changes.
+    """
+    result: list[dict[str, Any]] = []
+    for item in items:
+        parts = _assistant_text_parts(item)
+        if parts is None:
+            result.append(item)
+            continue
+        parts = [dict(part) for part in parts]
+        match = _LEADING_REASONING_BLOCK.match(parts[0]["text"]) if parts else None
+        if match is not None:
+            result.append({"type": "reasoning", "summary": [{"type": "summary_text", "text": match.group(1)}]})
+            parts[0]["text"] = parts[0]["text"][match.end() :]
+        for part in parts:
+            part["text"] = part["text"].strip()
+        if result and result[-1].get("type") == "reasoning" and not any(part["text"] for part in parts):
+            continue
+        result.append({**item, "content": parts})
     return result
 
 
