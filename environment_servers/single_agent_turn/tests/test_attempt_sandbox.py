@@ -13,7 +13,6 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ValidationError
 
 from environment_servers.single_agent_turn.app import (
-    AttemptSandboxConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
@@ -28,7 +27,12 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, OwnedSandboxes, SingleAgentTurnResponse
+from nemo_gym.server_runtime import (
+    NG_SANDBOX_ACCESS_KEY,
+    AttemptSandboxConfig,
+    OwnedSandboxes,
+    SingleAgentTurnResponse,
+)
 from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
 
@@ -134,6 +138,8 @@ def _lending_server(
 async def test_an_attempt_borrows_one_model_only_sandbox_for_its_turn_and_its_verification() -> None:
     provider = _Provider()
     server, client = _lending_server(provider)
+    # A Resources Server whose verifier grades in the agent's sandbox.
+    client.responses[0] = _Response({"resources_session_id": "resources-session", "verifier_mode": "shared"})
     # A verifier that echoes its whole request body back, as some do.
     echoing = dict(json.loads(client.responses[4].body))
     client.responses[4] = _Response(echoing | {NG_SANDBOX_ACCESS_KEY: {"connection": "echoed"}})
@@ -318,6 +324,7 @@ async def test_a_sandbox_that_cannot_be_lent_to_the_verifier_fails_the_attempt_f
     provider = _Provider()
     provider.fail_serialize_at = 2
     server, client = _lending_server(provider)
+    client.responses[0] = _Response({"resources_session_id": "resources-session", "verifier_mode": "shared"})
 
     result = await server.run_request(_request())
 

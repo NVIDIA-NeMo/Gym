@@ -94,7 +94,15 @@ def test_resources_seed_observation_serialization_respects_field_selection(field
 def test_resources_seed_response_keeps_its_object_schema(mode: str) -> None:
     schema = ResourcesSeedSessionResponse.model_json_schema(mode=mode)
 
-    assert set(schema["properties"]) == {"resources_session_id", "resources_tools", "sandbox_access", "observation"}
+    assert set(schema["properties"]) == {
+        "resources_session_id",
+        "resources_tools",
+        "sandbox_access",
+        "observation",
+        "sandbox_group",
+        "verifier_mode",
+        "supported_verifier_modes",
+    }
     assert schema["required"] == ["resources_session_id"]
     assert schema["additionalProperties"] is False
 
@@ -113,7 +121,15 @@ def test_resources_seed_response_keeps_its_http_response_schema() -> None:
     ]
     schema = document["components"]["schemas"][response_schema["$ref"].rsplit("/", 1)[1]]
 
-    assert set(schema["properties"]) == {"resources_session_id", "resources_tools", "sandbox_access", "observation"}
+    assert set(schema["properties"]) == {
+        "resources_session_id",
+        "resources_tools",
+        "sandbox_access",
+        "observation",
+        "sandbox_group",
+        "verifier_mode",
+        "supported_verifier_modes",
+    }
     assert schema["required"] == ["resources_session_id"]
     assert schema["additionalProperties"] is False
 

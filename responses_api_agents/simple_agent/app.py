@@ -416,6 +416,9 @@ def mark_missing_assistant_output(response: NeMoGymResponse) -> str:
 
 class SimpleAgent(SimpleResponsesAPIAgent):
     checkpoint_mode = "exported"
+    # With no tools, the loop only calls the model server, so a seed that lends no sandbox runs it in this process.
+    # Any tool, an HTTP one included, makes the Environment Server lend a sandbox, and the loop runs there.
+    runs_loop_without_sandbox = True
     config: SimpleAgentConfig
     # Continuation runs this class's turn loop on the session's history. A subclass can replace that loop, as
     # DeepAgentsAgent replaces responses(), so only a class that sets this in its own body supports continuation.
