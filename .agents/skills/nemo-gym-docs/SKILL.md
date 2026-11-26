@@ -84,18 +84,20 @@ Only when the user asks. Apply the same change under `fern/versions/v<release>/p
 
 ### Worked Example: Renaming a Slug
 
-Request: *"Rename `/main/get-started/setup` to `/main/get-started/detailed-setup`."*
+Request: *"Rename `/main/get-started/setup` to `/main/get-started/first-run`."*
 
-1. `git mv fern/versions/latest/pages/get-started/setup.mdx fern/versions/latest/pages/get-started/detailed-setup.mdx`, and update its `path:` in `main.yml` if it has a manual entry.
-2. Add a redirect in `fern/docs.yml`. Both `source` and `destination` need the full `/nemo/gym/` basepath with a leading slash:
+1. `git mv fern/versions/latest/pages/get-started/setup.mdx fern/versions/latest/pages/get-started/first-run.mdx`, and update its `path:` in `main.yml` if it has a manual entry.
+2. Add redirects in `fern/docs.yml` for both forms of the old URL. Main is the default version, so Fern also serves its pages without `/main`. Both `source` and `destination` need the full `/nemo/gym/` basepath with a leading slash:
 
    ```yaml
    redirects:
      - source: "/nemo/gym/main/get-started/setup"
-       destination: "/nemo/gym/main/get-started/detailed-setup"
+       destination: "/nemo/gym/main/get-started/first-run"
+     - source: "/nemo/gym/get-started/setup"
+       destination: "/nemo/gym/main/get-started/first-run"
    ```
 
-3. `grep -rn "/get-started/setup" fern/versions/latest/` and update incoming links.
+3. `git grep -n "get-started/setup" -- . ':!fern/versions/v*'` and update incoming links, including skills and READMEs.
 
 ## Content Conventions
 
@@ -203,13 +205,14 @@ Preview and publish use the `DOCS_FERN_TOKEN` secret (setup in [`fern/README.md`
 
 ## Cutting a New Release
 
-When a release ships (for example, `v0.8.0`):
+When a release ships (for example, `v0.8.0`), on a branch from `main`:
 
-1. `cp -r fern/versions/latest fern/versions/v0.8.0`
-2. `cp fern/versions/main.yml fern/versions/v0.8.0.yml`, then rewrite the `./latest/` path prefixes to `./v0.8.0/`.
-3. Add the release to `fern/docs.yml` `versions:` (`display-name: "0.8.0"`, `slug: v0.8.0`, `availability: stable`), and demote or remove older releases per the support policy.
-4. Keep the `/latest` redirects in `docs.yml` pointed at their intended target, currently `/main`.
-5. `fern/versions/latest/pages/` keeps moving forward as the bleeding-edge tree.
+1. Copy the docs from the release branch, not `main`, which has moved on: `git fetch origin r0.8.0 && mkdir fern/versions/v0.8.0 && git archive origin/r0.8.0:fern/versions/latest | tar -x -C fern/versions/v0.8.0`
+2. `git show origin/r0.8.0:fern/versions/main.yml | sed 's#\./latest/#./v0.8.0/#g' > fern/versions/v0.8.0.yml`
+3. In the copied pages, change `/main/` link prefixes to `/v0.8.0/` so the release does not send readers to unreleased pages; links without a version already stay in the release. `grep -rnE '\]\(/main/|href="/main/' fern/versions/v0.8.0` should then print nothing.
+4. Add the release to `fern/docs.yml` `versions:` directly after `Main` (`display-name: "0.8.0"`, `path: versions/v0.8.0.yml`, `slug: v0.8.0`, `availability: stable`). Keep `Main` first: the first entry is the default version, which serves the unversioned URLs.
+5. Keep the `/latest` redirects in `docs.yml` pointed at their intended target, currently `/main`.
+6. `fern/versions/latest/pages/` keeps moving forward as the bleeding-edge tree.
 
 ## Troubleshooting
 
