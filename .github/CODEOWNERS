@@ -22,17 +22,21 @@
 # independently.
 
 # ── Enforced ──────────────────────────────────────────────────────────────
+# Protected paths: only people own these. The automation bot (@svcnvidia-nemo-ci)
+# is never listed here, so its approval can never satisfy them.
 .github/ @nvidia-nemo/automation
 docker/ @nvidia-nemo/automation
 /pyproject.toml @nvidia-nemo/automation
 /uv.lock @nvidia-nemo/automation
 
 # BioNeMo
-/benchmarks/larp* @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
-/environments/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
-/responses_api_agents/larp_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
-/resources_servers/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
-/resources_servers/litmus_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
+# The bot is listed so that its approval can satisfy these rules where the
+# `code-owners-check` policy allows it (see .github/autobot/review-config.yml).
+/benchmarks/larp* @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers @svcnvidia-nemo-ci
+/environments/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers @svcnvidia-nemo-ci
+/responses_api_agents/larp_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers @svcnvidia-nemo-ci
+/resources_servers/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers @svcnvidia-nemo-ci
+/resources_servers/litmus_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers @svcnvidia-nemo-ci
 
 # ── Suggested (advisory only, see header) ───────────────────────────────────
 # Path → team map below mirrors the ownership proposal from PR #2439 (not
