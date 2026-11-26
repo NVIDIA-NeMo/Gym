@@ -183,6 +183,15 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    eval_node_cpu_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "CPU count that Node reports inside the eval container, which bounds the worker pools of Jest, Vitest "
+            "and other Node test runners. 0 leaves Node as it is."
+        ),
+    )
+
     command_exec_timeout: int = Field(default=5 * 60, description="Timeout for executing the command (seconds)")
 
     # Concurrency control
@@ -780,6 +789,43 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
         )
 
 
+# Jest and Vitest size their worker pools from the host's CPU count, which a container sees in full. This
+# preload, loaded into every Node process through NODE_OPTIONS, makes Node report at most ``cpu_count`` cores.
+_NODE_CPU_CAP_PATH = "/tmp/node-cpu-cap.cjs"
+_NODE_CPU_CAP_SCRIPT = """\
+const os = require("os");
+const cpus = os.cpus;
+os.cpus = () => cpus().slice(0, {cpu_count});
+if (os.availableParallelism) {{
+  const available = os.availableParallelism;
+  os.availableParallelism = () => Math.min(available(), {cpu_count});
+}}
+"""
+
+
+def _node_cpu_cap_command(cpu_count: int, path: str = _NODE_CPU_CAP_PATH) -> str:
+    """Shell that writes the preload to ``path`` and adds it to NODE_OPTIONS; a failed write leaves Node as it was."""
+    script_b64 = base64.b64encode(_NODE_CPU_CAP_SCRIPT.format(cpu_count=cpu_count).encode()).decode()
+    return (
+        f"{{ echo {script_b64} | base64 -d > {path} 2>/dev/null "
+        f'&& export NODE_OPTIONS="--require={path} ${{NODE_OPTIONS:-}}" || true; }}'
+    )
+
+
+_NODE_OPTIONS_ASSIGNMENT_RE = re.compile(r"""(?<!\{)\bNODE_OPTIONS=(?:"([^"]*)"|'([^']*)'|([^\s"']*))""")
+
+
+def _keep_node_cpu_cap(script: str) -> str:
+    """Put the CPU cap into every NODE_OPTIONS that ``script`` assigns, which would otherwise drop it."""
+
+    def with_cap(match: re.Match[str]) -> str:
+        quote = "'" if match.group(2) is not None else '"'
+        value = next(group for group in match.groups() if group is not None)
+        return f"NODE_OPTIONS={quote}--require={_NODE_CPU_CAP_PATH} {value}{quote}"
+
+    return _NODE_OPTIONS_ASSIGNMENT_RE.sub(with_cap, script)
+
+
 # A jest invocation:
 # runner-prefixed (npx/yarn), or bare `jest` in command position (line start or after &&/;/|),
 # but never inside words ("ts-jest", "config_jest"), quotes (grep '"jest"'), or assignments.
@@ -845,6 +891,8 @@ class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
             test_files = ",".join(test_files_str)
 
         run_script = _serialize_nv_internal_jest(instance_dict["run_script.sh"])
+        if self.config.eval_node_cpu_count > 0:
+            env_exports, run_script = _keep_node_cpu_cap(env_exports), _keep_node_cpu_cap(run_script)
         parsing_script = instance_dict["parsing_script.py"]
         run_script_path = self.config.persistent_dir / "run_script.sh"
         parsing_script_path = self.config.persistent_dir / "parsing_script.py"
@@ -3525,6 +3573,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         container_commands.append(
             f"echo {chrome_b64} | base64 -d > /tmp/chrome-wrapper.sh && chmod +x /tmp/chrome-wrapper.sh"
         )
+
+        # Cap the CPU count that Node reports while the tests are graded.
+        if command.mode == "eval" and params.eval_node_cpu_count > 0:
+            container_commands.append(_node_cpu_cap_command(params.eval_node_cpu_count))
 
         # Build mount arguments; the empty overmount hides ground-truth eval artifacts in-container.
         mount_args = [

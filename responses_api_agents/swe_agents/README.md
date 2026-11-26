@@ -28,6 +28,7 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 - [Output format](#output-format)
 - [GRPO masking and failure modes](#grpo-masking-and-failure-modes)
 - [Memory watchdog (OOM handling)](#memory-watchdog-oom-handling)
+- [Node worker pools](#node-worker-pools)
 - [Debug / profiling](#debug--profiling)
 
 ---
@@ -705,6 +706,16 @@ The enroot/apptainer sandbox this runs under has no cgroup support (v1 + fakeroo
 - The watchdog runs as an `asyncio.Task` alongside the container subprocess (started in `_start_container_command`, cancelled in `_finish_container_command`'s `finally`) and is disabled entirely when `memory_watchdog_enabled=false` or `apptainer_memory_limit_mb <= 0`.
 - A watchdog-triggered kill surfaces as a `RuntimeError` from `_finish_container_command`, which `process_single_datapoint` catches and turns into `oom_killed` / `eval_oom_killed` on `SWEBenchMetrics` — both feed into [GRPO masking](#grpo-masking-and-failure-modes) regardless of the (now-irrelevant) `resolved` value.
 - Peak RSS is tracked even when the limit is never crossed, so `agent_peak_rss_mb` / `eval_peak_rss_mb` are useful for right-sizing `apptainer_memory_limit_mb` from real rollout data.
+
+---
+
+## Node worker pools
+
+Jest and Vitest size their worker pools from the host's CPU count, and a container sees every host core. On a large node one test run then starts a core-count fleet of Node workers, which can starve the container's FUSE root filesystem or exhaust its memory until the eval hits its timeout.
+
+- For `nv-internal-1`, each line of `run_script.sh` that invokes Jest (`npx jest`, `yarn jest`, or a bare `jest`) gets `--runInBand` (unless the row sets `--maxWorkers`) and `--forceExit`, so a suite that leaves handles open still exits.
+- `eval_node_cpu_count` (default `0`, off) sets the CPU count that Node reports inside the eval container. A small preload (`/tmp/node-cpu-cap.cjs`, added to `NODE_OPTIONS`) applies it, so it reaches a runner however it is started, for example through `npm test`. A runner starts one worker fewer than that count, so `2` means one worker. If the file cannot be written, `NODE_OPTIONS` is left alone.
+- With a count set, a `NODE_OPTIONS` that an `nv-internal-1` row's Dockerfile or `run_script.sh` assigns gets the preload added, because the assignment would otherwise drop it.
 
 ---
 
