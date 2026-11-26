@@ -59,6 +59,8 @@ DUMPS: Dict[str, BeaverDump] = {
 META_DB = "_beaver_meta"
 # The grader reads this one table of META_DB, granted as SHOW GRANTS names it.
 _META_TABLE = f"`{META_DB}`.`loaded`"
+# ER_NONEXISTING_GRANT: REVOKE of a grant the account doesn't hold.
+_NO_SUCH_GRANT = 1141
 # The dump hash recorded while a database is being loaded.
 _LOADING = "loading"
 
@@ -297,6 +299,8 @@ def _ensure_reader(cur, admin_user: str, reader_dsn: str, reader_password: Optio
     An existing user keeps its password (this never resets an account it may not own); the startup check then refuses it
     if it holds anything beyond ``SELECT``, or if ``reader_password`` is wrong.
     """
+    import mysql.connector
+
     params = parse_mysql_dsn(reader_dsn, reader_password)
     user, password = str(params["user"]), str(params["password"])
     if not user or user == admin_user:
@@ -305,10 +309,12 @@ def _ensure_reader(cur, admin_user: str, reader_dsn: str, reader_password: Optio
     cur.execute("CREATE USER IF NOT EXISTS %s@%s IDENTIFIED BY %s", (user, "%", password))
     # The meta database is granted by its table: in a database-level grant `_` is a wildcard (unless partial_revokes is
     # on), so `_beaver_meta`.* would reach every database named like it. That grant, which this loader used to make,
-    # is revoked.
-    cur.execute("SELECT COUNT(*) FROM mysql.db WHERE db = %s AND user = %s AND host = %s", (META_DB, user, "%"))
-    if cur.fetchone()[0]:
+    # is revoked; revoking it directly needs no read access to the grant tables, and "no such grant" is the usual case.
+    try:
         cur.execute(f"REVOKE SELECT ON `{META_DB}`.* FROM %s@%s", (user, "%"))
+    except mysql.connector.Error as e:
+        if e.errno != _NO_SUCH_GRANT:
+            raise
     cur.execute(f"GRANT SELECT ON {_META_TABLE} TO %s@%s", (user, "%"))
     for db in db_ids:
         cur.execute(f"GRANT SELECT ON `{db}`.* TO %s@%s", (user, "%"))

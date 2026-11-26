@@ -161,6 +161,7 @@ class _FakeMySql:
         self.show_grants: Optional[List[str]] = None
         self.unreadable: set = set()
         self.lock_free = True
+        self.system_tables_readable = True  # whether the admin may read mysql.* (a provisioner may not)
         self.current_role, self.mandatory_roles = "NONE", ""
         self.connects: List[Dict[str, Any]] = []
 
@@ -235,10 +236,13 @@ class _FakeCur:
             s.users.setdefault(f"{params[0]}@{params[1]}", params[2])
         elif sql.startswith("GRANT SELECT"):
             s.grants.append((sql.split(" ON ")[1].split(" TO ")[0], f"{params[0]}@{params[1]}"))
-        elif sql.startswith("SELECT COUNT(*) FROM mysql.db"):
-            self.result = [(s.grants.count((f"`{params[0]}`.*", f"{params[1]}@{params[2]}")),)]
+        elif "mysql." in sql and not s.system_tables_readable:
+            raise mysql.connector.errors.ProgrammingError("SELECT command denied", errno=1142)
         elif sql.startswith("REVOKE SELECT"):
-            s.grants.remove((sql.split(" ON ")[1].split(" FROM ")[0], f"{params[0]}@{params[1]}"))
+            grant = (sql.split(" ON ")[1].split(" FROM ")[0], f"{params[0]}@{params[1]}")
+            if grant not in s.grants:
+                raise mysql.connector.errors.ProgrammingError("There is no such grant defined", errno=1141)
+            s.grants.remove(grant)
         elif sql.startswith("SELECT GET_LOCK"):
             self.result = [(1 if s.lock_free else 0,)]
         elif sql == "SHOW GRANTS":
@@ -488,8 +492,18 @@ def test_grader_privilege_problems_accepts_select_on_beaver() -> None:
     )
 
 
+def test_the_loader_needs_no_read_access_to_the_system_tables(tmp_path, tiny, fake_mysql) -> None:
+    # A provisioner may hold CREATE USER and grant rights on the BEAVER databases without reading mysql.*.
+    server = fake_mysql()
+    server.system_tables_readable = False
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert server.grants == [("`_beaver_meta`.`loaded`", "beaver_reader@%"), ("`tiny`.*", "beaver_reader@%")]
+    check_beaver_mysql(READER, ["tiny"])
+
+
 def test_a_grader_with_the_old_meta_database_grant_is_moved_to_the_table(tmp_path, tiny, fake_mysql) -> None:
     server = fake_mysql()
+    server.system_tables_readable = False
     server.users["beaver_reader@%"] = "theirs"
     server.grants.append(("`_beaver_meta`.*", "beaver_reader@%"))
     with pytest.raises(RuntimeError, match="must hold only SELECT"):
