@@ -126,7 +126,7 @@ args = ["/opt/hello-tools/server.py"]
 
 The `harbor` Environment Server writes the list to `/tmp/.nemo-gym/task.json` in the agent's sandbox. A harness that
 starts task tool servers itself, such as `miniswe_sandboxed_agent`, or that connects to them itself, such as
-`opencode_agent` with OpenCode 1, reads it there. Any other harness is refused for
+`opencode_agent` with OpenCode 1 or `hermes_agent`, reads it there. Any other harness is refused for
 the task with a terminal failure that names the reason, rather than run without the tool. The oracle of
 `gym dataset validate` always takes the task.
 

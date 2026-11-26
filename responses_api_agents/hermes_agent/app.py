@@ -99,6 +99,7 @@ from responses_api_agents.hermes_agent.sandbox import (
     HermesSandboxSession,
     parse_runtime_info,
 )
+from responses_api_agents.hermes_agent.task_context import read_task_context, task_mcp_servers, task_skills_dir
 
 
 # Legacy /run grades these request rejections and masks other provider failures.
@@ -518,7 +519,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except (NotImplementedError, OSError):
             pass  # not supported on this platform (e.g. Windows, non-main thread)
 
-    def _build_config(self, mcp_accesses: list[MCPToolAccess] | None = None) -> str:
+    def _build_config(
+        self, mcp_accesses: list[MCPToolAccess] | None = None, task_context: Mapping[str, Any] | None = None
+    ) -> str:
         import yaml
 
         model: str | dict[str, Any] = self._model_name()
@@ -562,6 +565,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 }
                 for access in mcp_accesses
             }
+        # The task's own servers; one that a grant already names keeps the grant's connection.
+        for name, entry in task_mcp_servers(task_context or {}).items():
+            config.setdefault("mcp_servers", {}).setdefault(name, entry)
+        if (skills_dir := task_skills_dir(task_context or {})) is not None:
+            # Hermes lists the skills it finds there beside its own; its skill tools are in the CLI toolset.
+            config["skills"] = {"external_dirs": [skills_dir]}
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
@@ -650,6 +659,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         )
         try:
             await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
+            if not owns_sandbox:
+                state.task_context = await read_task_context(sandbox)
+                await self._check_task_tools(body, state.task_context)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -661,6 +673,23 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
+
+    def supports_task_tool_context(self) -> bool:
+        """Hermes gets the task's own MCP servers and skills directory through its configuration."""
+        return True
+
+    async def _check_task_tools(self, body: AgentSeedSessionRequest, task_context: Mapping[str, Any]) -> None:
+        """Refuse at seed a declaration Hermes cannot be given, not at the first activation."""
+        servers = task_mcp_servers(task_context)
+        task_skills_dir(task_context)
+        granted = {access.name for access in self.effective_tool_accesses(body) if isinstance(access, MCPToolAccess)}
+        # Hermes exposes each MCP server as a toolset of the same name, so a name must not shadow a built-in one.
+        own = set(servers) - granted
+        colliding = sorted(own & await asyncio.to_thread(builtin_toolsets)) if own else []
+        if colliding:
+            raise AgentSeedRejectedError(
+                "The task's MCP servers collide with Hermes toolsets: " + ", ".join(colliding)
+            )
 
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
@@ -772,20 +801,29 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         rollout_id: str | None,
         mcp_accesses: list[MCPToolAccess],
+        task_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         params = self._conversation_params(body)
+        granted = [access.name for access in mcp_accesses]
+        # The task's own servers are required, as the task declares them for its tools.
+        task_servers = list(task_mcp_servers(task_context or {}))
+        server_names = [*granted, *(name for name in task_servers if name not in granted)]
+        required = [access.name for access in mcp_accesses if access.required]
+        required += [name for name in task_servers if name not in required]
         enabled_toolsets = self.config.enabled_toolsets
         if enabled_toolsets is not None:
-            # A restricted tool list would otherwise hide the tools this episode was granted.
-            enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
+            # A restricted tool list would otherwise hide the tools this episode was granted or the task brings.
+            enabled_toolsets = [*enabled_toolsets, *server_names]
+            if task_skills_dir(task_context or {}) is not None and "skills" not in enabled_toolsets:
+                enabled_toolsets.append("skills")
         return {
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
-            "config_yaml": self._build_config(mcp_accesses),
+            "config_yaml": self._build_config(mcp_accesses, task_context),
             "disabled_toolsets": self.config.disabled_toolsets,
             "enabled_toolsets": enabled_toolsets,
-            "mcp_servers": [access.name for access in mcp_accesses],
-            "required_mcp_servers": [access.name for access in mcp_accesses if access.required],
+            "mcp_servers": server_names,
+            "required_mcp_servers": required,
             **params,
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
@@ -814,6 +852,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             agent_session_id=agent_session_id,
             rollout_id=state.request.episode_id.capture_key,
             mcp_accesses=mcp_accesses,
+            task_context=state.task_context,
         )
         timeout = self._agent_timeout_sec(body)
         timed_out = False
@@ -867,7 +906,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT:
             response = response.model_copy(update={"status": "incomplete", "error": None})
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
-        server_names = [access.name for access in mcp_accesses]
+        server_names = payload["mcp_servers"]
         for item in response.output:
             if getattr(item, "type", None) == "function_call":
                 item.name = _gym_mcp_tool_name(item.name, server_names)
