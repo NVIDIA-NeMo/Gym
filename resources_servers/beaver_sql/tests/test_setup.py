@@ -205,6 +205,7 @@ class _FakeCur:
             s.tables[name] = 0
         elif sql.startswith("DROP DATABASE"):
             s.databases.discard(sql.split("`")[1])
+            s.tables.pop(sql.split("`")[1], None)
         elif sql.startswith("USE"):
             self.db = sql.split("`")[1]
         elif sql.startswith("CREATE TABLE"):
@@ -314,6 +315,19 @@ def test_reloads_a_stale_dump(tmp_path, tiny, fake_mysql) -> None:
     ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
     assert server.loaded["tiny"][0] == setup.DUMPS["tiny"].sha256
     assert "DROP DATABASE IF EXISTS `tiny`" in server.statements
+
+
+def test_reloads_a_recorded_database_that_is_gone(tmp_path, tiny, fake_mysql) -> None:
+    # Dropped, or a backup restored without it, after a load that is still recorded as current.
+    server = fake_mysql()
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    server.databases.discard("tiny")
+    server.tables.pop("tiny")
+    with pytest.raises(RuntimeError, match="sees 0 of 1 tables"):
+        check_beaver_mysql(READER, ["tiny"])
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert "tiny" in server.databases and server.loaded["tiny"] == (setup.DUMPS["tiny"].sha256, 1)
+    check_beaver_mysql(READER, ["tiny"])
 
 
 def test_wrong_table_count_is_an_error(tmp_path, tiny, fake_mysql, monkeypatch) -> None:

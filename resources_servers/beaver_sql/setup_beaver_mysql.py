@@ -316,8 +316,8 @@ def ensure_beaver_mysql(
 ) -> None:
     """Load every ``db_id`` not yet loaded from the pinned dump, then create the grader's read-only user.
 
-    Idempotent. A ``db_id`` recorded with another dump hash is reloaded; a database of that name this module didn't
-    record is never touched (error).
+    Idempotent. A ``db_id`` recorded with another dump hash, or recorded but missing from the server, is reloaded; a
+    database of that name this module didn't record is never touched (error).
     """
     # Both DSNs are checked before anything changes, so a DSN holding a password fails here, not after a load.
     parse_mysql_dsn(reader_dsn, reader_password)
@@ -338,7 +338,8 @@ def ensure_beaver_mysql(
             raise RuntimeError(
                 f"MySQL already has databases {foreign} that this loader didn't create; drop them or use another server"
             )
-        stale = [db_id for db_id in db_ids if recorded.get(db_id) != _dump(db_id).sha256]
+        # A recorded database that is gone (dropped, or a backup restored without it) is loaded again too.
+        stale = [db_id for db_id in db_ids if recorded.get(db_id) != _dump(db_id).sha256 or db_id not in existing]
         if stale:
             dumps = ensure_beaver_dumps(cache_dir, stale)
             for db_id in stale:
