@@ -192,14 +192,18 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   nohup`, `&`): the read dies with it. Run it as a CPU batch job on the cluster: the job installs the Gym CLI at the
   run's launcher commit on the node's local disk and runs the same command with
   `NEMO_GYM_REMOTE_READER_SRUN="--jobid=$SLURM_JOB_ID --overlap"`, so the readers run as steps of that job, in its
-  memory. Give it the time of the collector and two reader bounds plus the install, and never shorten it: a read
-  cut short starts over. On a shared account, take a CPU QOS with a free node, so the job does not hold back a
-  benchmark's CPU services. A recovery passes `--judge-partition` and `--judge-qos` (they are refused with
-  `--inspect`), since that variable names no partition for a judge-only job. Before the command, unset the
+  memory. Size its time limit from the reader bound B: 900 s plus 100 s per GB of rollout files (or
+  `NEMO_GYM_REMOTE_READER_TIMEOUT_S`), at most 14400 s. One evidence collection takes up to B for the collector, B for
+  the reader and min(2B, 14400 s) for the reader's one retry. Budget two collections, the most one command makes: a
+  recovery collects again before it queues a judge-only job. For 50 GB, B is 5900 s and two collections take up to
+  47200 s, about 13 h. Add the install, step start waits and a margin, and never shorten the limit: a read cut short
+  starts over. On a shared account, take a CPU QOS whose time limit holds that budget and that has a free node, so the
+  job does not hold back a benchmark's CPU services. A recovery passes `--judge-partition` and `--judge-qos` (they are
+  refused with `--inspect`), since that variable names no partition for a judge-only job. Before the command, unset the
   install's own settings (for example `UV_PYTHON_PREFERENCE` and the uv cache and Python paths) and the job's own
-  `SLURM_*`, `SRUN_*` and `SBATCH_*` variables except `SLURM_CONF`. For a run submitted from the cluster's login
-  node (`hostname` null in `gym-job.json`), Gym's `sbatch` runs inside the batch job and passes them on to the jobs
-  it submits. Read the JSON line from the job's log. If a large-store reader still stalls or times out
+  `SLURM_*`, `SRUN_*` and `SBATCH_*` variables except `SLURM_CONF`. For a run submitted from the cluster's login node
+  (`hostname` null in `gym-job.json`), Gym's `sbatch` runs inside the batch job and passes them on to the jobs it
+  submits. Read the JSON line from the job's log. If a large-store reader still stalls or times out
   after one retry with the 14400 s bound and more memory, report the store size, command and reader diagnostics
   as a suspected Gym reader issue, and say the run is blocked on the reader. If inspection reports "saved rows
   are unreadable", check the named files' read permissions and storage errors before attributing the failure
