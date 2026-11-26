@@ -2014,13 +2014,14 @@ def test_a_call_cancelled_while_claiming_releases_its_claim(tmp_path, monkeypatc
     from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
 
     store = CaptureStore(tmp_path)
-    claiming, proceed = threading.Event(), threading.Event()
+    claiming, proceed, claimed = threading.Event(), threading.Event(), threading.Event()
     mark_pending = store.mark_pending
 
     def held_claim(rollout_id, model_call_id):
         claiming.set()
         proceed.wait(5)
         mark_pending(rollout_id, model_call_id)
+        claimed.set()
 
     monkeypatch.setattr(store, "mark_pending", held_claim)
 
@@ -2031,12 +2032,15 @@ def test_a_call_cancelled_while_claiming_releases_its_claim(tmp_path, monkeypatc
         task = asyncio.create_task(_capture_call(store, "r-claim-cancel", app))
         await asyncio.to_thread(claiming.wait, 5)
         task.cancel()
+        await asyncio.sleep(0.2)
+        # A collector pass while the claim is still being written: a release already appended would be deleted
+        # as settled, and the claim that lands next would stay outstanding.
+        store.delete_claims_if_settled("r-claim-cancel")
+        proceed.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        # The claim lands after the cancelled call recorded its row and released it.
-        proceed.set()
-        await asyncio.sleep(0.1)
-        assert await await_model_call_capture_quiescence("r-claim-cancel", [tmp_path], timeout_s=5.0) is True
+        assert await asyncio.to_thread(claimed.wait, 5) is True
+        assert await await_model_call_capture_quiescence("r-claim-cancel", [tmp_path], timeout_s=2.0) is True
         assert [exchange["error_category"] for exchange in store.read("r-claim-cancel")] == ["cancelled"]
 
     asyncio.run(run())

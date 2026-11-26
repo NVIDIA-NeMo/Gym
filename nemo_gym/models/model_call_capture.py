@@ -30,6 +30,7 @@ import os
 import re
 import time
 import warnings
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
@@ -908,6 +909,16 @@ def _record(
             logger.warning("Could not release the capture claim for rollout %s.", rollout_id, exc_info=True)
 
 
+async def _write_after_claim(claim: asyncio.Future, write: Awaitable[None]) -> None:
+    """Run ``write`` once ``claim`` has finished, whatever its outcome.
+
+    A release appended before its claim could be deleted as settled, and the claim that lands next would stay
+    outstanding.
+    """
+    await asyncio.wait({claim})
+    await write
+
+
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
     """Record a failure when an admitted worker call returns without commit coordinates.
 
@@ -1244,11 +1255,13 @@ class _CaptureMiddleware:
             for message in deferred_response_messages:
                 await send(message)
 
+        # Off the event loop, since it waits on the claims file's lock. A task, so a call cancelled while
+        # claiming still claims, and its release can wait for the claim.
+        claim = asyncio.ensure_future(asyncio.to_thread(self._store.mark_pending, rollout_id, model_call_id))
         try:
             # Claimed before the call is forwarded and held for its whole lifetime, so a reader never snapshots
-            # before the row lands. Off the event loop, since it waits on the claims file's lock; inside the try,
-            # so a call cancelled while claiming still releases its claim.
-            await asyncio.to_thread(self._store.mark_pending, rollout_id, model_call_id)
+            # before the row lands.
+            await asyncio.shield(claim)
             with rollout_context(rollout_id):
                 await self._app(scope, _receive, _send)
         except (Exception, asyncio.CancelledError) as exc:
@@ -1284,7 +1297,7 @@ class _CaptureMiddleware:
                     execution=request_state.get("nemo_gym_model_execution"),
                     failure=exc,
                 )
-                await asyncio.shield(write)
+                await asyncio.shield(_write_after_claim(claim, write))
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
