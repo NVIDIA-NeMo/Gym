@@ -9,14 +9,15 @@ whose peak is only a sampled lower bound (process-tree sampling) is also sampled
 
 This sits next to :class:`nemo_gym.sandbox.resource_telemetry.ResourceSampler`, which is a different mechanism:
 
-- ``SandboxUsageTracker`` (here): providers implementing ``SupportsSandboxUsage`` (Docker, Enroot, Apptainer). It
-  reads the runtime's lifetime accounting (cgroup counters or the sandbox's process tree), runs whether or not
-  telemetry is configured, and returns the result as data: ``AsyncSandbox.resource_usage``, the ``gym.sandbox.stop``
-  span attributes and the stopped-sandbox listeners that fill ``SandboxObservation``.
+- ``SandboxUsageTracker`` (here): providers implementing ``SupportsSandboxUsage`` (Docker, Enroot, Apptainer,
+  OpenSandbox). It reads the runtime's lifetime accounting (cgroup counters or the sandbox's process tree), runs
+  whether or not telemetry is configured, and returns the result as data: ``AsyncSandbox.resource_usage``, the
+  ``gym.sandbox.stop`` span attributes and the stopped-sandbox listeners that fill ``SandboxObservation``.
 - ``ResourceSampler``: providers implementing ``ResourceProvider`` (OpenSandbox). It records the sandbox's allocation
   and live utilization gauges as OTel spans and metrics, every
   ``NEMO_GYM_OTEL_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS``, only while a trace exporter is active; nothing is
-  returned to the caller.
+  returned to the caller. On OpenSandbox both run: the tracker's two counter reads give exact lifetime totals, and
+  the sampler's gauges give the utilization over time.
 """
 
 import asyncio
@@ -49,9 +50,12 @@ class SandboxUsageSummary:
     minus first reading) is the CPU everything in that cgroup used while this sandbox lived. ``memory_peak_bytes``
     is the largest peak read. Current, anonymous and file memory are from the last sample.
 
+    The CPU contention counters (throttling and pressure stall time; see ``SandboxUsageSample``) follow
+    ``cpu_usage_usec_total``: ``*_total`` is the last cumulative reading and ``*_delta`` the last minus the first.
+
     ``final_read`` says whether the read in ``stop()``, before close, measured this source and scope. Without it the
-    totals are unknown: ``cpu_usage_usec_total``, ``cpu_usage_usec_delta`` and ``memory_peak_bytes`` are None (never
-    the create-time reading), and ``unavailable_reason`` says why once the sandbox has stopped:
+    totals are unknown: every ``*_total`` and ``*_delta`` and ``memory_peak_bytes`` are None (never the create-time
+    reading), and ``unavailable_reason`` says why once the sandbox has stopped:
     ``final_read_timeout``, ``final_read_failed``, or a reason the provider gave (``not_cgroup_root``,
     ``sandbox_gone``).
     """
@@ -72,8 +76,27 @@ class SandboxUsageSummary:
     memory_file_bytes: int | None = None
     includes_page_cache: bool | None = None
     process_count: int | None = None
+    cpu_throttled_usec_total: int | None = None
+    cpu_throttled_usec_delta: int | None = None
+    cpu_throttled_periods_total: int | None = None
+    cpu_throttled_periods_delta: int | None = None
+    cpu_pressure_some_usec_total: int | None = None
+    cpu_pressure_some_usec_delta: int | None = None
+    cpu_pressure_full_usec_total: int | None = None
+    cpu_pressure_full_usec_delta: int | None = None
     final_read: bool = False
     unavailable_reason: str | None = None
+
+
+# Cumulative counters a summary reports as the last reading (``<name>_total``) and its change over the samples
+# (``<name>_delta``).
+_COUNTERS = (
+    "cpu_usage_usec",
+    "cpu_throttled_usec",
+    "cpu_throttled_periods",
+    "cpu_pressure_some_usec",
+    "cpu_pressure_full_usec",
+)
 
 
 def usage_sample_interval() -> float:
@@ -93,9 +116,13 @@ def summarize(
     """
     first, last = samples[0], samples[-1]
     peaks = [sample.memory_peak_bytes for sample in samples if sample.memory_peak_bytes is not None]
-    delta = None
-    if first.cpu_usage_usec_total is not None and last.cpu_usage_usec_total is not None and len(samples) > 1:
-        delta = last.cpu_usage_usec_total - first.cpu_usage_usec_total
+    counters: dict[str, int | None] = {}
+    for name in _COUNTERS:
+        before, after = getattr(first, f"{name}_total"), getattr(last, f"{name}_total")
+        counters[f"{name}_total"] = after
+        counters[f"{name}_delta"] = (
+            after - before if before is not None and after is not None and len(samples) > 1 else None
+        )
     if not final_read:
         return SandboxUsageSummary(
             source=last.source,
@@ -120,8 +147,7 @@ def summarize(
         first_sampled_at=first.sampled_at,
         last_sampled_at=last.sampled_at,
         sample_count=len(samples),
-        cpu_usage_usec_total=last.cpu_usage_usec_total,
-        cpu_usage_usec_delta=delta,
+        **counters,
         cpu_kind=last.cpu_kind,
         memory_peak_bytes=max(peaks) if peaks else None,
         peak_kind=next((sample.peak_kind for sample in reversed(samples) if sample.peak_kind), None),
@@ -152,12 +178,11 @@ def usage_span_attributes(summaries: tuple[SandboxUsageSummary, ...]) -> dict[st
 class SandboxUsageTracker:
     """Samples one owned sandbox; a failed or slow read loses that sample, never the sandbox operation.
 
-    Merging ``ResourceSampler`` into this class later (see the module docstring for how they differ): give
-    OpenSandbox ``SupportsSandboxUsage`` (its container cgroup read through the provider's exec, or execd counters),
-    let ``poll()`` also export each sample as the live OTel gauges ``ResourceSampler.record("sample")`` emits today
-    when an exporter is active, and record the allocation once after create. ``ResourceSampler`` and
-    ``ResourceProvider`` could then go. They stay separate for now because no provider implements both: the tracker
-    reads lifetime counters on Docker, Enroot and Apptainer, while the sampler exports OpenSandbox's live gauges.
+    Merging ``ResourceSampler`` into this class later (see the module docstring for how they differ): let ``poll()``
+    also export each sample as the live OTel gauges ``ResourceSampler.record("sample")`` emits today when an exporter
+    is active, and record the allocation once after create. ``ResourceSampler`` and ``ResourceProvider`` could then
+    go. They stay separate for now: on OpenSandbox the tracker reads the sandbox's cgroup only after create and
+    before close, while the sampler reads execd's gauges periodically.
     """
 
     def __init__(self, provider: SupportsSandboxUsage, handle: SandboxHandle, *, interval: float) -> None:

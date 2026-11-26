@@ -453,11 +453,20 @@ reported only on its span.
 | Docker | the container's cgroup v2, on the host when the daemon is local, otherwise read from inside the container | `container` |
 | Apptainer | the instance's cgroup when Apptainer created one; otherwise its namespace processes and the cgroup it shares with Gym | `container`, else `process_tree`, `shared_step` |
 | Enroot | the live processes in the container's PID or mount namespace; the CPU of each completed `exec`; the cgroup it shares with Gym | `process_tree`, `shared_step` |
+| OpenSandbox | the sandbox's cgroup v2, read from inside it through the provider's exec after create and before close | `container` |
 
-Other providers, including OpenSandbox, report no usage yet.
+Other providers report no usage yet.
 
 - `container` values are kernel counters for the sandbox's own cgroup; memory includes page cache.
-  `SandboxObservation.cpu_time_s` and `peak_memory_mib` repeat them.
+  `SandboxObservation.cpu_time_s` and `peak_memory_mib` repeat them. An OpenSandbox read counts only where
+  `/proc/self/cgroup` is `0::/`, the sandbox's own cgroup namespace root; anywhere else the summary is empty with
+  `unavailable_reason` `not_cgroup_root`, and that sandbox is not read again. The read is not an exec span or a
+  tool call, and its own few milliseconds of CPU are in the total.
+- A cgroup v2 read also reports CPU contention, as lifetime totals (`*_total`) and their change over the samples
+  (`*_delta`): `cpu_throttled_usec` and `cpu_throttled_periods`, the time the CPU quota throttled the cgroup and
+  the number of quota periods in which it did (`cpu.stat`); and `cpu_pressure_some_usec` and
+  `cpu_pressure_full_usec`, the time at least one, or every, runnable task waited for a CPU (`cpu.pressure`). The
+  pressure totals are absent where the kernel has no pressure accounting.
 - `process_tree` values come from `/proc`, and `source` names the namespaces that selected the processes:
   `procfs_pidns`, `procfs_mntns` or `procfs_pidns_mntns`. Enroot nested in another container shares Gym's PID
   namespace, so its processes are found by their mount namespace. The CPU includes the children each process
@@ -482,7 +491,7 @@ Other providers, including OpenSandbox, report no usage yet.
   the server's process tree.
 
 Totals come from the read in `stop()`. Each summary's `final_read` says whether that read measured it; when it did
-not, `cpu_usage_usec_total`, `cpu_usage_usec_delta` and `memory_peak_bytes` are empty rather than the create-time
+not, every `*_total` and `*_delta` and `memory_peak_bytes` are empty rather than the create-time
 reading, and `unavailable_reason` says why (`final_read_timeout`, `final_read_failed`, `not_cgroup_root` or
 `sandbox_gone`).
 
@@ -493,13 +502,13 @@ These lifetime summaries are separate from the live resource records OpenSandbox
 
 | | Usage summaries (`SupportsSandboxUsage`) | Resource telemetry (`ResourceProvider`) |
 | --- | --- | --- |
-| Providers | Docker, Enroot, Apptainer | OpenSandbox |
+| Providers | Docker, Enroot, Apptainer, OpenSandbox | OpenSandbox |
 | Mechanism | Lifetime accounting: cumulative CPU and peak memory, read after create and before close | Allocation plus instantaneous CPU % and memory in use, every `NEMO_GYM_OTEL_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS` |
 | Output | `sandbox.resource_usage`, `gym.sandbox.stop` span attributes and `SandboxObservation.resource_usage` | `gym.sandbox.resource.*` spans and `gym.sandbox.*` gauges |
 | Needs an OTel exporter | No | Yes |
 
-Both are sampled only by the process that created the sandbox. They are expected to merge once one provider
-implements both.
+Both are sampled only by the process that created the sandbox. On OpenSandbox both run: the usage summary's
+counters are exact lifetime totals, and the resource telemetry gives utilization over time.
 
 ## Image Rewrites
 
