@@ -26,6 +26,11 @@ verifiers use harbor-rewardkit criteria, which changes the meaning of test count
   compare harnesses on the 63 other tasks with `++task_ids_fpath=benchmarks/terminal_bench_4/root_image_tasks.txt`.
   It has no step limit, so its scores are not comparable with the Artificial Analysis settings of
   `terminal_bench_4/miniswe`.
+- `terminal_bench_4/hermes`: Hermes in
+  [`hermes_agent`](../../responses_api_agents/hermes_agent/README.md) agent sessions, on the same task folders and
+  Harbor environment server, with the episode bound of `terminal_bench_4/miniswe`, Hermes's run limit raised to the
+  tasks' 8-hour agent budget and its turn limit set by `tb4_max_steps` (500 by default, as mini-SWE's step limit).
+  A task's own MCP servers and skills directory reach Hermes through its configuration.
 - `terminal_bench_4/nooa`: NOOA's BenchAgent in
   [`nooa_agent`](../../responses_api_agents/nooa_agent/README.md) agent sessions, on the same task folders and
   Harbor environment server, with the episode bound and setup allowance of `terminal_bench_4/miniswe` and NOOA's run
