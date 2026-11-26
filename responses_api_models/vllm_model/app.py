@@ -573,6 +573,51 @@ def _redacted_error_repr(error: ClientResponseError) -> str:
 ReasoningFieldMode = Literal["both", "reasoning", "reasoning_content"]
 
 
+_MISTRAL_TOOL_CALL_ID = re.compile(r"^[A-Za-z0-9]{9}$")
+_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def _mistral_tool_call_id(original: str, attempt: int) -> str:
+    digest = int.from_bytes(hashlib.sha256(f"{original}\0{attempt}".encode()).digest()[:8], "big")
+    chars = []
+    for _ in range(9):
+        digest, index = divmod(digest, 62)
+        chars.append(_BASE62[index])
+    return "".join(chars)
+
+
+def _remap_tool_call_ids_for_mistral(messages: List[Dict[str, Any]]) -> None:
+    """Give every tool call in ``messages`` a distinct 9-character alphanumeric id, in place.
+
+    Assistant ``tool_calls[].id`` and tool ``tool_call_id`` share one mapping, so each result
+    still answers its own call. Ids that are already valid keep their value; a new id never
+    takes one used elsewhere in the request.
+    """
+    originals = []
+    for message in messages:
+        for tool_call in message.get("tool_calls") or []:
+            if tool_call.get("id") is not None:
+                originals.append(tool_call["id"])
+        if message.get("tool_call_id") is not None:
+            originals.append(message["tool_call_id"])
+    taken = {i for i in originals if _MISTRAL_TOOL_CALL_ID.match(i)}
+    mapping = {i: i for i in taken}
+    for original in originals:
+        if original in mapping:
+            continue
+        attempt = 0
+        while (candidate := _mistral_tool_call_id(original, attempt)) in taken:
+            attempt += 1
+        taken.add(candidate)
+        mapping[original] = candidate
+    for message in messages:
+        for tool_call in message.get("tool_calls") or []:
+            if tool_call.get("id") is not None:
+                tool_call["id"] = mapping[tool_call["id"]]
+        if message.get("tool_call_id") is not None:
+            message["tool_call_id"] = mapping[message["tool_call_id"]]
+
+
 def _default_reasoning_field() -> str:
     # Environment fallback for launchers that select the mode without a config
     # override; an explicit ``reasoning_field`` in config takes precedence.
@@ -723,6 +768,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``uses_reasoning_parser``.
     preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
+    # Rewrite tool-call ids in the request history to distinct 9-character [A-Za-z0-9] ids, the
+    # only form vLLM's Mistral tokenizer accepts. It otherwise rejects longer ids or keeps their
+    # last 9 characters, so ids such as `call_0_conv_0001_2` and `call_1_conv_0001_2` collide
+    # ("Duplicate tool call id"). Valid ids are kept, and the mapping depends only on the id, so a
+    # resent history maps the same way on every turn.
+    mistral_tool_call_ids: bool = False
 
     drop_unrepresentable_request_fields: bool = Field(
         default=False,
@@ -1639,6 +1690,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
+
+        if self.config.mistral_tool_call_ids:
+            _remap_tool_call_ids_for_mistral(body_dict["messages"])
 
         body_dict["model"] = self.config.model
 
