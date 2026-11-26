@@ -175,10 +175,13 @@ def _pooled_groups(runs: Sequence[LoadedRun]) -> Tuple[List[Dict[str, Any]], Opt
 
 
 def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str]) -> LoadedRun:
-    """Concatenate complete repeat samples and recompute point estimates and 95% intervals.
+    """Pool repeat estimates and looping counts across independent sources.
 
-    Each repeat has equal weight, even when sources have different repeat counts. Metrics
-    available only as whole-run aggregates (including pass@k summaries) are omitted. A metric
+    Repeat metrics give each repeat equal weight and recompute means and 95% intervals.
+    Looping diagnostics instead sum completed, assessed, and flagged counts, requiring all
+    three counts from every source. Their ratios are derived from those totals without
+    repeat confidence intervals; the looping/ namespace is reserved for this calculation.
+    Other whole-run-only metrics (including pass@k summaries) are omitted. A repeat metric
     other than token accounting must be finite in every scored row of every source.
     Token metrics use the observations that record them, including accounting-only rows
     from unscored repeats, without inventing a zero quality or token estimate.
@@ -190,18 +193,18 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
     quality_rows = [
         _quality_rows(run, rows, label) for run, rows, label in zip(runs, rows_by_source, source_labels, strict=True)
     ]
-    metric_names = sorted(
+    repeat_metric_names = sorted(
         {
             name
             for rows in rows_by_source
             for row in rows
             for name in row
-            if name != AGENT_REF_KEY_NAME and is_primary_metric(name)
+            if name != AGENT_REF_KEY_NAME and is_primary_metric(name) and not name.startswith("looping/")
         }
     )
-    if not metric_names:
+    if not repeat_metric_names:
         raise ConfigError("Cannot pool runs: their repeat rows contain no primary metrics.")
-    quality_names = set(metric_names) - token_names
+    quality_names = set(repeat_metric_names) - token_names
     if not quality_names and any(
         is_primary_metric(name) and name not in token_names
         for run in runs
@@ -229,7 +232,7 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
         if metrics["looping/assessed_total"]:
             metrics["looping/rate"] = metrics["looping/flagged_total"] / metrics["looping/assessed_total"]
     accounting_notes = []
-    for name in metric_names:
+    for name in repeat_metric_names:
         observations = rows_by_source if name in token_names else quality_rows
         values, missing_notes = _pooled_metric_samples(name, observations, source_labels)
         accounting_notes.extend(missing_notes)
@@ -270,9 +273,14 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
     sample_count = sum(map(len, sample_rows_by_source))
     notes = [
         f"Pooled {len(runs)} independent sources ({', '.join(str(len(rows)) for rows in sample_rows_by_source)} "
-        f"repeats; {sample_count} total). Each repeat is an independent, equally weighted observation; "
+        f"repeats; {sample_count} total). For repeat-based metrics, each repeat is an independent, "
+        "equally weighted observation; "
         "local repeat indices in different sources are independent."
     ]
+    if "looping/completed_total" in metrics:
+        notes.append(
+            "Looping diagnostics sum counts across all sources; their ratios have no repeat confidence intervals."
+        )
     notes.extend(accounting_notes)
     if any(run.agent_metrics.get("coverage/masked_rollouts", 0) for run in runs) or any(
         len(scored) != len(recorded) for scored, recorded in zip(quality_rows, rows_by_source, strict=True)
@@ -292,7 +300,7 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
                 )
     if omitted:
         notes.append(
-            "Whole-run metrics without complete repeat-level samples were omitted from the pooled side: "
+            "Metrics without complete observations or required counts were omitted from the pooled side: "
             + ", ".join(f"`{name}`" for name in omitted)
             + "."
         )

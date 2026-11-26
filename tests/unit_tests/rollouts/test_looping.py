@@ -99,8 +99,8 @@ def test_metrics_include_masked_outputs_and_exclude_imputed_zeros():
     for labels in ([True, False], [False] * 8):
         data = [dict(reward=1, is_looping=flag, _ng_rollout_index=index) for index, flag in enumerate(labels)]
         aggregate = compute_aggregate_metrics(data)
-        runs.append(
-            LoadedRun("agent", aggregate.agent_metrics, aggregate.key_metrics, [], aggregate.repeat_level_metrics)
-        )
+        repeat_rows = [row | {"looping/rate": 0.5} for row in aggregate.repeat_level_metrics]
+        runs.append(LoadedRun("agent", aggregate.agent_metrics, aggregate.key_metrics, [], repeat_rows))
     pooled = pool_loaded_runs(runs, source_labels=["a", "b"]).agent_metrics
     assert pooled["looping/rate"] == 0.1
+    assert "mean_across_repeats/looping/rate" not in pooled
