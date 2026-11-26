@@ -244,6 +244,9 @@ responses_api_agents/cvdp_agent/deps/
 resources_servers/cvdp/data/gym_agentic_code_generation_no_commercial.jsonl
 resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.jsonl
 
+# Node.js that pi_agent/setup_pi.py installs for local Pi, named by its release, with its install lock and record
+responses_api_agents/pi_agent/.pi_node*
+
 # Node.js that codex_agent/setup_codex.py installs for local Codex and the launcher tests
 responses_api_agents/codex_agent/.codex_node/
 

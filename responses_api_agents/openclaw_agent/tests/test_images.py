@@ -90,8 +90,10 @@ def test_session_stages_prompt_images_and_replays_once(setup, monkeypatch, image
         assert sandbox.files[uploads[1]] == (SECOND_IMAGE.data if distinct else IMAGE.data)
         assert uploads[0].startswith(f"{sandbox.directory}/home/.openclaw/media/")
         prompt = staged(sandbox)["prompt"]
-        assert prompt.count(f"[Image: source: {uploads[0]}]") == 1
-        assert prompt.count(f"[Image: source: {uploads[1]}]") == 1
+        # OpenClaw attaches absolute image paths named on their own line; 2026.11.5 ignores the older marker.
+        assert prompt.splitlines().count(uploads[0]) == 1
+        assert prompt.splitlines().count(uploads[1]) == 1
+        assert "[Image: source:" not in prompt
         assert prompt.index(uploads[0]) < prompt.index(uploads[1])
         assert ("Describe the image" in prompt) is not image_only
         config = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])

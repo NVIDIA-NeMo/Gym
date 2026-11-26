@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: terminal_bench_2_1/openclaw
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: The 89 pinned Terminal-Bench 2.1 task folders in their Harbor format, run by OpenClaw 2026.6.11 agent
+  sessions through the Harbor environment server and graded by each task's own tests.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../openclaw.yaml
+harbor_target: terminal_bench_2_1
+resources_server: null
+agent_server: openclaw_agent
+datasets: []
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

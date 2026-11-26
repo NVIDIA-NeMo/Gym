@@ -208,6 +208,46 @@ def test_required_non_mcp_grant_is_still_rejected(setup):  # noqa: F811
     sandbox.exec.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "names",
+    [("company", "company_files"), ("company_files", "company"), ("company", "company.files"), ("a.b", "a_b")],
+)
+def test_grants_whose_tools_opencode_could_name_alike_are_refused(setup, names):  # noqa: F811
+    """OpenCode keys a grant's tools <grant>_<tool> and lets a later tool replace an earlier one under the same key:
+    `company` serving `files_list` and `company_files` serving `list` would both be `company_files_list`."""
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant(name, required=index == 0) for index, name in enumerate(names)]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert all(repr(name) in detail for name in names), detail
+    sandbox.exec.assert_not_awaited()
+
+
+def test_a_configured_grant_and_a_session_grant_that_could_collide_are_refused(setup):  # noqa: F811
+    agent, sandbox = setup
+    agent.config.tool_accesses = [MCPToolAccess.model_validate(grant("company", required=False))]
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("company_files", required=True)]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422 and "'company_files'" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("names", [("company", "store"), ("company", "companyfiles"), ("company", "company-files")])
+def test_grants_whose_tools_cannot_share_a_name_are_kept(setup, names):  # noqa: F811
+    agent, _ = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant(name, required=True) for name in names]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
 @pytest.mark.parametrize(
     "server_status, expected",

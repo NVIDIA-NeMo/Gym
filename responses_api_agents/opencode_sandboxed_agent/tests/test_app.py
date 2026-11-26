@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -1966,6 +1967,45 @@ class TestBenchmarkLifecycle:
         with raises(ValueError, match="authenticated MCP"):
             await server._seed_tool_servers(request, body)
 
+    async def test_the_config_names_a_tool_server_as_its_endpoint_lists_itself(self, monkeypatch):
+        """OpenCode names a tool server's tools by its MCP config key, so the key is the name the server's seed
+        metadata gives the endpoint; the URL is still resolved through the server's name."""
+        mcp = {"server_name": "company", "url_path": "/mcp", "headers": {"Authorization": "Bearer scoped"}}
+        seeded = MagicMock(read=AsyncMock(return_value=json.dumps({"mcp": mcp}).encode()))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seeded)
+        config = self._create_config()
+        config.tool_servers = [ResourcesServerRef(type="resources_servers", name="store")]
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        resolved = []
+        monkeypatch.setattr(
+            "nemo_gym.agents.agent_tools.sandbox_server_url",
+            lambda name, **_: resolved.append(name) or f"http://{name}.example:8000",
+        )
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+
+        entries = await server._seed_tool_servers(MagicMock(cookies={}), body)
+
+        assert entries == {
+            "company": {
+                "type": "remote",
+                "url": "http://store.example:8000/mcp",
+                "headers": {"Authorization": "Bearer scoped"},
+                "enabled": True,
+                "timeout": 60000,
+            }
+        }
+        assert resolved == ["store"]
+        monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://model.example:8000")
+        monkeypatch.setattr(
+            OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
+        )
+        request = MagicMock(state=SimpleNamespace(_ng_opencode_mcp=entries))
+        request.json = AsyncMock(return_value={})
+        assert (await server._create_opencode_config(request))["mcp"] == entries
+
     @mark.parametrize("export_found", [False, True])
     async def test_execution_failure_requires_captured_export_before_zero_verification(
         self, monkeypatch, export_found
@@ -2296,10 +2336,6 @@ class TestBenchmarkLifecycle:
                 "missing its launch marker",
             ),
             (
-                SimpleNamespace(stdout=None, stderr="", return_code=124, error_type="timeout"),
-                "missing its launch marker",
-            ),
-            (
                 SimpleNamespace(stdout="Shell: bash\npartial", stderr="", return_code=0, error_type=None),
                 "without a trustworthy completion marker",
             ),
@@ -2362,6 +2398,8 @@ class TestBenchmarkLifecycle:
                 return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
             if "opencode export" in command:
                 return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "nemo-gym-terminate-agent" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
             if "opencode db" in command:
                 return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
             return SimpleNamespace(
@@ -2392,6 +2430,145 @@ class TestBenchmarkLifecycle:
         assert run_result["opencode_finished"] is False
         sandbox.download.assert_awaited_once()
 
+    @mark.parametrize("session_list", ['[{"id":"session"}]', "[]"])
+    async def test_agent_deadline_without_output_continues_from_the_export_or_fails_before_grading(
+        self, tmp_path: Path, session_list: str
+    ) -> None:
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+
+        async def execute(command: str, **_kwargs: Any) -> Any:
+            if "session list" in command:
+                return SimpleNamespace(stdout=session_list, stderr="", return_code=0, error_type=None)
+            if "opencode export" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "opencode db" in command:
+                return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
+            if "nemo-gym-terminate-agent" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            # The provider reports the deadline but returns no output for the killed command.
+            return SimpleNamespace(stdout=None, stderr="", return_code=124, error_type="timeout")
+
+        async def download(_remote: str, local: Path) -> None:
+            local.write_bytes((Path(__file__).parent / "opencode_export_test_data.json").read_bytes())
+
+        sandbox = MagicMock(
+            upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
+        )
+        server._sandbox_id_to_sandbox = {"session": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        request = SimpleNamespace(
+            cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        if session_list == "[]":
+            with raises(NgFailureEvent, match="did not return any sessions") as caught:
+                await server.responses(request, body)
+            assert caught.value.operation == "opencode.session_list"
+            assert "session" not in server._sandbox_id_to_run_result
+            return
+
+        response = await server.responses(request, body)
+
+        assert response.output
+        run_result = server._sandbox_id_to_run_result["session"]
+        assert run_result["opencode_failed"] is True
+        assert run_result["opencode_exit_code"] == 124
+        assert run_result["opencode_error_type"] == "timeout"
+        assert run_result["opencode_export_found"] is True
+        assert run_result["opencode_finished"] is False
+        assert run_result["opencode_run_stdout"] == ""
+
+    @mark.parametrize("unconfirmed", ["exit", "timeout", "raises"])
+    async def test_agent_deadline_without_confirmed_termination_fails_before_export_and_grading(
+        self, tmp_path: Path, unconfirmed: str
+    ) -> None:
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+
+        async def execute(command: str, **_kwargs: Any) -> Any:
+            if "nemo-gym-terminate-agent" in command:
+                if unconfirmed == "raises":
+                    raise ConnectionError("sandbox unreachable")
+                return SimpleNamespace(
+                    stdout="",
+                    stderr="",
+                    return_code=1 if unconfirmed == "exit" else 124,
+                    error_type="timeout" if unconfirmed == "timeout" else None,
+                )
+            # The provider reports the deadline; the agent may still be running.
+            return SimpleNamespace(stdout="Shell: bash\npartial", stderr="", return_code=124, error_type="timeout")
+
+        sandbox = MagicMock(upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock())
+        server._sandbox_id_to_sandbox = {"session": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        request = SimpleNamespace(
+            cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        with raises(NgFailureEvent, match="could not be confirmed stopped") as caught:
+            await server.responses(request, body)
+
+        assert caught.value.failure_kind == "agent_route_failed"
+        assert caught.value.operation == "opencode.terminate"
+        assert sandbox.exec.await_count == 2
+        sandbox.download.assert_not_awaited()
+        assert "session" not in server._sandbox_id_to_run_result
+
+    @mark.skipif(not Path("/proc/self/stat").exists(), reason="the stop script reads /proc")
+    def test_terminate_command_stops_the_marked_process_tree_and_nothing_else(self, tmp_path: Path) -> None:
+        # The real pattern would match any "opencode run" process on this machine, so the test swaps in a token
+        # no other process has. The matching, tree walk, kill and confirmation logic are the shipped script's.
+        token = f"opencode-test-{os.getpid()}"
+        script = app_module.TERMINATE_AGENT_COMMAND.replace("opencod[e]\\ run", f"{token[:-1]}[{token[-1]}]")
+        assert script != app_module.TERMINATE_AGENT_COMMAND
+        marker = tmp_path / "pids"
+        # A shell whose command line carries the token, its child, and a bystander without the token.
+        agent = subprocess.Popen(
+            ["sh", "-c", f"sleep 300 & echo $! > {marker}; sleep 301; exit 0 # {token}"], start_new_session=True
+        )
+        bystander = subprocess.Popen(["sleep", "302"], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (marker.exists() and marker.read_text().strip()) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            child_pid = int(marker.read_text().strip())
+            done = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+            assert done.returncode == 0, done.stderr
+            agent.wait(timeout=10)
+
+            # A killed child is reparented and may stay a zombie until the container's init reaps it, which is
+            # dead for the script too, so only a live process counts as left over.
+            def alive(pid: int) -> bool:
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+                except (FileNotFoundError, ProcessLookupError):
+                    return False
+                return state != "Z"
+
+            deadline = time.monotonic() + 10
+            while alive(child_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not alive(child_pid)
+            assert bystander.poll() is None
+        finally:
+            for proc in (agent, bystander):
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
     @mark.parametrize(
         ("return_code", "sandbox_error_type", "expected_error_type"),
         [
@@ -2416,6 +2593,8 @@ class TestBenchmarkLifecycle:
             if "session list" in command:
                 return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
             if "opencode export" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "nemo-gym-terminate-agent" in command:
                 return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
             if "opencode db" in command:
                 return SimpleNamespace(stdout="", stderr="snapshot unavailable", return_code=1, error_type=None)
@@ -2598,7 +2777,8 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
     assert server._sandbox_id_to_sandbox == {}
 
 
-async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
+@mark.parametrize("listed_as", ["search", "company"])
+async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch, listed_as):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
@@ -2632,7 +2812,8 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
                 session={SESSION_ID_KEY: "trial"},
                 cookies={"sandbox_id": ""},
                 path_params={},
-                state=SimpleNamespace(_ng_opencode_mcp={"search": {}}),
+                # The tool server `search` lists its endpoint as `listed_as`, which keys its entry.
+                state=SimpleNamespace(_ng_opencode_mcp={listed_as: {}}),
             ),
             body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
         )
@@ -2640,6 +2821,9 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
         Path(app_module.__file__).with_name("required-mcp.js"), "/tmp/nemo-gym-required-mcp.js"
     )
     assert sandbox.exec.await_count == 2
+    # The required-server check looks for the entry's key.
+    required = f"NEMO_GYM_REQUIRED_MCP_SERVERS={shlex.quote(json.dumps([listed_as]))} "
+    assert required in sandbox.exec.await_args_list[0].kwargs["command"]
     # The only download is the plugin read-back: no export was pulled for an unscored rollout.
     assert [awaited.args[0] for awaited in sandbox.download.await_args_list] == ["/tmp/nemo-gym-required-mcp.js"]
     assert not server._sandbox_id_to_run_result
@@ -3171,3 +3355,93 @@ async def test_ripgrep_queue_shares_the_existing_setup_budget(tmp_path, monkeypa
     assert caught.value.operation == "opencode.setup"
     assert isinstance(caught.value.__cause__, TimeoutError)
     sandbox.upload.assert_not_awaited()
+
+
+@mark.parametrize("signal_death", [False, True])
+@mark.parametrize("plugins", [False, True])
+@mark.parametrize("force_zero", [False, True])
+async def test_agent_deadline_without_output_is_graded_once_and_scores_zero_when_configured(
+    tmp_path, monkeypatch, force_zero, plugins, signal_death
+):
+    from fastapi import Request
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    config.execution_failure_reward_zero = force_zero
+    if plugins:
+        config.opencode_plugins = ["nemo_gym_sentinel.js"]
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        payload = kwargs["json"]
+        if kwargs["url_path"] == "/verify":
+            score = float(bool(payload["response"]["output"]))
+            payload = payload | {"reward": score, "library_reward": score}
+        return SimpleNamespace(
+            cookies={},
+            json=AsyncMock(return_value={}),
+            ok=True,
+            read=AsyncMock(return_value=json.dumps(payload).encode()),
+            raise_for_status=lambda: None,
+        )
+
+    client.post = AsyncMock(side_effect=post)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = MagicMock(stop=AsyncMock(), upload=AsyncMock())
+    agent_runs = []
+    order = []
+    clock = [0.0]
+    monkeypatch.setattr(app_module, "monotonic", lambda: clock[0])
+
+    async def execute(command, **kwargs):
+        if "nemo-gym-terminate-agent" in command:
+            order.append("terminate")
+        if "session list" in command:
+            order.append("export")
+            return SimpleNamespace(return_code=0, error_type=None, stdout='[{"id":"session"}]', stderr="")
+        if "opencode run" in command:
+            agent_runs.append(command)
+            clock[0] += config.sandbox_timeout + 30
+            if signal_death:
+                # The provider's own backstop timer ended the command: a signal death with no error type, after
+                # the whole time limit has passed.
+                return SimpleNamespace(return_code=-1, error_type=None, stdout="Shell: bash\npartial", stderr="")
+            # The provider reports the deadline but returns no output for the killed command.
+            return SimpleNamespace(return_code=124, error_type="timeout", stdout=None, stderr="")
+        return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+
+    sandbox.exec = AsyncMock(side_effect=execute)
+    export = json.loads(Path(__file__).with_name("opencode_export_test_data.json").read_text())
+
+    async def download(remote, local):
+        local.write_text(json.dumps(export))
+
+    sandbox.download = AsyncMock(side_effect=download)
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    server._create_opencode_config = AsyncMock(return_value={})
+    server._upload_plugin_verified = AsyncMock()
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *args: [])
+    body = OpenCodeSandboxedAgentRunRequest.model_validate(
+        {"responses_create_params": {"input": [{"role": "user", "content": "Solve"}]}}
+    )
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/run", "headers": [], "session": {SESSION_ID_KEY: "trial"}}
+    )
+
+    if plugins:
+        # A session export proves assistant activity, not that the configured plugins loaded.
+        with raises(RuntimeError, match="plugins did not load"):
+            await server.run(request, body)
+        assert "/verify" not in [call.kwargs["url_path"] for call in client.post.await_args_list]
+        sandbox.stop.assert_awaited_once()
+        return
+
+    result = await server.run(request, body)
+
+    assert order.index("terminate") < order.index("export")
+    assert len(agent_runs) == 1
+    assert result.opencode_failed is True
+    assert result.opencode_error_type == "timeout"
+    assert result.reward == (0 if force_zero else 1)
