@@ -965,6 +965,55 @@ def test_configured_context_length_reaches_the_pinned_worker(tmp_path) -> None:
     assert agent.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT
 
 
+def test_configured_model_call_stale_timeout_is_the_limit_for_any_model_name(tmp_path) -> None:
+    """Unset, Hermes keys this limit on the model's name. Configured, a name on its reasoning-model list and any
+    other name get the same limit, and a run with the setting still completes."""
+    agent = _hermes(model_call_stale_timeout_seconds=1500)
+    names = ["qwen3-coder", "policy_model"]
+    driver = """
+import json, pathlib, sys
+sys.path[:0] = json.loads(sys.argv[1])
+import sandbox_runner
+status = sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
+from run_agent import AIAgent
+limits = {}
+for name in json.loads(sys.argv[5]):
+    hermes = AIAgent(
+        base_url=sys.argv[6], api_key='gym', model=name, provider='custom', api_mode='chat_completions',
+        enabled_toolsets=[], quiet_mode=True, skip_context_files=True, skip_memory=True,
+    )
+    limits[name] = hermes._compute_non_stream_stale_timeout({'messages': []})
+pathlib.Path(sys.argv[4]).write_text(json.dumps(limits))
+raise SystemExit(status)
+"""
+    input_path, output_path, report_path = (tmp_path / name for name in ("input.json", "output.json", "report.json"))
+    with _ModelServer([_completion({"content": "done"})]) as model:
+        input_path.write_text(json.dumps(_payload(model.base_url, config_yaml=agent._build_config())))
+        process = subprocess.run(
+            [
+                str(host_python()),
+                "-I",
+                "-c",
+                driver,
+                json.dumps([str(Path(sandbox_runner.__file__).parent)]),
+                str(input_path),
+                str(output_path),
+                str(report_path),
+                json.dumps(names),
+                model.base_url,
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=120,
+        )
+
+    assert process.returncode == 0, process.stderr
+    assert json.loads(output_path.read_text())["result"]["final_response"] == "done"
+    assert json.loads(report_path.read_text()) == {name: 1500.0 for name in names}
+
+
 def test_delegated_child_records_the_delegate_task_call_that_spawned_it(tmp_path) -> None:
     """The child finishes inside the delegate_task call and names the call that spawned it."""
     delegate = {

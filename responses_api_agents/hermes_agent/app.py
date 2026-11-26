@@ -400,6 +400,13 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     # answer, and falls back to its window for a model name it recognizes, else 256,000 tokens. Hermes refuses
     # windows under 64,000 tokens.
     context_length: Optional[int] = Field(default=None, ge=64_000)
+    # Hermes' `providers.custom.stale_timeout_seconds`: how long one model call may run without a response before
+    # Hermes drops and retries it; after five drops in a row the call fails. Calls are not streamed, so this bounds
+    # the whole call, thinking included. Unset, Hermes decides from the model's name and the Model Server address:
+    # 180 to 600 seconds for a name on its reasoning-model list, otherwise no limit at a local or private address
+    # and 90 seconds elsewhere. Set, every model gets this limit; at or above Hermes' request timeout (1800
+    # seconds) only that timeout is left.
+    model_call_stale_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     chat_template_kwargs_enabled: bool = True
     api_key: Optional[str] = None
     delegation_max_iterations: int = 50
@@ -552,6 +559,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if self.config.model_call_stale_timeout_seconds is not None:
+            # The worker builds every agent with provider "custom", and delegated children on a custom endpoint keep
+            # it, so this is the provider Hermes looks the limit up under. A block without a URL only tunes it.
+            config["providers"] = {"custom": {"stale_timeout_seconds": self.config.model_call_stale_timeout_seconds}}
         if mcp_accesses:
             # A grant is for tools, so Hermes' resource and prompt helper tools stay off.
             config["mcp_servers"] = {
