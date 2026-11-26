@@ -332,7 +332,7 @@ def test_reloads_a_recorded_database_that_is_gone(tmp_path, tiny, fake_mysql) ->
     ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
     server.databases.discard("tiny")
     server.tables.pop("tiny")
-    with pytest.raises(RuntimeError, match="sees 0 of 1 tables"):
+    with pytest.raises(RuntimeError, match="sees 0 of 1 tables.*missing.*start with mysql_admin_dsn"):
         check_beaver_mysql(READER, ["tiny"])
     ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
     assert "tiny" in server.databases and server.loaded["tiny"] == (setup.DUMPS["tiny"].sha256, 1)
@@ -506,7 +506,8 @@ def test_a_grader_with_the_old_meta_database_grant_is_moved_to_the_table(tmp_pat
     server.system_tables_readable = False
     server.users["beaver_reader@%"] = "theirs"
     server.grants.append(("`_beaver_meta`.*", "beaver_reader@%"))
-    with pytest.raises(RuntimeError, match="must hold only SELECT"):
+    # Started without an admin DSN, the grader is refused with what to do about it.
+    with pytest.raises(RuntimeError, match="must hold only SELECT.*earlier version.*start once with mysql_admin_dsn"):
         check_beaver_mysql(READER, ["tiny"])
     ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
     assert server.grants == [("`_beaver_meta`.`loaded`", "beaver_reader@%"), ("`tiny`.*", "beaver_reader@%")]

@@ -423,9 +423,13 @@ def check_beaver_mysql(
         if mandatory:
             extra.append(f"mandatory roles {mandatory}")
         if extra:
-            raise RuntimeError(
-                "the grader's MySQL user must hold only SELECT (and USAGE); it also has: " + "; ".join(extra)
-            )
+            message = "the grader's MySQL user must hold only SELECT (and USAGE); it also has: " + "; ".join(extra)
+            if any(g.startswith(f"GRANT SELECT ON `{META_DB}`.* TO ") for g in extra):
+                message += (
+                    f". Its SELECT on `{META_DB}`.* comes from an earlier version of this loader: start once with "
+                    f"mysql_admin_dsn, which moves it to the {_META_TABLE} table"
+                )
+            raise RuntimeError(message)
         try:
             cur.execute(f"SELECT db_id, dump_sha256, tables FROM `{META_DB}`.loaded")
         except Exception as e:
@@ -448,7 +452,12 @@ def check_beaver_mysql(
             cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = %s", (db_id,))
             visible = [name for (name,) in cur.fetchall()]
             if len(visible) != tables:
-                problems.append(f"{db_id}: the grader's user sees {len(visible)} of {tables} tables")
+                problem = f"{db_id}: the grader's user sees {len(visible)} of {tables} tables"
+                if not visible:
+                    # The grader can't tell a missing database from one it has no grant on.
+                    problem += " (the database is missing or not granted to it: start with mysql_admin_dsn to load it"
+                    problem += " and grant it)"
+                problems.append(problem)
                 continue
             # Seeing a table isn't reading it (a REFERENCES grant shows it too): read each one.
             unreadable = []
