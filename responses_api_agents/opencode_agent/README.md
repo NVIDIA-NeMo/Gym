@@ -784,3 +784,24 @@ activation: `"1"` means no checkpoint or crash caused a relaunch. The session's 
 per launch: `launch`, `reprompted`, `interrupted_tool_calls`, `outcome` (`finished` or `stopped`), `return_code` and
 `paused_s`, the time the activation has spent parked so far. The record of a launch that a restore brought back and the
 activation took over where it was also has `resumed_in_place: true`.
+
+
+### Task-local policy model sidecar
+
+For a borrowed task sandbox, `model_sidecar` starts the same model-server helper as mini-SWE. Set the agent's
+`model_server.name` to `policy_model` and provide a `model_sidecar` image containing Gym and the resolved vLLM
+model server's dependencies. The helper stages only the resolved policy model configuration, preserving its
+sampling, conversion and failure policy. `upstream_base_url` optionally selects a separately authorized task route.
+OpenCode 1 and OpenCode 2 use the sidecar URL, including the episode's rollout prefix. Session close shuts down
+the helper before releasing the borrowed sandbox connection.
+
+The sandbox owner must allocate a matching sidecar before lending the sandbox. DeepSWE and SWE-bench Pro accept
+its declaration under the resources server's `sandbox_config.sidecars`, only for the agent sandbox. Match the
+agent's `model_sidecar.name`, image and exposed model port. Keep network authorization with the sandbox owner,
+and remove any host model egress rule when the task uses only the sidecar route. Verifier sandboxes receive no
+sidecars. The Harbor environment server accepts `model_sidecar` directly and declares the sidecar for its task.
+
+This option requires a provider with sidecar support and a borrowed sandbox. Local execution is rejected.
+At checkpoints, these sessions use the existing episode restart path instead of restoring the harness in place:
+the sidecar supervisor and its attempt-specific model configuration are not part of OpenCode's exported state.
+MCP grants keep their configured routes and authorization independently of this model route.

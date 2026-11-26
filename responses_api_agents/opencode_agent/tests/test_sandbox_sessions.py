@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
@@ -24,11 +24,14 @@ from pydantic import ValidationError
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    ModelSidecarConfig,
     is_harness_termination_failure,
     parse_cleanup_receipt,
     raises_agent_failure,
 )
+from nemo_gym.agents.utils.model_sidecar import ModelSidecarError
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     PROVIDER_OOM_KILLED,
@@ -41,6 +44,8 @@ from nemo_gym.core import (
 )
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
+from nemo_gym.server_runtime import AgentSessionParticipant
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_RESTART_HEADER
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
@@ -2942,3 +2947,105 @@ def test_a_database_without_a_root_session_raises_the_typed_error(tmp_path: Path
         connection.execute("create table session (id text, parent_id text, time_created integer)")
     with pytest.raises(NoRootSessionError, match="found 0"):
         snapshot(database, tmp_path, harness_session_id=None, previous_message_ids=())
+
+
+@pytest.mark.parametrize("version", [OPENCODE_VERSION, OPENCODE_V2_VERSION])
+async def test_model_sidecar_routes_session_and_stops_before_disconnect(setup, monkeypatch, version):
+    agent, sandbox = setup
+    agent.config.model_server.name = "policy_model"
+    agent.config.opencode_version = version
+    agent.config.model_sidecar = ModelSidecarConfig(image="example/gym:sidecar")
+    order = []
+    sandbox.disconnect.side_effect = lambda **kwargs: order.append("disconnect")
+    sidecar = SimpleNamespace(
+        base_url="http://gym-model:19001/ng-rollout/opencode-smoke.attempt-2/v1",
+        shutdown=AsyncMock(side_effect=lambda: order.append("shutdown")),
+    )
+    bootstrap = AsyncMock(return_value=sidecar)
+    module = "responses_api_agents.opencode_agent.app"
+    monkeypatch.setattr(f"{module}.start_model_sidecar", bootstrap)
+    monkeypatch.setattr(
+        OpenCodeAgent,
+        "resolve_model_base_url",
+        MagicMock(side_effect=AssertionError("host listener must not be resolved")),
+    )
+    state = await agent._seed_agent_session_state(seed())
+    assert bootstrap.await_args.args == (sandbox, {}, agent.config.model_sidecar)
+    assert bootstrap.await_args.kwargs == {
+        "rollout_id": state.request.episode_id.capture_key,
+        "run_timeout_s": agent.config.timeout + agent.config.session_close_timeout_seconds,
+    }
+    payload = agent._launch_payload(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), prompt="fix", system="")
+    config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+    options = (
+        config["providers"]["nemo_gym"]["settings"]
+        if version == OPENCODE_V2_VERSION
+        else config["provider"]["nemo_gym"]["options"]
+    )
+    assert options["baseURL"] == sidecar.base_url
+    await asyncio.gather(state.close(30), state.close(30))
+    assert order == ["shutdown", "disconnect"]
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_model_sidecar_failed_seed_releases_borrowed_sandbox(setup, monkeypatch):
+    agent, sandbox = setup
+    agent.config.model_server.name = "policy_model"
+    agent.config.model_sidecar = ModelSidecarConfig(image="example/gym:sidecar")
+    bootstrap = AsyncMock(side_effect=ModelSidecarError("listener failed"))
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.start_model_sidecar", bootstrap)
+    with pytest.raises(ModelSidecarError, match="listener failed"):
+        await agent._seed_agent_session_state(seed())
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
+
+
+async def test_model_sidecar_requires_borrowed_sandbox(setup):
+    agent, sandbox = setup
+    agent.config.model_sidecar = ModelSidecarConfig(image="example/gym:sidecar")
+    with pytest.raises(AgentSeedRejectedError, match="borrowed task sandbox"):
+        await agent._seed_agent_session_state(seed().model_copy(update={"sandbox_access": None}))
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("model", [None, {"type": "responses_api_models", "name": "other"}])
+def test_model_sidecar_requires_policy_model(model):
+    with pytest.raises(ValidationError, match="policy_model"):
+        OpenCodeAgentConfig(
+            name="opencode",
+            host="localhost",
+            port=8001,
+            entrypoint="app.py",
+            num_workers=1,
+            model_server=model,
+            model_sidecar={"image": "example/gym:sidecar"},
+        )
+
+
+async def test_model_sidecar_uses_episode_restart_at_checkpoints(setup, monkeypatch):
+    agent, sandbox = setup
+    agent.config.model_server.name = "policy_model"
+    agent.config.model_sidecar = ModelSidecarConfig(image="example/gym:sidecar")
+    agent._checkpoint_participant = AgentSessionParticipant(agent)
+    sidecar = SimpleNamespace(base_url="http://gym-model:19001/v1", shutdown=AsyncMock())
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.start_model_sidecar", AsyncMock(return_value=sidecar))
+    request = seed()
+    response = Response()
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), request, response)
+    assert response.headers[CHECKPOINT_RESTART_HEADER] == "1"
+    state = agent._require_agent_session(request.agent_session_id)
+    assert not state.checkpointed
+    await state.close(30)
+    sidecar.shutdown.assert_awaited_once()
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_model_sidecar_rejects_unseeded_local_calls(setup):
+    agent, sandbox = setup
+    agent.config.model_sidecar = ModelSidecarConfig(image="example/gym:sidecar")
+    with pytest.raises(AgentSeedRejectedError, match="borrowed task sandbox session"):
+        await agent.responses(
+            Request({"type": "http", "session": {}}), NeMoGymResponseCreateParamsNonStreaming(input=[])
+        )
+    sandbox.exec.assert_not_awaited()

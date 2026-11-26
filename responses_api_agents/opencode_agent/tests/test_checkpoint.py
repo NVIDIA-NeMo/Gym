@@ -1632,7 +1632,7 @@ def test_sessions_the_agent_cannot_capture_restart() -> None:
     owned = borrowed.model_copy(update={"sandbox_access": None})
     continued = AgentSeedSessionRequest.model_validate(borrowed.model_dump() | {"continuation": {}})
     restarts = OpenCodeAgent._seed_restarts
-    agent = SimpleNamespace(config=SimpleNamespace(session_import_path=None), _opencode2=False)
+    agent = SimpleNamespace(config=SimpleNamespace(session_import_path=None, model_sidecar=None), _opencode2=False)
     importing = SimpleNamespace(config=SimpleNamespace(session_import_path="/imports/session.json"), _opencode2=False)
     opencode2 = SimpleNamespace(config=SimpleNamespace(session_import_path=None), _opencode2=True)
 
