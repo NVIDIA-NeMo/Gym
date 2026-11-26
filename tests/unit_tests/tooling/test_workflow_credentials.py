@@ -107,6 +107,14 @@ def test_workflow_credentials() -> None:
     assert not violations, "\n".join(violations)
 
 
+def test_guardwords_receives_only_its_catalog_deploy_key() -> None:
+    """Keep broader App credentials out of the Guardwords scanner."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/guardwords-check.yml").read_text())
+    assert workflow["jobs"]["guardwords-check"]["secrets"] == {
+        "GUARDWORDS_DEPLOY_KEY": "${{ secrets.GUARDWORDS_DEPLOY_KEY }}",
+    }
+
+
 @pytest.mark.parametrize(
     ("expression", "violations"),
     [
