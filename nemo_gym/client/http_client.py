@@ -16,6 +16,7 @@
 
 import asyncio
 import atexit
+import errno
 import json
 import socket
 import time
@@ -50,6 +51,12 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
+from nemo_gym.core.failure_kinds import (
+    TRANSPORT_LOCAL_RESOURCE,
+    TRANSPORT_PEER_DROP,
+    TRANSPORT_TIMEOUT,
+    TRANSPORT_UNREACHABLE,
+)
 from nemo_gym.core.failure_transport import (
     FailureHeader,
     observe_reply,
@@ -66,6 +73,7 @@ from nemo_gym.telemetry.connection_pool import (
     reset_server_name,
     set_server_name,
 )
+from nemo_gym.telemetry.gym_metrics import record_http_timeout, record_transport_resend
 from nemo_gym.telemetry.observer import request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -392,6 +400,9 @@ async def close_global_aiohttp_client() -> None:
 # Registered here, so a process that imports only nemo_gym.client still closes its sessions at exit.
 atexit.register(global_aiohttp_client_exit)
 
+# Transport resends this one logical request made, on its CLIENT span; downstream servers' resends are not included.
+HTTP_TRANSPORT_RESEND_COUNT_SPAN_ATTRIBUTE = "nemo.gym.http.transport_resend_count"
+
 
 # This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
 MAX_NUM_TRIES = 3
@@ -480,6 +491,8 @@ async def request(
     The transport resends a reply reports (``X-NG-Transport-Resend-Count``) join this request's only from a Gym server:
     an internal call, or one with ``_gym_server=True``, which marks a Gym server without the internal retry policy.
     """
+    if "_span" in kwargs:
+        raise TypeError("_span is set by the request tracing itself; callers cannot pass it")
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
 
@@ -595,6 +608,8 @@ async def _traced_request(
                 "http.request.method": method.upper(),
                 "url.full": _redacted_url(url),
                 "nemo.gym.rollout.id": current_rollout_id(),
+                # Raised at each resend, so a request that succeeds first time reports 0.
+                HTTP_TRANSPORT_RESEND_COUNT_SPAN_ATTRIBUTE: 0,
             }
             safe_set_span_attributes(span, attributes)
 
@@ -612,6 +627,7 @@ async def _traced_request(
             _retry_other_errors=_retry_other_errors,
             _connection_retry_window=_connection_retry_window,
             _gym_server=_gym_server,
+            _span=span,
             **kwargs,
         )
 
@@ -732,6 +748,33 @@ class ConnectionRetryWindow:
         )
 
 
+def _is_timeout(error: BaseException) -> bool:
+    """A timeout, whether raised as one or as an OS error (ETIMEDOUT) that aiohttp wrapped."""
+    for candidate in (error, getattr(error, "os_error", None), error.__cause__):
+        if isinstance(candidate, TimeoutError) or getattr(candidate, "errno", None) == errno.ETIMEDOUT:
+            return True
+    return False
+
+
+# Exhaustion on this host (descriptors, buffers, ephemeral ports), not a fault of the destination.
+_LOCAL_RESOURCE_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM, errno.EADDRNOTAVAIL})
+_PEER_DROP_ERRNOS = frozenset({errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE})
+
+
+def _os_error_resend_reason(error: BaseException) -> str:
+    """The shared transport failure name for an OS-level error that is not a timeout, else ``other``."""
+    # aiohttp wraps a reset during the body write as a ClientOSError without an errno, the reset as its cause.
+    candidates = (error, getattr(error, "os_error", None), error.__cause__)
+    codes = {code for candidate in candidates if type(code := getattr(candidate, "errno", None)) is int}
+    if codes & _LOCAL_RESOURCE_ERRNOS:
+        return TRANSPORT_LOCAL_RESOURCE
+    if codes & _PEER_DROP_ERRNOS or any(isinstance(candidate, ConnectionResetError) for candidate in candidates):
+        return TRANSPORT_PEER_DROP
+    if isinstance(error, ClientConnectorError):
+        return TRANSPORT_UNREACHABLE
+    return "other"
+
+
 def _request_upload_complete(upload: UploadTracker | None) -> bool | None:
     """Whether the one observed HTTP attempt finished sending its body, including EOF.
 
@@ -759,9 +802,11 @@ async def _request_with_retries(
     *,
     _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     _gym_server: bool = False,
+    _span: Any = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
+    destination = _server_name or "external"
     # Initialization stays inside the client span and sets the metrics flag before it is read.
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
@@ -779,6 +824,7 @@ async def _request_with_retries(
                 internal_budget_s = cfg.global_aiohttp_internal_retry_budget_seconds
                 window = ConnectionRetryWindow(internal_budget_s)
         attempts_started = 0
+        resend_reason = "other"
         while True:
             if window is not None and window.expired():
                 raise window.last_error
@@ -786,6 +832,9 @@ async def _request_with_retries(
                 # Counted as the next attempt starts, after the expired-window exit: a failure that exhausts a budget
                 # raises before reaching here, and a cancelled backoff starts nothing.
                 observe_transport_resend()
+                record_transport_resend(reason=resend_reason, server_name=destination)
+                if _span is not None:
+                    safe_set_span_attributes(_span, {HTTP_TRANSPORT_RESEND_COUNT_SPAN_ATTRIBUTE: attempts_started})
             attempts_started += 1
             if _max_num_tries is not None:
                 explicit_tries += 1
@@ -818,6 +867,7 @@ async def _request_with_retries(
                     await response.read()
                 return response
             except ServerDisconnectedError as error:
+                resend_reason = TRANSPORT_PEER_DROP
                 if _on_transport_failure is not None:
                     _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect:
@@ -848,6 +898,12 @@ async def _request_with_retries(
                 if _on_transport_failure is not None:
                     _on_transport_failure(error, _request_upload_complete(upload))
                 timed_out = isinstance(error, ConnectionTimeoutError)
+                # aiohttp wraps an OS-level ETIMEDOUT (a connect or socket timeout) as a ClientOSError.
+                resend_reason = (
+                    TRANSPORT_TIMEOUT if timed_out or _is_timeout(error) else _os_error_resend_reason(error)
+                )
+                if resend_reason == TRANSPORT_TIMEOUT:
+                    record_http_timeout(server_name=destination)
                 if timed_out and window is not None and window.expired():
                     # The connect cap set from the window ran out: report the connection error it stood for.
                     raise window.last_error from error
@@ -876,6 +932,10 @@ async def _request_with_retries(
 
                 await asyncio.sleep(_connection_backoff_s(window))
             except Exception as e:
+                # aiohttp's ServerTimeoutError is a TimeoutError too.
+                resend_reason = TRANSPORT_TIMEOUT if isinstance(e, TimeoutError) else _os_error_resend_reason(e)
+                if resend_reason == TRANSPORT_TIMEOUT:
+                    record_http_timeout(server_name=destination)
                 if _on_transport_failure is not None:
                     _on_transport_failure(e, _request_upload_complete(upload))
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
