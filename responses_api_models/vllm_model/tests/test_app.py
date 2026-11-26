@@ -22,6 +22,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
@@ -78,6 +79,7 @@ from nemo_gym.core import (
     encode_model_sampling,
     rollout_context,
 )
+from nemo_gym.core.chat_reasoning import CHAT_REASONING_FORMAT_HEADER, CHAT_REASONING_FORMAT_STRUCTURED
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     CaptureStore,
@@ -3106,13 +3108,177 @@ class TestApp:
         data = response_2_2.json()
         assert data["output"][0]["content"][0]["text"] == routed_output_2
 
+    @mark.parametrize("stream", [False, True])
+    def test_chat_reasoning_content_round_trips_across_tool_turns(self, monkeypatch, stream):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        headers = {CHAT_REASONING_FORMAT_HEADER: CHAT_REASONING_FORMAT_STRUCTURED}
+        server.config.reasoning_field = "reasoning_content"
+
+        def completion(index, field, tool_call=None):
+            message = {"role": "assistant", "content": None if tool_call else "Finished", field: f"Thought {index}"}
+            if tool_call:
+                # An upstream may supply both aliases. The harness should receive one copy.
+                message.update(tool_calls=[tool_call], reasoning="Thought 1")
+            return {
+                "id": f"test-{index}",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [{"index": 0, "finish_reason": "tool_calls" if tool_call else "stop", "message": message}],
+            }
+
+        tool_call = {
+            "id": "call1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": '{"query":"status"}'},
+        }
+        calls = [completion(1, "reasoning_content", tool_call), completion(2, "reasoning")]
+        upstream = AsyncMock(side_effect=calls)
+        server._clients = [MagicMock(create_chat_completion=upstream)]
+
+        def read_reply(response):
+            assert response.status_code == 200
+            if not stream:
+                return response.json()["choices"][0]["message"]
+            message = {}
+            for line in response.text.splitlines():
+                if line.startswith("data: ") and line != "data: [DONE]":
+                    for choice in json.loads(line[6:])["choices"]:
+                        delta = choice["delta"]
+                        assert not set(message).intersection(delta)
+                        if delta.get("tool_calls"):
+                            [tool] = delta["tool_calls"]
+                            delta["tool_calls"] = [{key: value for key, value in tool.items() if key != "index"}]
+                        message.update(delta)
+            return message
+
+        messages = [{"role": "user", "content": "Look up status"}]
+        with TestClient(server.setup_webserver()) as client:
+            first = read_reply(
+                client.post("/v1/chat/completions", headers=headers, json={"messages": messages, "stream": stream})
+            )
+            assert first["role"] == "assistant"
+            assert first.get("content") in (None, "")
+            assert first["reasoning_content"] == "Thought 1"
+            assert "reasoning" not in first
+            assert first["tool_calls"] == [tool_call]
+            messages += [
+                {
+                    key: value
+                    for key, value in first.items()
+                    if key in {"role", "content", "reasoning_content", "tool_calls"}
+                },
+                {"role": "tool", "tool_call_id": "call1", "content": "ok"},
+            ]
+            second = read_reply(
+                client.post("/v1/chat/completions", headers=headers, json={"messages": messages, "stream": stream})
+            )
+            assert second["reasoning_content"] == "Thought 2"
+            assert second["content"] == "Finished"
+            assert "reasoning" not in second
+
+        replayed = upstream.await_args_list[1].kwargs["messages"]
+        assert replayed[1]["reasoning_content"] == "Thought 1"
+        assert "reasoning" not in replayed[1]
+        assert replayed[1]["tool_calls"] == [tool_call]
+        assert replayed[2] == {"role": "tool", "tool_call_id": "call1", "content": "ok"}
+        for call in upstream.await_args_list:
+            assert CHAT_REASONING_FORMAT_HEADER not in (call.kwargs.get("extra_headers") or {})
+
+    @mark.parametrize("stream", [False, True])
+    def test_one_proxy_serves_inline_and_structured_chat_concurrently(self, monkeypatch, stream):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        ready = asyncio.Event()
+        pending = 0
+
+        async def completion(**request):
+            nonlocal pending
+            pending += 1
+            if pending == 2:
+                ready.set()
+            await asyncio.wait_for(ready.wait(), timeout=5)
+            assert CHAT_REASONING_FORMAT_HEADER not in (request.get("extra_headers") or {})
+            return {
+                "id": "test",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Answer", "reasoning": "Hidden"},
+                    }
+                ],
+            }
+
+        server._clients = [MagicMock(create_chat_completion=completion)]
+
+        def collect(response):
+            assert response.status_code == 200, response.text
+            if not stream:
+                return response.json()["choices"][0]["message"]
+            message = {}
+            for line in response.text.splitlines():
+                if line.startswith("data: {"):
+                    for choice in json.loads(line[6:])["choices"]:
+                        message.update(choice["delta"])
+            return message
+
+        with TestClient(server.setup_webserver()) as client, ThreadPoolExecutor(max_workers=2) as pool:
+            body = {"messages": [{"role": "user", "content": "Think"}], "stream": stream}
+            left = pool.submit(client.post, "/v1/chat/completions", json=body)
+            right = pool.submit(
+                client.post,
+                "/v1/chat/completions",
+                headers={CHAT_REASONING_FORMAT_HEADER: CHAT_REASONING_FORMAT_STRUCTURED},
+                json=body,
+            )
+            inline, structured = collect(left.result()), collect(right.result())
+        assert inline["content"] == "<think>Hidden</think>Answer"
+        assert "reasoning_content" not in inline
+        assert structured["content"] == "Answer"
+        assert structured["reasoning_content"] == "Hidden"
+        assert "reasoning" not in structured
+
+    def test_chat_reasoning_content_is_opt_in(self, monkeypatch):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        upstream = AsyncMock(
+            return_value={
+                "id": "test",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Answer", "reasoning": "Hidden"},
+                    }
+                ],
+            }
+        )
+        server._clients = [MagicMock(create_chat_completion=upstream)]
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "Think"}]})
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["content"].startswith("<think>") and message["content"].endswith("Answer")
+        assert "reasoning_content" not in message
+        assert "reasoning" not in message
+
     @mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
     @mark.parametrize("format_type", ["json_schema", "json_object"])
+    @mark.parametrize("request_structured_chat", [False, True])
     def test_structured_responses_preserve_literal_tags_and_judge_schema(
-        self, monkeypatch, reasoning_field, format_type
+        self, monkeypatch, reasoning_field, format_type, request_structured_chat
     ):
         server = self._setup_server(monkeypatch)
         server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        headers = {CHAT_REASONING_FORMAT_HEADER: CHAT_REASONING_FORMAT_STRUCTURED} if request_structured_chat else {}
         verdict = {"coverage_outcome": "fulfilled", "justification": "Literal <think>text</think> stays"}
         final = json.dumps(verdict)
         upstream = AsyncMock(
@@ -3147,6 +3313,7 @@ class TestApp:
         with TestClient(server.setup_webserver()) as client:
             response = client.post(
                 "/v1/responses",
+                headers=headers,
                 json={
                     "input": [{"role": "user", "content": "Judge this claim"}],
                     "text": {"format": format_config},
@@ -3165,6 +3332,52 @@ class TestApp:
             expected["json_schema"] = {"name": "verdict", "schema": schema, "strict": True}
         assert sent["response_format"] == expected
         assert sent["temperature"] == 0 and sent["max_tokens"] == 2048
+
+    @mark.parametrize("stream", [False, True])
+    def test_messages_ignores_chat_reasoning_header(self, monkeypatch, stream):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        upstream = AsyncMock(
+            return_value={
+                "id": "test",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Answer", "reasoning": "Hidden"},
+                    }
+                ],
+            }
+        )
+        server._clients = [MagicMock(create_chat_completion=upstream)]
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post(
+                "/v1/messages",
+                headers={CHAT_REASONING_FORMAT_HEADER: CHAT_REASONING_FORMAT_STRUCTURED},
+                json={
+                    "model": "test",
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "Think"}],
+                    "stream": stream,
+                },
+            )
+        assert response.status_code == 200, response.text
+        if stream:
+            deltas = [
+                json.loads(line[6:])["delta"]
+                for line in response.text.splitlines()
+                if line.startswith("data: ") and json.loads(line[6:])["type"] == "content_block_delta"
+            ]
+            assert {"type": "thinking_delta", "thinking": "Hidden"} in deltas
+            assert {"type": "text_delta", "text": "Answer"} in deltas
+        else:
+            blocks = response.json()["content"]
+            assert [block["type"] for block in blocks] == ["thinking", "text"]
+            assert blocks[0]["thinking"] == "Hidden" and blocks[1]["text"] == "Answer"
+        assert "reasoning_content" not in response.text
 
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)

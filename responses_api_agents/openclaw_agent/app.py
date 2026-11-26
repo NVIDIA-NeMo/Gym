@@ -34,7 +34,7 @@ from uuid import uuid4
 
 import psutil
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -81,6 +81,8 @@ from nemo_gym.core import (
     UnsupportedContentError,
     split_text_and_media,
 )
+from nemo_gym.core.chat_reasoning import CHAT_REASONING_FORMAT_HEADER, CHAT_REASONING_FORMAT_STRUCTURED
+from nemo_gym.core.correlation import CLIENT_SESSION_HEADER
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import (
     await_model_call_capture_quiescence,
@@ -655,6 +657,13 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/openclaw_agent/workspaces"
     openclaw_agent_id: str = "main"
     thinking: str = "off"
+    requires_reasoning_content_on_assistant_messages: bool = Field(
+        default=False,
+        description=(
+            "Ask the Gym model server for structured Chat Completions reasoning and require OpenClaw to replay it. "
+            "Use OpenClaw 2026.11.5 or newer."
+        ),
+    )
     system_prompt: Optional[str] = None
     setup_timeout: int = 900
     timeout: int = Field(default=900, gt=0)
@@ -691,6 +700,12 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     # Per-request timeout of a sandbox session's MCP tool grants (OpenClaw's mcp.servers.<name>.timeout).
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _validate_reasoning_replay(self) -> "OpenClawAgentConfig":
+        if self.requires_reasoning_content_on_assistant_messages and self.model_server is None:
+            raise ValueError("requires_reasoning_content_on_assistant_messages requires model_server")
+        return self
 
     @property
     def command_parts(self) -> list[str]:
@@ -1014,7 +1029,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if media or self.config.image_input:
             session_config["models"]["providers"]["nemo"]["models"][0]["input"] = ["text", "image"]
         # Capture rejected attempts too: they have no responseId in the transcript.
-        session_config["models"]["providers"]["nemo"]["headers"] = {"x-session-id": session_id}
+        headers = session_config["models"]["providers"]["nemo"].setdefault("headers", {})
+        headers[CLIENT_SESSION_HEADER] = session_id
         session_config.update(
             {
                 "agents": {
@@ -1545,14 +1561,18 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if self.config.model_server:
             providers = cfg.setdefault("models", {}).setdefault("providers", {})
             nemo = providers.setdefault("nemo", {})
+            # Gym returns usage in the final SSE chunk for custom provider URLs.
+            compat = {"supportsUsageInStreaming": True}
+            if self.config.requires_reasoning_content_on_assistant_messages:
+                compat["requiresReasoningContentOnAssistantMessages"] = True
+                nemo.setdefault("headers", {})[CHAT_REASONING_FORMAT_HEADER] = CHAT_REASONING_FORMAT_STRUCTURED
             model_entry = {
                 "id": self.config.model,
                 "name": self.config.model,
                 "api": "openai-completions",
                 "reasoning": True,
                 "input": ["text"],
-                # Gym returns usage in the final SSE chunk for custom provider URLs.
-                "compat": {"supportsUsageInStreaming": True},
+                "compat": compat,
             }
             if self.config.context_window is not None:
                 model_entry["contextWindow"] = self.config.context_window
