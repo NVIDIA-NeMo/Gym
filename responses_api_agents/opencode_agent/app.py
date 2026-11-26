@@ -376,6 +376,57 @@ _OPENCODE_ISOLATION = {
 }
 
 
+# Where a Harbor environment server leaves the task's own MCP servers and skills directory in the agent's sandbox.
+TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
+
+
+def _task_mcp_servers(task_context: Mapping[str, Any], timeout_ms: int | None) -> dict[str, dict[str, Any]]:
+    """OpenCode 1 ``mcp`` entries for the MCP servers the task itself declares, by name.
+
+    A server with a URL is a ``remote`` entry, which tries streamable HTTP and then SSE, so it serves both of
+    Harbor's URL transports; a ``stdio`` server is a ``local`` entry that OpenCode starts in the sandbox. A
+    declaration that is neither is the task's own error, so the seed is refused rather than retried.
+    """
+    declared = task_context.get("mcp_servers") or []
+    if not isinstance(declared, list):
+        raise AgentSeedRejectedError(f"{TASK_CONTEXT_FILE}: mcp_servers is not a list")
+    servers: dict[str, dict[str, Any]] = {}
+    for server in declared:
+        name = server.get("name") if isinstance(server, Mapping) else None
+        if not isinstance(name, str) or not name:
+            raise AgentSeedRejectedError("The task declares an MCP server without a name")
+        if name in servers:
+            raise AgentSeedRejectedError(f"The task declares the MCP server {name!r} more than once")
+        url, command, args = server.get("url"), server.get("command"), server.get("args") or []
+        if server.get("transport") == "stdio":
+            if not isinstance(command, str) or not command or not isinstance(args, list):
+                raise AgentSeedRejectedError(
+                    f"The task's stdio MCP server {name!r} needs a command and a list of args"
+                )
+            entry: dict[str, Any] = {"type": "local", "command": [command, *map(str, args)], "enabled": True}
+        elif isinstance(url, str) and url:
+            # A task's server has no credentials of Gym's; a headless run must not start an OAuth flow.
+            entry = {"type": "remote", "url": url, "enabled": True, "oauth": False}
+        else:
+            raise AgentSeedRejectedError(f"The task's MCP server {name!r} needs a url")
+        if timeout_ms is not None:
+            entry["timeout"] = timeout_ms
+        servers[name] = entry
+    return servers
+
+
+def _task_skills_dir(task_context: Mapping[str, Any]) -> str | None:
+    """The task's skills directory, an absolute sandbox path, or ``None`` when the task declares none."""
+    skills_dir = task_context.get("skills_dir")
+    if skills_dir is None or skills_dir == "":
+        return None
+    if not _is_sandbox_path(skills_dir):
+        raise AgentSeedRejectedError(
+            f"The task's skills_dir must be an absolute, normalized sandbox path: {skills_dir!r}"
+        )
+    return skills_dir
+
+
 def _private_directories(root: str) -> dict[str, str]:
     """OpenCode's private HOME and XDG directories under ``root``; tool shells get the task's back through a hook."""
     return {
@@ -1417,6 +1468,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "runtime": state.runtime,
                 "sandbox_id": state.sandbox_id,
                 "harness_session_id": state.harness_session_id,
+                "task_context": dict(state.task_context),
                 "launch_count": state.launch_count,
                 "launch_records": list(state.launch_records),
                 "interrupted_tool_calls": state.interrupted_tool_calls,
@@ -1449,6 +1501,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 model_ref=self.config.model_server,
                 observations=AgentObservationBundle.model_validate(observations) if observations else None,
                 harness_session_id=saved.get("harness_session_id"),
+                task_context=dict(saved.get("task_context") or {}),
                 checkpointed=True,
                 launch_count=int(saved["launch_count"]),
                 launch_records=list(saved.get("launch_records") or []),
@@ -1803,6 +1856,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             if self.config.session_import_path is not None:
                 await self._import_session(state)
+            if not owns_sandbox and self.supports_task_tool_context():
+                state.task_context = await self._read_task_context(sandbox)
+                # Refuse a declaration OpenCode cannot be given at seed, not at the first activation.
+                self._granted_mcp_servers(body, state.task_context)
+                _task_skills_dir(state.task_context)
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -1911,12 +1969,60 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.harness_session_id = roots[0]
             state.message_ids = await asyncio.to_thread(stored_message_ids, database)
 
-    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], dict[str, list[str]]]:
-        """OpenCode ``mcp`` entries for a session's MCP tool grants, and the grant names by requirement.
+    def supports_task_tool_context(self) -> bool:
+        """OpenCode 1 gets the task's own MCP servers and skills directory through its configuration.
 
-        The model sees each grant's tools as ``<grant>_<tool>``. OpenCode connects when the run starts and leaves a
-        server that fails to connect out of the tool list, so ``required_mcp.mjs`` checks the grants before the first
-        model call and ``_check_mcp_grants`` reads the result.
+        OpenCode 2 sessions do not read them yet, so an environment server keeps refusing such a task there.
+        """
+        return not self._opencode2
+
+    @staticmethod
+    async def _read_task_context(sandbox: AsyncSandbox) -> dict[str, JsonValue]:
+        """The task's own MCP servers and skills directory, from the file a Harbor environment server writes.
+
+        A read that ran and found nothing returns ``{}``. A provider failure raises, because running the task without
+        the tools it declares would score a silent zero. A file that is not a JSON object is the task's own error, so
+        the seed is refused rather than retried.
+        """
+        path = quote(TASK_CONTEXT_FILE)
+        # A file that exists but cannot be read fails the read instead of passing for an absent one.
+        result = await exec_idempotent(
+            sandbox,
+            f"if [ -e {path} ]; then cat {path}; fi",
+            what="OpenCode task context read",
+            cwd="/",
+            timeout_s=30,
+        )
+        if result.error_type is not None or result.return_code != 0:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.setup",
+                stage="seed",
+                failure_reason=f"The sandbox could not read {TASK_CONTEXT_FILE}: "
+                f"{result.error_type or result.return_code}",
+            )
+        text = (result.stdout or "").strip()
+        if not text:
+            return {}
+        try:
+            context = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise AgentSeedRejectedError(f"{TASK_CONTEXT_FILE} is not JSON") from error
+        if not isinstance(context, dict):
+            raise AgentSeedRejectedError(f"{TASK_CONTEXT_FILE} is not a JSON object")
+        return context
+
+    def _granted_mcp_servers(
+        self, request: AgentSeedSessionRequest, task_context: Mapping[str, Any] | None = None
+    ) -> tuple[dict[str, Any], dict[str, list[str]]]:
+        """OpenCode ``mcp`` entries for a session's MCP tool grants and the task's own servers, and their names by
+        requirement.
+
+        The model sees each server's tools as ``<server>_<tool>``. OpenCode connects when the run starts and leaves a
+        server that fails to connect out of the tool list, so ``required_mcp.mjs`` checks them before the first
+        model call and ``_check_mcp_grants`` reads the result. The task's own servers (``task_context``) are required,
+        as the task declares them for its tools; one that a grant already names keeps the grant's connection.
         """
         servers = {}
         grants: dict[str, list[str]] = {"required": [], "optional": []}
@@ -1936,6 +2042,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 entry["timeout"] = round(self.config.mcp_tool_timeout_seconds * 1000)
             servers[access.name] = entry
             grants["required" if access.required else "optional"].append(access.name)
+        timeout_ms = (
+            round(self.config.mcp_tool_timeout_seconds * 1000)
+            if self.config.mcp_tool_timeout_seconds is not None
+            else None
+        )
+        for name, entry in _task_mcp_servers(task_context or {}, timeout_ms).items():
+            if name in servers:
+                # A Harbor environment server can also grant the task's own server, under its own name.
+                if name in grants["optional"]:
+                    grants["optional"].remove(name)
+                    grants["required"].append(name)
+                continue
+            servers[name] = entry
+            grants["required"].append(name)
         return servers, grants
 
     @staticmethod
@@ -2766,9 +2886,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
                 config["provider"]["nemo_gym"]["models"][model_id]["temperature"] = True
-        mcp_servers, mcp_grants = self._granted_mcp_servers(state.request)
+        mcp_servers, mcp_grants = self._granted_mcp_servers(state.request, state.task_context)
         if mcp_servers:
             config["mcp"] = mcp_servers
+        if (skills_dir := _task_skills_dir(state.task_context)) is not None:
+            # The task brings these skills, so its session loads them and may call the skill tool, which the default
+            # permission profile denies. Set after the profile's own rules: OpenCode applies the last match.
+            config["skills"] = {"paths": [skills_dir]}
+            permission = config.setdefault("permission", {})
+            if isinstance(permission, dict):
+                permission.pop("skill", None)
+                permission["skill"] = "allow"
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             if self.config.system_prompt_mode == "replace":
@@ -2940,7 +3068,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.observations = observations
         observations.gaps.extend(state.take_export_gaps())
         mcp_unconfirmed = None
-        mcp_servers, mcp_grants = self._granted_mcp_servers(state.request)
+        mcp_servers, mcp_grants = self._granted_mcp_servers(state.request, state.task_context)
         if mcp_servers and not isinstance(failure, asyncio.CancelledError):
             error, mcp_unconfirmed = await self._check_mcp_grants(state, mcp_grants, observations)
         # Required Gym MCP tools that did not connect, or (below) were never confirmed: a setup failure.
