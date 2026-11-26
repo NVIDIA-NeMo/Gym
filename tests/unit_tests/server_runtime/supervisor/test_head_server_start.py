@@ -106,6 +106,71 @@ def test_an_answer_before_our_head_server_started_is_not_ready(monkeypatch) -> N
     assert polls.call_count == 2
 
 
+def test_a_head_server_that_never_starts_while_another_answers_names_the_other(monkeypatch) -> None:
+    """Our head server hangs before binding while another server answers on its port: the timeout says so, rather
+    than that our head server "is running" with status `success`."""
+    supervisor = waiting_supervisor(monkeypatch, alive=True, statuses=["success"] * 10, timeout_s=6)
+    supervisor._head_server = SimpleNamespace(started=False)
+    supervisor._head_server_instance = SimpleNamespace(config=SimpleNamespace(host="127.0.0.1", port=11600))
+
+    with pytest.raises(HeadServerUnresponsiveError) as raised:
+        supervisor._wait_for_head_server()
+    assert "another server answered on its port 11600" in str(raised.value)
+    assert "although it is running" not in str(raised.value)
+
+
+def test_a_real_bind_failure_behind_a_foreign_answering_server_is_eaddrinuse(monkeypatch) -> None:
+    """End to end on real sockets: another HTTP server holds the port and answers, our uvicorn head server fails to
+    bind on a thread as HeadServer.run_webserver runs it, and the wait reports EADDRINUSE so `start` moves it."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import requests
+    import uvicorn
+
+    class Answer(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    foreign = HTTPServer(("127.0.0.1", 0), Answer)
+    port = foreign.server_address[1]
+    threading.Thread(target=foreign.serve_forever, daemon=True).start()
+
+    async def app(scope, receive, send):  # never reached: the bind fails
+        pass
+
+    ours = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="critical"))
+    thread = threading.Thread(target=ours.run, daemon=True)
+    thread.start()
+
+    def poll(_name: str) -> str:
+        try:
+            requests.get(f"http://127.0.0.1:{port}", timeout=2)
+            return "success"
+        except requests.exceptions.ConnectionError:
+            return "connection_error"
+
+    supervisor = ServerSupervisor()
+    supervisor._server_client = MagicMock(poll_for_status=MagicMock(side_effect=poll))
+    supervisor._head_server, supervisor._head_server_thread = ours, thread
+    supervisor._head_server_instance = SimpleNamespace(config=SimpleNamespace(host="127.0.0.1", port=port))
+    supervisor._head_server_spinup_timeout_seconds = 30
+    monkeypatch.setattr(env_module, "sleep", lambda seconds: thread.join(timeout=seconds))
+    try:
+        with pytest.raises(ServerStartFailedError) as raised:
+            supervisor._wait_for_head_server()
+    finally:
+        foreign.shutdown()
+        foreign.server_close()
+
+    assert (raised.value.server_name, raised.value.errno) == (HEAD_SERVER_KEY_NAME, errno.EADDRINUSE)
+    assert not ours.started
+
+
 def test_a_taken_head_server_port_is_retried_once_on_a_fresh_port(taken_port: dict) -> None:
     supervisor = ServerSupervisor()
     supervisor.shutdown = MagicMock()

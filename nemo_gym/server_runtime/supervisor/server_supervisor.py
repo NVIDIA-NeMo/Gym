@@ -993,9 +993,10 @@ class ServerSupervisor:  # pragma: no cover
             # Checked before trusting an answer: a dead thread means our head server never bound its port.
             thread_alive = self._head_server_thread.is_alive()
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            if status == "success" and thread_alive and self._own_head_server_started():
+            own_started = self._own_head_server_started()
+            if status == "success" and thread_alive and own_started:
                 return
-            if not thread_alive or not self._head_server_thread.is_alive():
+            if not thread_alive:
                 head = getattr(getattr(self, "_head_server_instance", None), "config", None)
                 bind_errno = _port_bind_errno(head.host, head.port) if head is not None else None
                 raise ServerStartFailedError(
@@ -1009,9 +1010,20 @@ class ServerSupervisor:  # pragma: no cover
                     errno=bind_errno,
                 )
             if deadline is not None and monotonic() >= deadline:
+                if status == "success" and not own_started:
+                    head = getattr(getattr(self, "_head_server_instance", None), "config", None)
+                    where = f"port {head.port}" if head is not None else "its port"
+                    reason = (
+                        f"the head server did not start within {timeout_seconds:g}s, while another server answered on "
+                        f"its {where} (another Gym run?)"
+                    )
+                else:
+                    reason = (
+                        f"the head server did not answer within {timeout_seconds:g}s although it is running "
+                        f"(last status `{status}`)"
+                    )
                 raise HeadServerUnresponsiveError(
-                    f"server_start_failed: the head server did not answer within {timeout_seconds:g}s although it is "
-                    f"running (last status `{status}`). Stopping instead of waiting on the allocation. Raise the "
+                    f"server_start_failed: {reason}. Stopping instead of waiting on the allocation. Raise the "
                     f"limit with `++{HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, or set it to 0 to wait "
                     "without a limit.",
                     server_name=HEAD_SERVER_KEY_NAME,
