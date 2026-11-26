@@ -180,6 +180,18 @@ def test_each_row_is_sealed_passes_the_seed_contract_and_compiles_its_bundle(nam
     bundle_files(spec)
 
 
+@pytest.mark.parametrize("name", [INDEX, STATUS])
+def test_each_recorded_prefix_names_the_model_the_harness_gives_opencode(name):
+    # OpenCode continues an imported session with its last user message's model. The harness configures only
+    # opencode_agent's sandbox_model_id there, so a prefix naming any other model fails the run before its first call.
+    prefix = ROWS[name]["agentic_if"]["continuation"]["prefix_export"]
+    infos = [message["info"] for message in prefix["messages"]]
+    named = {(info["model"]["providerID"], info["model"]["modelID"]) for info in infos if info["role"] == "user"}
+    named |= {(info["providerID"], info["modelID"]) for info in infos if info["role"] == "assistant"}
+    named.add((prefix["info"]["model"]["providerID"], prefix["info"]["model"]["id"]))
+    assert named == {("nemo_gym", "dummy_model")}
+
+
 # ------------------------------------------------------------------------------------------ scripted sessions
 
 
