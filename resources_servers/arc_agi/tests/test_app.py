@@ -46,3 +46,16 @@ class TestApp:
 
         result = _parse_grid("")
         assert result is None
+
+    def test_parse_grid_uses_last_grid(self) -> None:
+        # A corrected answer after a draft box is the one scored.
+        text = "First guess: \\boxed{[[0, 1], [1, 0]]}\nNo, the rule flips rows, so:\n\\boxed{[[1, 0], [0, 1]]}"
+        assert _parse_grid(text) == [[1, 0], [0, 1]]
+
+        # Without a box, the restated test input comes first and the answer last.
+        text = "The test input is [[0, 1], [1, 0]]. The output grid is [[1, 0], [0, 1]]."
+        assert _parse_grid(text) == [[1, 0], [0, 1]]
+
+        # Spaces just inside the box do not hide it.
+        text = "Input [[0, 1], [1, 0]] becomes $$\\boxed{ [[1, 0], [0, 1]] }$$"
+        assert _parse_grid(text) == [[1, 0], [0, 1]]
