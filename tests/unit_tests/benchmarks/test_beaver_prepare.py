@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 import pytest
 
 from benchmarks.beaver.prepare import build_rows
+from nemo_gym.data.task_data import TaskDataValidator, find_server_dir, load_task_data_schema
 from nemo_gym.data.task_selection import row_task_id
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 
@@ -55,6 +56,20 @@ def test_task_ids_and_digests_do_not_depend_on_row_order() -> None:
     forward = _plan(build_rows(domain_rows, SCHEMAS, include_evidence=True))
     backward = _plan(build_rows(reordered, SCHEMAS, include_evidence=True))
     assert forward.tasks == backward.tasks
+
+
+@pytest.mark.parametrize("include_evidence", [True, False])
+def test_rows_match_the_servers_schema_with_no_undeclared_fields(include_evidence: bool) -> None:
+    domain_rows = _domain_rows()
+    domain_rows["dw"][0]["domain_knowledge"] = '["revenue is net of returns"]'
+    validator = TaskDataValidator(
+        server_name="beaver_sql",
+        adapter=load_task_data_schema(find_server_dir("beaver_sql")),
+        dataset_fpath="beaver.jsonl",
+    )
+    for index, row in enumerate(build_rows(domain_rows, SCHEMAS, include_evidence)):
+        validator.validate_row(index, row)
+    assert validator.report.clean, validator.report.summary()
 
 
 def test_a_question_id_in_two_domains_is_refused() -> None:
