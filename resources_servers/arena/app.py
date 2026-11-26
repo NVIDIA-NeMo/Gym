@@ -36,7 +36,7 @@ from nemo_gym.server_runtime import (
     observe_llm_judge_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import call_judge, record_parsed_judge_verdict
+from nemo_gym.verification import call_judge, record_parsed_judge_verdict, record_rejected_judge_reply
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -421,6 +421,9 @@ class ArenaResourcesServer(SimpleResourcesServer):
 
             if verdict is not None:
                 record_parsed_judge_verdict()
+            else:
+                # The reply stays a dependency of the grade; a game asked again completes only with a parsed verdict.
+                record_rejected_judge_reply()
 
             return ArenaGame(
                 responses_create_params=responses_create_params,

@@ -34,7 +34,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    rollout_context,
 )
+from nemo_gym.server_runtime import observe_verifier
 from nemo_gym.verification import judge_failsafe
 from resources_servers.arena.app import (
     JUDGE_NO_VERDICT,
@@ -866,6 +868,26 @@ class TestArenaResourcesServer:
         assert result.reward == approx(1.0)
         assert result.failure_kind is None
         assert result.mask_sample is False
+
+    async def test_a_game_that_gets_a_verdict_when_asked_again_completes_its_grading(
+        self, server: ArenaResourcesServer
+    ):
+        self._setup_judge_texts(server, ["[[A>B]]", "The answer is [[B", "[[B>A]]"], [None, "max_output_tokens", None])
+        verify = observe_verifier(server.verify, enabled=True)
+
+        with rollout_context("rescued"):
+            result = await verify(self._make_verify_request("Answer."))
+
+        # The rejected reply stays a dependency, but the grading completes on the verdict that replaced it.
+        (invocation,) = result.ng_verifier_invocations
+        (operation,) = invocation.grading_operations
+        assert operation.outcome == "completed"
+        assert sorted(dependency.response_id for dependency in operation.dependencies) == [
+            "judge-0",
+            "judge-1",
+            "judge-2",
+        ]
+        assert result.reward == approx(1.0)
 
     async def test_a_row_without_verdict_counts_against_max_rollout_failure_rate(self, server: ArenaResourcesServer):
         self._setup_judge_texts(server, ["", "[[B>A]]", ""], ["content_filter", None, "content_filter"])
