@@ -864,13 +864,35 @@ async def test_retry_cannot_exceed_artifact_capture_budget() -> None:
     s.disconnect.assert_awaited_once()
 
 
+def stopped_artifact() -> SandboxResult:
+    """What the worker publishes when the supervisor's SIGTERM stops it: its work, marked cancelled."""
+    from nemo_gym.trajectory import ObservationGap
+    from responses_api_agents.nooa_agent.result import set_response_lifecycle
+
+    work = artifact()
+    return work.model_copy(
+        update={
+            "response": set_response_lifecycle(work.response, NOOATerminationReason.CANCELLED, None),
+            "observations": work.observations.model_copy(
+                update={"gaps": [*work.observations.gaps, ObservationGap(code="cancelled", detail="CancelledError: ")]}
+            ),
+            "termination_reason": NOOATerminationReason.CANCELLED,
+            "termination_error": "CancelledError: ",
+            "error": RunnerError(kind="cancelled", message="CancelledError: "),
+        }
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("saved", ["checkpoint", "result"])
+@pytest.mark.parametrize("saved", ["checkpoint", "result", "stopped-result"])
 async def test_worker_deadline_returns_saved_work_as_a_gradable_time_limit(saved: str) -> None:
     r, s = runner()
     s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
     if saved == "checkpoint":
         s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    elif saved == "stopped-result":
+        # The usual case: the supervisor's SIGTERM at the deadline makes the worker publish a cancelled result.
+        s.files[r.directory + "/result.json"] = stopped_artifact().model_dump_json()
     else:
         s.files[r.directory + "/result.json"] = artifact().model_dump_json()
     request = payload().request
@@ -886,6 +908,7 @@ async def test_worker_deadline_returns_saved_work_as_a_gradable_time_limit(saved
     assert response.status == "incomplete"
     gaps = {gap.code: gap.detail for gap in observations.gaps}
     assert NOOATerminationReason.TIMEOUT_EXCEEDED in gaps
+    assert NOOATerminationReason.CANCELLED not in gaps
     assert not any("not gradable" in detail or "not a terminal" in detail for detail in gaps.values())
     if saved == "checkpoint":
         assert "last saved checkpoint" in gaps["partial_checkpoint"]
