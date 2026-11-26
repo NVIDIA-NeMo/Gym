@@ -59,6 +59,25 @@ This legacy `/run` path is deprecated and will be removed after the Environment 
 Both paths of `miniswe_sandboxed_agent` are superseded by `mini_swe_agent` agent sessions. For Harbor task folders without `[agent].user`, switch to `--agent mini_swe_agent/mini_swe_agent_sandboxed` with the same model and sandbox options. Existing configurations remain available, and no adapter removal date is set. Tasks with `[agent].user` must keep the older adapter because the replacement refuses a task user. Legacy `/run` benchmark presets must keep their current adapter until their environment-server migration; changing only the agent name is insufficient. Terminal-Bench-Science's `terminal_bench_science/miniswe` preset has migrated to `mini_swe_agent` on the Harbor environment server, and its `/run` preset remains as `terminal_bench_science/miniswe_legacy_agent`. Migration does not establish new benchmark qualification or guarantee identical scores.
 </Warning>
 
+### Gzip model requests
+
+Supported agents can gzip model requests from an agent session to reduce traffic to the NeMo Gym model server.
+Gzip is lossless and off by default. It requires an agent session and is unavailable in OpenCode 2.
+
+Set `gzip_requests_enabled: true` on the agent and point its `model_server` reference to a NeMo Gym model server.
+For example, add this override when the Hermes agent and its model server are already configured.
+
+```yaml
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      gzip_requests_enabled: true
+```
+
+The agent uses gzip level 1 for serialized request bodies of at least 4 KiB. Smaller bodies, already encoded requests, and bodies that do not shrink are sent unchanged.
+Model servers accept both gzip and uncompressed requests. The model server setting `gzip_max_decoded_bytes` defaults to 256 MiB (268,435,456 bytes).
+The model server returns HTTP 413 when a gzip body exceeds the decoded size limit and HTTP 400 when a gzip body is malformed.
+
 ### Kilo MCP and sandbox ownership
 
 Kilo's session adapter accepts remote MCP grants from Resources. Set the Environment Server's `resources_tool_transports: [mcp]` to expose Resources tools through MCP. Grant URLs and headers must be reachable and valid from the task sandbox. Required direct HTTP grants are still rejected; this does not make a recipe configured with `[direct_http]` compatible with Kilo.
