@@ -270,8 +270,9 @@ a later unrelated failure (an OOM kill, say) is still graded. It knows Codex 0.1
 retry limit, last status: 429`, `Reconnecting... waiting for network`, and a stream disconnect
 from a transport error, a closed stream, a failed send or the SSE idle timeout. The output
 cap's `stream disconnected before completion: Incomplete response returned, reason:
-max_output_tokens` is not an endpoint failure. A run that completed or hit its time limit is not
-a failed run, so the check never applies to it.
+max_output_tokens` is not an endpoint failure, and neither is Codex 0.163.0's text for the
+cap, the same message without the `stream disconnected before completion: ` prefix. A run
+that completed or hit its time limit is not a failed run, so the check never applies to it.
 
 `raise_oom_score_adj: true` raises the score of Codex and everything it starts to 1000 (to 0
 when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent work rather

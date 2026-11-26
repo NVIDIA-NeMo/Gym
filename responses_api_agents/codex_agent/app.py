@@ -115,7 +115,14 @@ LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
-_OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+# Codex's final error when a model response ends at its output-token limit (the output cap), a gradable outcome.
+# Codex 0.144.4 and 0.154.0 retry such a response as a stream disconnect and report the first text; Codex 0.163.0
+# does not retry it and reports the second. An error is the output cap only if it equals one of them in full, so
+# a stream disconnect with another cause after the prefix, such as a transport failure, is never taken for it.
+_OUTPUT_LIMIT_ERRORS = (
+    "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+    "Incomplete response returned, reason: max_output_tokens",
+)
 # Characters of Codex stderr kept in the error of an activation that never started a turn.
 _STDERR_TAIL_CHARS = 2000
 # Codex 0.144.4 rejects MCP server names with other characters.
@@ -1319,7 +1326,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         errors = usage.get("errors") or []
         output_limited = (
             bool(errors)
-            and all(message == _OUTPUT_LIMIT_ERROR for message in errors)
+            and all(message in _OUTPUT_LIMIT_ERRORS for message in errors)
             and cleanup is not None
             and not cleanup["error"]
             and failure is None
