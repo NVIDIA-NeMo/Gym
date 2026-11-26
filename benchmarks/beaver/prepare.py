@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prepare BEAVER benchmark rows: questions from Hugging Face, schema from the MySQL dumps.
 
-Per-row output: ``{id, question, gt_sql, db_id, domain, category, detailed_category, evidence, evidence_section,
-sql_context}``. The prompt (``prompts/schema_only.yaml``) shows the question, its evidence when there is any, and the
+Per-row output: ``{task_id, id, question, gt_sql, db_id, domain, category, detailed_category, evidence,
+evidence_section, sql_context}``. ``task_id`` is BEAVER's own question id, ``id`` kept as its source copy: it already
+names its domain (``dw_12``, ``dw_real_12``), so it is unique across domains and doesn't depend on row order. The prompt (``prompts/schema_only.yaml``) shows the question, its evidence when there is any, and the
 ``CREATE TABLE`` statements of the question's database (``sql_context``): the schema-only setup of auto-ontology-eval.
 
 Sources, both gated on Hugging Face (MIT; accept the terms on each dataset page, then ``hf auth login``), pinned:
@@ -93,13 +94,19 @@ def build_rows(
     domain_rows: Dict[str, List[Dict[str, Any]]], schemas: Dict[str, str], include_evidence: bool
 ) -> List[Dict[str, Any]]:
     rows = []
+    seen: Dict[str, str] = {}
     for domain, questions in domain_rows.items():
         for q in questions:
+            task_id = str(q["id"])
+            if task_id in seen:
+                raise ValueError(f"BEAVER question id {task_id!r} appears in {seen[task_id]!r} and {domain!r}")
+            seen[task_id] = domain
             db_id = str(q.get("db") or DOMAIN_DB[domain]).strip() or DOMAIN_DB[domain]
             evidence = evidence_text(q.get("domain_knowledge")) if include_evidence else ""
             rows.append(
                 {
-                    "id": str(q["id"]),
+                    "task_id": task_id,
+                    "id": task_id,
                     "question": q["question"],
                     "gt_sql": q["sql"],
                     "db_id": db_id,
