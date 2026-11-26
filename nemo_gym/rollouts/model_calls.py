@@ -126,16 +126,23 @@ async def await_model_call_capture_quiescence(
     stores = [CaptureStore(directory) for directory in capture_dirs]
     deadline = time.monotonic() + timeout_s
 
-    def any_pending(lock_wait_s: float) -> bool:
-        return any(store.has_pending(rollout_id, lock_wait_s=lock_wait_s) for store in stores)
+    def any_pending() -> bool:
+        # The lock wait is what is left once the thread runs, so a wait for a free worker counts against it.
+        return any(
+            store.has_pending(rollout_id, lock_wait_s=max(0.0, deadline - time.monotonic())) for store in stores
+        )
 
     while True:
         try:
-            # Off the event loop, since it waits on the claims file's lock; a lock held to the deadline is pending.
-            if not await asyncio.to_thread(any_pending, max(0.0, deadline - time.monotonic())):
-                return True
+            # Off the event loop, since it waits on the claims file's lock. A poll still queued or locked at the
+            # deadline counts as pending.
+            pending = await asyncio.wait_for(asyncio.to_thread(any_pending), max(0.0, deadline - time.monotonic()))
+        except TimeoutError:
+            pending = True
         except OSError:
             logger.warning("Could not poll model-call capture claims for rollout %s.", rollout_id, exc_info=True)
+            return True
+        if not pending:
             return True
         if time.monotonic() >= deadline:
             logger.warning(
@@ -184,9 +191,16 @@ class CaptureSnapshot(NamedTuple):
 
 
 def snapshot_model_call_capture(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureSnapshot]:
-    """Snapshot the capture the merge will read, so deleting it afterwards can tell whether a row landed since."""
-    store = _store_for_rollout(rollout_id, capture_dirs)
-    identity = store.capture_identity(rollout_id) if store is not None else None
+    """Snapshot the capture the merge will read, so deleting it afterwards can tell whether a row landed since.
+
+    None, so nothing is deleted, when the capture is missing or can't be read; the merge then reports why.
+    """
+    try:
+        store = _store_for_rollout(rollout_id, capture_dirs)
+        identity = store.capture_identity(rollout_id) if store is not None else None
+    except OSError:
+        logger.warning("Could not snapshot the model-call capture of rollout %s.", rollout_id, exc_info=True)
+        return None
     return CaptureSnapshot(store, rollout_id, identity) if identity is not None else None
 
 
@@ -224,7 +238,17 @@ def merge_model_call_capture_into_record(
         gaps.append(ObservationGap(code="model_call_capture_no_records"))
     else:
         try:
-            calls, verifier_invocations, invalid_count = _read_capture_records(store, rollout_id)
+            read = []
+            try:
+                # Read under the claims lock: a call that wrote and released between the read and the check would
+                # otherwise be missing with no gap.
+                settled = store.delete_claims_if_settled(
+                    rollout_id, while_locked=lambda: read.append(_read_capture_records(store, rollout_id))
+                )
+            except OSError:
+                logger.warning("Could not check the capture claims of rollout %s.", rollout_id, exc_info=True)
+                settled = False
+            calls, verifier_invocations, invalid_count = read[0] if read else _read_capture_records(store, rollout_id)
             if invalid_count:
                 gaps.append(
                     ObservationGap(
@@ -232,11 +256,6 @@ def merge_model_call_capture_into_record(
                         detail=f"count={invalid_count}",
                     )
                 )
-            try:
-                settled = store.delete_claims_if_settled(rollout_id)
-            except OSError:
-                logger.warning("Could not check the capture claims of rollout %s.", rollout_id, exc_info=True)
-                settled = False
             if not settled:
                 gaps.append(ObservationGap(code="model_call_capture_pending"))
             if store.is_incomplete(rollout_id):

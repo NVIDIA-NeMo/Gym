@@ -2009,38 +2009,65 @@ def test_a_call_is_claimed_off_the_event_loop_before_it_is_forwarded(tmp_path, m
 
 def test_a_call_cancelled_while_claiming_releases_its_claim(tmp_path, monkeypatch):
     import asyncio
-    import threading
+    from concurrent.futures import Future, ThreadPoolExecutor
 
+    import nemo_gym.models.model_call_capture as capture
     from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
 
     store = CaptureStore(tmp_path)
-    claiming, proceed, claimed = threading.Event(), threading.Event(), threading.Event()
-    mark_pending = store.mark_pending
 
-    def held_claim(rollout_id, model_call_id):
-        claiming.set()
-        proceed.wait(5)
-        mark_pending(rollout_id, model_call_id)
-        claimed.set()
+    class HeldExecutor(ThreadPoolExecutor):
+        """Queues every job until the test runs it, so the test picks the order claims and releases land in."""
 
-    monkeypatch.setattr(store, "mark_pending", held_claim)
+        def __init__(self) -> None:
+            super().__init__(max_workers=1)
+            self.jobs = []
+
+        def submit(self, fn, /, *args, **kwargs):
+            future = Future()
+            self.jobs.append((future, lambda: fn(*args, **kwargs)))
+            return future
+
+        def run_newest(self) -> None:
+            future, job = self.jobs.pop()
+            try:
+                future.set_result(job())
+            except BaseException as error:
+                future.set_exception(error)
+
+    write_after_claim = capture._write_after_claim
 
     async def app(scope, receive, send) -> None:
         raise AssertionError("forwarded a cancelled call")
 
     async def run() -> None:
+        loop = asyncio.get_running_loop()
+        held = HeldExecutor()
+        loop.set_default_executor(held)
+        handling_cancel = asyncio.Event()
+
+        async def observed(claim, write):
+            handling_cancel.set()
+            await write_after_claim(claim, write)
+
+        monkeypatch.setattr(capture, "_write_after_claim", observed)
         task = asyncio.create_task(_capture_call(store, "r-claim-cancel", app))
-        await asyncio.to_thread(claiming.wait, 5)
+        while not held.jobs:
+            await asyncio.sleep(0)
+        assert len(held.jobs) == 1, "the claim is the only job queued"
         task.cancel()
-        await asyncio.sleep(0.2)
-        # A collector pass while the claim is still being written: a release already appended would be deleted
-        # as settled, and the claim that lands next would stay outstanding.
-        store.delete_claims_if_settled("r-claim-cancel")
-        proceed.set()
+        await handling_cancel.wait()
+        # Newest job first, with a collector pass after each: a release queued before its claim lands first and is
+        # deleted as settled, and the claim that lands next stays outstanding.
+        while not task.done():
+            if held.jobs:
+                held.run_newest()
+                store.delete_claims_if_settled("r-claim-cancel")
+            await asyncio.sleep(0)
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert await asyncio.to_thread(claimed.wait, 5) is True
-        assert await await_model_call_capture_quiescence("r-claim-cancel", [tmp_path], timeout_s=2.0) is True
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        assert await await_model_call_capture_quiescence("r-claim-cancel", [tmp_path], timeout_s=5.0) is True
         assert [exchange["error_category"] for exchange in store.read("r-claim-cancel")] == ["cancelled"]
 
     asyncio.run(run())

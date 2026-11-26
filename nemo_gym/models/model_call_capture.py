@@ -30,7 +30,7 @@ import os
 import re
 import time
 import warnings
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
@@ -285,16 +285,25 @@ class CaptureStore:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return True
 
-    def delete_claims_if_settled(self, rollout_id: str, *, lock_wait_s: float = _CLAIMS_LOCK_WAIT_S) -> bool:
+    def delete_claims_if_settled(
+        self,
+        rollout_id: str,
+        *,
+        lock_wait_s: float = _CLAIMS_LOCK_WAIT_S,
+        while_locked: Optional[Callable[[], None]] = None,
+    ) -> bool:
         """Delete the claims file if no claim in it is outstanding; False while one is.
 
         The read and the unlink hold the claims file's lock, and an appender skips a deleted file, so a claim
         taken at any point stays visible. A lock still held after ``lock_wait_s`` keeps the file.
+        ``while_locked`` runs under that lock before the check, so True means no call claimed or released while it
+        ran. It does not run if the lock is not taken.
         """
         path = self.claims_path_for(rollout_id)
         for _ in range(_CLAIM_APPEND_ATTEMPTS):
             try:
-                handle = path.open("r+b")
+                # Created for ``while_locked`` if missing, so a call that claims meanwhile waits on this lock.
+                handle = path.open("r+b" if while_locked is None else "a+b")
             except FileNotFoundError:
                 return True
             with handle:
@@ -303,6 +312,9 @@ class CaptureStore:
                 try:
                     if not _is_live(handle, path):
                         continue
+                    if while_locked is not None:
+                        while_locked()
+                    handle.seek(0)
                     if _has_outstanding_claim(handle.read()):
                         return False
                     try:
@@ -312,7 +324,7 @@ class CaptureStore:
                     return True
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return not self.has_pending(rollout_id, lock_wait_s=lock_wait_s)
+        return while_locked is None and not self.has_pending(rollout_id, lock_wait_s=lock_wait_s)
 
     def capture_identity(
         self, rollout_id: str, *, lock_wait_s: float = _CLAIMS_LOCK_WAIT_S
@@ -381,8 +393,11 @@ class CaptureStore:
 
     def remove_pending_markers(self, rollout_ids: set[str]) -> None:
         """Remove earlier Gym versions' per-call pending markers of these rollouts, listing the directory once."""
-        with os.scandir(self._root) as entries:
-            stale = [entry.path for entry in entries if _pending_marker_rollout_id(entry.name) in rollout_ids]
+        try:
+            with os.scandir(self._root) as entries:
+                stale = [entry.path for entry in entries if _pending_marker_rollout_id(entry.name) in rollout_ids]
+        except FileNotFoundError:
+            return  # A store opened with ``create=False`` on a missing directory has no markers.
         for marker in stale:
             Path(marker).unlink(missing_ok=True)
 

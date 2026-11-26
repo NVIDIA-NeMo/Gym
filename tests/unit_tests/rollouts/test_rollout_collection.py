@@ -15201,20 +15201,55 @@ class TestEnrichRunResult:
         assert call["model_call_id"] == "c1" and call["request"] is None and call["response"] is None
         assert CaptureStore(tmp_path).path_for("g1_g0_a0").exists(), "the bodies stay in the store"
 
-    async def test_deleting_the_capture_keeps_the_payloads_on_the_record(self, tmp_path: Path) -> None:
+    async def test_deleting_the_capture_keeps_the_payloads_on_the_record(self, tmp_path: Path, monkeypatch) -> None:
+        import threading
+
+        from nemo_gym.models.model_call_capture import CaptureStore
+        from nemo_gym.rollouts import rollout_collection
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        path = CaptureStore(tmp_path).path_for("g1_g0_a0")
+        result = {"response": {"output": []}, "reward": 0.0}
+        gate, deleted = threading.Event(), threading.Event()
+        clear = rollout_collection.clear_model_call_capture_after_snapshot
+
+        def held_clear(snapshot) -> None:
+            gate.wait(5)
+            clear(snapshot)
+            deleted.set()
+
+        monkeypatch.setattr(rollout_collection, "clear_model_call_capture_after_snapshot", held_clear)
+        await rollout_collection.enrich_run_result(
+            self._row(), result, capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
+        )
+
+        # Returned while the deletion is held: it starts as the result is handed back and is not awaited.
+        assert path.exists() and not deleted.is_set()
+        [call] = result["ng_trajectory"]["model_calls"]
+        assert call["response"]["output"][0]["content"][0]["text"] == "first"
+        gate.set()
+        assert await asyncio.to_thread(deleted.wait, 5)
+        assert not path.exists()
+
+    async def test_a_capture_that_cannot_be_opened_is_reported_and_kept(self, tmp_path: Path, monkeypatch) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore
         from nemo_gym.rollouts.rollout_collection import enrich_run_result
 
         self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+
+        def unreadable(*_args, **_kwargs):
+            raise PermissionError("capture not readable")
+
+        monkeypatch.setattr(CaptureStore, "capture_identity", unreadable)
+        monkeypatch.setattr(CaptureStore, "read_available", unreadable)
         result = {"response": {"output": []}, "reward": 0.0}
 
         await enrich_run_result(
             self._row(), result, capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
         )
 
-        [call] = result["ng_trajectory"]["model_calls"]
-        assert call["response"]["output"][0]["content"][0]["text"] == "first"
-        assert not CaptureStore(tmp_path).path_for("g1_g0_a0").exists()
+        assert [gap["code"] for gap in result["ng_model_call_capture"]["gaps"]] == ["model_call_capture_unreadable"]
+        assert CaptureStore(tmp_path).path_for("g1_g0_a0").exists()
 
     async def test_deleting_the_capture_without_payloads_is_refused(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import enrich_run_result
@@ -15554,6 +15589,50 @@ class TestRunRecordWriter:
                 delete_model_call_capture=True,
             )
         assert self._lines(run_dir / "rollouts-step_3.jsonl") == [written]
+
+    async def test_a_recorded_shard_deletes_a_capture_only_after_writing_its_row(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from nemo_gym.models.model_call_capture import CaptureStore
+        from nemo_gym.rollouts import rollout_collection
+
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        keys = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                keys.append(maybe_rollout_id_from_run_body(examples[0]))
+                TestEnrichRunResult._store_call(capture_dir, keys[0], "c1", "first")
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        at_write = []
+        write = rollout_collection._RunRecordWriter.write
+
+        def observed_write(self, record):
+            at_write.append(CaptureStore(capture_dir).path_for(keys[0]).exists())
+            return write(self, record)
+
+        monkeypatch.setattr(rollout_collection._RunRecordWriter, "write", observed_write)
+        [completion] = list(
+            Helper().run_examples(
+                [TestEnrichRunResult._row()],
+                record_output_dir=tmp_path / "run",
+                record_shard="s",
+                delete_model_call_capture=True,
+            )
+        )
+        await completion
+
+        assert at_write == [True]
+        assert not CaptureStore(capture_dir).path_for(keys[0]).exists()
 
     @pytest.mark.parametrize("scope_rollout_ids", [True, False])
     async def test_a_caller_with_unique_ids_can_keep_them_in_a_recorded_shard(

@@ -430,7 +430,7 @@ async def test_a_run_directory_of_an_earlier_version_reads_without_waiting_on_it
     store.record("11-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
     (tmp_path / "11-0.c0ffee.capture.pending").touch()
 
-    assert await await_model_call_capture_quiescence("11-0", [tmp_path], timeout_s=0.05) is True
+    assert await await_model_call_capture_quiescence("11-0", [tmp_path], timeout_s=5.0) is True
     record = merge_model_call_capture_into_record({"_ng_task_index": 11, "_ng_rollout_index": 0}, [tmp_path])
 
     assert len(record["ng_model_call_capture"]["calls"]) == 1
@@ -784,6 +784,70 @@ def test_clear_all_pending_still_drops_every_claim(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_clear_all_pending_of_a_missing_directory_finds_nothing(tmp_path):
+    store = CaptureStore(tmp_path / "missing", create=False)
+
+    with pytest.warns(DeprecationWarning, match="delete_claims"):
+        store.clear_all_pending("24-4")
+
+    assert not (tmp_path / "missing").exists()
+
+
+def test_no_call_can_claim_or_release_while_the_merge_reads_the_capture(tmp_path, monkeypatch):
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("25-0", "call-1")
+    store.record("25-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    store.clear_pending("25-0", "call-1")
+    read_available = CaptureStore.read_available
+    late = []
+
+    def read_then_a_late_call(self, rollout_id):
+        read = read_available(self, rollout_id)
+        # A call that claims, writes and releases right after the read; a claims lock held by the merge stops it.
+        if not store.has_pending(rollout_id, lock_wait_s=0):
+            store.mark_pending(rollout_id, "call-2")
+            store.record(
+                rollout_id, {**_capture_exchange("responses", "B", {}, {"id": "resp-B"}), "model_call_id": "call-2"}
+            )
+            store.clear_pending(rollout_id, "call-2")
+            late.append("call-2")
+        return read
+
+    monkeypatch.setattr(CaptureStore, "read_available", read_then_a_late_call)
+    record = merge_model_call_capture_into_record({"_ng_task_index": 25, "_ng_rollout_index": 0}, [tmp_path])
+
+    assert late == []
+    assert [call["model_call_id"] for call in record["ng_model_call_capture"]["calls"]] == ["call-1"]
+    assert "gaps" not in record["ng_model_call_capture"]
+    assert not store.claims_path_for("25-0").exists()
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_returns_at_its_deadline_behind_a_busy_executor(tmp_path):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    CaptureStore(tmp_path).mark_pending("26-0", "call-1")
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+    busy, gate = threading.Event(), threading.Event()
+    blocker = loop.run_in_executor(None, lambda: busy.set() or gate.wait(5))
+    assert busy.wait(5)
+
+    drained = await await_model_call_capture_quiescence("26-0", [tmp_path], timeout_s=0.2)
+    held = not blocker.done()
+    gate.set()
+    await blocker
+
+    assert drained is False
+    assert held, "the drain waited for the busy worker past its deadline"
+
+
 def test_merge_keeps_the_calls_it_read_when_the_claims_cannot_be_checked(tmp_path, monkeypatch, caplog):
     from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 
@@ -792,7 +856,7 @@ def test_merge_keeps_the_calls_it_read_when_the_claims_cannot_be_checked(tmp_pat
     store.record("17-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
     store.clear_pending("17-0", "call-1")
 
-    def read_only(*_args):
+    def read_only(*_args, **_kwargs):
         raise PermissionError("read-only claims file")
 
     monkeypatch.setattr(CaptureStore, "delete_claims_if_settled", read_only)

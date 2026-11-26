@@ -2766,7 +2766,7 @@ async def run_e2e_multistage(
         global_config_dict.get("model_call_capture") or {}
     ).trajectory_schema_version
 
-    def attach_rollout_evidence(
+    async def attach_rollout_evidence(
         row: Dict[str, Any], result: Dict[str, Any], rollout_latency_ms: Optional[float]
     ) -> None:
         """Join the rollout's evidence and attach ``ng_perf``, as ``run_from_config`` does."""
@@ -2778,7 +2778,9 @@ async def run_e2e_multistage(
             result.get(NG_DISPATCH_DRAINED_KEY)
         )
         if capture_dirs and not no_result:
-            merge_model_call_capture_into_record(
+            # Off the event loop: the merge waits on the claims file's lock.
+            await asyncio.to_thread(
+                merge_model_call_capture_into_record,
                 result,
                 capture_dirs,
                 include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
@@ -2820,7 +2822,7 @@ async def run_e2e_multistage(
         result[NG_RESULT_TYPE_KEY] = next(
             iter(server_client.global_config_dict[environment_server]["environment_servers"])
         )
-        attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
+        await attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
         on_result(row, result)
         return row, result
 
@@ -2835,7 +2837,7 @@ async def run_e2e_multistage(
             remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
         clear_model_call_captures_for_rollouts(rows, capture_dirs)
 
-        def finish(completed: Any) -> None:
+        async def finish(completed: Any) -> None:
             # A failure while verifying comes after the rollout, so a retry judges the persisted deliverable;
             # without one, /verify answers 404 and the policy runs again.
             if (
@@ -2847,7 +2849,7 @@ async def run_e2e_multistage(
                 completed.result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
             if completed.environment_server_type is not None:
                 completed.result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
-            attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
+            await attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
             on_result(completed.row, completed.result)
             results.append((completed.row, completed.result))
 
@@ -2861,13 +2863,13 @@ async def run_e2e_multistage(
         )
         try:
             for future in completions:
-                finish(await future)
+                await finish(await future)
         except BaseException:
             # One raising rollout ends the batch; save the siblings that finished but were not consumed yet.
             if hasattr(completions, "aclose_and_drain"):
                 for settled in await completions.aclose_and_drain():
                     if not settled.cancelled() and settled.exception() is None:
-                        finish(settled.result())
+                        await finish(settled.result())
             raise
         return results
 

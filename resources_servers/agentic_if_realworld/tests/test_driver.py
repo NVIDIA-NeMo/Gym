@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import shutil
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -338,9 +339,11 @@ def test_adaptive_capture_selected_parameters_and_resume(
 
         merge = model_calls.merge_model_call_capture_into_record
         assembled = []
+        merged_on_loop = []
 
         def assemble(record, *args, **kwargs):
             assembled.append(record["task_id"])
+            merged_on_loop.append(threading.current_thread() is threading.main_thread())
             if record["task_id"] == later_id:
                 raise ValueError("Later saved rollout cannot be assembled")
             return merge(record, *args, **kwargs)
@@ -351,6 +354,8 @@ def test_adaptive_capture_selected_parameters_and_resume(
             with pytest.raises(ValueError, match="cannot be assembled"):
                 asyncio.run(rollout_driver.run_rollout_collection(config, settings))
         assert assembled == [row["task_id"] for row in inventory]
+        # The merge waits on the claims file's lock, so it runs off the event loop.
+        assert merged_on_loop and not any(merged_on_loop)
         assert all(path.read_bytes() == saved for path, saved in artifacts.items())
         assert len(calls) == 4 and len(judge_calls) == 2
 

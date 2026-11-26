@@ -265,7 +265,10 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         rollout_id = maybe_rollout_id_from_run_body(record)
                         if rollout_id:
                             await await_model_call_capture_quiescence(rollout_id, capture_dirs)
-                        merge_model_call_capture_into_record(record, capture_dirs, include_payloads=True)
+                        # Off the event loop: the merge waits on the claims file's lock.
+                        await asyncio.to_thread(
+                            merge_model_call_capture_into_record, record, capture_dirs, include_payloads=True
+                        )
                         _attach_trajectory_record(record, record)
                     async with writing:
                         try:

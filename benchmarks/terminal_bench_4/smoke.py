@@ -196,7 +196,9 @@ async def main(args):
                             _ng_task_index=manifest["tasks"].index(task),
                             _ng_rollout_index=0,
                         )
-                        merge_model_call_capture_into_record(result, [capture_dir], include_payloads=True)
+                        await asyncio.to_thread(
+                            merge_model_call_capture_into_record, result, [capture_dir], include_payloads=True
+                        )
                         _attach_trajectory_record(result, result)
                         rollout_records.append(result)
                         agent_observed = bool((result.get("response") or {}).get("output"))

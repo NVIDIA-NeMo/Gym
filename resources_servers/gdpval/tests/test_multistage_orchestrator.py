@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -4423,6 +4424,15 @@ class TestCachedDeliverableReuse:
         # An earlier session wrote the calls of the reused stage-1 row, whose task index is offset by the stride.
         reused_key = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0}
         CaptureStore(capture_dir).record(maybe_rollout_id_from_run_body(reused_key), _capture_exchange("seeded"))
+        loop_thread = threading.get_ident()
+        merge = multistage_module.merge_model_call_capture_into_record
+        merged_on_loop = []
+
+        def observed_merge(*args, **kwargs):
+            merged_on_loop.append(threading.get_ident() == loop_thread)
+            return merge(*args, **kwargs)
+
+        monkeypatch.setattr(multistage_module, "merge_model_call_capture_into_record", observed_merge)
 
         _, _, persisted = await self._run_two_stages(tmp_path, monkeypatch, cached=True, capture_dir=capture_dir)
 
@@ -4431,6 +4441,8 @@ class TestCachedDeliverableReuse:
             for row in persisted
         }
         assert calls_by_stage == {0: ["dispatched"], 1: ["seeded"]}
+        # The merge waits on the claims file's lock, so it runs off the event loop.
+        assert merged_on_loop == [False, False]
 
     async def test_a_reused_row_without_a_capture_has_no_calls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
