@@ -60,18 +60,17 @@ def _capture_tool_turn(message: dict) -> dict:
     calls = message.get("tool_calls")
     if not isinstance(calls, list) or not calls:
         return message
-    content = message.get("content")
-    reasoning = message.get("reasoning_content")
-    if (
-        reasoning in (None, "")
-        and isinstance(content, str)
-        and content.startswith("<think>")
-        and content.endswith("</think>")
-    ):
-        reasoning = content[len("<think>") : -len("</think>")]
-    elif content != "":
+    visible_text = message.get("content")
+    if not isinstance(visible_text, str):
         return message
-    if not isinstance(reasoning, str) or not reasoning.strip() or "<think>" in reasoning or "</think>" in reasoning:
+    reasoning = message.get("reasoning_content")
+    if reasoning in (None, "") and visible_text.startswith("<think>"):
+        reasoning, closing_tag, visible_text = visible_text[len("<think>") :].partition("</think>")
+        if not closing_tag:
+            return message
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        return message
+    if any(tag in text for tag in ("<think>", "</think>") for text in (reasoning, visible_text)):
         return message
     digest = _tool_turn_digest(calls)
     if digest is None:
@@ -81,6 +80,8 @@ def _capture_tool_turn(message: dict) -> dict:
     # The assistant content participates in both the strict and the argument-relaxed lookup.
     # Include the ordered arguments here so the relaxed lookup cannot widen this equivalence.
     result["content"] = [{"type": "thinking", "thinking": reasoning, "tool_turn_digest": digest}]
+    if visible_text:
+        result["content"].append({"type": "text", "text": visible_text})
     return result
 
 
@@ -88,8 +89,8 @@ def capture_chat_tool_turns(items: list[dict]) -> list[dict]:
     """Compare a single inline thinking block with its exact echo in the reasoning field.
 
     The model server enables this only when its Chat preprocessor renders both
-    tool-only forms as empty visible text and the same separate reasoning. The
-    returned items are for capture lookup only. Visible text, competing aliases,
-    literal tags within thinking, and other shapes retain their original evidence.
+    forms as the same separate reasoning with identical visible text. The
+    returned items are for capture lookup only. Competing aliases, nested tags,
+    and other shapes retain their original evidence.
     """
     return [_capture_tool_turn(item) for item in items]

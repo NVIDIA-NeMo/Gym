@@ -133,9 +133,9 @@ from `prompt_logprobs` — no separate `/tokenize` round-trip is needed.
 ### Comparing reasoning in captured Chat tool turns
 
 `match_chat_tool_reasoning: true` lets the capture matcher compare a
-tool-only assistant reply that contains one `<think>...</think>` block with
+assistant tool reply that starts with one `<think>...</think>` block with
 an echo of the same text in `reasoning_content`. The comparison requires
-the same thinking text and tool calls, including argument key order.
+the same thinking, visible text, and tool calls, including argument key order.
 Requests and replies retain their original format. Responses and Messages
 endpoints do not use this comparison.
 

@@ -721,7 +721,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         default=False,
         description=(
             "For token capture, compare an inline thinking block with its exact reasoning_content echo on a "
-            "Chat Completions tool-only assistant turn. Enable at the start of a new capture lineage, with a model "
+            "Chat Completions assistant tool turn with identical visible text. Enable for a fresh capture lineage with a model "
             "whose renderer treats the two forms equivalently. Model requests and replies keep their wire format."
         ),
     )

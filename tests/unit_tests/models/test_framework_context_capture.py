@@ -156,12 +156,15 @@ def _chat_tool_turn(content):
         "thinking",
         "aliases",
         "visible",
+        "visible_match",
+        "visible_changed",
         "nested_tags",
         "pre_opt_in",
     ],
 )
 async def test_chat_tool_reasoning_matches_only_equivalent_transitions(ledger, mode, change):
-    served = _chat_tool_turn("<think>Use the fixture. </think>")
+    visible = "I will read the file. " if change in ("visible_match", "visible_changed") else ""
+    served = _chat_tool_turn(f"<think>Use the fixture. </think>{visible}")
     original = deepcopy(served)
     _, first = await _serve(
         ledger,
@@ -173,10 +176,10 @@ async def test_chat_tool_reasoning_matches_only_equivalent_transitions(ledger, m
     )
     assert first.mode == "text"
     assert served == original
-    echo = {**_chat_tool_turn(""), "reasoning_content": "Use the fixture. "}
+    echo = {**_chat_tool_turn(visible), "reasoning_content": "Use the fixture. "}
     if change == "empty_reasoning":
         echo = {**deepcopy(served), "reasoning_content": ""}
-    matches = change in (None, "empty_reasoning")
+    matches = change in (None, "empty_reasoning", "visible_match")
     tool = echo["tool_calls"][0]
     if change == "argument_order":
         tool["function"]["arguments"] = '{"path":"fixture","options":{"second":2,"first":1}}'
@@ -192,6 +195,8 @@ async def test_chat_tool_reasoning_matches_only_equivalent_transitions(ledger, m
         echo["reasoning"] = "An inconsistent alias"
     if change == "visible":
         echo["content"] = "A visible answer"
+    if change == "visible_changed":
+        echo["content"] = visible.rstrip()
     if change == "nested_tags":
         echo["reasoning_content"] = "<think>literal text</think>"
     # Parsed argument values and key order agree despite reserialization.
