@@ -19,6 +19,7 @@ To reproduce a reported result, start with its frozen run record. The record ide
 | [WebVoyager, October 21, 2026](#webvoyager-reference) | 418 successes and 134 valid zeros from 552 tasks, 75.72% success | Nano Omni tuned `iter_0004622` | [WebVoyager result and configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/README.md#instance-pool-validation-on-2026-10-21) |
 | [WebArena, November 11, 2026](#webarena-reference) | Raw reward `475.0/812`, full successes `475/812` | Nano Omni specialist `iter_0005034/mcore_to_hf` | [WebArena result and configuration](https://github.com/NVIDIA-NeMo/Gym/pull/2917#issuecomment-6811644462) |
 | [VisualWebArena, November 10–12, 2026](#visualwebarena-reference) | Raw reward `231.0/908`, full successes `231/908` | Nano Omni tuned `iter_0004622` | [VisualWebArena result and configuration](https://github.com/NVIDIA-NeMo/Gym/pull/2918#issuecomment-6949230827) |
+| [VisualWebArena specialist, November 25–26, 2026](#visualwebarena-specialist-reference) | Raw reward `256.0/908`, full successes `256/908` (28.19%) | `vwa-v10/iter_0001253/mcore_to_hf` | [Verified phase results](#specialist-run-results) |
 
 ### Arrange the deployment
 
@@ -64,7 +65,7 @@ Live sites and their contents change, and the original travel dates eventually e
 
 - **Source and input.** Gym `363bd7c9a1e0c33028c56443e4303cb773b7472c`, the frozen snapshot-fix candidate evaluated for 475/812. Ask the run owner for the archived source from release `2026-11-11-webarena-pr2917-iter0005034-snapshot-r4`. The verified source archive SHA-256 is `67d58f074c4cbffd791299be76a6c87b5647118545ad7428f43138fb346b6de5`. The 812-row prepared input SHA-256 is `7ca11a1127f52ce80e96fb9a59f7b0223bb04691bc5cf350be719d28bae2fd16` and the four-stage plan SHA-256 is `38284a252adbe7ff8eb44055bd337f645f4b7fa14d2c1687a6d06487c51445b8`. The run used OpenAI SDK `2.44.0` and its original evaluator revision.
 - **Serving and browser.** Use `iter_0005034/mcore_to_hf`, BF16, one TP8 replica on eight H100 GPUs, context length `128000`, max sequences `32`, and the recorded `nano_v3` and `qwen3_coder` parsers. The policy used temperature `0.1`, `top_p=0.95`, no request-level output cap, a 100-step limit and three recent screenshots. Keep argument repair disabled, the original uncapped Nano Omni scroll amount, and the 30-second scroll timeout. Start up to three separate headed Chromium workers at `1920×1080`, one task per worker and per site. Cross-site work runs alone.
-- **Sites and order.** Restore the frozen Shopping, Shopping Admin, Reddit and GitLab seeds, plus the reference Map and Wikipedia data. Run 435 single-site reads, five cross-site reads, 352 single-site writes and 20 cross-site writes in that order. The archived stage plan supplies the exact grouping and within-group order.
+- **Sites and order.** Restore the frozen Shopping, Shopping Admin, Reddit and GitLab seeds, the [reference Map state](#populate-the-webarena-map-database), and the matching Wikipedia data. Run 435 single-site reads, five cross-site reads, 352 single-site writes and 20 cross-site writes in that order. The archived stage plan supplies the exact grouping and within-group order.
 - **Judge.** The original evaluator called `us/azure/openai/gpt-4.1` through the NVIDIA Inference API with a 120-second timeout. Retain the original evaluator and request settings for a comparison to 475/812. The later scorer fixes in #2917 have their own validation.
 
 ### VisualWebArena reference
@@ -74,7 +75,75 @@ Live sites and their contents change, and the original travel dates eventually e
 - **Sites and order.** Restore the reference Shopping, Reddit and Classifieds seeds, with a fresh database volume for Classifieds, plus the matching Wikipedia and homepage assets. Use the recorded four-stage launcher with up to three isolated browser workers and one task per site. The stages are 480 single-site reads, 12 cross-site reads, 404 single-site writes and 12 cross-site writes. The later `benchmarks.visualwebarena.run` coordinator documented below implements a different clean-state schedule.
 - **Judge and result scope.** The original evaluator used `us/azure/openai/gpt-4.1` through the NVIDIA Inference API with a 120-second timeout. All 908 native outcomes and the technical audit passed. The original-frame manual review was still pending in the published result record.
 
-The later VisualWebArena run uses the specialist checkpoint `vwa-v10/iter_0001253` and a revised scorer. See its [separate evaluation record](https://github.com/NVIDIA-NeMo/Gym/pull/2918#issuecomment-6999876118).
+### VisualWebArena specialist reference
+
+- **Source and input.** Use release `2026-11-25-vwa-v10-clean-r1` and
+  Gym `1893b3eb397cc52deba2cd092f2c1ae78a3f3c08` with the revised scorer.
+  The source archive SHA-256 is
+  `0a08a567e13560bdb23f425be9f7473672fdf6227e1f068072d2009a3ccc0abd`.
+  Stage the 908-row prepared input with SHA-256
+  `504c75655b1afa81d3d2d202470a838ac74383acb1c071604590da6550837a5f`,
+  plus the 341 task images at their recorded paths and hashes. The scorer
+  file SHA-256 is `69dd55a486ea766598c7c2b0e02d8b680539f39e47d4cb1e00209bfd3ed64516`.
+  Request the archived resolved configuration and its dependency inventories.
+  The original configuration has SHA-256
+  `ae51480720140c50fc4f8c92942a5c2d6f98f034e01da483c1f46a427c6557d2`
+  before rebinding deployment paths and endpoints. [Pinned Gym commit](https://github.com/NVIDIA-NeMo/Gym/commit/1893b3eb397cc52deba2cd092f2c1ae78a3f3c08).
+- **Policy serving.** Verify all 17 checkpoint shards and the release's 37-file
+  inventory for `vwa-v10/iter_0001253/mcore_to_hf`. Serve two BF16 TP8 replicas
+  on eight H100 GPUs each. Each replica has context length `64000` and max
+  sequences `32`. Use the archived serving image and vLLM package, checkpoint
+  tokenizer and image processor, `keep_history` template with thinking enabled
+  and history-thinking truncation disabled, `nano_v3` reasoning parser, and
+  `qwen3_coder` tool parser. The serving image archive SHA-256 is
+  `7dac78869a1f5f328a79654db75b86a569199745833346c86781fe5d33e52539`
+  and the vLLM package manifest SHA-256 is
+  `076c873a2f1197ca88ebe24bc7c70521a8c4c9f0f0e8fb45c6839b76b36ade75`.
+- **Agent and browser.** Keep temperature `0.1`, `top_p=0.95`, the omitted
+  request-level output cap, the 100-step limit, and three recent screenshots.
+  Run one site-lock pool with 32 independent headed Chromium instances at
+  `1920×1080`, using Playwright `1.55.0` and Chromium `140.0.7339.16`.
+  The browser image archive SHA-256 is
+  `f622a316fd0fa4c60e9e1e57664486d10e1136686533d0b5457d652405351887`.
+  The deployed roles used OpenAI SDK `2.45.0` and the agent and browser resource
+  used Pillow `12.3.0`.
+- **Sites, judge and collection.** Restore the matching Shopping, Reddit, and
+  Classifieds seeds and the Wikipedia and homepage assets on one owned
+  deployment. Check both policy endpoints and run smoke tasks `121`, `466`,
+  `480`, `481`, and `718` before formal collection. The judge was
+  `us/azure/openai/gpt-4.1` through the NVIDIA Inference API Chat Completions
+  endpoint with a 120-second timeout. Use the archived full-run launcher, its
+  32 requested agent loops, a session-seed request timeout of `10800` seconds,
+  and a phase-collector timeout of `57600` seconds. The coordinator verifies the
+  initial reset, dispatches the ordinary work in phase order, then verifies
+  each of six protected reset epochs on the same exclusive deployment.
+
+#### Specialist run results
+
+| Phase | Valid outcomes | Raw reward | Full successes |
+| --- | ---: | ---: | ---: |
+| Read-only | 492 | 166.0 | 166 |
+| Ordinary writes | 408 | 86.0 | 86 |
+| Protected epoch 1 (`346`, `678`) | 2 | 2.0 | 2 |
+| Protected epoch 2 (`345`, `751`) | 2 | 1.0 | 1 |
+| Protected epoch 3 (`336`) | 1 | 0.0 | 0 |
+| Protected epoch 4 (`335`) | 1 | 1.0 | 1 |
+| Protected epoch 5 (`340`) | 1 | 0.0 | 0 |
+| Protected epoch 6 (`92`) | 1 | 0.0 | 0 |
+| Total | 908 | 256.0 | 256 |
+
+The ordinary writer phase reached its time limit and resumed with its existing
+site state and output. Task 602 had successfully renamed the shared Reddit
+test account. The run restored the original username on that account and
+confirmed login, private-message access, and the original profile from the
+worker browser. Of 403 original ordinary outcomes, 359 were retained and 44
+zero-reward episodes had rejected login. The run collected those 44 IDs and
+five missing IDs again, one at a time in the original task order using the same
+weights, scorer, and site deployment. Each of the 49 selected replays had a
+successful login receipt. The final audit verified 908 unique selected outcomes,
+zero masked or imputed outcomes, and all eight protected state receipts. The
+run record retains all per-task results, original and replay row hashes, and
+the exact continuation commands.
 
 ### Compare the rerun
 
@@ -241,6 +310,16 @@ cd "$SITE_SETUP_DIR/$SITE_PROFILE"
 
 Download the matching archives from the [WebArena mirrors](https://github.com/web-arena-x/webarena/blob/dce04686a56253aefba7b18a4fa0937cf1dc987b/environment_docker/README.md#individual-website), [VisualWebArena mirrors](https://github.com/web-arena-x/visualwebarena/blob/89f5af29305c3d1e9f97ce4421462060a70c9a03/environment_docker/README.md#classifieds-website), and the [OpenStreetMap archive](https://zenodo.org/records/12636845). Place the files listed for your benchmark beside `00_vars.sh`. Keep the original archives or their checksums to identify the site snapshot.
 
+Before loading the images, check usable space for the downloaded archives, the
+extracted data, and the Docker image and volume store. With the containerd image
+store enabled, also check the filesystem containing containerd's configured root.
+
+```bash
+docker_data_root="$(sudo docker info --format '{{.DockerRootDir}}')"
+df -h -- "$PWD" "$docker_data_root"
+sudo docker info --format '{{json .DriverStatus}}'
+```
+
 | Site | Gym variable | Local URL or port | Seed asset | Benchmark |
 | --- | --- | --- | --- | --- |
 | Shopping | `WA_SHOPPING` | `7770` | `shopping_final_0712.tar` | WebArena and VisualWebArena |
@@ -270,7 +349,14 @@ sed -i -E \
 
 ### Configure WebArena Map and GitLab
 
-For the WebArena stack, start a private Map backend using the [upstream Map backend instructions](https://github.com/web-arena-x/webarena/blob/dce04686a56253aefba7b18a4fa0937cf1dc987b/environment_docker/README.md#setting-up-your-own-map-backend). The published bootstrap serves tiles on `8080`, geocoding on `8085`, and driving, cycling, and walking routes on `5000`, `5001`, and `5002`. Configure the Map frontend installer to use that backend and set GitLab's advertised SSH port to match the task URLs. Run this block from the `webarena` setup directory before creating containers:
+For a new WebArena deployment using the public setup, start a private Map
+backend for tiles on `8080`, geocoding on `8085`, and driving, cycling, and
+walking routes on `5000`, `5001`, and `5002`. The reference rerun uses the
+archived frontend and backend configuration described below. [Upstream Map backend instructions](https://github.com/web-arena-x/webarena/blob/dce04686a56253aefba7b18a4fa0937cf1dc987b/environment_docker/README.md#setting-up-your-own-map-backend).
+
+From the `webarena` setup directory, configure the frontend backend URLs,
+bind the frontend database's host port to loopback, and advertise GitLab SSH
+on the port expected by the tasks. Run this before creating containers.
 
 ```bash
 read -rp "Private Map backend DNS name or IP: " map_backend_host
@@ -282,6 +368,8 @@ sed -i \
   -e 's|^OSM_BIKE_SUFFIX=.*|OSM_BIKE_SUFFIX=":5001"|' \
   -e 's|^OSM_FOOT_SUFFIX=.*|OSM_FOOT_SUFFIX=":5002"|' \
   03_docker_create_containers.sh
+sed -i 's/"54321:5432"/"127.0.0.1:54321:5432"/' \
+  openstreetmap-templates/docker-compose.yml
 sed -i 's/docker create --name gitlab /docker create --name gitlab -p 2222:22 /' \
   03_docker_create_containers.sh
 sed -i "/^docker exec gitlab gitlab-ctl reconfigure$/i printf \"\\\\ngitlab_rails['gitlab_shell_ssh_port'] = 2222\\\\n\" | docker exec -i gitlab tee -a /etc/gitlab/gitlab.rb >/dev/null" \
@@ -319,6 +407,54 @@ sudo bash 01_docker_load_images.sh &&
 
 Keep the homepage process running. Scripts 03 through 05 recreate the containers, start the services, and apply the matching seed data and base URLs. For WebArena, rerun scripts 02 through 05 before each independent evaluation, while every browser is idle. For VisualWebArena the reset service calls the same scripts at each required reset. If a startup command fails, inspect that service's `docker logs` and complete the setup before beginning evaluation.
 
+### Populate the WebArena Map database
+
+The Map website reads OpenStreetMap object details from its own PostgreSQL
+database. The tile, geocoding, and routing services have separate data.
+Complete the website database restore or import before the browser smoke.
+If a reset removes the Map database volume, restore the populated state
+again before admitting tasks.
+
+**475/812 reference.** Obtain the following four files from the archived
+WebArena release. Run the checksum check in their staging directory.
+
+```bash
+sha256sum --check - <<'SHA256'
+d3b389bce0051f291346ac1ddb029e2748085e02b5bd313b55bf81174ebf18d2  map-frontend-cold-state.tar.zst
+888ad53f754948f660796b6fcb440294a3dec647e141d606b1c7cb2616695baa  nominatim_volumes.tar
+e6d58ad43e1da7530b7384522a4d0d30f59a44fdcadb8ad7c2e6695a43c585b1  osm_dump.tar
+99a4d10aae831fb3410b7d4743be03d9e02691283ec5105952839b84b9204806  osrm_routing.tar
+SHA256
+```
+
+Use the release's Map restore and service-launch commands with your own
+staging directory and private addresses. Extract into fresh paths with both
+database containers stopped. The cold-state archive supplies the populated
+PostgreSQL 11 frontend database, application files, frontend and backend
+images, and the archived frontend configuration. Start the frontend database
+with the matching image and set volume ownership to its PostgreSQL user.
+Restore the PostgreSQL 14 data directory and flatnode store for Nominatim 4.2.
+Stage the matching import data from `osm_dump.tar` and the preprocessed OSRM
+5.27.1 car, bike, and foot data. Rebind the archived frontend URLs to your
+deployment, preserving which services provide tiles, geocoding, and routes.
+
+**Fresh public setup.** When the public images and script 05 initialize an
+empty Map database, populate it with the matching Northeast OSM PBF.
+From the `webarena` setup directory, wait for the database and its Rails
+migrations, then use Osmosis on the site host. Allow a day or longer for the
+full import. [Osmosis API database writer](https://github.com/openstreetmap/osmosis/blob/main/doc/detailed-usage.adoc#--write-apidb---wd).
+
+```bash
+sudo apt-get install -y osmosis
+read -rp "Path to the staged Northeast OSM .pbf file: " map_pbf
+map_compose_file=openstreetmap-website/docker-compose.yml
+sudo docker compose -f "$map_compose_file" exec -T db \
+  pg_isready -U postgres -d openstreetmap &&
+  osmosis --read-pbf "file=$map_pbf" --log-progress \
+    --write-apidb host=127.0.0.1:54321 database=openstreetmap \
+    user=postgres validateSchemaVersion=no
+```
+
 ### Check site access from the browser worker
 
 In the Gym launch shell, set the site URLs for your benchmark. If the sites are hosted elsewhere, substitute their private addresses including any required path. The GitLab and Reddit variables use the site root because Gym appends its own paths for login and evaluation.
@@ -338,7 +474,14 @@ export WA_MAP="http://localhost:3000"
 export WA_CLASSIFIEDS="http://localhost:9980"
 ```
 
-Open the homepage and follow each installed site's link from the worker's network namespace. Check the destination and a known seeded record on each site. Log in to the mutable sites with the benchmark accounts and confirm the expected account, repository, or store is visible. Gym uses the seeded accounts by default and supports `WA_SHOPPING_USERNAME` and `WA_SHOPPING_PASSWORD` and corresponding variables for `SHOPPING_ADMIN`, `REDDIT`, `GITLAB`, and `CLASSIFIEDS`. Verify that the GitLab clone box advertises port `2222`. On Map, check that tiles render, a place search returns results, and car, foot, and bicycle routes load. An HTTP response on port `3000` only verifies the frontend is up.
+Open the homepage and follow each installed site's link from the worker's network namespace. Check the destination and a known seeded record on each site. Log in to the mutable sites with the benchmark accounts and confirm the expected account, repository, or store is visible. NeMo Gym uses the seeded accounts by default and supports `WA_SHOPPING_USERNAME` and `WA_SHOPPING_PASSWORD` and corresponding variables for `SHOPPING_ADMIN`, `REDDIT`, `GITLAB`, and `CLASSIFIEDS`. Verify that the GitLab clone box advertises port `2222`.
+
+On WebArena Map, verify in the worker's browser that tiles render and place
+search works. Open a known Map object from the seeded area and check that its
+detail page has tags. Enter two street addresses and confirm that the routing
+UI renders a route with travel time and distance. The reference browser
+probe used 5000 Fifth Avenue, Pittsburgh, and UPMC Shadyside Family Health
+Center. Check the backend for driving, cycling, and walking routes.
 
 You can check the HTTP paths in a terminal on that worker first. Pass your benchmark's URLs to `check_sites` and inspect the final destination for any unexpected redirect.
 

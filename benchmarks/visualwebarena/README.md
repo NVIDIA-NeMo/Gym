@@ -55,9 +55,12 @@ if the images are not below the JSONL's parent directory. The generated
 
 ## Run
 
-For the reported 231/908 run, use the [reference deployment](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#visualwebarena-reference)
-to obtain the frozen inputs, site data, and original launcher. The coordinator
-below runs the current clean-state schedule.
+For the specialist checkpoint `vwa-v10/iter_0001253/mcore_to_hf`, use the
+[908-task specialist reference](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#visualwebarena-specialist-reference)
+for the frozen runtime, inputs, site data, and clean-state schedule used for
+the reported 256/908 full successes. The
+[earlier 231/908 reference](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#visualwebarena-reference)
+records the tuned `iter_0004622` checkpoint and its four-stage launcher.
 
 Follow the [deployment guide](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#deploy-the-webarena-family-sites)
 for the `visualwebarena` site stack and its [reset service](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#start-the-reset-service).

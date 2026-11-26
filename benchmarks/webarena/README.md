@@ -32,8 +32,11 @@ to obtain the frozen source, checkpoint, and site seeds and reproduce the origin
 four-stage schedule.
 
 Follow the [WebArena deployment guide](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#deploy-the-webarena-family-sites)
-to install the site images and Map backend, restore the seed state, and verify
-access from the browser worker. Then export the task-visible endpoints:
+to install the sites and Map backend. Restore the
+[populated Map database](../../fern/versions/latest/pages/evaluation/deploy-web-benchmarks.mdx#populate-the-webarena-map-database)
+along with the other site seeds, then verify a Map object and an
+address-to-address route from the browser worker. Export the task-visible
+endpoints in the launch shell.
 
 ```bash
 export WA_SHOPPING="http://host:7770"
