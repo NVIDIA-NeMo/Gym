@@ -58,6 +58,23 @@ async def test_missing_resources_sandbox_is_rejected(setup) -> None:
     sandbox.stop.assert_not_awaited()
 
 
+async def test_sandbox_model_root_has_no_trace_segment_while_traces_export(setup, monkeypatch) -> None:
+    from nemo_gym.client import server_client
+    from nemo_gym.core.correlation import parse_path
+
+    # While traces export, a model URL built for a sandbox client gets the current span's trace segment.
+    trace = "/ng-trace/00-5dd571d301f00f2079273eade02b8da6-6242bd0b7a1dfdad-03"
+    monkeypatch.setattr(server_client, "trace_context_path_segment", lambda: trace)
+    instance, _, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    runner = instance._require_agent_session("session").runner
+    assert runner.model_base_url == "http://model:8000"
+    # The worker posts to root + rollout route; a trace segment before the rollout segment is rejected as out of order.
+    context, rest = parse_path(runner.model_base_url.removeprefix("http://model:8000") + "/ng-rollout/r1/v1/responses")
+    assert (context.capture_key, context.trace_parent, rest) == ("r1", None, "/v1/responses")
+    await close(instance)
+
+
 async def test_sandbox_session_forwards_configured_context_window(setup) -> None:
     instance, sandbox, _, _ = setup
     instance.config.context_window = 262144
@@ -329,10 +346,9 @@ async def test_failed_connect_closes_provider_without_retaining_seeded_state(set
     sandbox.disconnect.assert_not_awaited()
 
 
-async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_outage(setup) -> None:
+async def test_worker_stopped_at_its_budget_returns_saved_work_for_grading(setup) -> None:
     import json
 
-    from responses_api_agents.nooa_agent.runner import NOOARunFailure
     from responses_api_agents.nooa_agent.tests.test_sandbox_runner import checkpoint_artifact, cleanup_receipt
 
     instance, sandbox, _, _ = setup
@@ -340,10 +356,31 @@ async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_out
     runner = instance._require_agent_session("session").runner
     sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
     sandbox.files[runner.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline"):
-        await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    response = await instance.responses(
+        request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task")
+    )
+    # The environment verifies an `incomplete` response and skips a `failed` one.
+    assert response.status == "incomplete"
+    assert response.output == checkpoint_artifact().response.output
     receipt = await close(instance)
-    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+    codes = {gap.code for gap in receipt.agent_observations.gaps}
+    assert NOOATerminationReason.TIMEOUT_EXCEEDED in codes
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR not in codes
+
+
+async def test_worker_budget_failure_without_saved_work_is_not_a_retryable_dependency_outage(setup) -> None:
+    import json
+
+    from responses_api_agents.nooa_agent.tests.test_sandbox_runner import cleanup_receipt
+
+    instance, sandbox, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    runner = instance._require_agent_session("session").runner
+    sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    # Not an HTTPException(503): the environment must not retry an exhausted budget as an outage.
+    with pytest.raises(RuntimeError, match="worker exceeded its execution deadline"):
+        await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    await close(instance)
 
 
 async def test_cancelled_request_stays_cancelled_even_when_session_is_closing(setup) -> None:
