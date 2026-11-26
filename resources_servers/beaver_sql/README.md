@@ -81,7 +81,7 @@ The grader's user can only read: a query that writes or creates a temporary tabl
 result; `LOAD_FILE()` returns NULL. (The official evaluator connects as `MYSQL_USER`, which BEAVER's README example sets
 to root.) Startup reads every table as the grader, and
 refuses a grader user that holds anything beyond `SELECT` on the BEAVER databases and `_beaver_meta`: another
-privilege, a role, or `SELECT` elsewhere. The loader creates that user if it doesn't exist and never changes an
+privilege, a role, `SELECT` elsewhere, or grant authority (`WITH GRANT OPTION`). The loader creates that user if it doesn't exist and never changes an
 existing user's password; it refuses a grader DSN that names its own (admin) user, runs one loader at a time per server
 (`GET_LOCK`), and creates a database only if no one else has, even between its check and its load.
 

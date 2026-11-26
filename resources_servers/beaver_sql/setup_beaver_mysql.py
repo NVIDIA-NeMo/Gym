@@ -359,14 +359,17 @@ _GRANT = re.compile(r"^GRANT (.+?) ON (\S+) TO ")
 
 def grader_privilege_problems(grants: List[str]) -> List[str]:
     """The grants (``SHOW GRANTS`` lines) that give the grader's user more than reading BEAVER: a role, any privilege
-    but ``SELECT`` and ``USAGE``, or ``SELECT`` beyond the BEAVER databases and the meta table (``*.*`` would expose
-    the ``mysql`` system tables)."""
+    but ``SELECT`` and ``USAGE``, ``SELECT`` beyond the BEAVER databases and the meta table (``*.*`` would expose
+    the ``mysql`` system tables), or grant authority (``WITH GRANT OPTION``), which would let it pass its access on."""
     readable = {f"`{db}`.*" for db in (META_DB, *DUMPS)}
     problems = []
     for grant in grants:
         match = _GRANT.match(grant)
         if match is None:
             problems.append(grant)  # a role grant
+            continue
+        if grant.rstrip().upper().endswith(" WITH GRANT OPTION"):
+            problems.append(grant)
             continue
         privileges = {p.strip().upper() for p in match.group(1).split(",")}
         if privileges == {"USAGE"}:

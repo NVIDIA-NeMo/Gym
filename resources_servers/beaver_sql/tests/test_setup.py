@@ -427,6 +427,9 @@ def test_check_reads_every_table(tmp_path, tiny, fake_mysql) -> None:
         "GRANT SELECT ON `mysql`.* TO `beaver_reader`@`%`",
         "GRANT FILE ON *.* TO `beaver_reader`@`%`",
         "GRANT `admin_role`@`%` TO `beaver_reader`@`%`",
+        # Grant authority: the grader could hand its access to other accounts.
+        "GRANT SELECT ON `tiny`.* TO `beaver_reader`@`%` WITH GRANT OPTION",
+        "GRANT USAGE ON *.* TO `beaver_reader`@`%` WITH GRANT OPTION",
     ],
 )
 def test_check_refuses_a_grader_that_can_do_more_than_read_beaver(tmp_path, tiny, fake_mysql, grant) -> None:
