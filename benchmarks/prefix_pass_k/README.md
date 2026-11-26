@@ -1,4 +1,4 @@
-# Prefix pass@K — SWE-bench Verified, DeepSWE and SWE-bench Pro
+# Prefix pass@K — SWE-bench Verified, DeepSWE, SWE-bench Pro and AutomationBench
 
 Replay a captured agent trajectory up to its **decisive turn** T, hand control to
 a candidate model from there (up to 3 model turns), extract the patch, repeat K
@@ -34,6 +34,7 @@ The pieces:
 | SWE-bench Verified | backticks: one fenced bash command per turn | 100 clean instances | `verified.yaml` |
 | DeepSWE | function calling: `bash` tool calls | 119 trials / 69 tasks | `deepswe.yaml` |
 | SWE-bench Pro | backticks | 130 instances, passed-only | `pro.yaml` |
+| AutomationBench | function calling: calls to three API tools, served by the resources server | 100 tasks (`pilot100`) | `automationbench.yaml` |
 
 The two wires differ in everything the model sees -- steer, primer, prefill,
 stop list, observation format -- so a trace must be replayed on the wire it was
@@ -118,6 +119,7 @@ gym env start ... +prefix_pass_k_agent_verified.responses_api_agents.prefix_pass
 |---|---|---|
 | Verified | **100/100** | **0/100** |
 | DeepSWE | **119/119** | **0/119** |
+| AutomationBench | **100/100** (replay 1..N) | **0/100** |
 
 Each rollout also reports:
 
@@ -175,6 +177,25 @@ K=32 rollouts per row, unbiased pass@k; diversity is pass@32 - pass@1, and
 | Gemma-4-26B-A4B | 0.1141 | 0.3101 | 0.4500 | 0.3359 | 45 |
 | GLM-4.5-Air-Base | 0.1103 | 0.3217 | 0.4900 | 0.3797 | 49 |
 | Qwen3.5-35B-A3B-Base | 0.2334 | 0.5160 | 0.6600 | 0.4266 | 63 |
+
+**AutomationBench** (100 tasks; a rollout passes at reward 1):
+
+| checkpoint | pass@1 | pass@8 | pass@32 | diversity | mixed |
+|---|---|---|---|---|---|
+| DeepSeek-V4-Pro-Base | 0.4109 | 0.6629 | 0.7800 | 0.3691 | 68 |
+| Hy4-flash-Base | 0.3769 | 0.6642 | 0.8200 | 0.4431 | 77 |
+| DeepSeek-V4-Flash-Base | 0.2472 | 0.4926 | 0.5800 | 0.3328 | 55 |
+| Hy3-preview-Base | 0.2431 | 0.4810 | 0.5800 | 0.3369 | 56 |
+| Kimi-K2-Base | 0.2306 | 0.4918 | 0.6300 | 0.3994 | 61 |
+| Nemotron-3.5-Super-VL-120B-A12B-Base | 0.1803 | 0.3632 | 0.4900 | 0.3097 | 48 |
+| GLM-4.5-Air-Base | 0.0816 | 0.2028 | 0.3000 | 0.2184 | 30 |
+| Nemotron-3.5-Lightning-30B-A3B-Base | 0.0009 | 0.0059 | 0.0100 | 0.0091 | 1 |
+
+These were collected on the same rows with an earlier harness that ran the
+trajectories' own agent loop. One checkpoint re-run end to end through
+`automationbench.yaml` reproduced its scores: pass@1 0.4700 vs 0.4728, pass@8
+0.7761 vs 0.7764, pass@32 0.87 vs 0.86, with every replayed prefix observation
+(111,200) byte-identical to the capture.
 
 ## DeepSWE
 
@@ -259,6 +280,52 @@ graded by the stock SWE-bench Pro server. What differs from Verified:
 The Pro server collects the patch with `git add -N . && git diff <base_commit>`,
 so committed, staged and new files are graded without `uncommit_worktree`.
 
+## AutomationBench
+
+AutomationBench tasks run against a simulated SaaS world (Salesforce, Gmail, HubSpot, ...) that the
+`automationbench` resources server holds per session and serves as three tools, `api_search`, `api_fetch` and
+`base64_encode`, at `POST /<tool name>`. There is no sandbox, so the agent runs with `tool_executor:
+resources_server`: replayed and candidate calls go to those endpoints, and the stock rubric scores the final world.
+The reward is `aa_headline`: 0 if any guardrail breaks, otherwise the share of objectives met. A rollout passes at 1.
+
+**The decisive turn is defined differently.** An AutomationBench trajectory reads first and writes last, so the SWE
+pools' T* (the first turn T such that replaying 1..T resolves the task) is the last turn in 80% of trajectories, and
+would test only the final write. A row's `target_turn` is instead **T_first**: the first turn that changes any
+assertion's verdict, which is always an objective starting to pass. It falls at a median 0.83 of the trajectory. The
+candidate then has to redo that turn and finish what the trajectory still needed, so its budget is
+`max(3, 2 * (N - T_first + 1))` turns, carried by each row (`max_forwards: null` in the config). Located this way,
+T_first assumes nothing about monotonicity: every turn of every trajectory was replayed and graded.
+
+| | SWE pools | AutomationBench |
+|---|---|---|
+| decisive turn | T*: first T whose replay 1..T resolves the task | T_first: first T that changes any assertion's verdict |
+| reward | binary | share of objectives, 0 on any broken guardrail |
+| gold check | replay 1..T resolves | replay 1..N (the whole trajectory) scores 1: rows carry `suffix` |
+| candidate turns | 3 | `max(3, 2 * (N - T_first + 1))` |
+
+Do not compare an AutomationBench prefix pass@K with a SWE one.
+
+- **Pool.** `data/automationbench_pilot100.json`: 100 distinct tasks, stratified round-robin over domain x T_first/N
+  tercile x source model, from 2,261 eligible trajectories of six frontier models over 501 tasks (four repeats of
+  each of the 600 public tasks, collected with `benchmarks/automationbench` and `deterministic: true`). The mix is
+  flattened (terciles 35/35/30), so scores compare checkpoints, not estimate pass@K on the full task set.
+- **Determinism.** The simulator mints record ids from `uuid4` and `random` and stamps records with the wall clock,
+  so a naive replay creates different ids and every later call that references one diverges. The resources server's
+  `deterministic: true` runs each call with the episode's own RNG and the clock frozen per call; each row carries
+  the record its trajectory started from (`determinism`), so the replay reproduces the capture's tool text.
+- **Narration.** Source models narrate unevenly: some write text next to every call, some never. The arm renders
+  the captured text (`replay_assistant_text`, `render_assistant_text`) so the prompt's content does not depend on
+  which model wrote the trajectory.
+- **Ids.** `prepare_automationbench.py` renames call ids `call_<turn>_<i>`: source ids identify the source model by
+  format, and some embed long opaque signatures that a base model copies.
+- **Unparsed forwards.** A forward with no call ends the candidate's turns (`on_unparsed_forward: stop`), as the
+  harness the trajectories ran on ends a rollout on a turn without tool calls.
+
+```bash
+# Rows: the trajectories live outside the repo; the task rows come from `gym eval prepare --benchmark automationbench`.
+PREFIX_PASS_K_AUTOMATIONBENCH_TRACES=/path/to/traces python -m benchmarks.prefix_pass_k.prepare_automationbench
+```
+
 ## Traps
 
 **A 0-byte patch reads as model weakness.** It is usually a command that ran
@@ -314,6 +381,8 @@ prefix_pass_k:
                            function calling: {turn, tool_calls, action,
                              captured_observations, replay_commands?}
   target                 the captured decisive turn, replayed only by the gold check
+  suffix[]               AutomationBench: turns T+1..N, replayed after target by the gold check
+  max_forwards           AutomationBench: the row's candidate budget (the config's `max_forwards: null`)
   n_prefix_turns         may be < T-1: failed API calls are skipped, not replayed
   reference_target_turn  DeepSWE: the decisive turn the bisect reported
 ```

@@ -1,0 +1,103 @@
+# Prefix pass@K on AutomationBench (function-calling wire, tools served by the resources server).
+#
+# AutomationBench keeps each task's simulated SaaS world in the `automationbench` resources server, which
+# serves the api toolset as `POST /<tool name>` on a session. So the agent runs with `tool_executor:
+# resources_server`: it replays the captured trajectory's tool calls into the session, hands over at the
+# decisive turn, sends the candidate's calls to the same endpoints, and the stock rubric scores the final
+# world (`aa_headline`: 0 if any guardrail breaks, else the share of objectives met; a rollout passes at 1).
+#
+# The decisive turn is NOT the SWE pools' T*. AutomationBench tasks read first and write last, so "the first
+# turn whose replay through T resolves the task" is the final turn in most trajectories. A row's
+# `target_turn` is T_first, the first turn that changes any assertion's verdict (always an objective starting
+# to pass). The candidate continues from there and gets `max(3, 2 * (N - T_first + 1))` turns (the row's own
+# `max_forwards`), to redo the decisive turn and finish the turns the trajectory still needed. See
+# README.md#automationbench.
+#
+# Rows: `prepare_automationbench.py` (gitignored output). Their tool calls replay under the trajectory's own
+# determinism record, so ids and timestamps match the capture: the resources server runs with
+# `deterministic: true`.
+#
+# Validate before quoting a number (both take zero model turns; run at --num-repeats 1):
+#   gold check (replay 1..N, the whole trajectory; every row MUST score 1):
+#     ++prefix_pass_k_agent_automationbench.responses_api_agents.prefix_pass_k_agent.replay_through_target=true
+#   contamination screen (replay 1..T-1; NO row may score 1):
+#     ++prefix_pass_k_agent_automationbench.responses_api_agents.prefix_pass_k_agent.max_forwards=0
+config_paths:
+- responses_api_agents/prefix_pass_k_agent/configs/prefix_pass_k_agent.yaml
+- resources_servers/automationbench/configs/automationbench.yaml
+
+prefix_pass_k_automationbench_resources_server:
+  _inherit_from: automationbench_resources_server
+  resources_servers:
+    automationbench:
+      deterministic: true
+
+# The checkpoint under test. Point it at yours in env.yaml (policy_base_url, policy_model_name) or on the
+# command line, and send the `id` /v1/models reports, exactly. A hosted endpoint takes its key from an
+# environment variable, never the command line:
+#   '++policy_model_automationbench.responses_api_models.base_model.openai_api_key=${oc.env:MY_KEY_VAR}'
+#
+#   * tool_names / tool_definitions_json: the candidate writes a JSON array of calls to the three api tools.
+#     The definitions are the payload the trajectories' harness sent, verbatim (`api_fetch` non-strict: its
+#     `params` and `body` are free-form objects).
+#   * max_tool_calls_per_turn 12: decisive turns make up to 11 calls at p99 (23 at most); 3 would cut 29%.
+#   * max_tokens 4096: about 90% of decisive turns fit (p90 ~2.8K tokens); 1024 would cut 30%.
+#   * render_assistant_text: source models narrate unevenly (some on every turn, some never). Dropping the
+#     text would make the prompt depend on which model wrote the trajectory. The candidate's own turn still
+#     opens on the tool-call line.
+#   * stop: the next role marker ends the turn. Arguments are JSON-escaped in the transcript, so a raw newline
+#     never sits inside one; without the stops a base model runs on into invented turns.
+#   * temperature 0.6: the reference bridge's value for base checkpoints, as in the SWE pools.
+policy_model_automationbench:
+  responses_api_models:
+    base_model:
+      entrypoint: app.py
+      wire: function_calling
+      openai_base_url: ${policy_base_url}
+      openai_api_key: unused-for-local-vllm
+      openai_model: ${policy_model_name}
+      tool_names: [api_search, api_fetch, base64_encode]
+      steer: "\nSystem: Continue the task from here. Reply with the next tool calls, as a JSON array in the same form as the tool calls above, each calling `api_search`, `api_fetch` or `base64_encode`, and nothing after it."
+      render_assistant_text: true
+      stop: ["\nTool Result:", "\nUser:", "\nSystem:", "\nAssistant"]
+      max_tool_calls_per_turn: 12
+      max_tokens: 4096
+      temperature: 0.6
+      tool_definitions_json: "[{\"type\": \"function\", \"function\": {\"name\": \"api_search\", \"description\": \"Search available API endpoints by keyword.\\n\\nUse this to discover which endpoint to call before using api_fetch.\\nRanks results using BM25 over endpoint descriptions and parameter text.\\nReturns full endpoint details including the URL to pass to api_fetch.\", \"parameters\": {\"properties\": {\"query\": {\"description\": \"Space-separated keywords (e.g. \\\"inbox messages\\\", \\\"trash\\\", \\\"send label\\\").\\n   Uses API-native terms: \\\"messages\\\" not \\\"emails\\\", \\\"trash\\\" not \\\"delete\\\".\", \"title\": \"Query\", \"type\": \"string\"}, \"top_k\": {\"default\": 5, \"description\": \"Maximum number of results to return (default 5).\", \"title\": \"Top K\", \"type\": \"integer\"}}, \"required\": [\"query\", \"top_k\"], \"title\": \"api_search_args\", \"type\": \"object\", \"additionalProperties\": false}, \"strict\": true}}, {\"type\": \"function\", \"function\": {\"name\": \"api_fetch\", \"description\": \"Call an API endpoint by its full URL, routing to the appropriate world state mutation.\\n\\nUse api_search first to discover the correct URL and parameters for an endpoint.\", \"parameters\": {\"properties\": {\"method\": {\"description\": \"HTTP method (GET, POST, PUT, PATCH, DELETE).\", \"title\": \"Method\", \"type\": \"string\"}, \"url\": {\"description\": \"Full API URL from api_search results (e.g., \\\"https://api.hubapi.com/crm/v3/objects/contacts\\\").\", \"title\": \"Url\", \"type\": \"string\"}, \"params\": {\"type\": \"object\", \"description\": \"Query parameters as a JSON object. Use {} when there are no query parameters.\"}, \"body\": {\"type\": \"object\", \"description\": \"Request body as a JSON object. Use {} when there is no request body.\"}}, \"required\": [\"method\", \"url\", \"params\", \"body\"], \"title\": \"api_fetch_args\", \"type\": \"object\", \"additionalProperties\": false}, \"strict\": false}}, {\"type\": \"function\", \"function\": {\"name\": \"base64_encode\", \"description\": \"Encode text to base64url \u2014 the format Gmail API body fields require.\\n\\nThe Gmail messages.send / drafts endpoints accept the message body only in\\nbase64url form: either ``raw`` (the full RFC 2822 message, base64url-encoded)\\nor ``payload.body.data`` (the body text, base64url-encoded). Use this tool to\\nproduce that encoding, then pass the result to api_fetch. This is a local\\nhelper \u2014 it does not call any API endpoint.\", \"parameters\": {\"properties\": {\"text\": {\"description\": \"Plaintext to encode (an email body, or a full RFC 2822 message).\", \"title\": \"Text\", \"type\": \"string\"}}, \"required\": [\"text\"], \"title\": \"base64_encode_args\", \"type\": \"object\", \"additionalProperties\": false}, \"strict\": true}}]"
+
+prefix_pass_k_agent_automationbench:
+  _inherit_from: prefix_pass_k_agent
+  responses_api_agents:
+    prefix_pass_k_agent:
+      domain: other
+      value: Measure per-state capability and diversity (mean reward vs true pass@K) on enterprise workflow automation.
+      wire: function_calling
+      tool_executor: resources_server
+      # No sandbox: the base config's provider would otherwise be resolved at startup.
+      sandbox_provider: null
+      resources_server:
+        type: resources_servers
+        name: prefix_pass_k_automationbench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model_automationbench
+      # Each row's own budget (above).
+      max_forwards: null
+      # A forward without calls ends the candidate's turns, as the trajectories' verifiers harness ended a
+      # rollout on a turn without tool calls.
+      on_unparsed_forward: stop
+      replay_assistant_text: true
+      datasets:
+        - name: prefix_pass_k_automationbench
+          type: benchmark
+          jsonl_fpath: benchmarks/prefix_pass_k/data/prefix_pass_k_automationbench_benchmark.jsonl
+          prepare_script: benchmarks/prefix_pass_k/prepare_automationbench.py
+          num_repeats: 32
+
+prefix_pass_k_agent_automationbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: prefix_pass_k_agent_automationbench
