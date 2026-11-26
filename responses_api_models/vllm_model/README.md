@@ -130,6 +130,19 @@ When `return_token_id_information: true`, generation token IDs are read from
 the native `logprobs.tokens` (`"token_id:<int>"`) entries and prompt token IDs
 from `prompt_logprobs` — no separate `/tokenize` round-trip is needed.
 
+### Comparing reasoning in captured Chat tool turns
+
+`match_chat_tool_reasoning: true` lets the capture matcher compare a
+tool-only assistant reply that contains one `<think>...</think>` block with
+an echo of the same text in `reasoning_content`. The comparison requires
+the same thinking text and tool calls, including argument key order.
+Requests and replies retain their original format. Responses and Messages
+endpoints do not use this comparison.
+
+Enable this at the beginning of a fresh capture lineage after checking that
+the model's Chat renderer treats these forms equivalently. Existing capture
+rows retain the fingerprints recorded when they were written.
+
 ## Example run config
 
 VLLMModel connects NeMo Gym to a vLLM server that you start and manage yourself. Spin up a vLLM server in a separate terminal (see the [vLLM docs](https://docs.vllm.ai/)), then point NeMo Gym at it.

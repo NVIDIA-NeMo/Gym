@@ -48,6 +48,7 @@ from nemo_gym.models.token_capture.protocols import (
     TokenCaptureFrozenError,
     TokenSink,
 )
+from nemo_gym.models.token_capture.reasoning import capture_chat_tool_turns
 from nemo_gym.models.token_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
@@ -135,6 +136,7 @@ class CaptureContext:
     external_staging: bool = False
     parent_resolution_mode: ParentResolutionMode = "fingerprint"
     allow_system_suffix: bool = False
+    match_chat_tool_reasoning: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -275,6 +277,8 @@ async def resolve_parent(request_messages: list | None) -> None:
     if context is None or request_messages is None:
         return
     context.request_items = list(request_messages)
+    if context.match_chat_tool_reasoning:
+        request_messages = capture_chat_tool_turns(request_messages)
     if context.parent_resolution_mode == "source_history":
         await _admit_candidate(context, request_messages)
         return
@@ -721,7 +725,9 @@ async def capture_tokens(
             prefix_supplied=context.prefix_supplied,
         )
         if request_messages is not None:
-            stamp_continuation(entry, list(request_messages))
+            stamp_continuation(
+                entry, list(request_messages), match_chat_tool_reasoning=context.match_chat_tool_reasoning
+            )
     except Exception:
         await _capture_failed(context, "build")
         return

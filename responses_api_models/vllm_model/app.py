@@ -717,6 +717,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # (`400 duplicate field 'reasoning'`).
     # Unset falls back to the NEMO_GYM_REASONING_FIELD environment variable, then "both".
     reasoning_field: ReasoningFieldMode = Field(default_factory=_default_reasoning_field, validate_default=True)
+    match_chat_tool_reasoning: bool = Field(
+        default=False,
+        description=(
+            "For token capture, compare an inline thinking block with its exact reasoning_content echo on a "
+            "Chat Completions tool-only assistant turn. Enable at the start of a new capture lineage, with a model "
+            "whose renderer treats the two forms equivalently. Model requests and replies keep their wire format."
+        ),
+    )
     # Keep reconstructed assistant history byte-for-byte in ``content`` for
     # models whose validated direct-vLLM contract includes <think> tags.
     # Response parsing remains controlled independently by
@@ -918,6 +926,18 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "preserve_thinking_blocks requires use_completions_api=false: /v1/completions has no assistant "
                 "messages to carry the thinking blocks on"
             )
+        if self.match_chat_tool_reasoning and (
+            self.use_completions_api
+            or self.is_responses_native
+            or not self.uses_reasoning_parser
+            or not self.uses_interleaved_reasoning
+            or self.preserve_reasoning_in_assistant_content
+            or "messages" in (self.extra_body or {})
+        ):
+            raise ValueError(
+                "match_chat_tool_reasoning requires Chat Completions with interleaved reasoning parsing "
+                "and no messages override"
+            )
         return self
 
     @model_validator(mode="after")
@@ -1054,7 +1074,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> None:
         context = current_capture_context()
-        if context is None or context.parent_resolution_mode != "source_history":
+        if context is None:
+            return
+        # Request-level extra_body is merged after reasoning normalization and can replace messages.
+        context.match_chat_tool_reasoning = (
+            self.config.match_chat_tool_reasoning
+            and isinstance(body, NeMoGymChatCompletionCreateParamsNonStreaming)
+            and not (body.metadata or {}).get("extra_body")
+        )
+        if context.parent_resolution_mode != "source_history":
             return
         try:
             options = json.loads((body.metadata or {}).get("extra_body") or "{}")

@@ -4,6 +4,7 @@
 """The gateway selects source-compatible parents and preserves root capture."""
 
 import asyncio
+from copy import deepcopy
 
 import pytest
 
@@ -26,20 +27,37 @@ def ledger(request, tmp_path):
     return InMemoryLineageStore() if request.param == "memory" else FileLineageStore(tmp_path)
 
 
-async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, started=None, finish=None, model="model"):
+async def _serve(
+    ledger,
+    call_id,
+    items,
+    *,
+    ordinary=False,
+    splice=False,
+    started=None,
+    finish=None,
+    model="model",
+    match_chat_tool_reasoning=False,
+    mode="source_history",
+    served_message=None,
+    cum_hash=None,
+):
     context = CaptureContext(
         capture_key="rollout-1",
         model_call_id=call_id,
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        parent_resolution_mode="source_history",
+        parent_resolution_mode=mode,
+        match_chat_tool_reasoning=match_chat_tool_reasoning,
     )
     token = set_token_sink(context)
     handler = VLLMWorkerCaptureHandler()
     try:
         await resolve_parent(items)
         candidate = context.capture_admission
+        if candidate is None:
+            return context, candidate
         await register_call_intent()
         if ordinary:
             context.parent_resolution_mode = "fingerprint"
@@ -57,19 +75,21 @@ async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, starte
         if finish is not None:
             await finish.wait()
         coords = dict(model_call_id=call_id, staging_key=f"rollout-1/{call_id}")
+        if cum_hash is not None:
+            coords["cumulative_hash"] = cum_hash
         if splice:
             coords.update(
                 parent_call_id=candidate.parent_call_id, prev_len=candidate.prev_len, cum_len=candidate.prev_len + 3
             )
         handler.prepare_response({"ng_commit_coords": _staged_coords(**coords)})
-        await handler.finalize_response(
-            {
-                "id": f"response-{call_id}",
-                "output": [
-                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
-                ],
-            }
-        )
+        payload = {"id": f"response-{call_id}"}
+        if served_message is not None:
+            payload["choices"] = [{"message": served_message, "finish_reason": "tool_calls"}]
+        else:
+            payload["output"] = [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
+            ]
+        await handler.finalize_response(payload)
         return context, candidate
     finally:
         reset_token_sink(token)
@@ -104,6 +124,117 @@ async def test_source_rewrite_roots_without_candidate_and_keeps_source_evidence(
         splice=True,
     )
     assert next_admission.staging_chain == ["rollout-1/c2"]
+
+
+_CHAT_PROMPT = [{"role": "user", "content": "Use a tool"}]
+
+
+def _chat_tool_turn(content):
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "Read", "arguments": '{"path":"fixture","options":{"first":1,"second":2}}'},
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize("mode", ["fingerprint", "source_history"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        None,
+        "argument_order",
+        "argument_value",
+        "tool_name",
+        "tool_id",
+        "thinking",
+        "aliases",
+        "visible",
+        "nested_tags",
+        "pre_opt_in",
+    ],
+)
+async def test_chat_tool_reasoning_matches_only_equivalent_transitions(ledger, mode, change):
+    served = _chat_tool_turn("<think>Use the fixture. </think>")
+    original = deepcopy(served)
+    _, first = await _serve(
+        ledger,
+        "first",
+        _CHAT_PROMPT,
+        mode=mode,
+        match_chat_tool_reasoning=change != "pre_opt_in",
+        served_message=served,
+    )
+    assert first.mode == "text"
+    assert served == original
+    echo = {**_chat_tool_turn(""), "reasoning_content": "Use the fixture. "}
+    tool = echo["tool_calls"][0]
+    if change == "argument_order":
+        tool["function"]["arguments"] = '{"path":"fixture","options":{"second":2,"first":1}}'
+    if change == "argument_value":
+        tool["function"]["arguments"] = '{"path":"other","options":{"first":1,"second":2}}'
+    if change == "tool_name":
+        tool["function"]["name"] = "read"
+    if change == "tool_id":
+        tool["id"] = "call1"
+    if change == "thinking":
+        echo["reasoning_content"] = "Use the fixture."
+    if change == "aliases":
+        echo["reasoning"] = "An inconsistent alias"
+    if change == "visible":
+        echo["content"] = "A visible answer"
+    if change == "nested_tags":
+        echo["reasoning_content"] = "<think>literal text</think>"
+    # Parsed argument values and key order agree despite reserialization.
+    if change is None:
+        tool["function"]["arguments"] = '{ "path": "fixture", "options": {"first": 1, "second": 2} }'
+    history = _CHAT_PROMPT + [echo, {"role": "tool", "tool_call_id": tool["id"], "content": "result"}]
+    wire_history = deepcopy(history)
+    context, second = await _serve(
+        ledger,
+        "second",
+        history,
+        mode=mode,
+        match_chat_tool_reasoning=True,
+        served_message=served,
+        splice=change is None,
+    )
+    assert context.request_items == wire_history == history
+    if change is None:
+        assert second.mode == ("candidate" if mode == "source_history" else "token_in")
+        assert second.parent_call_id == "first"
+        assert context.committed
+    elif mode == "source_history":
+        assert second.mode == "text" and second.parent_call_id is None
+    else:
+        assert second is None and context.parent_resolution.reason == "no_match"
+
+
+@pytest.mark.parametrize("mode", ["fingerprint", "source_history"])
+async def test_equivalent_chat_tool_reasoning_leaves_conflicting_parents_ambiguous(ledger, mode):
+    served = _chat_tool_turn("<think>Find the fixture</think>")
+    for call, digest in [("first", "a" * 64), ("second", "b" * 64)]:
+        await _serve(
+            ledger,
+            call,
+            _CHAT_PROMPT,
+            mode=mode,
+            match_chat_tool_reasoning=True,
+            served_message=served,
+            cum_hash=digest,
+        )
+    echo = {**_chat_tool_turn(""), "reasoning_content": "Find the fixture"}
+    history = _CHAT_PROMPT + [echo, {"role": "tool", "tool_call_id": "call-1", "content": "result"}]
+    context, last = await _serve(ledger, "third", history, mode=mode, match_chat_tool_reasoning=True)
+    if mode == "source_history":
+        assert last.mode == "text" and last.root_reason == "ambiguous_candidate"
+    else:
+        assert last is None and context.parent_resolution.reason == "ambiguous"
 
 
 @pytest.mark.parametrize("role", ["system", "developer", "assistant", "user"])

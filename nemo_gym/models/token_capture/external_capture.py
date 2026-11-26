@@ -21,6 +21,7 @@ from nemo_gym.models.token_capture.completion import (
 from nemo_gym.models.token_capture.config import ExternalStagingBackend
 from nemo_gym.models.token_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.models.token_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureLedger
+from nemo_gym.models.token_capture.reasoning import capture_chat_tool_turns
 from nemo_gym.models.token_capture.records import (
     TOKEN_FIELDS,
     response_finish_reason,
@@ -371,6 +372,17 @@ class _BaseExternalCaptureHandler(ABC):
             str(coords.staging_key)
         ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
+        request_items = list(context.request_items or [])
+        replay_items = (
+            completion_replay_items(served_payload) if context.parent_resolution_mode == "source_history" else []
+        )
+        # Keep the served reply and its output witnesses intact for attribution.
+        if context.match_chat_tool_reasoning:
+            request_items = capture_chat_tool_turns(request_items)
+            match_response_items = capture_chat_tool_turns(response_items)
+            replay_items = capture_chat_tool_turns(replay_items)
+        else:
+            match_response_items = response_items
         evidence_items = completion_items(served_payload) if context.parent_resolution_mode == "source_history" else []
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
@@ -421,7 +433,7 @@ class _BaseExternalCaptureHandler(ABC):
             replay=(
                 summarize_replay(
                     replay_context(
-                        list(context.request_items or []) + completion_replay_items(served_payload),
+                        request_items + replay_items,
                         render_digest=admission.request_replay.render_digest,
                     )
                 )
@@ -438,8 +450,8 @@ class _BaseExternalCaptureHandler(ABC):
             # Framework capture reconstructs ancestry from CallRecord parents.
             # Only ordinary capture uses this separately persisted lookup chain.
             staging_chain=() if context.parent_resolution_mode == "source_history" else tuple(child_staging_chain),
-            request_items=list(context.request_items or []),
-            response_items=response_items,
+            request_items=request_items,
+            response_items=match_response_items,
         )
         if context.publish_on_delivery:
             context.deferred_commit = commit
