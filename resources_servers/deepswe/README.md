@@ -108,6 +108,27 @@ gym env start \
   --config responses_api_models/<model>/configs/<model>.yaml
 ```
 
+## Run NOOA rollouts
+
+`benchmarks/deepswe/nooa.yaml` runs `nooa_agent` (NOOA's BenchAgent, in sandboxed mode) on the same episode: the same
+agent sandbox, three-hour budget, episode bound and verifier as the OpenCode recipe. The agent sandbox has no network,
+so NOOA installs its runtime from an offline bundle that you build once per checkout, outside the task sandbox, on a
+host with Docker. The bundle is bound to the checkout's tracked source: build it again after any change.
+
+```bash
+export NOOA_SWE_RUNTIME_WHEELHOUSE=/absolute/path/to/new-runtime-bundle
+python -m responses_api_agents.nooa_agent.offline_runtime \
+  --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" --target x86_64/gnu
+gym env start \
+  --config benchmarks/deepswe/nooa.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config responses_api_models/<model>/configs/<model>.yaml
+```
+
+NOOA has no model-call limit by default (`max_policy_calls`), and the recipe declares the 262144-token context window
+(`context_window`); match that value to the serving window when you change it. A run that reaches the three-hour worker
+ceiling is graded as it stands, as with OpenCode and Hermes.
+
 The resources server keeps each episode session until the Environment Server closes it. A session that is never
 closed expires after the agent sandbox's `ttl_s`, and shutdown stops what is left. Verify grades a session once: an
 identical retry returns the same verdict, and a verify after close is masked as a lost session.
