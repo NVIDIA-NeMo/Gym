@@ -1,0 +1,30 @@
+name: arc_agi_2
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: ARC-AGI-2 public evaluation set (120 grid-transformation puzzles), exact-match grid answers, no tools
+modality: text
+licensing: Apache-2.0
+authors:
+- dhanley
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: arc_code
+agent_server: simple_agent
+datasets:
+- name: arc_agi_2
+  type: benchmark
+  jsonl_fpath: benchmarks/arc_agi_2/data/arc_agi_2_no_tools.jsonl
+  prepare_script: benchmarks/arc_agi_2/prepare.py
+  prompt_config: benchmarks/arc_agi_2/prompts/no_tools.yaml
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/arc_agi_2/prompts/no_tools.yaml
+lifecycle: active
