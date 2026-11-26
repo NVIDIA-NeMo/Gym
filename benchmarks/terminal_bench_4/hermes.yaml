@@ -1,0 +1,29 @@
+# Terminal-Bench 4.1 with Hermes, run through the Harbor environment server on the pinned task folders of
+# environments/harbor/terminal_bench_4, as terminal_bench_4/opencode and terminal_bench_4/miniswe. The server owns
+# each task sandbox, its Compose group and the separate verifier, and lends the sandbox to hermes_agent's agent
+# session. See README.md, "Run".
+harbor_target: terminal_bench_4
+config_paths:
+- responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      # The longest agent run, as terminal_bench_4/miniswe and terminal_bench_4/opencode: the shipped 21,600 s
+      # would end a run two hours before the tasks' 8-hour agent budget does. A smaller value caps smoke runs.
+      sandbox_runner_timeout_seconds: ${oc.select:tb4_agent_max_timeout_sec,28800}
+      # Hermes ships 30 turns, which ends a Terminal-Bench task long before its budget; mini-SWE's step limit on
+      # this benchmark is the same knob.
+      max_turns: ${oc.select:tb4_max_steps,500}
+      # Hermes's own default for one terminal command; the shipped config lowers it to 60 s.
+      terminal_timeout: 180
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # As terminal_bench_4/miniswe: an episode runs under its task's budget (harness setup, the 8-hour agent budget,
+      # the verifier's timeout and grace), capped here; the server's default cap (21600 s) would cut a long run short.
+      default_episode_timeout_seconds: ${oc.select:tb4_episode_timeout_sec,54000}
+      # Hermes's sandbox install may take up to its sandbox_install_timeout_seconds (900 s); the server's default
+      # allowance (300 s) would end a slow install as a task deadline.
+      harness_setup_allowance_s: 900
