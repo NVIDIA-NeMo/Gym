@@ -15,6 +15,7 @@ from dataclasses import replace
 from fractions import Fraction
 from typing import TYPE_CHECKING
 
+from anyio import CancelScope
 from math_verify import parse, verify
 from math_verify.parser import LatexExtractionConfig
 from sympy import Expr, FiniteSet, Rational, Tuple
@@ -53,7 +54,7 @@ def _parse_scalar(text: str, latex: LatexExtractionConfig, *, numeric: bool = Fa
     text = _DECIMAL_WITH_POINT.sub(_exact_decimal, text)
     values = parse(r"\boxed{" + text + "}", (latex,), fallback_mode="no_fallback", parsing_timeout=0)
     if len(values) == 1 and isinstance(values[0], Expr) and values[0].is_finite is not False:
-        return values[0].doit()
+        return values[0].doit() if numeric else values[0]
     return None
 
 
@@ -108,6 +109,10 @@ def _matches(reference: str, box: str, config: "MathVerifyConfig") -> bool:
         return False
     if isinstance(left, (FiniteSet, Tuple)) or isinstance(right, (FiniteSet, Tuple)):
         return left == right
+    # Zero and cancellation can erase a suffix during evaluation (e.g. 0m and 0s).
+    if not config.units and left.free_symbols != right.free_symbols:
+        return False
+    left, right = left.doit(), right.doit()
     if isinstance(left, Rational) and isinstance(right, Rational):
         if left != right and ("." in reference or "." in box):
             # Distinct rationals differ by at least 1/(q1*q2). More places cannot make them round alike.
@@ -150,14 +155,17 @@ def _score_box(reference: str, box: str, config: "MathVerifyConfig", parent_pid:
 
 async def _reap(pid: int) -> None:
     """Collect the killed child before releasing its slot, even if the host cannot start a thread."""
-    cancelled = False
-    while os.waitpid(pid, os.WNOHANG)[0] == 0:
-        try:
-            await asyncio.sleep(0.005)
-        except asyncio.CancelledError:
-            cancelled = True
-    if cancelled:
-        raise asyncio.CancelledError
+    cancellation = None
+    with CancelScope() as cleanup:
+        while os.waitpid(pid, os.WNOHANG)[0] == 0:
+            try:
+                await asyncio.sleep(0.005)
+            except asyncio.CancelledError as exc:
+                # A disconnected request's AnyIO scope cancels every wait until shielded.
+                cleanup.shield = True
+                cancellation = exc
+    if cancellation is not None:
+        raise cancellation
 
 
 class BoxedMathVerifier:

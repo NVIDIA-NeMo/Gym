@@ -202,6 +202,7 @@ link must agree. Different assignment names, compound left-hand sides such as
 `x+y=1`, primes and other unsupported notation go to the model judge.
 
 Scalar comparisons preserve unit suffixes by default (`units: false`).
+For example, `0m` matches `0m`, while `0s` or bare `0` for that reference goes to the judge.
 With `units: true`, Math-Verify can strip a trailing variable such as the `t`
 in `3t`. Both scalar comparison directions must match by default
 (`bidirectional: true`). Disabling the reverse check still requires supported

@@ -28,6 +28,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import yaml
+from anyio import CancelScope
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
@@ -380,6 +381,9 @@ class TestAnswerOptions:
         [
             ({"units": True, "bidirectional": False}, "3t", "3", True),
             ({}, "3t", "3", False),
+            ({}, "0m", "0s", False),
+            ({}, "0m", "0", False),
+            ({}, "0m", "0m", True),
             ({}, "2", r"2 \text{ (or 3)}", False),
             ({}, r"12\,\text{J}", r"12\,\text{kJ}", False),
             ({"units": False}, "3t", "t+t+t", True),
@@ -547,6 +551,25 @@ class TestAnswerOptions:
         assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
         with raises(ChildProcessError):
             waitpid(pid, os.WNOHANG)
+
+    async def test_disconnected_request_waits_between_child_polls(self, monkeypatch):
+        from resources_servers.stem_judge.boxed_math import _reap
+
+        sleep = asyncio.sleep
+        waited = []
+
+        async def record_sleep(delay):
+            await sleep(delay)
+            if delay > 0:
+                waited.append(delay)
+
+        polls = iter([(0, 0), (0, 0), (0, 0), (123, 0)])
+        monkeypatch.setattr(os, "waitpid", lambda *_: next(polls))
+        monkeypatch.setattr(asyncio, "sleep", record_sleep)
+        with CancelScope() as request:
+            request.cancel()
+            await _reap(123)
+        assert request.cancelled_caught and waited
 
     async def test_cancelling_symbolic_workers_keeps_the_loop_responsive(self, config, monkeypatch, tmp_path):
         def unresponsive_worker(reference, *_):
