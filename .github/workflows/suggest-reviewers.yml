@@ -46,9 +46,8 @@ permissions:
 
 jobs:
   suggest-reviewers:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@6433b3b14022abe1a72da8baac638944b36e3099
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@b6b4df4160277e1048091f972eda0c51319bc845
     with:
-      workflow_ref: 6433b3b14022abe1a72da8baac638944b36e3099  # pragma: allowlist secret
       pr_number: ${{ inputs.pr_number }}
       app-id: ${{ vars.GYM_PR_APP_ID }}
     secrets:
