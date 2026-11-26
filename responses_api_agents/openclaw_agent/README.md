@@ -120,6 +120,8 @@ until the first call rather than startup. Concurrent callers share one backgroun
 attempt; it does not block the event loop, and failed installs can be retried.
 Sandbox sessions use their separate in-sandbox installer and the exact
 configured `openclaw_version`; host environment overrides do not change that runtime.
+`sandbox_runtime_upload` prepares that runtime on the host instead; see
+[Upload the runtime from the Agent Server host](#upload-the-runtime-from-the-agent-server-host).
 
 `configs/openclaw_agent.yaml` supports both paths: an agent session selects sandbox
 execution; no agent session selects the local CLI. Invalid or closed sessions are
@@ -203,6 +205,69 @@ attempts. Missing `flock`, `curl`, CA certificates, `tar`, `gzip`, `sha256sum`, 
 running as root. Other images receive an actionable prerequisite error. Installation errors include
 the failed command, exit status, provider error, stdout, and stderr. Supporting these architectures does not establish
 validation on every task image; record the actual image digest and runtime versions with each run.
+
+### Upload the runtime from the Agent Server host
+
+The in-sandbox installer needs `curl`, a CA bundle, `tar`, `gzip`, `sha256sum`, `awk`, `flock` and network access to
+nodejs.org and the npm registry inside the task sandbox, and it adds missing tools only as root, with `apt-get` or
+`apk`. A task image that runs as a non-root user without `curl`, or a sandbox without network access, cannot install
+the runtime. Set `sandbox_runtime_upload: true` for those:
+
+```yaml
+openclaw_agent:
+  responses_api_agents:
+    openclaw_agent:
+      sandbox_runtime_upload: true
+```
+
+It is off by default, and the in-sandbox installer stays the default. With it on, installing needs only Bash,
+`tar` and `gzip` in the sandbox, and a `/tmp` its user can write: no `curl`, no network, no root and no package
+manager. Running is another matter: the image must hold the shared libraries the official Node.js build links to,
+such as `libstdc++.so.6`, as it must for the in-sandbox installer. Setup cannot add them.
+
+- **Host.** On the first seed for a sandbox platform, the Agent Server host downloads the pinned Node 24.22.3 build
+  for that platform, the release the in-sandbox installer installs, and checks it against a SHA-256 pinned in
+  `sandbox_runtime.py`. It then installs `openclaw@<openclaw_version>` with that build's own npm, the one the
+  in-sandbox installer runs, so both resolve the same tree. A release whose `engines.node` range does not accept that
+  Node is refused with a 422. Both archives are cached under `openclaw_sandbox_runtime` in Gym's `cache_dir` and
+  reused by later seeds: about 245 MB per platform for 2026.11.5 and about 120 MB for 2026.6.11, which each seed
+  uploads. The host needs HTTPS access to nodejs.org and to the npm registry until the cache is warm; a host without
+  it can be given the archives in that directory. No npmrc file shapes the install. Of the host's `npm_config_*`
+  environment variables, only those that say where packages come from apply (`registry`, `proxy`, `https_proxy`,
+  `noproxy`, `cafile`, `strict_ssl`), along with proxy variables such as `HTTPS_PROXY`. Seeds of one worker share one
+  download or build; each worker with a cold cache runs its own. A build is stopped after 30 minutes so that a stalled
+  one does not hold later seeds; the next seed starts it again.
+- **Sandbox.** Each seed uploads both archives, unpacks them in a private directory beside the runtime directory,
+  runs the packages' install scripts with `npm rebuild --offline`, checks that the CLI runs and that the package
+  declares `openclaw_version`, and renames the result to
+  `/tmp/nemo-gym-openclaw-runtime-node-24.22.3-openclaw-<version>` in one step. A concurrent seed sees a whole
+  runtime or none, and a runtime that is already there is kept without uploading anything. Setup then applies the
+  same check as for `sandbox_runtime_dir`: the package version, its Node engine range, and that the exec tool's
+  compiled process helper loads. The two settings cannot be combined.
+
+The `openclaw` package tree is not portable across platforms. npm selects per-platform packages that hold prebuilt
+binaries (in 2026.11.5, among others, `@openclaw/proc-safe-<os>-<cpu>-<libc>`, `@lydell/node-pty-<os>-<cpu>` and
+`@esbuild/<os>-<cpu>`), and some packages have install scripts; `esbuild`'s checks its platform binary. The host
+therefore installs with `--os linux`, `--cpu` and `--libc` set to the sandbox's platform, never to
+its own, and with `--ignore-scripts`; the scripts run in the sandbox, on the platform they are for.
+
+Platform limits:
+
+- **Sandbox:** Linux with glibc 2.28 or newer, on x86_64/aarch64. Other platforms are refused at seed with a 422.
+  That includes musl: the in-sandbox installer adds or privately replaces the C++ runtime its musl Node build needs,
+  as root, and nothing is installed into the image here. Use the in-sandbox installer or `sandbox_runtime_dir` for
+  a musl image. OpenClaw 2026.11.5's exec tool needs glibc 2.33 or newer, as with the other ways to install: on an
+  older glibc the runtime is uploaded, the check after it finds that the process helper does not load, and the seed
+  is refused with a 422. Pin 2026.6.11 for such images.
+- **Host:** npm needs a Node.js that runs on the host. The sandbox's build is used where it runs, a glibc Linux host
+  of the sandbox's architecture. Otherwise the pinned Node 24.22.3 build for the host is downloaded too, on macOS
+  and glibc Linux, x86_64/arm64. So a macOS/arm64 host can prepare a Linux x86_64 runtime. On any other host, such
+  as Windows or musl Linux, the seed fails with an error that names the cache directory to fill.
+- **Packages:** the install scripts run in the sandbox whatever npm settings the task image carries: its
+  `npm_config_*` variables and npmrc files do not apply to the rebuild. `--offline` keeps npm itself from fetching
+  packages. It does not keep an install script from making network calls of its own; whether a script can download
+  depends on the sandbox's network policy. No script of 2026.6.11 or 2026.11.5 compiles or downloads on the
+  supported platforms.
 
 The runner uses ordinary sandbox `exec`; no PTY/session API is required. Its internal deadline
 leaves time for harness termination before the provider deadline. Session close requests a stop and
@@ -346,6 +411,7 @@ Resources-owned sandbox, since agent-owned sandboxes are gone before verificatio
 OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
 other than `inherit` (the default, the provider's network), and it cannot be combined with
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
+`sandbox_runtime_upload: true`, or
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out.
 Build it into the image with `bash install_openclaw_runtime.sh <dir> <openclaw_version>`; the image also needs `bash`,
 since the session prepare step would otherwise run `apk` or `apt-get`, which the policy blocks. Instead of installing,
@@ -370,7 +436,9 @@ harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), whic
 instance name, `openclaw_agent.responses_api_agents.openclaw_agent.sandbox_config`.
 It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
 overrides it with `model_and_tools`. A restricted sandbox cannot download OpenClaw, so supply
-`sandbox_runtime_dir`.
+`sandbox_runtime_dir`. To upload the runtime instead, set `sandbox_runtime_upload: true` and
+`sandbox_runtime_dir: null` under the profile's own instance name: the profile requires a value for
+`sandbox_runtime_dir`, and the two cannot both be set.
 
 HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
