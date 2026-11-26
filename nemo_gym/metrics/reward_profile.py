@@ -43,6 +43,7 @@ from nemo_gym.config.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
+from nemo_gym.metrics.looping import looping_metrics
 from nemo_gym.metrics.metrics_config import (
     ACROSS_REPEATS_MARKER,
     COMPLETION_TOKEN_METRIC_NAMES,
@@ -176,7 +177,7 @@ class RewardProfiler:
                 rollout_info[k] = v
 
         for k, v in result.items():
-            if k.startswith("_") or k in {"reward", "response"}:
+            if k.startswith("_") or k in {"reward", "response", "is_looping"}:
                 continue
             if isinstance(v, bool):
                 rollout_info[k] = int(v)
@@ -456,7 +457,7 @@ class RewardProfiler:
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
             for k, v in result.items():
-                if k.startswith("_"):
+                if k.startswith("_") or k == "is_looping":
                     continue
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)
@@ -985,6 +986,7 @@ def coverage_by_agent(
     for name, records in per_agent.items():
         scored, masked = _partition_on_mask(records)
         agent_coverage = _coverage_metrics(records, scored, masked)
+        agent_coverage.update(looping_metrics(records))
         if agent_coverage:
             coverage[name] = agent_coverage
     return coverage
@@ -1273,6 +1275,7 @@ def compute_aggregate_metrics(
     # rows stay in `verify_responses` and are reported as coverage below.
     scored, masked = _partition_on_mask(verify_responses)
     coverage = _coverage_metrics(verify_responses, scored, masked)
+    coverage.update(looping_metrics(verify_responses))
 
     if not scored:
         # Every rollout was masked. Publishing means over an empty set would invent a

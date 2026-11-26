@@ -221,6 +221,13 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
                 )
 
     metrics: Dict[str, float] = {}
+    looping_counts = ("looping/completed_total", "looping/assessed_total", "looping/flagged_total")
+    if all(all(name in run.agent_metrics for name in looping_counts) for run in runs):
+        metrics.update({name: sum(run.agent_metrics[name] for run in runs) for name in looping_counts})
+        if metrics["looping/completed_total"]:
+            metrics["looping/coverage"] = metrics["looping/assessed_total"] / metrics["looping/completed_total"]
+        if metrics["looping/assessed_total"]:
+            metrics["looping/rate"] = metrics["looping/flagged_total"] / metrics["looping/assessed_total"]
     accounting_notes = []
     for name in metric_names:
         observations = rows_by_source if name in token_names else quality_rows
@@ -256,7 +263,7 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
             name
             for run in runs
             for name in (*run.agent_metrics, *run.key_metrics)
-            if is_primary_metric(name) and name not in metric_names
+            if is_primary_metric(name) and name not in metrics
         }
     )
     sample_rows_by_source = quality_rows if quality_names else rows_by_source

@@ -124,6 +124,7 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.metrics.looping import looping_metrics
 from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
@@ -135,6 +136,7 @@ from nemo_gym.rollouts.batch_status import (
     disable_run_status,
 )
 from nemo_gym.rollouts.health.types import RunHealthConfig
+from nemo_gym.rollouts.looping import LoopingAssessor
 from nemo_gym.rollouts.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
@@ -1694,6 +1696,10 @@ class SharedRolloutCollectionConfig(
     RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, RunHealthConfig, BaseNeMoGymCLIConfig
 ):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    assess_looping: bool = Field(
+        default=False,
+        description="Assess severe assistant/reasoning text repetition before token rebuilding; independent of health checks.",
+    )
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
         description=(
@@ -3188,6 +3194,7 @@ def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
     # This metrics-only copy honors the explicit denominator policy. The original
     # answer, failure diagnostics, and training mask remain untouched in the sidecar.
     scored["mask_sample"] = False
+    scored[NG_NO_PERSIST_KEY] = True
     scored.setdefault("reward", 0.0)
     return scored
 
@@ -3323,6 +3330,7 @@ def _missing_rollout_rows_counted_as_zero(
                     ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
                     AGENT_REF_KEY_NAME: row.get(AGENT_REF_KEY_NAME),
                     "reward": 0.0,
+                    NG_NO_PERSIST_KEY: True,
                 }
                 if NG_ENVIRONMENT_SERVER_KEY in row:
                     zero[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
@@ -4856,6 +4864,9 @@ executions → not run again (left to recovery)
             if owned_token_source is not None:
                 output_files.push_async_callback(owned_token_source.close)
             output_files.enter_context(store)
+            looping_assessor = LoopingAssessor() if config.assess_looping else None
+            if looping_assessor is not None:
+                output_files.callback(looping_assessor.close)
             output_files.push_async_callback(_cancel_and_join, agent_complete_tasks)
 
             def write_final_status() -> None:
@@ -4984,6 +4995,10 @@ executions → not run again (left to recovery)
                 no_result = no_persist or structured_failure or failure_class in _NO_RESULT_FAILURE_CLASSES
 
                 _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
+
+                if looping_assessor is not None:
+                    assessment = await looping_assessor.assess(result.get("response"))
+                    result.update(is_looping=assessment.is_looping, reasons=list(assessment.reasons))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off), project ng_trajectory and assemble ng_perf. Never alters the
@@ -5552,6 +5567,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     )
                     await raise_for_status(agg_response)
                     agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+                    looping = looping_metrics(agent_result_list)
+                    agg_result.agent_metrics.update(looping)
+                    agg_result.key_metrics.update(looping)
             except Exception as exc:
                 if first_error is None:
                     first_error = exc
