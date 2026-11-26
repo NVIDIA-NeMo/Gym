@@ -15,6 +15,7 @@
 
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 from pytest import mark, raises
@@ -99,6 +100,7 @@ def test_unmatched_prompt_ids_require_explicit_partial_mode(tmp_path):
 
 @mark.parametrize("flag", ["--version", "--benchmark"])
 def test_v4_offline_scoring_preserves_short_answers_and_prints_diagnostics(tmp_path, monkeypatch, capsys, flag):
+    monkeypatch.chdir(tmp_path)
     path = tmp_path / "rollouts.jsonl"
     prompt_path = tmp_path / "prompts.jsonl"
     row = {
@@ -125,8 +127,8 @@ def test_v4_offline_scoring_preserves_short_answers_and_prints_diagnostics(tmp_p
     assert tasks[0][0]["style_reference_token_count"] == 200
     assert compute_rollout_scores.load_metrics("lmarena_v4", 0.01).compute(tasks)["win_rate"] == 1.0
     assert compute_rollout_scores.load_metrics("lmarena_v3", 0.01).compute(tasks)["win_rate"] == 0.0
-    assert compute_rollout_scores.PROMPT_PATHS["lmarena_v4"].as_posix() == (
-        "benchmarks/lmarena_v4/data/lmarena_v4_validation.jsonl"
+    assert compute_rollout_scores.PROMPT_PATHS["lmarena_v4"] == (
+        Path(__file__).resolve().parents[3] / "benchmarks/lmarena_v4/data/lmarena_v4_validation.jsonl"
     )
     monkeypatch.setattr(
         sys, "argv", ["compute_rollout_scores", str(path), flag, "lmarena_v4", "--prompts", str(prompt_path)]

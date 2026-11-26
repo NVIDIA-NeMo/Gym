@@ -31,18 +31,14 @@ from resources_servers.arena.taxonomy import (
 )
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 BENCHMARK_CONFIGS = {
-    "vision_arena_v1": Path("resources_servers/arena/configs/vision_arena_v1.yaml"),
-    "lmarena_v2": Path("resources_servers/arena/configs/lmarena_v2.yaml"),
-    "lmarena_v3": Path("resources_servers/arena/configs/lmarena_v3.yaml"),
-    "lmarena_v4": Path("resources_servers/arena/configs/lmarena_v4.yaml"),
+    name: _REPO_ROOT / "resources_servers" / "arena" / "configs" / f"{name}.yaml"
+    for name in ("vision_arena_v1", "lmarena_v2", "lmarena_v3", "lmarena_v4")
 }
 # LMArena prompts provide taxonomy metadata used for slice reporting.
 PROMPT_PATHS = {
-    "vision_arena_v1": Path("benchmarks/vision_arena_v1/data/vision_arena_v1_validation.jsonl"),
-    "lmarena_v2": Path("benchmarks/lmarena_v2/data/lmarena_v2_validation.jsonl"),
-    "lmarena_v3": Path("benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl"),
-    "lmarena_v4": Path("benchmarks/lmarena_v4/data/lmarena_v4_validation.jsonl"),
+    name: _REPO_ROOT / "benchmarks" / name / "data" / f"{name}_validation.jsonl" for name in BENCHMARK_CONFIGS
 }
 SCORE_SLICE_ORDER = (*PROMPT_CATEGORY_ORDER, "exclude-ties")
 
