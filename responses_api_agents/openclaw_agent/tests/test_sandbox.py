@@ -2192,21 +2192,29 @@ def test_runtime_dir_must_be_absolute(setup):
         OpenClawAgentConfig.model_validate({**agent.config.model_dump(), "sandbox_runtime_dir": "opt/openclaw"})
 
 
-_UPLOADED_RUNTIME = "/tmp/nemo-gym-openclaw-runtime-node-22.19.0-openclaw-2026.6.11"
+_UPLOADED_RUNTIME = "/tmp/nemo-gym-openclaw-runtime-node-24.22.3-openclaw-2026.6.11"
+_HELPER_UNAVAILABLE = (
+    "OpenClaw 2026.6.11 cannot run its exec tool in this image: its compiled process helper does not load "
+    "(it needs glibc 2.33 or newer, or musl)."
+)
 
 
 @pytest.mark.parametrize(
-    ("failure", "status"),
+    ("failure", "probe", "status"),
     [
-        (None, 200),
+        (None, (0, "2026.6.11\n24.22.3\n>=22.19.0", ""), 200),
         # A failed host build or installation may pass on another attempt.
-        (RuntimeError("npm install exited with 1"), 500),
+        (RuntimeError("npm install exited with 1"), None, 500),
         # A platform without a Node.js build fails the same way every time.
-        (AgentSeedRejectedError("musl build for x86_64 only"), 422),
+        (AgentSeedRejectedError("supports glibc sandboxes only"), None, 422),
+        # The uploaded runtime is held to the check of a preinstalled one: a Node.js outside the release's range,
+        # and an image whose glibc cannot load the exec tool's process helper, refuse the seed.
+        (None, (0, "2026.6.11\n24.22.3\n>=26.1.0", ""), 422),
+        (None, (4, "2026.6.11\n24.22.3\n>=22.19.0", _HELPER_UNAVAILABLE), 422),
     ],
-    ids=["published", "failed", "unsupported_platform"],
+    ids=["published", "failed", "unsupported_platform", "unsupported_engine", "exec_helper_unavailable"],
 )
-def test_uploaded_runtime_is_published_then_checked_instead_of_installed_in_the_sandbox(setup, failure, status):
+def test_uploaded_runtime_is_published_then_checked_instead_of_installed_in_the_sandbox(setup, failure, probe, status):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
@@ -2214,8 +2222,9 @@ def test_uploaded_runtime_is_published_then_checked_instead_of_installed_in_the_
     run_exec = sandbox.run_exec
 
     async def report_version(command, **kwargs):
-        if command.endswith(f"{_UPLOADED_RUNTIME}/openclaw/node_modules/openclaw/package.json"):
-            return SimpleNamespace(error_type=None, return_code=0, stdout="2026.6.11", stderr="")
+        if f"{_UPLOADED_RUNTIME}/openclaw/node_modules/openclaw/openclaw.mjs --version >/dev/null" in command:
+            return_code, stdout, stderr = probe
+            return SimpleNamespace(error_type=None, return_code=return_code, stdout=stdout, stderr=stderr)
         return await run_exec(command, **kwargs)
 
     sandbox.exec.side_effect = report_version
@@ -2234,11 +2243,20 @@ def test_uploaded_runtime_is_published_then_checked_instead_of_installed_in_the_
     assert not any(path.endswith("/install_openclaw_runtime.sh") for path in sandbox.files)
     assert created.status_code == status, created.text
     if failure is None:
-        # The uploaded runtime passes the same check as a preinstalled one before the session uses it.
-        assert _runtime_check(commands).startswith(f"{_UPLOADED_RUNTIME}/node/bin/node -e ")
+        # The uploaded runtime passes the same check as a preinstalled one before the session uses it: the CLI,
+        # the package version with its Node engine range, and the exec tool's process helper.
+        check = _runtime_check(commands)
+        assert (
+            f"{_UPLOADED_RUNTIME}/node/bin/node {_UPLOADED_RUNTIME}/openclaw/node_modules/openclaw/openclaw.mjs"
+            in check
+        )
+        assert "@openclaw/proc-safe/reaper" in check
     else:
-        assert not any(command.endswith("/openclaw/node_modules/openclaw/package.json") for command in commands)
+        assert not any("/openclaw.mjs --version >/dev/null" in command for command in commands)
+    if status != 200:
         sandbox.stop.assert_awaited_once()
+    if probe is not None and probe[0] == 4:
+        assert "cannot run its exec tool in this image" in created.json()["detail"]
 
 
 def test_runtime_is_installed_inside_the_sandbox_unless_upload_is_configured(setup):
@@ -2255,7 +2273,7 @@ def test_runtime_is_installed_inside_the_sandbox_unless_upload_is_configured(set
     (install,) = [
         call.args[0] for call in sandbox.exec.await_args_list if "install_openclaw_runtime.sh" in call.args[0]
     ]
-    assert install.endswith("/install_openclaw_runtime.sh /tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11 2026.6.11")
+    assert install.endswith("/install_openclaw_runtime.sh /tmp/nemo-gym-openclaw-node-24.22.3-2026.6.11 2026.6.11")
     assert any(path.endswith("/install_openclaw_runtime.sh") for path in sandbox.files)
 
 

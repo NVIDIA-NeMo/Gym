@@ -4,9 +4,11 @@
 
 With ``sandbox_runtime_upload`` installing needs only Bash, ``tar`` and ``gzip`` in the sandbox: no network, no
 root, no package manager and no ``curl``. The image must hold the shared libraries the official Node.js build links
-to, such as ``libstdc++.so.6``. For each sandbox platform the host downloads the pinned Node.js build and checks its
-SHA-256, then installs ``openclaw`` for that platform with that build's own npm, the one the in-sandbox installer
-would run. The package tree is not portable: npm selects per-platform packages that hold prebuilt binaries, so
+to, such as ``libstdc++.so.6``. For each sandbox platform the host downloads the pinned Node.js build, the release
+``install_openclaw_runtime.sh`` installs, and checks its SHA-256, then installs ``openclaw`` for that platform with
+that build's own npm, the one the in-sandbox installer would run. A release whose ``engines.node`` range leaves
+that Node.js out is refused. The package tree is not portable: npm selects per-platform packages that hold prebuilt
+binaries, so
 ``--os``, ``--cpu`` and ``--libc`` name the sandbox, never the host, and no install script runs on the host. Both
 archives are cached on the host under ``openclaw_sandbox_runtime`` in Gym's ``cache_dir``.
 
@@ -46,22 +48,33 @@ from nemo_gym.agents import AgentSeedRejectedError, SandboxPlatform, probe_sandb
 from nemo_gym.client import request
 from nemo_gym.config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox
-from responses_api_agents.openclaw_agent.setup_openclaw import _node_platform, _node_reported_version
+from responses_api_agents.openclaw_agent.setup_openclaw import (
+    DEFAULT_NODE_VERSION,
+    OPENCLAW_ENGINES_NODE,
+    _node_platform,
+    _node_reported_version,
+    node_satisfies_range,
+)
 
 
 LOG = logging.getLogger(__name__)
 
-#: The Node.js that runs OpenClaw in a sandbox; ``install_openclaw_runtime.sh`` installs the same version.
-SANDBOX_NODE_VERSION = "22.19.0"
-# Published in https://nodejs.org/dist/v22.19.0/SHASUMS256.txt. The macOS builds only ever run npm on a macOS host.
+#: The Node.js that runs OpenClaw in a sandbox: the release ``install_openclaw_runtime.sh`` installs, whichever
+#: ``openclaw_version`` is configured.
+SANDBOX_NODE_VERSION = DEFAULT_NODE_VERSION
+# SHA-256 of each build by Node.js release, as published in SHASUMS256.txt beside it, for example
+# https://nodejs.org/dist/v24.22.3/SHASUMS256.txt. A release without its checksums here is never downloaded, so add
+# them when DEFAULT_NODE_VERSION changes. The macOS builds only ever run npm on a macOS host.
 _NODE_SHA256 = {
-    "linux-x64": "d36e56998220085782c0ca965f9d51b7726335aed2f5fc7321c6c0ad233aa96d",  # pragma: allowlist secret
-    "linux-arm64": "d32817b937219b8f131a28546035183d79e7fd17a86e38ccb8772901a7cd9009",  # pragma: allowlist secret
-    "darwin-x64": "3cfed4795cd97277559763c5f56e711852d2cc2420bda1cea30c8aa9ac77ce0c",  # pragma: allowlist secret
-    "darwin-arm64": "c59006db713c770d6ec63ae16cb3edc11f49ee093b5c415d667bb4f436c6526d",  # pragma: allowlist secret
+    "24.22.3": {
+        "linux-x64": "061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2",  # pragma: allowlist secret
+        "linux-arm64": "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8",  # pragma: allowlist secret
+        "darwin-x64": "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7",  # pragma: allowlist secret
+        "darwin-arm64": "ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd",  # pragma: allowlist secret
+    },
 }
 _NODE_DOWNLOADS = "https://nodejs.org/dist"
-# The official Linux builds of Node.js 22 are linked against glibc 2.28.
+# The official Linux builds of Node.js 24 are linked against glibc 2.28.
 _NODE_MIN_GLIBC_MINOR = 28
 # `uname -m` spellings of the CPUs the Linux builds run on, and the name npm and nodejs.org use for each.
 _NPM_CPU = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}
@@ -155,7 +168,7 @@ def _sha256(path: Path) -> str:
 
 async def _node_archive(build: str) -> Path:
     """Return the host-cache path to the pinned Node.js archive for ``build`` after checking its SHA-256."""
-    expected = _NODE_SHA256.get(build)
+    expected = _NODE_SHA256.get(SANDBOX_NODE_VERSION, {}).get(build)
     if expected is None:
         raise RuntimeError(f"No pinned Node.js {SANDBOX_NODE_VERSION} build for {build}")
     name = f"node-v{SANDBOX_NODE_VERSION}-{build}.tar.gz"
@@ -209,7 +222,7 @@ async def _host_node(sandbox_build: str, sandbox_node: Path, scratch: Path) -> P
     except RuntimeError:
         # nodejs.org publishes no build for this host at all.
         host_build = sys.platform
-    if host_build != sandbox_build and host_build in _NODE_SHA256:
+    if host_build != sandbox_build and host_build in _NODE_SHA256.get(SANDBOX_NODE_VERSION, {}):
         archive = await _node_archive(host_build)
         candidate = await asyncio.to_thread(_unpack_node, archive, scratch / "host-node") / "bin" / "node"
         if await asyncio.to_thread(_node_reported_version, str(candidate)) == SANDBOX_NODE_VERSION:
@@ -247,6 +260,23 @@ def _npm_environment(node: Path) -> dict[str, str]:
     }
     env["PATH"] = f"{node.parent}{os.pathsep}{env.get('PATH', '')}"
     return env
+
+
+def _refuse_unaccepted_node(openclaw_version: str, engines: str | None) -> None:
+    """Refuse a release whose ``engines.node`` range leaves out the pinned Node.js, which every attempt would repeat.
+
+    The check after installation, which the session setup shares with a preinstalled runtime, applies the same
+    rule to the Node.js in the sandbox; this one saves the build or the upload.
+    """
+    try:
+        accepted = bool(engines) and node_satisfies_range(SANDBOX_NODE_VERSION, engines)
+    except ValueError:
+        accepted = False
+    if not accepted:
+        raise AgentSeedRejectedError(
+            f"openclaw {openclaw_version} declares engines.node {engines!r}, which does not accept the Node.js "
+            f"{SANDBOX_NODE_VERSION} that sandbox_runtime_upload installs"
+        )
 
 
 def _write_archive(source: Path, archive: Path) -> None:
@@ -302,9 +332,13 @@ async def _openclaw_archive(openclaw_version: str, platform: SandboxPlatform) ->
             ]
             await _run(argv, env=_npm_environment(node))
             package = tree / "node_modules/openclaw/package.json"
-            installed = json.loads(await asyncio.to_thread(package.read_text)).get("version")
-            if installed != openclaw_version:
-                raise RuntimeError(f"npm installed openclaw {installed}, not the requested {openclaw_version}")
+            manifest = json.loads(await asyncio.to_thread(package.read_text))
+            if manifest.get("version") != openclaw_version:
+                raise RuntimeError(
+                    f"npm installed openclaw {manifest.get('version')}, not the requested {openclaw_version}"
+                )
+            # The range the installed release declares, whether or not setup_openclaw lists it.
+            _refuse_unaccepted_node(openclaw_version, (manifest.get("engines") or {}).get("node"))
             archive = scratch / "openclaw.tar.gz"
             await asyncio.to_thread(_write_archive, tree, archive)
             os.replace(archive, path)
@@ -363,11 +397,12 @@ async def upload_openclaw_runtime(
 
     Builds both archives for the sandbox's platform on this host if needed, uploads them and unpacks them. A runtime
     directory that exists was published whole by an earlier seed and is left alone; the caller checks that it runs
-    ``openclaw_version``. ``timeout_s`` bounds the whole installation, including a build that another seed started.
+    ``openclaw_version`` on a Node.js the release accepts and that the exec tool's compiled process helper loads
+    there. ``timeout_s`` bounds the whole installation, including a build that another seed started.
 
-    Raises ``AgentSeedRejectedError`` when no pinned Node.js build runs on the sandbox's platform, ``RuntimeError``
-    when the host build, a download or the installation in the sandbox fails or the host build outlasts its own
-    deadline, and ``TimeoutError`` when ``timeout_s`` runs out.
+    Raises ``AgentSeedRejectedError`` when no pinned Node.js build runs on the sandbox's platform or the release
+    does not accept the pinned Node.js, ``RuntimeError`` when the host build, a download or the installation in the
+    sandbox fails or the host build outlasts its own deadline, and ``TimeoutError`` when ``timeout_s`` runs out.
     """
     try:
         async with asyncio.timeout(timeout_s):
@@ -376,6 +411,8 @@ async def upload_openclaw_runtime(
                 raise RuntimeError(f"Could not look for an OpenClaw runtime in the sandbox: {present.error_type}")
             if present.return_code == 0:
                 return
+            if openclaw_version in OPENCLAW_ENGINES_NODE:
+                _refuse_unaccepted_node(openclaw_version, OPENCLAW_ENGINES_NODE[openclaw_version])
             await _refuse_other_machines(sandbox)
             platform = await probe_sandbox_platform(sandbox)
             node_archive = _readable_in_sandbox(await _node_archive(sandbox_node_build(platform)))

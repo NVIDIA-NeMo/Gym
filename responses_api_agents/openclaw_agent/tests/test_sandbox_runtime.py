@@ -28,6 +28,7 @@ from responses_api_agents.openclaw_agent.sandbox_runtime import (
     upload_openclaw_runtime,
     uploaded_runtime_dir,
 )
+from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_NODE_VERSION
 
 
 VERSION = "2026.6.11"
@@ -51,7 +52,10 @@ elif args[0].endswith("npm-cli.js") and args[1] == "install":
     package = Path(args[args.index("--prefix") + 1]) / "node_modules/openclaw"
     package.mkdir(parents=True)
     version = os.environ.get("FAKE_NPM_INSTALLS") or args[-1].rpartition("@")[2]
-    (package / "package.json").write_text(json.dumps({"version": version}))
+    manifest = {"version": version, "engines": {"node": os.environ.get("FAKE_NPM_ENGINES", ">=22.19.0")}}
+    if not manifest["engines"]["node"]:
+        del manifest["engines"]
+    (package / "package.json").write_text(json.dumps(manifest))
     (package / "openclaw.mjs").write_text("")
     if os.environ.get("FAKE_NPM_PID_FILE"):
         Path(os.environ["FAKE_NPM_PID_FILE"]).write_text(str(os.getpid()))
@@ -114,7 +118,7 @@ def _npm(log: Path, command: str) -> list[dict]:
 )
 def test_the_node_build_matches_the_sandbox_platform(platform: SandboxPlatform, build: str) -> None:
     assert sandbox_node_build(platform) == build
-    assert build in sandbox_runtime._NODE_SHA256
+    assert build in sandbox_runtime._NODE_SHA256[SANDBOX_NODE_VERSION]
 
 
 @pytest.mark.parametrize(
@@ -132,7 +136,13 @@ def test_a_platform_without_a_node_build_is_refused(platform: SandboxPlatform, m
 
 def test_the_uploaded_runtime_is_the_node_the_in_sandbox_installer_installs() -> None:
     installer = Path(sandbox_runtime.__file__).with_name("install_openclaw_runtime.sh").read_text()
+    assert SANDBOX_NODE_VERSION == DEFAULT_NODE_VERSION
     assert f"\nnode_version={SANDBOX_NODE_VERSION}\n" in installer
+    # Every build of that release the host may download has its checksum pinned: both sandbox architectures, and
+    # the macOS builds that run npm on a macOS host.
+    pins = sandbox_runtime._NODE_SHA256[SANDBOX_NODE_VERSION]
+    assert sorted(pins) == ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
+    assert all(re.fullmatch(r"[0-9a-f]{64}", pin) for pin in pins.values())
     # The two runtimes never share a directory: only the in-sandbox installer's has a lock and a ready marker.
     assert (
         uploaded_runtime_dir(VERSION)
@@ -177,7 +187,7 @@ def download(monkeypatch, tmp_path):
         return _Response(served.body, served.status)
 
     monkeypatch.setattr(sandbox_runtime, "request", request)
-    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", {"linux-x64": served.pinned})
+    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", {SANDBOX_NODE_VERSION: {"linux-x64": served.pinned}})
     return served
 
 
@@ -239,7 +249,7 @@ def host(monkeypatch, tmp_path):
         for build in ("linux-x64", "linux-arm64")
     }
     monkeypatch.setattr(sandbox_runtime, "_cache_dir", lambda: cache)
-    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", pins)
+    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", {SANDBOX_NODE_VERSION: pins})
     monkeypatch.setattr(sandbox_runtime, "request", AsyncMock(side_effect=AssertionError("the cache is warm")))
     monkeypatch.setenv("FAKE_NODE_LOG", str(log))
     return SimpleNamespace(cache=cache, log=log, pins=pins)
@@ -269,7 +279,7 @@ async def test_the_host_installs_openclaw_for_the_sandbox_platform(host, platfor
     assert len(npmrcs) == 2 and all(str(host.cache) in npmrc for npmrc in npmrcs)
     with tarfile.open(archive) as tar:
         package = json.load(tar.extractfile("openclaw/node_modules/openclaw/package.json"))
-    assert package == {"version": VERSION}
+    assert package == {"version": VERSION, "engines": {"node": ">=22.19.0"}}
     # Only archives remain: the scratch directory with the unpacked Node.js and npm's cache is gone.
     assert sorted(path.name for path in host.cache.iterdir() if path.name.startswith(".")) == []
 
@@ -299,6 +309,28 @@ async def test_concurrent_cold_seeds_share_one_host_build(host) -> None:
 
     assert len(set(archives)) == 1
     assert len(_npm(host.log, "install")) == 1
+
+
+@pytest.mark.parametrize("engines", [">=22.19.0", ">=24.16.0 <25 || >=26.1.0"], ids=["2026.6.11", "2026.11.5"])
+async def test_the_pinned_node_is_one_each_pinned_release_accepts(host, monkeypatch, engines) -> None:
+    """The ranges the two releases declare, for which the installer installs one Node.js."""
+    assert engines in sandbox_runtime.OPENCLAW_ENGINES_NODE.values()
+    monkeypatch.setenv("FAKE_NPM_ENGINES", engines)
+
+    assert (await sandbox_runtime._openclaw_archive(VERSION, X86_64_GLIBC)).is_file()
+
+
+@pytest.mark.parametrize("engines", [">=26.1.0", "<24", "", "22 - 23"], ids=["newer", "older", "undeclared", "unread"])
+async def test_a_release_that_does_not_accept_the_pinned_node_is_refused_and_not_cached(
+    host, monkeypatch, engines
+) -> None:
+    """Session setup would refuse it after the upload: the Node.js in the sandbox is outside the release's range."""
+    monkeypatch.setenv("FAKE_NPM_ENGINES", engines)
+
+    with pytest.raises(AgentSeedRejectedError, match=f"does not accept the Node.js {SANDBOX_NODE_VERSION}"):
+        await sandbox_runtime._openclaw_archive(VERSION, X86_64_GLIBC)
+
+    assert not any(path.name.startswith(("openclaw-", ".")) for path in host.cache.iterdir())
 
 
 async def test_a_tree_that_holds_another_version_is_not_cached(host, monkeypatch) -> None:
@@ -399,7 +431,7 @@ async def test_a_host_that_cannot_run_the_sandbox_node_runs_npm_with_its_own_pin
         "linux-x64": _node_archive(host.cache / f"{name}-linux-x64.tar.gz", "linux-x64", node="#!/bin/sh\nexit 126\n"),
         "darwin-arm64": _node_archive(host.cache / f"{name}-darwin-arm64.tar.gz", "darwin-arm64"),
     }
-    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", pins)
+    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", {SANDBOX_NODE_VERSION: pins})
     monkeypatch.setattr(sandbox_runtime, "_node_platform", lambda: ("darwin", "arm64"))
 
     archive = await sandbox_runtime._openclaw_archive(VERSION, X86_64_GLIBC)
@@ -418,7 +450,7 @@ async def test_a_host_no_pinned_node_runs_on_fails_instead_of_building(host, mon
     """A host of the sandbox's own build name that cannot run it (another C library), or one with no build."""
     name = f"node-v{SANDBOX_NODE_VERSION}-linux-x64.tar.gz"
     pins = {"linux-x64": _node_archive(host.cache / name, "linux-x64", node="#!/bin/sh\nexit 126\n")}
-    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", pins)
+    monkeypatch.setattr(sandbox_runtime, "_NODE_SHA256", {SANDBOX_NODE_VERSION: pins})
 
     def node_platform() -> tuple[str, str]:
         if host_platform is None:
@@ -486,9 +518,8 @@ async def test_seeding_publishes_the_runtime_and_leaves_the_task_untouched(task)
 
     assert sorted(os.listdir(task.runtime)) == ["node", "openclaw"]
     assert os.access(task.runtime / "node/bin/node", os.X_OK)
-    assert json.loads((task.runtime / "openclaw/node_modules/openclaw/package.json").read_text()) == {
-        "version": VERSION
-    }
+    package = json.loads((task.runtime / "openclaw/node_modules/openclaw/package.json").read_text())
+    assert package["version"] == VERSION
     assert _leftovers(task) == []
     assert _tree(task.workdir) == [] and _tree(task.home) == []
     # The packages' install scripts run in the sandbox, offline, with HOME in the setup directory.
@@ -543,6 +574,20 @@ async def test_a_failed_host_build_uploads_nothing(task, monkeypatch, failure, m
         await _upload(task)
 
     assert not task.runtime.exists() and _leftovers(task) == []
+
+
+@pytest.mark.sandbox
+async def test_a_listed_release_that_does_not_accept_the_pinned_node_is_refused_before_any_build(
+    task, monkeypatch
+) -> None:
+    monkeypatch.setattr(sandbox_runtime, "OPENCLAW_ENGINES_NODE", {VERSION: ">=26.1.0"})
+    monkeypatch.setattr(task.sandbox, "upload", AsyncMock(side_effect=AssertionError("nothing is uploaded")))
+
+    with pytest.raises(AgentSeedRejectedError, match=f"does not accept the Node.js {SANDBOX_NODE_VERSION}"):
+        await _upload(task)
+
+    assert not task.runtime.exists() and _leftovers(task) == []
+    assert _calls(task.log) == []
 
 
 @pytest.mark.sandbox
