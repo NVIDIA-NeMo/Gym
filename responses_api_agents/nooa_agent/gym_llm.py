@@ -216,6 +216,21 @@ def _portable_assistant_items(response: LLMResponse) -> list[dict[str, Any]]:
     return items
 
 
+def _responses_content_part(part: Any) -> Any:
+    """A part of a user message in Responses form.
+
+    NOOA attaches what a cell showed the model (``show(image)``) to the cell's output as Chat Completions parts.
+    Text and images have a Responses form; any other part is passed on as it is.
+    """
+    kind = part.get("type") if isinstance(part, Mapping) else None
+    if kind == "text":
+        return {"type": "input_text", "text": part["text"]}
+    if kind == "image_url":
+        image = part["image_url"]
+        return {"type": "input_image", "image_url": image["url"], "detail": image.get("detail", "auto")}
+    return part
+
+
 def _responses_input(
     messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
     gaps: list[ObservationGap] | None = None,
@@ -296,7 +311,10 @@ def _responses_input(
                     }
                 )
             continue
-        result.append(_dump(message))
+        item = _dump(message)
+        if item.get("role") == "user" and isinstance(item.get("content"), list):
+            item = {**item, "content": [_responses_content_part(part) for part in item["content"]]}
+        result.append(item)
     return result, "\n\n".join(instructions) or None
 
 
