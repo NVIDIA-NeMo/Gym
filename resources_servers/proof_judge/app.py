@@ -228,7 +228,6 @@ class ProofWithJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
-    # Force a 422 error if the problem is missing or empty.
     problem: str = Field(min_length=1)
 
 

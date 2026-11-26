@@ -4,6 +4,7 @@
 from asyncio import gather
 from unittest.mock import AsyncMock, MagicMock
 
+from pydantic import ValidationError
 from pytest import MonkeyPatch, mark, raises
 
 from nemo_gym.client import ServerClient
@@ -14,6 +15,7 @@ from resources_servers.proof_judge.app import (
     ProofWithJudgeResourcesServerConfig,
     ProofWithJudgeVerifyRequest,
 )
+from resources_servers.proof_judge.task_data import TaskData
 
 
 MINIMAL_RESPONSES_CREATE_PARAMS = {
@@ -179,11 +181,21 @@ class TestFailureContract:
         assert all(reward == (0.0 if zeroed else 0.25) for reward, _ in results)
         assert not server._incorrect_group_coordinators
 
-    @mark.parametrize("problem_kwargs", [{}, {"problem": ""}], ids=["missing", "empty"])
-    def test_problem_is_required_and_nonempty(self, problem_kwargs) -> None:
-        with raises(Exception):
-            ProofWithJudgeVerifyRequest(
-                responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
-                response=_make_response(VALID_POLICY_RESPONSE),
-                **problem_kwargs,
-            )
+    @mark.parametrize(
+        ("problem_kwargs", "error_type"),
+        [({}, "missing"), ({"problem": ""}, "string_too_short")],
+        ids=["missing", "empty"],
+    )
+    def test_problem_is_required_and_nonempty(self, problem_kwargs: dict, error_type: str) -> None:
+        request_kwargs = {
+            "responses_create_params": MINIMAL_RESPONSES_CREATE_PARAMS,
+            "response": _make_response(VALID_POLICY_RESPONSE),
+        }
+        # Dataset validation (TaskData) must reject exactly what /verify rejects.
+        for model, kwargs in ((ProofWithJudgeVerifyRequest, request_kwargs), (TaskData, {})):
+            with raises(ValidationError) as error:
+                model(**kwargs, **problem_kwargs)
+            assert [(e["loc"], e["type"]) for e in error.value.errors()] == [(("problem",), error_type)]
+
+    def test_task_data_keeps_other_task_fields(self) -> None:
+        assert TaskData(problem="Prove P.", source="textbook").model_extra == {"source": "textbook"}
