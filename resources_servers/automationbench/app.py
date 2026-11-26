@@ -40,10 +40,14 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
+from resources_servers.automationbench.determinism import deterministic_call, deterministic_world, new_record
 from resources_servers.automationbench.task_data import TaskData, TaskInfo
 
 
 LOG = logging.getLogger(__name__)
+
+# The episode state's live determinism record (`deterministic: true`); it advances with every tool call.
+DETERMINISM_KEY = "_determinism"
 
 # The scores /verify reports, in the order the benchmark's rubric computes them: task_completed_correctly reads the
 # partial_credit that partial_credit caches on the state.
@@ -71,6 +75,10 @@ class AutomationBenchResourcesServerConfig(BaseResourcesServerConfig):
     reward_fn: Literal["aa_headline", "partial_credit"] = "aa_headline"
     # Adds every assertion's verdict to the verify response (`assertion_results`).
     export_assertion_results: bool = False
+    # Seeded ids and a frozen clock per tool call (determinism.py), so replaying a captured trajectory reproduces
+    # its ids, timestamps and tool text. Prefix pass@K needs it; a row's `determinism` record, when it carries one,
+    # is the record its trajectory started from.
+    deterministic: bool = False
 
 
 class AutomationBenchVerifyRequest(BaseVerifyRequest):
@@ -106,19 +114,28 @@ def tool_env() -> Any:
     return AutomationBenchEnv(dataset=placeholder, rubric=vf.Rubric(), toolset="api")
 
 
-def new_world_state(info: Dict[str, Any]) -> Dict[str, Any]:
-    """The rubric's state for a fresh episode, built as upstream's ``AutomationBenchEnv.setup_state`` builds it."""
+def new_world_state(info: Dict[str, Any], determinism: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The rubric's state for a fresh episode, built as upstream's ``AutomationBenchEnv.setup_state`` builds it.
+
+    With a ``determinism`` record the world is built under it (call 0), and every later tool call runs under it.
+    """
     from automationbench.runner import compute_allowed_services, strip_none_values
     from automationbench.schema.world import WorldState
 
     info = copy.deepcopy(info)
     initial_state = strip_none_values(info.get("initial_state", {}))
     info["assertions"] = [strip_none_values(assertion) for assertion in info.get("assertions", [])]
-    world = WorldState(**initial_state)
+    state: Dict[str, Any] = {"info": info, "initial_state": copy.deepcopy(initial_state)}
+    if determinism is None:
+        world = WorldState(**initial_state)
+    else:
+        state[DETERMINISM_KEY] = dict(determinism)
+        world = deterministic_world(initial_state, state[DETERMINISM_KEY], state)
     world.meta.allowed_services = compute_allowed_services(
         initial_state, info.get("assertions", []), info.get("zapier_tools", [])
     )
-    return {"info": info, "world": world, "initial_state": copy.deepcopy(initial_state)}
+    state["world"] = world
+    return state
 
 
 def run_tool(tool_name: str, arguments: Any, state: Dict[str, Any]) -> str:
@@ -127,8 +144,12 @@ def run_tool(tool_name: str, arguments: Any, state: Dict[str, Any]) -> str:
     if not isinstance(arguments, dict):
         return f"Expected tool arguments to be a dict, got {type(arguments).__name__}: {arguments}"
     arguments = env.update_tool_args(tool_name, arguments, [], state)
+    record = state.get(DETERMINISM_KEY)
     try:
-        return str(env.tool_map[tool_name](**arguments))
+        if record is None:
+            return str(env.tool_map[tool_name](**arguments))
+        with deterministic_call(record, state):
+            return str(env.tool_map[tool_name](**arguments))
     except Exception as error:
         return f"{error}"
 
@@ -182,8 +203,14 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
         # A seed without the params (a caller that does not send them) cannot be checked, and is served.
         if body.responses_create_params is not None and not body.responses_create_params.tools:
             raise ResourcesSeedRejectedError(NO_TOOLS_REASON)
+        determinism = None
+        if self.config.deterministic:
+            if body.determinism is not None:
+                determinism = body.determinism.model_dump()
+            else:
+                determinism = new_record(body.task_id)
         try:
-            state = new_world_state(body.info.model_dump())
+            state = new_world_state(body.info.model_dump(), determinism)
         except ValidationError as error:
             # No retry can build this world: refuse the seed (422) instead of failing it with a 500 the Environment
             # Server would dispatch again.

@@ -31,6 +31,16 @@ class TaskInfo(BaseModel):
     )
 
 
+class DeterminismRecord(BaseModel):
+    """Where a deterministic episode's ids and clock start (resources_servers/automationbench/determinism.py)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    seed: str = Field(description="Hex seed of the episode's `random` state, which also draws its uuid4s.")
+    clock_base: str = Field(description="ISO time the clock is frozen at for call 0; call n sees it plus n seconds.")
+    calls: int = Field(default=0, description="Calls already made; a captured trajectory's record starts at 0.")
+
+
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -41,6 +51,12 @@ class TaskData(BaseModel):
     info: TaskInfo = Field(
         description="The upstream task, as verifiers' AutomationBench environment receives it.",
         json_schema_extra={"consumed_by": ["verify"]},
+    )
+
+    determinism: DeterminismRecord | None = Field(
+        default=None,
+        description="With the server's `deterministic: true`, the record the episode starts from; rows without one "
+        "are seeded from `task_id`. Prefix pass@K rows carry their trajectory's record so the replay reproduces it.",
     )
 
     # Read only by config_legacy_agent.yaml's verifiers_agent.

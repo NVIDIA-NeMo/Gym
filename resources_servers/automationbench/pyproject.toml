@@ -12,6 +12,8 @@ dependencies = [
     "automationbench-env",
     # tool_env() builds its placeholder dataset with it.
     "datasets",
+    # deterministic: true freezes the clock per tool call (determinism.py).
+    "time-machine>=2.16.0",
 ]
 
 [tool.uv]
