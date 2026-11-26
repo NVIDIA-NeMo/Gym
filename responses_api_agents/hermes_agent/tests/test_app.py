@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from nemo_gym.agents import (
     AGENT_SESSION_COOKIE_KEY,
@@ -142,6 +143,21 @@ class TestSanity:
             "threshold": 0.5,
             "threshold_tokens": threshold_tokens,
         }
+
+    def test_model_call_stale_timeout_is_written_for_the_custom_provider(self) -> None:
+        agent = HermesAgent(
+            config=_config(model_call_stale_timeout_seconds=1800), server_client=MagicMock(spec=ServerClient)
+        )
+        assert yaml.safe_load(agent._build_config())["providers"] == {"custom": {"stale_timeout_seconds": 1800.0}}
+
+    def test_provider_tuning_is_left_to_hermes_without_a_model_call_stale_timeout(self) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        assert "providers" not in yaml.safe_load(agent._build_config())
+
+    @pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])
+    def test_model_call_stale_timeout_must_be_a_positive_finite_number(self, seconds) -> None:
+        with pytest.raises(ValidationError):
+            _config(model_call_stale_timeout_seconds=seconds)
 
     def test_model_stays_a_name_without_context_length(self) -> None:
         agent = HermesAgent(config=_config(model="policy"), server_client=MagicMock(spec=ServerClient))
