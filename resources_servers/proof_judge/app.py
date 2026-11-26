@@ -315,10 +315,11 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
         if not self.config.zero_reward_incorrect_groups:
             return reward, details
 
-        if details.get("mask_sample"):
-            verifier_reward = None
-        else:
+        # None marks a proof the verifier did not score. A row masked for its meta-verifier reply keeps its r_y.
+        if details.get("r_y_measured", True):
             verifier_reward = float(details["r_y"]) if "r_y" in details else 0.0
+        else:
+            verifier_reward = None
         coordinator = self._incorrect_group_coordinators[problem]
         coordinator.verifier_rewards.append(verifier_reward)
 
@@ -511,7 +512,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
                 "verifier_response": verifier_response,
             }
             if r_y_score is None:
-                details |= _unparseable_verdict("verifier", verifier_response, mask_sample=True)
+                details |= _unparseable_verdict("verifier", verifier_response, r_y_measured=False)
             return alpha * r_y, details
 
         assert meta_result is not None
@@ -529,19 +530,20 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
             "verifier_response": verifier_response,
             "meta_response": meta_response,
         }
+        # The reward needs both scores: with either one missing it is not a measurement, so the row is masked at 0.
         if r_y_score is None:
-            details |= _unparseable_verdict("verifier", verifier_response, mask_sample=True)
-        elif r_meta_score is None:
-            # r_y measured the proof; only the meta term is missing, so the reward is still evidence.
-            details |= _unparseable_verdict("meta-verifier", meta_response, mask_sample=False)
+            return 0.0, details | _unparseable_verdict("verifier", verifier_response, r_y_measured=False)
+        if r_meta_score is None:
+            return 0.0, details | _unparseable_verdict("meta-verifier", meta_response, r_y_measured=True)
         return alpha * r_y + beta * r_z, details
 
 
-def _unparseable_verdict(judge: str, reply: str, *, mask_sample: bool) -> dict[str, Any]:
+def _unparseable_verdict(judge: str, reply: str, *, r_y_measured: bool) -> dict[str, Any]:
     return {
         "failure_kind": JUDGE_UNPARSEABLE,
         "failure_reason": f"{judge} replied without a boxed score: {reply[:200]!r}",
-        "mask_sample": mask_sample,
+        "mask_sample": True,
+        "r_y_measured": r_y_measured,
     }
 
 

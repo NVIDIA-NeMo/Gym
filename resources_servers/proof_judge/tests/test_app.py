@@ -115,19 +115,20 @@ class TestFailureContract:
         assert judge.await_count == judge_calls
 
     @mark.parametrize(
-        ("verifier_reply", "meta_reply", "reward", "mask_sample", "failure_kind", "named_judge"),
+        ("self_score", "verifier_reply", "meta_reply", "reward", "mask_sample", "failure_kind", "named_judge"),
         [
             # Both scores parsed: r_y=1, r_meta=1 -> alpha*1 + beta*(1-|1-1|)*1.
-            ("\\boxed{1}", "\\boxed{1}", 1.0, False, None, None),
-            # Only the meta score is missing: r_y still measured the proof, so the reward is degraded but valid.
-            ("\\boxed{1}", "No score here.", 0.5, False, JUDGE_UNPARSEABLE, "meta-verifier"),
-            # The primary verdict is missing: nothing measured the proof, so the sample is masked.
-            ("No score here.", "\\boxed{1}", 0.0, True, JUDGE_UNPARSEABLE, "verifier"),
+            (1, "\\boxed{1}", "\\boxed{1}", 1.0, False, None, None),
+            # The meta score is missing: the verifier term alone (0.5) is not the reward, so the sample is masked.
+            (1, "\\boxed{1}", "No score here.", 0.0, True, JUDGE_UNPARSEABLE, "meta-verifier"),
+            # The verifier score is missing: the meta term alone (0.5 at a self-score of 0) is not the reward either.
+            (0, "No score here.", "\\boxed{1}", 0.0, True, JUDGE_UNPARSEABLE, "verifier"),
         ],
     )
-    async def test_meta_verifier_degrades_without_masking(
+    async def test_a_missing_score_from_either_judge_masks_the_sample(
         self,
         monkeypatch: MonkeyPatch,
+        self_score: int,
         verifier_reply: str,
         meta_reply: str,
         reward: float,
@@ -140,8 +141,9 @@ class TestFailureContract:
             return (meta_reply, 3) if "Confident." in prompt else (verifier_reply, 7)
 
         monkeypatch.setattr(ProofWithJudgeResourcesServer, "_call_judge", judge)
+        policy_text = VALID_POLICY_RESPONSE.replace("\\boxed{1}", f"\\boxed{{{self_score}}}")
 
-        result = await _make_server(alpha=0.5, beta=0.5).verify(_make_body())
+        result = await _make_server(alpha=0.5, beta=0.5).verify(_make_body(response_text=policy_text))
 
         assert result.reward == reward
         assert result.mask_sample is mask_sample
@@ -152,23 +154,47 @@ class TestFailureContract:
             assert result.failure_reason.startswith(f"{named_judge} replied without a boxed score")
 
     @mark.parametrize(
-        ("member_details", "zeroed"),
+        ("member_replies", "zeroed"),
         [
-            # Two measured zeros: the group is all-incorrect.
-            ([{"r_y": 0.0}, {"r_y": 0.0}], True),
-            # A masked verdict beside a measured zero: the measured evidence still says all-incorrect.
-            ([{"r_y": 0.0, "mask_sample": True}, {"r_y": 0.0}], True),
-            # A masked verdict beside a measured pass: not all-incorrect.
-            ([{"r_y": 0.0, "mask_sample": True}, {"r_y": 1.0}], False),
-            # Nothing measured: a masked zero is not evidence, so the group is not declared incorrect.
-            ([{"r_y": 0.0, "mask_sample": True}, {"r_y": 0.0, "mask_sample": True}], False),
+            # Two scored zeros: the group is all-incorrect.
+            ([("\\boxed{0}", "\\boxed{1}"), ("\\boxed{0}", "\\boxed{1}")], True),
+            # An unscored proof beside a scored zero: the scored evidence still says all-incorrect.
+            ([("No score here.", "\\boxed{1}"), ("\\boxed{0}", "\\boxed{1}")], True),
+            # An unscored proof beside a scored pass: not all-incorrect.
+            ([("No score here.", "\\boxed{1}"), ("\\boxed{1}", "\\boxed{1}")], False),
+            # No proof was scored, so the group is not declared incorrect.
+            ([("No score here.", "\\boxed{1}"), ("No score here.", "\\boxed{1}")], False),
+            # A member masked for its meta-verifier reply still has a verifier score: its zero is evidence,
+            ([("\\boxed{0}", "No score here."), ("No score here.", "\\boxed{1}")], True),
+            # and so is its pass.
+            ([("\\boxed{1}", "No score here."), ("\\boxed{0}", "\\boxed{1}")], False),
         ],
-        ids=["both_measured_zero", "masked_and_zero", "masked_and_pass", "all_masked"],
+        ids=[
+            "both_scored_zero",
+            "unscored_and_zero",
+            "unscored_and_pass",
+            "all_unscored",
+            "meta_masked_zero",
+            "meta_masked_pass",
+        ],
     )
-    async def test_masked_verdicts_are_not_evidence_for_zeroing_the_group(
-        self, member_details: list[dict], zeroed: bool
+    async def test_unscored_proofs_are_not_evidence_for_zeroing_the_group(
+        self, monkeypatch: MonkeyPatch, member_replies: list[tuple[str, str]], zeroed: bool
     ) -> None:
-        server = _make_server(zero_reward_incorrect_groups=True, expected_group_size=len(member_details))
+        replies: dict[str, str] = {}
+
+        async def judge(_self, prompt: str) -> tuple[str, int]:
+            # Only the meta-verifier prompt carries the policy's self-analysis.
+            return (replies["meta"], 3) if "Confident." in prompt else (replies["verifier"], 7)
+
+        monkeypatch.setattr(ProofWithJudgeResourcesServer, "_call_judge", judge)
+        server = _make_server(
+            alpha=0.5, beta=0.5, zero_reward_incorrect_groups=True, expected_group_size=len(member_replies)
+        )
+        member_details = []
+        for verifier_reply, meta_reply in member_replies:
+            replies.update(verifier=verifier_reply, meta=meta_reply)
+            member_details.append((await server._judge_single("Prove P.", VALID_POLICY_RESPONSE))[1])
 
         results = await gather(
             *(
