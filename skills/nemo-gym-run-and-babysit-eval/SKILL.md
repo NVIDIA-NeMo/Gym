@@ -187,8 +187,19 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   srun args if it needs a partition or QOS, and `NEMO_GYM_REMOTE_READER_TIMEOUT_S` raises its time bound
   (300 to 14400 s; by default it grows with the size of the rollout files). A big store needs memory
   (`--mem=<size>` in `NEMO_GYM_REMOTE_READER_SRUN`; on a login node the reader ends with `MemoryError`) and more
-  time than a tool call that is cut at about 10 minutes allows: start the inspect or the recovery detached
-  (`setsid nohup <command> > <log> 2>&1 &`) and poll the log. If a large-store reader still stalls or times out
+  time than a tool call that is cut at about 10 minutes allows. Gym stops a reader when the process that started it
+  ends, so do not start the inspect or the recovery detached on a machine or container that can go away (`setsid
+  nohup`, `&`): the read dies with it. Run it as a CPU batch job on the cluster: the job installs the Gym CLI at the
+  run's launcher commit on the node's local disk and runs the same command with
+  `NEMO_GYM_REMOTE_READER_SRUN="--jobid=$SLURM_JOB_ID --overlap"`, so the readers run as steps of that job, in its
+  memory. Give it the time of the collector and two reader bounds plus the install, and never shorten it: a read
+  cut short starts over. On a shared account, take a CPU QOS with a free node, so the job does not hold back a
+  benchmark's CPU services. A recovery passes `--judge-partition` and `--judge-qos` (they are refused with
+  `--inspect`), since that variable names no partition for a judge-only job. Before the command, unset the
+  install's own settings (for example `UV_PYTHON_PREFERENCE` and the uv cache and Python paths) and the job's own
+  `SLURM_*`, `SRUN_*` and `SBATCH_*` variables except `SLURM_CONF`. For a run submitted from the cluster's login
+  node (`hostname` null in `gym-job.json`), Gym's `sbatch` runs inside the batch job and passes them on to the jobs
+  it submits. Read the JSON line from the job's log. If a large-store reader still stalls or times out
   after one retry with the 14400 s bound and more memory, report the store size, command and reader diagnostics
   as a suspected Gym reader issue, and say the run is blocked on the reader. If inspection reports "saved rows
   are unreadable", check the named files' read permissions and storage errors before attributing the failure
