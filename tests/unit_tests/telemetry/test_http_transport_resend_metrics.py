@@ -7,7 +7,14 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from aiohttp import ClientConnectorError, ClientOSError, ClientTimeout, ServerDisconnectedError, ServerTimeoutError
+from aiohttp import (
+    ClientConnectionResetError,
+    ClientConnectorError,
+    ClientOSError,
+    ClientTimeout,
+    ServerDisconnectedError,
+    ServerTimeoutError,
+)
 
 import nemo_gym.client.http_client
 from nemo_gym.client.http_client import HTTP_TRANSPORT_RESEND_COUNT_SPAN_ATTRIBUTE
@@ -18,6 +25,17 @@ from tests.unit_tests.telemetry.conftest import requires_lens
 
 REASON = gym_metrics.HTTP_RESEND_REASON_ATTRIBUTE
 SERVER = gym_metrics.HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE
+
+
+def _connector_error(code: int, message: str) -> ClientConnectorError:
+    return ClientConnectorError(SimpleNamespace(ssl=None, host="gym", port=80), OSError(code, message))
+
+
+def _reset_during_body_write() -> ClientOSError:
+    # As aiohttp raises it when the connection closes while it writes the request body.
+    error = ClientOSError(None, "Cannot write request body")
+    error.__cause__ = ClientConnectionResetError("Cannot write to closing transport")
+    return error
 
 
 @pytest.fixture
@@ -64,13 +82,33 @@ def _install_transport(monkeypatch: pytest.MonkeyPatch, outcomes: list[Any]) -> 
 @pytest.mark.parametrize(
     ("failure", "reason"),
     [
-        (ServerDisconnectedError(), "server_disconnected"),
-        (ClientOSError(), "client_os_error"),
-        (asyncio.TimeoutError(), "timeout"),
-        (ServerTimeoutError(), "timeout"),
+        (ServerDisconnectedError(), "transport_peer_drop"),
+        (ClientOSError(errno.ECONNRESET, "Connection reset by peer"), "transport_peer_drop"),
+        (ClientConnectionResetError("Cannot write to closing transport"), "transport_peer_drop"),
+        (_reset_during_body_write(), "transport_peer_drop"),
+        (_connector_error(errno.ECONNREFUSED, "Connection refused"), "transport_unreachable"),
+        (_connector_error(errno.EMFILE, "Too many open files"), "transport_local_resource"),
+        (ClientOSError(errno.EADDRNOTAVAIL, "Cannot assign requested address"), "transport_local_resource"),
+        (ClientOSError(), "other"),
+        (ClientOSError([], "connector detail"), "other"),
+        (asyncio.TimeoutError(), "transport_timeout"),
+        (ServerTimeoutError(), "transport_timeout"),
         (RuntimeError("boom"), "other"),
     ],
-    ids=["disconnect", "os error", "asyncio timeout", "aiohttp timeout", "other"],
+    ids=[
+        "disconnect",
+        "reset",
+        "closing transport",
+        "reset during body write",
+        "refused",
+        "out of descriptors",
+        "out of ports",
+        "os error without errno",
+        "os error with a non-numeric errno",
+        "asyncio timeout",
+        "aiohttp timeout",
+        "other",
+    ],
 )
 async def test_a_retry_is_counted_by_why_the_previous_attempt_failed(
     collected_metrics, monkeypatch: pytest.MonkeyPatch, failure: Exception, reason: str
@@ -109,7 +147,7 @@ async def test_every_timed_out_attempt_is_counted_retried_or_not(
     metrics = collected_metrics()
     assert metrics[gym_metrics.HTTP_TIMEOUT_INSTRUMENT] == {frozenset({(SERVER, "judge")}): 2}
     assert metrics[gym_metrics.HTTP_TRANSPORT_RESEND_INSTRUMENT] == {
-        frozenset({(REASON, "timeout"), (SERVER, "judge")}): 1
+        frozenset({(REASON, "transport_timeout"), (SERVER, "judge")}): 1
     }
 
 
@@ -131,7 +169,7 @@ async def test_an_os_level_timeout_is_counted_as_a_timeout(
     metrics = collected_metrics()
     assert metrics[gym_metrics.HTTP_TIMEOUT_INSTRUMENT] == {frozenset({(SERVER, "judge")}): 1}
     assert metrics[gym_metrics.HTTP_TRANSPORT_RESEND_INSTRUMENT] == {
-        frozenset({(REASON, "timeout"), (SERVER, "judge")}): 1
+        frozenset({(REASON, "transport_timeout"), (SERVER, "judge")}): 1
     }
 
 
@@ -198,8 +236,8 @@ async def test_each_retry_is_counted_by_the_failure_just_before_it(
     await nemo_gym.client.http_client._request_with_retries("POST", "http://gym/run", _server_name="policy_model")
 
     assert collected_metrics()[gym_metrics.HTTP_TRANSPORT_RESEND_INSTRUMENT] == {
-        frozenset({(REASON, "server_disconnected"), (SERVER, "policy_model")}): 1,
-        frozenset({(REASON, "timeout"), (SERVER, "policy_model")}): 1,
+        frozenset({(REASON, "transport_peer_drop"), (SERVER, "policy_model")}): 1,
+        frozenset({(REASON, "transport_timeout"), (SERVER, "policy_model")}): 1,
     }
 
 

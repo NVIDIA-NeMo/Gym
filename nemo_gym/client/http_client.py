@@ -51,6 +51,12 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
+from nemo_gym.core.failure_kinds import (
+    TRANSPORT_LOCAL_RESOURCE,
+    TRANSPORT_PEER_DROP,
+    TRANSPORT_TIMEOUT,
+    TRANSPORT_UNREACHABLE,
+)
 from nemo_gym.core.failure_transport import (
     FailureHeader,
     observe_reply,
@@ -750,6 +756,25 @@ def _is_timeout(error: BaseException) -> bool:
     return False
 
 
+# Exhaustion on this host (descriptors, buffers, ephemeral ports), not a fault of the destination.
+_LOCAL_RESOURCE_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM, errno.EADDRNOTAVAIL})
+_PEER_DROP_ERRNOS = frozenset({errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE})
+
+
+def _os_error_resend_reason(error: BaseException) -> str:
+    """The shared transport failure name for an OS-level error that is not a timeout, else ``other``."""
+    # aiohttp wraps a reset during the body write as a ClientOSError without an errno, the reset as its cause.
+    candidates = (error, getattr(error, "os_error", None), error.__cause__)
+    codes = {code for candidate in candidates if type(code := getattr(candidate, "errno", None)) is int}
+    if codes & _LOCAL_RESOURCE_ERRNOS:
+        return TRANSPORT_LOCAL_RESOURCE
+    if codes & _PEER_DROP_ERRNOS or any(isinstance(candidate, ConnectionResetError) for candidate in candidates):
+        return TRANSPORT_PEER_DROP
+    if isinstance(error, ClientConnectorError):
+        return TRANSPORT_UNREACHABLE
+    return "other"
+
+
 def _request_upload_complete(upload: UploadTracker | None) -> bool | None:
     """Whether the one observed HTTP attempt finished sending its body, including EOF.
 
@@ -842,7 +867,7 @@ async def _request_with_retries(
                     await response.read()
                 return response
             except ServerDisconnectedError as error:
-                resend_reason = "server_disconnected"
+                resend_reason = TRANSPORT_PEER_DROP
                 if _on_transport_failure is not None:
                     _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect:
@@ -874,8 +899,10 @@ async def _request_with_retries(
                     _on_transport_failure(error, _request_upload_complete(upload))
                 timed_out = isinstance(error, ConnectionTimeoutError)
                 # aiohttp wraps an OS-level ETIMEDOUT (a connect or socket timeout) as a ClientOSError.
-                resend_reason = "timeout" if timed_out or _is_timeout(error) else "client_os_error"
-                if resend_reason == "timeout":
+                resend_reason = (
+                    TRANSPORT_TIMEOUT if timed_out or _is_timeout(error) else _os_error_resend_reason(error)
+                )
+                if resend_reason == TRANSPORT_TIMEOUT:
                     record_http_timeout(server_name=destination)
                 if timed_out and window is not None and window.expired():
                     # The connect cap set from the window ran out: report the connection error it stood for.
@@ -906,8 +933,8 @@ async def _request_with_retries(
                 await asyncio.sleep(_connection_backoff_s(window))
             except Exception as e:
                 # aiohttp's ServerTimeoutError is a TimeoutError too.
-                resend_reason = "timeout" if isinstance(e, TimeoutError) else "other"
-                if resend_reason == "timeout":
+                resend_reason = TRANSPORT_TIMEOUT if isinstance(e, TimeoutError) else _os_error_resend_reason(e)
+                if resend_reason == TRANSPORT_TIMEOUT:
                     record_http_timeout(server_name=destination)
                 if _on_transport_failure is not None:
                     _on_transport_failure(e, _request_upload_complete(upload))

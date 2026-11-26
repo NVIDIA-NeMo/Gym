@@ -399,7 +399,7 @@ here.
 
 | Metric | Attributes | Meaning |
 | --- | --- | --- |
-| `gym.http.transport_resend_total` | `nemo.gym.http.resend_reason`, destination | One attempt sent again, counted when the next attempt starts, so a request that gives up adds nothing for its last failure. The reason is why the previous attempt failed: `server_disconnected`, `client_os_error`, `timeout` or `other`. |
+| `gym.http.transport_resend_total` | `nemo.gym.http.resend_reason`, destination | One attempt sent again, counted when the next attempt starts, so a request that gives up adds nothing for its last failure. The reason is why the previous attempt failed, in the shared transport failure names: `transport_peer_drop` (the connection was dropped or reset), `transport_unreachable` (the connection could not be made), `transport_timeout`, `transport_local_resource` (this host ran out of descriptors, buffers or ports), or `other`. |
 | `gym.http.timeout_total` | destination | One attempt that timed out, whether it was sent again or not. |
 
 A timeout includes an OS-level connect or socket timeout that aiohttp reports as a connection error. The client sees

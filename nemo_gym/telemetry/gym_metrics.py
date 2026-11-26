@@ -193,7 +193,8 @@ HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.qu
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
 HTTP_TRANSPORT_RESEND_INSTRUMENT = "gym.http.transport_resend_total"
 HTTP_TIMEOUT_INSTRUMENT = "gym.http.timeout_total"
-# Why the previous attempt failed: server_disconnected, client_os_error, timeout or other.
+# Why the previous attempt failed, in the shared transport failure names (nemo_gym.core.failure_kinds):
+# transport_peer_drop, transport_unreachable, transport_timeout or transport_local_resource; else other.
 HTTP_RESEND_REASON_ATTRIBUTE = "nemo.gym.http.resend_reason"
 RUN_METRIC_PREFIX = "gym.run."
 RUN_ID_ATTRIBUTE = "nemo.gym.run.id"
