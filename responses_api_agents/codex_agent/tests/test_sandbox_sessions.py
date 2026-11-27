@@ -1542,7 +1542,8 @@ CODEX_0172_HIGH_DEMAND = "We’re currently experiencing high demand, which may 
 
 
 @pytest.mark.parametrize(
-    "condition", ["completed", "timed-out", "output-cap", "model-error", "failed-exit", "in-turn", "other-notice"]
+    "condition",
+    ["completed", "timed-out", "output-cap", "model-error", "failed-exit", "in-turn", "other-notice", "changed-text"],
 )
 def test_multi_agent_deprecation_notice_is_a_warning_or_returns_to_the_errors(setup, condition) -> None:
     agent, sandbox = setup
@@ -1566,6 +1567,11 @@ def test_multi_agent_deprecation_notice_is_a_warning_or_returns_to_the_errors(se
     elif condition == "other-notice":
         notice = CODEX_0172_LEGACY_LANDLOCK_DEPRECATION
         transcript[1:3] = [{"type": "item.completed", "item": {"id": "item_0", "type": "error", "message": notice}}]
+    elif condition == "changed-text":
+        # The notice names the same key and ends with one more sentence, so it is an error.
+        notice += " The key is ignored."
+        for event in transcript[1:3]:
+            event["item"] = {**event["item"], "message": notice}
     # The response's status and error message of each run that keeps the notice as a warning.
     kept = {
         "completed": ("completed", None),
@@ -1598,7 +1604,7 @@ def test_multi_agent_deprecation_notice_is_a_warning_or_returns_to_the_errors(se
         assert [gap["code"] for gap in observations["gaps"]].count("model_metadata_fallback") == 1
         assert observations["records"][0]["status"] == status
     else:
-        # A notice that was set aside before the turn is among the errors again.
+        # Each notice is among the errors, also one that was set aside before the turn.
         assert body["detail"].count(notice) == (1 if condition == "other-notice" else 2)
         assert not notices
         assert observations["records"][0]["status"] == "failed"
