@@ -268,6 +268,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "qwen_code_agent",
         "simple_agent",
         "simple_strands_agent",
+        "spatialclaw_agent",
         "stirrup_agent",
         "terminus_2_agent",
         "terminus_2_sandboxed_agent",

@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Explicit local development execution, matching the native resource kernel's
+# shared-filesystem contract. LocalProvider does not provide isolation.
+spatialclaw_harness_sandbox:
+  local:
+    concurrency: 1
+
+spatialclaw_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      resources_server: null
+      num_workers: 1
+      opencode_version: 1.17.11
+      image_input: true
+      context_window: 131072
+      timeout: 1800
+      mcp_tool_timeout_seconds: 1800
+      max_output_tokens: ${oc.env:SPATIALCLAW_MAX_OUTPUT_TOKENS,16384}
+      sandbox_provider: null
+      network_access: inherit
+      sandbox_model_id: ${policy_model_name}
+      system_prompt: >-
+        Solve the provided SpatialClaw question using the benchmark's granted
+        get_context and execute tools. Call get_context before reasoning about
+        the media; follow its native system instructions, image mappings and
+        execution protocol. The execute tool runs Python in one persistent
+        benchmark kernel. Use InputImages, RefImages, Metadata, tools, vlm and
+        show there. Submit the answer by executing ReturnAnswer(value).
+        The benchmark grades only that explicit submission. Built-in host tools,
+        other agents and web access are not part of this task.
+      opencode_config:
+        compaction:
+          auto: false
+        agent:
+          build:
+            steps: 30
+        # No inherited host-tool permission map; later matching rules win.
+        permission:
+          '*': deny
+          '*_get_context': allow
+          '*_execute': allow
+
+# Native base template is unused when all benchmark agents inherit OpenCode.
+spatialclaw_agent: null

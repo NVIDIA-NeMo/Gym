@@ -309,6 +309,7 @@ def test_default_hermes_composes_with_exactly_one_session_environment(tmp_path: 
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
+        "spatialclaw_agent",
         "kilocode_agent",
         "claude_code_agent",
         "cline_agent",

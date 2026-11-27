@@ -1,0 +1,25 @@
+spatialclaw_resources_server:
+  resources_servers:
+    spatialclaw:
+      entrypoint: app.py
+      num_workers: 1
+      expose_tools_over_mcp: true
+      allowed_agents: [spatialclaw_agent, opencode_agent]
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}
+      model_config_path: ${oc.env:SPATIALCLAW_MODEL_CONFIG,null}
+      gpu_server_registry: ${oc.env:SPATIALCLAW_GPU_SERVER_REGISTRY,null}
+      workspace_root: ${oc.env:SPATIALCLAW_RESOURCE_WORKSPACE_ROOT,outputs/spatialclaw_resources}
+      frame_cache_root: ${oc.env:SPATIALCLAW_FRAME_CACHE_ROOT,outputs/spatialclaw_frame_cache}
+      domain: other
+      verified: false
+      description: Score prepared rows with the pinned SpatialClaw benchmark evaluator.
+      value: Preserve SpatialClaw-native extraction and aggregate metrics in NeMo Gym.
+      spatialclaw_url: ${oc.env:SPATIALCLAW_SOURCE_URL,""}
+      spatialclaw_commit: ${oc.env:SPATIALCLAW_COMMIT,""}
+      spatialclaw_root: ${oc.env:SPATIALCLAW_ROOT,null}
+      source_cache_root: null
+      dataset_config: ???
+      data_root: ${oc.env:SPATIALCLAW_DATA_ROOT,null}
