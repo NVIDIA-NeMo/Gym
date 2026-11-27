@@ -1,0 +1,174 @@
+---
+title: "BenchCAD"
+description: "Evaluate CAD generation, editing, and numeric QA with single-turn inference or OpenCode and native BenchCAD scoring."
+---
+
+# BenchCAD
+
+[BenchCAD](https://github.com/BenchCAD/BenchCAD-main) evaluates parametric CAD
+generation and understanding. Gym's `benchcad_agent` supports one direct model
+response or the sandboxed OpenCode harness. Both modes use the upstream prompts,
+answer extraction, and scorers. No judge model is required.
+
+| Task | Model input | Reward |
+| --- | --- | --- |
+| `vision2code` | Canonical four-view render | Voxel IoU |
+| `codeedit` | Original CadQuery code and edit instruction | Normalized IoU improvement |
+| `vision_qa` | Dataset image and numeric questions | Mean type-aware numeric accuracy |
+| `code_qa` | CadQuery code and numeric questions | Mean type-aware numeric accuracy |
+
+Rewards retain their native fractional values. Count and boolean questions use
+exact equality; dimensional and ratio questions use sign-aware symmetric ratio
+accuracy. CodeEdit uses the upstream baseline IoU and clips improvement to [0, 1].
+
+The integration pins upstream commit `77fd16a80a4e5fc39964ee23b6cc3225beefac8f`,
+dataset revision `5919f578ab09ec283603a082fab07c7639ab56eb`, and OpenCode `1.17.11`.
+Code is MIT licensed upstream; the [dataset](https://huggingface.co/datasets/BenchCAD/BenchCAD)
+is CC BY 4.0, attributed to the BenchCAD authors in the preparation manifest.
+
+## Prepare data and the CAD environment
+
+Run from the Gym repository root with Gym installed. Preparation needs `git`,
+`uv`, network access to GitHub and Hugging Face, and Python 3.12. The CAD stack
+uses a separate Python environment because its NumPy dependency does not support
+Gym's Python 3.13. Its pins match upstream's CAD stack, with the upstream ARM
+Dockerfile's `nlopt==2.11.0` compatibility adjustment.
+
+```bash
+# Start with one part per task.
+python -m benchmarks.benchcad.prepare --limit 1
+
+# Select task variants explicitly, or omit --limit for the full dataset.
+python -m benchmarks.benchcad.prepare --tasks code_qa codeedit --limit 5
+
+# Full preparation includes all four tasks and renders Vision2Code references.
+gym eval prepare --config benchmarks/benchcad/config.yaml
+```
+
+Preparation reuses the upstream data conversion scripts. It creates
+`benchmarks/benchcad/data/benchcad_benchmark.jsonl`, individual task JSONLs,
+private reference assets, and a manifest recording actual part counts and
+source revisions. Full Vision2Code preparation executes the ground-truth CAD
+programs and renders their canonical 524×524 inputs; this is substantial CPU
+work. It does not substitute Hugging Face's low-resolution preview images.
+
+The upstream Vision2Code downloader can skip ground-truth programs that fail to
+execute. Inspect preparation counts before reporting a full benchmark result.
+QA has one rollout per part, with all questions for that part in the prompt.
+The committed `example.jsonl` contains five Code-QA parts; prepare their private
+assets with `python -m benchmarks.benchcad.prepare --tasks code_qa --limit 5`
+before running that file.
+
+## Build the CAD sandbox
+
+```bash
+docker build -f benchmarks/benchcad/Dockerfile -t benchcad-opencode:77fd16a .
+```
+
+The image includes OpenCode, Python 3.12, and the CAD libraries. It excludes the
+upstream task data. OpenCode mode starts an agent sandbox containing only allowed
+images; the model opens them using its `read` tool. Single-turn mode sends images
+directly to the model and starts no agent sandbox or OpenCode process. Both modes
+execute predicted CAD code in a fresh scoring sandbox. Numeric QA needs no
+sandbox in single-turn mode. Reference geometry and QA answers stay in the
+trusted scoring process.
+
+The configuration uses Gym's Docker provider. The task image is separate from
+the model inference runtime. Do not mount reference data into task containers.
+
+## Single-turn evaluation without a harness
+
+Single-turn mode makes one model request with no tools or iterative feedback.
+Prepared datasets and private assets work with both modes, including datasets
+prepared before single-turn support. The adapter removes the exact OpenCode
+instruction suffix from prepared prompts and attaches the allowed PNG images as
+Responses API `input_image` parts. The upstream task text is preserved. Custom
+prompts without that suffix are passed through.
+
+Set `policy_base_url`, `policy_api_key`, and `policy_model_name` in your local
+`env.yaml`. The endpoint must support images for the vision tasks.
+
+```bash
+gym env start --config benchmarks/benchcad/single_turn.yaml --model-type vllm_model
+
+gym eval run --no-serve --agent benchcad_agent \
+  --input benchmarks/benchcad/data/benchcad_benchmark.jsonl \
+  --output results/benchcad-single-turn/rollouts.jsonl \
+  --num-repeats 1 --concurrency 4
+```
+
+There is no separate output cap by default (`single_turn_max_output_tokens: null`).
+To add one, set `--max-output-tokens` or `single_turn_max_output_tokens`; the budget
+includes reasoning. Leave both unset to use the endpoint's remaining context.
+`single_turn_timeout` defaults to 3,600 seconds. For a 65,536-token context window,
+start the vLLM endpoint with `--max-model-len 65536 --generation-config vllm`.
+The second flag prevents a checkpoint generation config from adding an output cap.
+This window includes both input and output tokens; `--max-output-tokens` controls
+only the output budget.
+`opencode_max_context_window` is unused in single-turn mode.
+The endpoint image limit only needs to accommodate the task input images.
+No cropped images or generated renders are fed back to the model.
+
+The model response is scored once. Output-budget exhaustion (`output_limit`),
+other incomplete responses (`model_incomplete`), model timeouts (`model_timeout`),
+and unexpected tool calls (`unexpected_tool_call`) score zero. Model-service and
+scoring-infrastructure errors are masked. A scorer timeout is an infrastructure
+error, separate from the model generation budget.
+
+## OpenCode evaluation
+
+Serve the checkpoint using a compatible inference runtime with tool calling and,
+for the vision tasks, image input. Set `policy_base_url`, `policy_api_key`, and
+`policy_model_name` in your local `env.yaml`. Match the agent's
+`opencode_max_context_window` to the endpoint's context limit; the benchmark
+configuration defaults to 131,072 tokens. Start evaluation after the model
+endpoint is ready.
+
+```bash
+gym env start --config benchmarks/benchcad/config.yaml --model-type vllm_model
+
+gym eval run --no-serve --agent benchcad_agent \
+  --input benchmarks/benchcad/data/benchcad_benchmark.jsonl \
+  --output results/benchcad/rollouts.jsonl \
+  --num-repeats 1 --concurrency 4
+```
+
+Use `--input benchmarks/benchcad/data/code_qa.jsonl` to evaluate an individual
+task variant. Context size, maximum agent steps, timeouts, and concurrency are
+configurable in `benchmarks/benchcad/config.yaml`.
+
+OpenCode retains image tool results in its conversation, so repeated reads,
+crops, and generated renders can exceed an endpoint's image limit even when a
+task starts with one image. For vLLM endpoints, configure
+`--limit-mm-per-prompt` for the intended tool budget and available GPU memory
+before running vision evaluations. A rejected image request may be retried until
+the agent timeout; the current adapter records that outcome as a zero-scored
+`agent_timeout`, not a masked infrastructure failure. Audit server errors when
+interpreting vision scores.
+
+## Interpret results
+
+Each rollout retains the task, record ID, native reward, status, scorer revision,
+and artifact directory. Artifacts include the input, full Gym response, final
+answer, execution diagnostics, predicted STEP when produced, and result. The
+OpenCode harness also saves its trajectory under `results/benchcad/opencode`.
+Single-turn runs save the exact model request, including attached images, as
+`model_input.json`; model usage belongs to that one generation. When rollout
+observability is enabled, they record a one-turn trajectory with no agent tool calls.
+
+Missing code, invalid answers, code execution failures, context exhaustion, and
+agent or code timeouts score zero. Infrastructure failures set `mask_sample: true`; report their count and
+resolve them before comparing models. The upstream IoU implementation returns
+zero when geometry cannot be loaded or voxelized; this behavior is preserved.
+
+Report scores separately for the four task variants, along with the preparation
+manifest, inference mode, and generation or OpenCode budgets. A pooled mean
+weights the much larger Vision2Code split heavily. A subset smoke run is not a
+full benchmark score. OpenCode allows
+tool use and iterative work, so label these results `benchcad-opencode`; they are
+a distinct protocol from the upstream single-response leaderboard and its own
+specialized agentic arm. Direct runs are labeled `benchcad-single-turn`. Report
+them separately from OpenCode results, with the model, sampling parameters, and
+token limit. Shared prompts and scoring alone do not establish parity with a
+particular upstream leaderboard run. This adapter is for evaluation and does not
+produce training token IDs or log probabilities.
