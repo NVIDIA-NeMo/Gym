@@ -108,8 +108,16 @@ def output_validation_item(item: dict[str, Any]) -> OutputValidationItem:
 
 
 def output_item_fingerprint(item: dict[str, Any]) -> str:
-    """Reuse dialect-neutral visible fingerprints and exact reasoning evidence."""
-    if item.get("type") == "reasoning":
+    """Reuse dialect-neutral visible fingerprints and exact evidence for reasoning and custom tool calls.
+
+    A custom tool call's ``input`` is free-form text in which whitespace and JSON formatting carry meaning,
+    so its evidence is the replay digest. That digest hashes every field of the item except ``id``,
+    ``status``, the token fields and null fields. A ``namespace`` or a ``caller`` field therefore counts:
+    ``{namespace: "functions", name: "exec"}`` and ``{name: "functions__exec"}`` differ for a custom tool
+    call, where the fingerprint of a function call joins them. Each such difference refuses a match and
+    none accepts a false one.
+    """
+    if item.get("type") in ("reasoning", "custom_tool_call"):
         return replay_context([item]).items[0].digest
     result = assistant_fingerprint([item])
     if not result:

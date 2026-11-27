@@ -3,6 +3,7 @@
 """The in-place re-judgment of a run's saved judge failures at the end of its collection."""
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -18,7 +19,12 @@ from nemo_gym.eval.rollout_reverification import (
     rejudge_saved_judge_failures,
     settle_rejudgments,
 )
-from nemo_gym.rollouts.rollout_records import logical_rollout_id, materialized_path_for
+from nemo_gym.rollouts.rollout_records import (
+    is_rejudgment_failure_of,
+    is_rejudgment_of,
+    logical_rollout_id,
+    materialized_path_for,
+)
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.rollouts.test_rollout_store import snapshot
@@ -28,7 +34,12 @@ ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "outp
 
 
 def _run(
-    tmp_path: Path, *, judge_failures: int, rollouts: int = 3, evidence: dict | None = None
+    tmp_path: Path,
+    *,
+    judge_failures: int,
+    rollouts: int = 3,
+    evidence: dict | None = None,
+    failure_fields: dict | Callable[[int], dict] | None = None,
 ) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
@@ -54,6 +65,7 @@ def _run(
                         "response": ANSWER,
                     }
                     | (evidence or {})
+                    | (failure_fields(index) if callable(failure_fields) else failure_fields or {})
                 )
                 store.record_outcome(failure)
                 failures.append(failure)
@@ -192,6 +204,96 @@ def test_a_spent_judge_failure_is_left_out_of_the_binding_only_when_asked(tmp_pa
             judge_failed_only=True,
             skip_spent_judge_failures=True,
         )
+
+
+_UNPARSEABLE_JUDGE_FAILURE = {"_ng_failure_class": "judge_unparseable", "_ng_failure_legacy_class": "judge_failed"}
+
+
+def test_the_binding_takes_the_judge_failures_the_ordinary_selection_takes(tmp_path):
+    # A judge failure whose canonical class is judge_unparseable keeps judge_failed as its retained classification.
+    output, failures = _run(tmp_path, judge_failures=4, rollouts=6, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+    expected = sorted(logical_rollout_id(failure) for failure in failures)
+    assert due_judge_failures(output) == expected  # the ordinary selection takes all four
+    assert sorted(bind_judge_failures(output)["failures"]) == expected  # and so does the binding
+
+
+def test_a_spent_judge_failure_with_a_retained_classification_is_still_spent(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, _ = _run(tmp_path, judge_failures=1, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+    assert due_judge_failures(output) == []
+    with pytest.raises(ConfigError, match="has spent its 1 saved failure attempts"):
+        bind_judge_failures(output)
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
+
+
+async def test_a_pass_settles_judge_failures_of_both_classes_in_one_batch(tmp_path, monkeypatch):
+    output, failures = _run(
+        tmp_path, judge_failures=2, failure_fields=lambda index: _UNPARSEABLE_JUDGE_FAILURE if index == 1 else {}
+    )
+
+    async def reply(task, json):
+        return json | {"reward": 1.0}
+
+    posted = _verifier(monkeypatch, reply)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 2
+
+    assert sorted(posted) == [0, 1]
+    scored, failed, pending = _state(output)  # reopened from disk: both grades were saved
+    assert all(scored[logical_rollout_id(failure)] == 1.0 for failure in failures)
+    assert pending == {}
+    assert due_judge_failures(output) == []
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert sorted(posted) == [0, 1]  # a second pass makes no verifier call
+
+
+async def test_a_repeat_judge_failure_with_a_retained_classification_is_saved_and_counted(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+    output, (failure,) = _run(tmp_path, judge_failures=1, rollouts=1, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+
+    async def reply(task, json):
+        # The judge fails again: the same saved answer, a fresh failure, the canonical class and the retained one.
+        event = {"event_id": "judge-again", "boundary": "resources_server", "failure_kind": "judge_failed"}
+        return json | {
+            "_ng_failure_events": {"judge-again": event},
+            "_ng_failure_id": "judge-again",
+            "_ng_failure_class": "judge_unparseable",
+            "_ng_failure_legacy_class": "judge_failed",
+            "failure_kind": "judge_failed",
+            "mask_sample": True,
+            "reward": 0.0,
+        }
+
+    posted = _verifier(monkeypatch, reply)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert posted == [0]
+    store = RolloutStore.read(output, import_legacy=False)  # reopened from disk
+    (saved,) = store.failures()
+    assert saved["_ng_failure_id"] == "judge-again"  # the new failure persisted, it was not withdrawn
+    assert saved["_ng_rejudged_failure_id"] == failure["_ng_failure_id"]
+    assert len(store.failures()) == 1 and store.manifest.pending_rejudge == {}
+    assert due_judge_failures(output) == []  # both attempts are spent
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert posted == [0]  # a second pass makes no verifier call
+
+
+@pytest.mark.parametrize("fields", [{}, _UNPARSEABLE_JUDGE_FAILURE], ids=["judge_failed", "judge_unparseable"])
+def test_a_judge_failure_of_either_class_binds_its_rejudgment_and_a_repeat_failure(tmp_path, fields):
+    _, (first, *_) = _run(tmp_path, judge_failures=1, failure_fields=fields)
+    run = {"_ng_run_id": "run-1", "_ng_attempt_index": 0}
+    failure = first | run
+    scored = {k: v for k, v in failure.items() if not k.startswith("_ng_failure")} | {
+        "failure_kind": None,
+        "mask_sample": False,
+        "reward": 1.0,
+        "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+    }
+    again = failure | {"_ng_failure_id": "judge-again", "_ng_rejudged_failure_id": failure["_ng_failure_id"]}
+    assert is_rejudgment_of(failure, scored)
+    assert is_rejudgment_failure_of(failure, again)
+    classless = {k: v for k, v in failure.items() if not k.startswith("_ng_failure")}
+    assert not is_rejudgment_failure_of(classless, again)  # a classless saved result is not a judge failure
 
 
 async def test_a_run_without_due_judge_failures_judges_nothing(tmp_path, monkeypatch):

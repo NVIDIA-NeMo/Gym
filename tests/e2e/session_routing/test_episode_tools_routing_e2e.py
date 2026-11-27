@@ -44,6 +44,7 @@ CALLS = 8
 # An MCP episode also initializes and lists its tools, each a request of its own.
 MCP_EPISODES = int(os.getenv("NEMO_GYM_MULTIWORKER_E2E_MCP_EPISODES", "50"))
 MCP_CALLS = 4
+MAX_MCP_BATCHES = 5
 
 
 class Deployment:
@@ -169,7 +170,7 @@ def test_every_tool_call_runs_on_the_worker_that_runs_its_episode(deployment: De
 def test_every_mcp_request_runs_on_the_worker_that_runs_its_episode(deployment: Deployment) -> None:
     """Initialize, tools/list and tools/call each reach a random worker; each is routed by the token header."""
 
-    async def run_all() -> list[dict]:
+    async def run_batch(first: int) -> list[dict]:
         async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as client:
 
             async def one(index: int) -> dict:
@@ -178,14 +179,20 @@ def test_every_mcp_request_runs_on_the_worker_that_runs_its_episode(deployment: 
                     assert response.status == 200, await response.text()
                     return await response.json()
 
-            return await asyncio.gather(*(one(index) for index in range(MCP_EPISODES)))
+            return await asyncio.gather(*(one(first + index) for index in range(MCP_EPISODES)))
 
-    results = [response["result"] for response in asyncio.run(run_all())]
+    # The kernel decides which worker accepts each connection, and one worker can accept a whole
+    # batch. Run further batches until the episodes have landed on more than one worker.
+    results: list[dict] = []
+    for batch in range(MAX_MCP_BATCHES):
+        results += [response["result"] for response in asyncio.run(run_batch(batch * MCP_EPISODES))]
+        if len({result["owner_pid"] for result in results}) > 1:
+            break
 
     # A tools/list that reached another worker would list nothing.
     assert all(result["listed"] == ["add"] for result in results)
     assert Counter(status for result in results for status in result["statuses"]) == Counter(
-        {200: MCP_EPISODES * MCP_CALLS}
+        {200: len(results) * MCP_CALLS}
     )
     assert all(set(result["ran_on"]) == {result["owner_pid"]} for result in results)
     assert len({result["owner_pid"] for result in results}) > 1

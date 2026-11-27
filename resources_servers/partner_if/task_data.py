@@ -138,6 +138,19 @@ class ToolBackendBundle(StrictModel):
         return self
 
 
+class RecordedContextHarness(StrictModel):
+    """The recorded-context row's stock-agent contract, checked against the resources configuration at reset."""
+
+    version: Literal["gymnasium-v1"]
+    max_parent_turns: int = Field(strict=True, ge=1, le=6)
+    max_policy_calls: int = Field(strict=True, ge=1, le=8)
+    max_delegate_turns: int = Field(strict=True, ge=1, le=6)
+    temperature: float = Field(strict=True, ge=0, allow_inf_nan=False)
+    top_p: float = Field(strict=True, gt=0, le=1, allow_inf_nan=False)
+    max_tokens: int = Field(strict=True, ge=1, le=8192)
+    wire_format: Literal["gym-responses-to-chat"]
+
+
 class TaskData(VerifierMetadata):
     """A row's task-owned fields, flat, as Gym's data tooling validates them.
 
@@ -150,6 +163,11 @@ class TaskData(VerifierMetadata):
     task_name: str | None = Field(default=None, json_schema_extra={"consumed_by": ["run", "provenance"]})
     # The task's own tool backend, for a sandboxed mock-tool server.
     tool_backend: ToolBackendBundle | None = Field(default=None, json_schema_extra={"consumed_by": ["run"]})
+    recorded_context_harness: RecordedContextHarness | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"consumed_by": ["reset", "step", "provenance"]},
+    )
     # The fields of a Scale-SWE instance (resources_servers/scale_swe/task_data.py).
     instance_id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify", "provenance"]})
     repo: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})

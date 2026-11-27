@@ -25,7 +25,7 @@ from environment_servers.bird_interact.adk_prompts import (
     RESPONSE_GENERATOR_PROMPT,
     UNCLEAR_QUESTION_REPLY,
 )
-from environment_servers.bird_interact.task_data import BirdInteractTask
+from environment_servers.bird_interact.task_input import BirdInteractTask
 
 
 # The ADK's output limits for the two stages, which it samples at temperature 0.

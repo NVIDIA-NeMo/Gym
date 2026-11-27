@@ -237,7 +237,9 @@ def test_post_run_export_with_integer_config_keys_preserves_saved_artifacts(live
 def test_config_key_collisions_are_rejected_before_opening_a_backend(live, monkeypatch, post_run):
     artifacts, live_exporter, _ = live
     config = OmegaConf.create(live_exporter.global_config_dict)
-    config["nested"] = [{"statuses": {400: "fail", "400": "retry"}}]
+    # omegaconf>=2.4 rejects int/str duplicate keys (400 vs "400") itself; bool/str still reaches
+    # the exporter's own collision check, which is what this test exercises.
+    config["nested"] = [{"statuses": {True: "fail", "true": "retry"}}]
     settings = OmegaConf.create({key: value for key, value in config.items() if key.startswith("mlflow_")})
     if post_run:
         OmegaConf.save(config, artifacts.resolved_config_yaml_fpath)

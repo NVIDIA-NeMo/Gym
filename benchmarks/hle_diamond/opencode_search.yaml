@@ -3,7 +3,8 @@
 # agent's sandbox reaches only the model and that server.
 config_paths:
 - benchmarks/hle_diamond/opencode.yaml
-# The sandbox reaches the Tavily server's MCP tools by address, so the Resources servers leave loopback too.
+# The sandbox reaches the Tavily server's MCP tools by address, so the Resources servers leave loopback too
+# (the judge resources server keeps its own loopback host, config.yaml).
 absolute_ip_server_types: [responses_api_models, resources_servers]
 tavily:
   resources_servers:

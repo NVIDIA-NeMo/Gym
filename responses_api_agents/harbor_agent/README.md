@@ -69,6 +69,7 @@ Common `harbor_environment_kwargs` for this environment:
 - `singularity_image_cache_dir`: cache directory for converted `.sif` images.
 - `singularity_force_pull`: force re-pull/re-convert the image instead of using cache.
 - `singularity_no_mount`: override/suppress selected Singularity default mounts.
+- `singularity_server_startup_timeout_sec`: seconds to wait for the container to become ready, including `setup.sh`, per start attempt (up to 3; default 60). The whole start is still bounded by the task's `build_timeout_sec` × `harbor_timeout_multiplier`.
 - `workdir`: override container working directory.
 
 Singularity does not enforce cgroups-based memory limits on most HPC clusters (no

@@ -138,6 +138,73 @@ async def test_exec_runs_in_the_workspace_with_layered_env(tmp_path: Path) -> No
     assert workspace.parent == tmp_path
 
 
+async def test_exec_runs_an_argument_list_without_the_shell(tmp_path: Path) -> None:
+    # The configured shell does not exist: shell text cannot start, an argument list never needs it.
+    provider = LocalProvider(workspace_root=str(tmp_path), shell=str(tmp_path / "no-such-shell"))
+    assert provider.exec_takes_argv()
+    handle = await provider.create(SandboxSpec(env={"FROM_SPEC": "spec"}))
+    show = "import os, sys; print(os.getcwd(), os.environ['FROM_SPEC'], os.environ['FROM_CALL'], sys.argv[1:])"
+
+    result = await provider.exec(handle, [sys.executable, "-c", show, "a;b $HOME", "*"], env={"FROM_CALL": "call"})
+
+    workspace, spec, call, received = result.stdout.split(" ", 3)
+    assert (result.return_code, result.error_type) == (0, None)
+    assert Path(workspace).resolve() == handle.raw["workspace"].resolve()
+    assert (spec, call) == ("spec", "call")
+    assert received.strip() == "['a;b $HOME', '*']"
+    with pytest.raises(FileNotFoundError):
+        await provider.exec(handle, "true")
+
+
+@pytest.mark.parametrize(
+    "program, return_code, same_as_shell_text",
+    [
+        ("no-such-program", 127, True),
+        ("{scratch}/missing/program", 127, True),
+        ("{scratch}/data/program", 127, False),  # under a file: shells disagree on 126 or 127
+        ("{scratch}/data", 126, True),  # not executable
+        ("{scratch}", 126, True),  # a directory
+    ],
+)
+async def test_an_argument_list_whose_program_cannot_start_is_a_command_failure_like_shell_text(
+    tmp_path: Path, program: str, return_code: int, same_as_shell_text: bool
+) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "data").write_text("not a program")
+    provider = LocalProvider(workspace_root=str(tmp_path / "workspaces"))
+    handle = await provider.create(SandboxSpec())
+    program = program.format(scratch=scratch)
+
+    result = await provider.exec(handle, [program, "argument"])
+
+    assert (result.return_code, result.error_type, result.stdout) == (return_code, None, None)
+    assert program in result.stderr
+    if same_as_shell_text:
+        shell_text = await provider.exec(handle, quote(program))
+        assert (shell_text.return_code, shell_text.error_type) == (return_code, None)
+
+
+async def test_a_working_directory_that_cannot_be_used_raises_for_an_argument_list_too(tmp_path: Path) -> None:
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec())
+    missing = str(tmp_path / "missing")
+
+    for command in (["true"], "true"):
+        with pytest.raises(FileNotFoundError) as caught:
+            await provider.exec(handle, command, cwd=missing)
+        assert caught.value.filename == missing
+
+
+async def test_public_sandbox_api_runs_an_argument_list_literally_and_shell_text_expanded(tmp_path: Path) -> None:
+    async with AsyncSandbox(create_provider({"local": {"workspace_root": str(tmp_path)}})) as sandbox:
+        await sandbox.start(SandboxSpec(env={"HOME": "/home/agent"}))
+        argv = await sandbox.exec(["printf", "%s", "a;b $HOME"])
+        text = await sandbox.exec('printf %s "a;b $HOME"')
+    assert (argv.return_code, argv.stdout) == (0, "a;b $HOME")
+    assert (text.return_code, text.stdout) == (0, "a;b /home/agent")
+
+
 async def test_command_failure_is_reported_not_raised(tmp_path: Path) -> None:
     provider = LocalProvider(workspace_root=str(tmp_path))
     handle = await provider.create(SandboxSpec())

@@ -6,9 +6,10 @@ The adapter writes OpenCode 2's own schema for what it owns (provider, model, pl
 and passes the session's ``opencode_config`` keys (``permission``, ``tools``, ``compaction``, ``agent``) in the
 OpenCode 1 form the agent configuration and ``configs/permissions/default.yaml`` use. OpenCode 2 reads that form
 and migrates it: ``bash`` rules apply to ``shell``, ``task`` rules to ``subagent``, ``agent.build.steps`` stays the
-build agent's step limit and ``agent.build.prompt`` its system prompt. ``attachment`` is renamed to ``media``. The
-compaction buffer is the exception: OpenCode 2 reads ``compaction.buffer``, and the agent config refuses OpenCode 1's
-``compaction.reserved`` when it loads. The seed refuses any other ``opencode_config`` key, for both versions
+build agent's step limit and ``agent.build.prompt`` its system prompt. ``attachment`` is renamed to ``media`` and
+``snapshot`` to ``snapshots``. The compaction buffer is the exception: OpenCode 2 reads ``compaction.buffer``, and the
+agent config refuses OpenCode 1's ``compaction.reserved`` when it loads. The seed refuses any other
+``opencode_config`` key, for both versions
 (``app._session_opencode_config_error``). Code Mode is off (``code_mode_off``).
 """
 
@@ -32,6 +33,16 @@ ISOLATION = {
 UNRESTRICTED_MEDIA = {
     "image": {"auto_resize": False, "max_width": 2**31 - 1, "max_height": 2**31 - 1, "max_base64_bytes": 2**31 - 1}
 }
+
+
+def background_compaction_off(config: dict[str, Any]) -> None:
+    """Turn off OpenCode 2's background compaction summaries in ``config``.
+
+    2.3.1 turned them on by default: as the context nears automatic compaction, OpenCode writes a summary in extra model
+    calls beside the session's and holds it in its process until compaction is due, and each Gym run of a session is
+    its own process. Off, OpenCode 2 compacts as 2.2.7 does; 2.2.7 ignores the key.
+    """
+    config.setdefault("compaction", {})["background"] = False
 
 
 def code_mode_off(permission: Mapping[str, Any] | str | None) -> dict[str, Any]:
@@ -124,9 +135,12 @@ def session_config(
         config["media"] = copy.deepcopy(UNRESTRICTED_MEDIA)
     if "attachment" in opencode_config:
         config["media"] = copy.deepcopy(opencode_config["attachment"])
+    if "snapshot" in opencode_config:
+        config["snapshots"] = opencode_config["snapshot"]
     for key in ("tools", "compaction"):
         if opencode_config.get(key):
             config[key] = copy.deepcopy(opencode_config[key])
+    background_compaction_off(config)
     agent = copy.deepcopy(dict(opencode_config.get("agent") or {}))
     if replace_prompt is not None:
         agent.setdefault("build", {})["prompt"] = replace_prompt

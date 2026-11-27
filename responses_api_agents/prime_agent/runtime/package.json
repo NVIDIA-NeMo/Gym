@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "prime-agent": "file:__NEMO_GYM_PRIME_ARCHIVES__/prime-agent.tgz"
+  },
+  "name": "nemo-gym-prime-runtime",
+  "private": true,
+  "version": "0.7.0"
+}

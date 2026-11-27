@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The tools' arguments and a-Interact's replies, and the per-phase results. The task rows are in ``task_data.py``."""
+"""The tools' arguments and a-Interact's replies, and the per-phase results. The task rows are in ``task_input.py``."""
 
 from typing import Literal
 

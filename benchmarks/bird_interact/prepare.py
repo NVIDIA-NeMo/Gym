@@ -9,11 +9,9 @@ not downloaded; they are in the sandbox image that ``Dockerfile`` builds.
 
 The public rows withhold the ground truth: ``sol_sql``, ``external_knowledge`` and ``test_cases``, for the task and
 for its follow-up. The authors send it on request, and ``prepare`` merges it in by ``instance_id``. It keeps the rows
-that the server can grade: query tasks, whose two phases are both ``Query``, with their ground truth. As in
-BIRD-Interact, a query phase is graded by comparing its result with the solution's even when it has test cases.
-BIRD-Interact's management tasks, which test cases grade, are left out: the server does not run test cases yet. It reads
-the file the authors sent from ``data/`` (``GROUND_TRUTH_FILES``), which git ignores, unless ``ground_truth_jsonl``
-names another.
+with their ground truth: query tasks, graded by comparing their result with the solution's, and management tasks,
+graded by their own test cases. It reads the file the authors sent from ``data/`` (``GROUND_TRUTH_FILES``), which git
+ignores, unless ``ground_truth_jsonl`` names another.
 """
 
 import json
@@ -21,7 +19,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from environment_servers.bird_interact.task_data import BirdInteractTask
+from environment_servers.bird_interact.task_input import BirdInteractTask
 from nemo_gym.data import materialize_task
 
 
@@ -44,8 +42,6 @@ RELEASE_REVISIONS = {
     "lite": "f7881a9c2b9630cc4fc13b0c39279740b0a2fd87",  # pragma: allowlist secret
     "full": "5d78b0722433c3821e1ebda5d8c39d24070049d7",  # pragma: allowlist secret
 }
-# A phase's category when its row names none, as in the ADK.
-QUERY_CATEGORY = "Query"
 
 
 def database_dir(release: str) -> Path:
@@ -88,7 +84,7 @@ def merge_ground_truth(row: dict[str, Any], truth: dict[str, Any]) -> dict[str, 
 def select_tasks(
     rows: list[dict[str, Any]], ground_truth: dict[str, dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
-    """The rows the server can grade, with their ground truth merged in, and why each other row was left out."""
+    """The rows with their ground truth, merged in, and why each other row was left out."""
     kept: list[dict[str, Any]] = []
     left_out: Counter[str] = Counter()
     for row in rows:
@@ -98,11 +94,8 @@ def select_tasks(
             continue
         merged = merge_ground_truth(row, truth)
         follow_up = merged.get("follow_up")
-        categories = {merged.get("category") or QUERY_CATEGORY, (follow_up or {}).get("category") or QUERY_CATEGORY}
         if not merged["sol_sql"] or (follow_up is not None and not follow_up.get("sol_sql")):
             left_out["no ground truth"] += 1
-        elif categories != {QUERY_CATEGORY}:
-            left_out["management task"] += 1
         else:
             BirdInteractTask.model_validate(merged)
             kept.append(merged)

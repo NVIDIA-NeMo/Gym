@@ -459,7 +459,13 @@ def configured_server(monkeypatch):
             **overrides,
         )
         server = BM.BaseModelServer(config=config, server_client=MagicMock(spec=ServerClient))
-        create_client.assert_called_once_with(base_url=config.openai_base_url, api_key=config.openai_api_key)
+        create_client.assert_called_once_with(
+            base_url=config.openai_base_url,
+            api_key=config.openai_api_key,
+            request_timeout_seconds=config.request_timeout_seconds,
+            max_connection_retries=config.max_connection_retries,
+            connection_retry_timeout_s=config.connection_retry_timeout_s,
+        )
         assert server._semaphore._value == 2
         return server, backend
 
@@ -588,3 +594,28 @@ def test_multiworker_import_exports_app(monkeypatch, module_name, worker):
     else:
         assert not hasattr(worker_module, "app")
         start.assert_not_called()
+
+
+def test_the_endpoint_call_is_unbounded_unless_bounds_are_configured(configured_server) -> None:
+    configured_server()  # the fixture asserts the client got exactly the configured values
+
+    config_defaults = BM.BaseModelServerConfig.model_fields
+    assert config_defaults["request_timeout_seconds"].default is None
+    assert config_defaults["max_connection_retries"].default is None
+    assert config_defaults["connection_retry_timeout_s"].default is None
+
+
+def test_configured_bounds_reach_the_client(configured_server) -> None:
+    server, _ = configured_server(
+        request_timeout_seconds=30.0, max_connection_retries=3, connection_retry_timeout_s=15.0
+    )
+
+    assert server.config.request_timeout_seconds == 30.0
+    assert server.config.max_connection_retries == 3
+    assert server.config.connection_retry_timeout_s == 15.0
+
+
+@pytest.mark.parametrize("field", ["request_timeout_seconds", "max_connection_retries", "connection_retry_timeout_s"])
+def test_a_bound_of_zero_is_rejected(configured_server, field: str) -> None:
+    with pytest.raises(ValueError):
+        configured_server(**{field: 0})

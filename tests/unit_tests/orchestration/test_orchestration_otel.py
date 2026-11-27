@@ -26,11 +26,12 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import LOCAL_NODE_METRICS, SubmitConfig
 from nemo_gym.orchestration.executors import otel as obs_module
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
+    NODE_METRICS_FILTER,
     OTLP_GRPC_PORT,
     OTLP_HTTP_PORT,
     collector_config_path,
@@ -288,7 +289,9 @@ def test_collector_keeps_each_producers_own_name_as_display_identity():
 
 
 def test_collector_metrics_pipeline_also_accepts_otlp_metrics():
-    assert _rendered()["service"]["pipelines"]["metrics"]["receivers"] == ["prometheus", "otlp", "span_metrics"]
+    pipelines = _rendered()["service"]["pipelines"]
+    assert pipelines["metrics"]["receivers"] == ["prometheus", "otlp", "span_metrics"]
+    assert pipelines["metrics/local"]["receivers"] == ["prometheus", "otlp"]
 
 
 def test_collector_derives_metrics_from_spans_with_display_identity_and_sandbox_provider():
@@ -300,8 +303,107 @@ def test_collector_derives_metrics_from_spans_with_display_identity_and_sandbox_
     assert "span_metrics" not in doc["service"]["pipelines"]["traces"]["exporters"]
     traces = doc["service"]["pipelines"]["traces/local"]["processors"]
     assert traces.index("transform/identity") < traces.index("resource/local")
-    for name in ("metrics", "metrics/local"):
-        assert "span_metrics" in doc["service"]["pipelines"][name]["receivers"], name
+    # Remote only: the local traces file already holds every span the series are derived from.
+    assert "span_metrics" in doc["service"]["pipelines"]["metrics"]["receivers"]
+    assert "span_metrics" not in doc["service"]["pipelines"]["metrics/local"]["receivers"]
+
+
+def _node_filter(doc):
+    return doc["processors"].get(NODE_METRICS_FILTER)
+
+
+def _kept_by_local_filter(doc, metric_name, service_name="node"):
+    """Evaluates the rendered filter condition the way the collector does, for the two terms it is built from."""
+    (condition,) = _node_filter(doc)["metrics"]["metric"]
+    match = re.fullmatch(
+        r'resource\.attributes\["service\.name"\] == "(?P<job>[^"]+)" and not IsMatch\(metric\.name, "(?P<keep>.*)"\)',
+        condition,
+    )
+    assert match, condition
+    # Undo the collector's `$$` escape; the default patterns carry no OTTL string escapes.
+    keep = match["keep"].replace("$$", "$")
+    dropped = service_name == match["job"] and re.search(keep, metric_name) is None
+    return not dropped
+
+
+def test_local_metrics_keep_a_short_list_of_node_exporter_metrics():
+    doc = _rendered()
+    pipelines = doc["service"]["pipelines"]
+    local = pipelines["metrics/local"]["processors"]
+    # Applied while `service.name` still names the scrape job, before resource/local overwrites it.
+    assert local.index("transform/identity") < local.index(NODE_METRICS_FILTER) < local.index("resource/local")
+    for kept in (
+        "up",
+        "node_cpu_seconds_total",
+        "node_load1",
+        "node_load15",
+        "node_memory_MemAvailable_bytes",
+        "node_pressure_cpu_waiting_seconds_total",
+        "node_network_receive_bytes_total",
+        "node_infiniband_port_data_transmitted_bytes_total",
+    ):
+        assert _kept_by_local_filter(doc, kept), kept
+    for dropped in (
+        "node_systemd_unit_state",
+        "node_cpu_scaling_governor",
+        "node_load1_extra",
+        "node_infiniband_port_errors_received_total",
+        "ib_vport_rx_write_requests",
+        "node_mountstats_nfs_read_bytes_total",
+    ):
+        assert not _kept_by_local_filter(doc, dropped), dropped
+    # Other producers are never filtered, whatever the metric is called.
+    for service in ("dcgm", "gym-vllm/policy", "nemo-gym/policy_model"):
+        assert _kept_by_local_filter(doc, "node_systemd_unit_state", service), service
+
+
+def test_remote_metrics_are_not_filtered():
+    doc = _rendered()
+    assert NODE_METRICS_FILTER not in doc["service"]["pipelines"]["metrics"]["processors"]
+    assert doc["service"]["pipelines"]["metrics"]["processors"] == [
+        "transform/metric_names",
+        "transform/identity",
+        "resource/managed",
+        "batch",
+    ]
+
+
+def test_local_node_metrics_null_keeps_everything_locally():
+    doc = _rendered(_config(otel={"local_node_metrics": None}))
+    assert NODE_METRICS_FILTER not in doc["processors"]
+    assert NODE_METRICS_FILTER not in doc["service"]["pipelines"]["metrics/local"]["processors"]
+
+
+def test_local_node_metrics_extra_extends_the_default_list():
+    config = _config(otel={"local_node_metrics_extra": ["node_disk_.*", "ib_vport_rx_.*"]})
+    assert config.otel.local_node_metrics == list(LOCAL_NODE_METRICS)
+    doc = _rendered(config)
+    for kept in ("node_disk_read_bytes_total", "ib_vport_rx_write_requests", "node_cpu_seconds_total"):
+        assert _kept_by_local_filter(doc, kept), kept
+    assert not _kept_by_local_filter(doc, "node_systemd_unit_state")
+
+
+def test_local_node_metrics_can_be_replaced():
+    doc = _rendered(_config(otel={"local_node_metrics": ["node_load1"]}))
+    assert _kept_by_local_filter(doc, "node_load1")
+    assert not _kept_by_local_filter(doc, "node_cpu_seconds_total")
+
+
+def test_no_node_filter_without_a_node_scrape():
+    doc = _rendered(_config(otel={"node_metrics_port": None}))
+    assert NODE_METRICS_FILTER not in doc["processors"]
+
+
+def test_local_node_metrics_rejects_an_invalid_pattern():
+    with pytest.raises(ValidationError, match="not a valid regular expression"):
+        _config(otel={"local_node_metrics_extra": ["node_(cpu"]})
+
+
+def test_local_node_metrics_filter_escapes_the_collectors_expansion():
+    (condition,) = _rendered(_config(otel={"local_node_metrics": ['a"b\\d$']}))["processors"][NODE_METRICS_FILTER][
+        "metrics"
+    ]["metric"]
+    assert 'IsMatch(metric.name, "^(?:(?:a\\"b\\\\d$$))$$")' in condition
 
 
 def test_collector_renames_colon_metrics_to_underscores_before_export():
@@ -366,7 +468,8 @@ def test_collector_writes_a_local_copy_next_to_the_managed_export():
         managed, local = doc["service"]["pipelines"][signal], doc["service"]["pipelines"][f"{signal}/local"]
         assert managed["exporters"] == ["otlp_http/managed"]
         assert local["exporters"][0] == f"file/{signal}"
-        assert managed["receivers"] == local["receivers"]
+        # The local copy receives everything the managed export does, except the remote-only span metrics.
+        assert [r for r in managed["receivers"] if r != "span_metrics"] == local["receivers"]
 
 
 def test_local_only_collector_needs_no_destination_or_token():
@@ -375,7 +478,9 @@ def test_local_only_collector_needs_no_destination_or_token():
 
     assert set(doc["exporters"]) == {"file/metrics", "file/traces", "file/logs"}
     assert set(doc["service"]["pipelines"]) == {"metrics/local", "traces/local", "logs/local"}
-    assert "span_metrics" in doc["service"]["pipelines"]["traces/local"]["exporters"]
+    # With no remote metrics pipeline to receive them, span metrics are not derived at all.
+    assert "connectors" not in doc
+    assert "span_metrics" not in doc["service"]["pipelines"]["traces/local"]["exporters"]
     assert "service.name" not in _attrs(doc, "resource/local")
     for signal in ("metrics", "traces", "logs"):
         local = doc["service"]["pipelines"][f"{signal}/local"]

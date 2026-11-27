@@ -70,6 +70,7 @@ from resources_servers.swebench.sandbox_session_checkpoints import (
     SandboxCheckpointFields,
 )
 from resources_servers.swebench.swebench_patches import (
+    patch_swebench_chartjs_chrome_flag,
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_sandbox,
@@ -432,6 +433,7 @@ class SwebenchResourcesServer(CheckpointedSandboxSessionResourcesServer):
         )
         restore_test_assets_from_staging(test_spec, body.test_assets())
         patch_swebench_pytest_result_summary(test_spec)
+        patch_swebench_chartjs_chrome_flag(test_spec)
         return test_spec
 
     async def seed_session(
