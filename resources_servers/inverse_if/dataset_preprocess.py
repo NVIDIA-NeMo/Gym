@@ -37,8 +37,7 @@ from pathlib import Path
 from typing import Any
 
 
-# Hardcoded path for raw Inverse IF data
-DEFAULT_RAW_DATA_DIR = Path("/lustre/fsw/portfolios/llmservice/users/mfathi/data/inverse_if")
+DEFAULT_RAW_DATA_DIR = Path("/path/to/inverse_if")
 
 
 # ---------------------------------------------------------------------------

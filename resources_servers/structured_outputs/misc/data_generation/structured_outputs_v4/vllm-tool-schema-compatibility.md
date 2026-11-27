@@ -169,7 +169,7 @@ choice for the vLLM path used in these rollouts.
 After regenerating data, scan the tool schemas for boolean schema nodes:
 
 ```bash
-cd /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github
+cd /path/to/Gym
 
 python resources_servers/structured_outputs/misc/check_tool_call_jsonl.py \
     -i resources_servers/structured_outputs/data/structured_outputs_v4_tool_call.jsonl

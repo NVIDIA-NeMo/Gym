@@ -171,7 +171,7 @@ Prerequisites for tuning and debugging:
 5. Did something weird happen on the vLLM engine side?
    1. If the progress rollouts/min reported in W&B is very different than usual, that may indicate a transient failure on the vLLM engine side. Try rerunning with the same config and see if the same behavior persists.
 6. Is there something else wrong?
-   1. Message @bxyu-nvidia @sdevare in Slack and share your Slurm logs and W&B.
+   1. Ask the benchmark maintainers through the repository issue tracker. Share only sanitized logs and approved links.
 
 #### Current vLLM decode speeds across engine batch sizes
 Definitions

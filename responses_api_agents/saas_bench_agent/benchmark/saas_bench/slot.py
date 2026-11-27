@@ -89,7 +89,7 @@ def _wait_podman_health(name: str, test: list[str], timeout: float = 240) -> Non
 def _nrt_nofile_args() -> list[str]:
     """Return an explicit container descriptor limit for rootless Podman.
 
-    The cpu_short launcher raises and records ``SAAS_NRT_NOFILE`` before
+    The CPU partition launcher raises and records ``SAAS_NRT_NOFILE`` before
     starting Podman.  Passing it explicitly prevents compose services from
     falling back to a lower Podman/systemd default than the batch shell.
     """

@@ -32,8 +32,7 @@ from pathlib import Path
 from typing import Any
 
 
-# Hardcoded path for raw multichallenge data
-DEFAULT_RAW_DATA_DIR = Path("/lustre/fsw/portfolios/llmservice/users/mfathi/data/multichallenge")
+DEFAULT_RAW_DATA_DIR = Path("/path/to/multichallenge")
 
 
 def build_input_messages(task: dict) -> list[dict]:

@@ -309,8 +309,8 @@ The LLM judge analyzes the model's response and returns `[[YES]]` or `[[NO]]`.
 
 ---
 
-**Note**: The default raw data path is hardcoded in `dataset_preprocess.py`:
+**Note**: The default raw data path is the placeholder `/path/to/multichallenge`:
 ```
-/lustre/fsw/portfolios/llmservice/users/mfathi/data/multichallenge
+/path/to/multichallenge
 ```
 Update `DEFAULT_RAW_DATA_DIR` in the script or use `--data-dir` to specify a different location.

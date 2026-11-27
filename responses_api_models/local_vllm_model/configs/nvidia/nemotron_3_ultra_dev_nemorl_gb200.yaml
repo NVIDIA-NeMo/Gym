@@ -58,7 +58,7 @@ nemotron_3_ultra_dev:
         # Parser config
         enable_auto_tool_choice: true
         tool_call_parser: qwen3_coder
-        reasoning_parser_plugin: /lustre/fsw/portfolios/llmservice/users/lvega/evals/ultra_v3_reasoning_parser.py
+        reasoning_parser_plugin: /path/to/reasoning_parser_plugin.py
         reasoning_parser: ultra_v3
 
         # Loading config

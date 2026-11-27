@@ -24,7 +24,7 @@ throughout, and all paths below are relative to the repo root.
 
 | file | when | what |
 |---|---|---|
-| your data `.jsonl` | always | one row per task, on `/lustre`. Not committed |
+| your data `.jsonl` | always | one row per task, at `/path/to/your-data.jsonl`. Not committed |
 | `resources_servers/<env>/` | only if your env is not already in Gym | verifier + config. See the [environment guide](https://docs.nvidia.com/nemo/gym/latest/contribute/environments) |
 | `$R/manifests/<yours>.yaml` | always | your one-entry manifest. Committed |
 | `$R/manifests/nemotron_3_5_super.yaml` | step 04 | add your entry to the shared sweep |
@@ -73,8 +73,8 @@ all manifests and rebuild, per [README.md § 01](./README.md#01---optional-creat
 ## 02 - Creating a single manifest file.
 
 Copy the closest `manifests/example_*.yaml` and change `entries`. Every entry needs `label`, `agent`,
-`configs` and `data`. `owner` is optional in the schema but expected for new entries — it is you, because the `/lustre` path stops
-identifying anyone once the data is copied or a blend is re-cut.
+`configs` and `data`. `owner` is optional in the schema but expected for new entries — it is you, because a dataset path stops
+identifying its creator once the data is copied or a blend is re-cut.
 
 ```bash
 PYTHONPATH=$R python -m infra validate $R/manifests/<yours>.yaml
@@ -181,7 +181,7 @@ uWSGI process per worker, so the worker count *is* the concurrency — a session
 the sandboxes ride along on the vLLM nodes and are fronted by an nginx balancer hashing the same
 header, so they cost no extra nodes. If your environment executes code, size this rather than
 assuming GPUs are the limit. Only one arm64 build exists:
-`/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
+`/path/to/nemo-skills-sandbox.sqsh`
 
 ## 04 - Adding a manifest entry into manifests/nemotron_3_5_super.yaml
 

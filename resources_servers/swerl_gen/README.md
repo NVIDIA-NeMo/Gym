@@ -57,7 +57,7 @@ Optional fields:
 ### Example of rollouts and usage
 You need to have singularity installed. Image having singularity: 
 
-`/lustre/fsw/portfolios/llmservice/users/asohrabizade/codegen/sqsh/nvidian+nemo+verl_v2_enroot0.8.5.sqsh`
+`/path/to/container.sqsh`
 
 ```bash
 gym env start \

@@ -19,7 +19,7 @@ it, then the resources server grades the patch. Our cluster uses Apptainer.
 
 The benchmark is data, task images and grading scripts. The **resources server**
 is Gym's HTTP interface to those pieces. Slurm allocation, mounts and launch
-settings live in the separate [Slurm evaluations repository](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/tree/jnolan/hermes-sandboxed-pro).
+settings are maintained with the deployment configuration.
 
 ## Review order
 
@@ -27,7 +27,7 @@ settings live in the separate [Slurm evaluations repository](https://gitlab-mast
 2. [Runner](runner.py#L95), then [runtime preparation](prepare_runtime.sh#L1): how Hermes starts. The existing portable-Python helper is reused; GNU and musl builds support Debian/Ubuntu and Alpine task images.
 3. [Pro `seed_session()`](../../resources_servers/swebench_pro/app.py#L305) and [verification](../../resources_servers/swebench_pro/verification.py#L388): inspect the diff against main to distinguish changes from the existing implementation.
 4. [Apptainer handoff](../../nemo_gym/sandbox/providers/apptainer/provider.py#L560): a bare instance ID cannot reconstruct the provider's staging directory, mount point and environment in the agent process. Also review retryable cleanup in the [sandbox API](../../nemo_gym/sandbox/api.py) and [OpenSandbox provider](../../nemo_gym/sandbox/providers/opensandbox/provider.py), plus assistant reasoning replay in [the Chat Completions schema](../../nemo_gym/core/responses_api_types.py).
-5. Slurm [configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/swebench_pro.yaml) and [existing launcher](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_eval.sh).
+5. Consult the deployment configuration and launcher used by your environment.
 
 ## Why the remaining additions exist
 
