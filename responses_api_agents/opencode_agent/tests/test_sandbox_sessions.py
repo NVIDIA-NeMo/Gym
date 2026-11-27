@@ -2708,9 +2708,26 @@ async def test_missing_task_environment_hook_rejects_otherwise_valid_result(setu
     "budget,expected", [(None, 1800), ("900.0", 900), ("12.5", 12.5), ("3600", 1800), ("nan", 1800)]
 )
 def test_task_timeout_metadata_reaches_sandbox_supervisor(
-    setup: tuple[OpenCodeAgent, Sandbox], tmp_path: Path, budget: str | None, expected: float
+    setup: tuple[OpenCodeAgent, Sandbox],
+    tmp_path: Path,
+    budget: str | None,
+    expected: float,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent, sandbox = setup
+    clock = [monotonic()]
+    for module in ("responses_api_agents.opencode_agent.app", "nemo_gym.agents.utils.sandbox_session"):
+        monkeypatch.setattr(f"{module}.monotonic", lambda: clock[0])
+    upload = sandbox.upload
+    staged = []
+
+    async def upload_with_staging_time(source: str | Path, destination: str) -> None:
+        await upload(source, destination)
+        if destination.endswith("/prompt.txt"):
+            staged.append(destination)
+            clock[0] += 1.25
+
+    monkeypatch.setattr(sandbox, "upload", upload_with_staging_time)
     agent.config.timeout = 1800
     (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 900.0\n")
     (tmp_path / "instruction.md").write_text("Fix the code")
@@ -2727,8 +2744,9 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         )
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        # Staging spends the budget, and OpenCode runs for what remains.
-        assert expected - 1 < float(command[command.index("--timeout") + 1]) <= expected
+        # Staging spends the budget independently of host scheduling speed.
+        assert len(staged) == 1
+        assert float(command[command.index("--timeout") + 1]) == expected - 1.25
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
