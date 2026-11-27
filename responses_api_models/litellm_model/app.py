@@ -280,7 +280,7 @@ class LiteLLMModelServer(SimpleModelServer):
         """Verify the LiteLLM proxy is running a known-safe version."""
         base_url = re.sub(r"/v1/?$", "", self.config.openai_base_url.rstrip("/"))
         health_url = f"{base_url}/health/readiness/details"
-        auth_header = self.config.openai_api_key
+        auth_header = self._client.current_api_key
         if not auth_header.lower().startswith("bearer "):
             auth_header = f"Bearer {auth_header}"
         raw_api_key = auth_header.removeprefix("Bearer ").strip()
@@ -348,8 +348,7 @@ class LiteLLMModelServer(SimpleModelServer):
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
 
         async def create_and_validate() -> NeMoGymResponse:
             try:

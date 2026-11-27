@@ -126,7 +126,7 @@ initial_job_identity = job_identity()
 a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id", "_ng_failure_stage",
-        "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
+        "stage_index", "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
         "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "_ng_elapsed_s",
         "ng_policy_model_server", "_ng_rejudge_operation_id", "failure_outcome_action", "failure_outcome_attribution")
 # Only structural response facts leave the run host; response contents stay local.
@@ -1615,9 +1615,14 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 )
             )
         selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
+        # Resolve each path once: a realpath per record is slow on shared filesystems.
+        sources = {name: (artifacts / name).resolve() for name in selected}
+        resolved: dict[Path, Path] = {}
         for disposition in ("success", "failure", "omitted"):
             for record in store.selected_records(disposition).values():
-                matches = [name for name in selected if (artifacts / name).resolve() == record.path.resolve()]
+                if record.path not in resolved:
+                    resolved[record.path] = record.path.resolve()
+                matches = [name for name in selected if sources[name] == resolved[record.path]]
                 if len(matches) != 1:
                     raise ValueError("selected outcome is outside the collected source files")
                 selected[matches[0]].add(record.line_number - 1)

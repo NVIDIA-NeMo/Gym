@@ -23,7 +23,9 @@ def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_m
     for name, executable in binaries.items():
         if name not in missing:
             (bindir / name).symlink_to(executable)
-    (bindir / "ln").symlink_to(shutil.which("ln"))
+    # ln is the fake package manager's; rmdir and sleep are the install lock's.
+    for name in ("ln", "rmdir", "sleep"):
+        (bindir / name).symlink_to(shutil.which(name))
     uid = bindir / "id"
     uid.write_text(f"#!/bin/sh\necho {1000 if failure == 'nonroot' else 0}\n")
     uid.chmod(0o755)
@@ -45,12 +47,14 @@ def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_m
     command = _sandbox_prepare_command(str(task), str(directory), str(tmp_path / "runtime"))
     result = subprocess.run(
         ["/bin/sh", "-c", command],
-        env=os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)},
+        env=os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path), "TMPDIR": str(tmp_path)},
         capture_output=True,
         text=True,
         errors="replace",
         timeout=10,
     )
+    # The install lock is released on every path, so a retried preparation never waits for a finished one.
+    assert not (tmp_path / ".nemo-gym-opencode-bootstrap.lock").exists()
     if failure and missing:
         assert result.returncode == (100 if failure == "install" else 1), result.stderr
         assert not directory.exists()

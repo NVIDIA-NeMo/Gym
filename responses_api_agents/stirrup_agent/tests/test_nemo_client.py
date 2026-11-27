@@ -24,8 +24,11 @@ import json
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import APIStatusError
 from pydantic import BaseModel
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, Tool, ToolCall, ToolMessage, UserMessage
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
@@ -54,6 +57,90 @@ def _make_response(content: str = "ok"):
     response.usage.completion_tokens = 5
     response.usage.completion_tokens_details = None
     return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 413])
+async def test_explicit_context_rejection_reaches_stirrup_recovery(status, caplog) -> None:
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
+    error = APIStatusError(
+        "DO_NOT_LOG_ERROR_BODY",
+        response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
+        body={"code": "context_length_exceeded", "message": "DO_NOT_LOG_ERROR_BODY"},
+    )
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+    history = [UserMessage(content="original task")]
+    before = list(history)
+
+    with pytest.raises(ContextOverflowError) as caught:
+        await client.generate(history, tools={})
+
+    assert caught.value.__cause__ is error
+    assert "DO_NOT_LOG_ERROR_BODY" not in str(caught.value)
+    assert "DO_NOT_LOG_ERROR_BODY" not in caplog.text
+    assert history == before
+    assert client._truncation_overruns == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 413])
+async def test_a_context_rejection_is_raised_unchanged_when_recovery_is_off(status) -> None:
+    client = _make_client(truncation_recovery=False)
+    error = APIStatusError(
+        "prompt too long",
+        response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
+        body={"code": "context_length_exceeded", "message": "prompt too long"},
+    )
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(APIStatusError) as caught:
+        await client.generate([UserMessage(content="original task")], tools={})
+
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, {"code": "invalid_output_token_parameter", "message": "context length exceeded"}),
+        (400, {"message": "context_length_exceeded"}),
+        (400, {"code": None}),
+        (400, None),
+        (400, "context_length_exceeded"),
+        (413, {"code": "request_too_large"}),
+        (422, {"code": "context_length_exceeded"}),
+        (500, {"code": "context_length_exceeded"}),
+    ],
+)
+async def test_other_http_failures_are_not_treated_as_context_overflow(status, body) -> None:
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
+    error = APIStatusError(
+        "request refused",
+        response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
+        body=body,
+    )
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(APIStatusError) as caught:
+        await client.generate([UserMessage(content="original task")], tools={})
+
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+async def test_successful_length_response_retains_partial_content(finish_reason) -> None:
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
+    response = _make_response(content="partial work")
+    response.choices[0].finish_reason = finish_reason
+    client._client.chat.completions.create = AsyncMock(return_value=response)
+
+    result = await client.generate([UserMessage(content="original task")], tools={})
+
+    assert result.content == "partial work"
+    assert result.token_usage.input == 10
+    assert result.token_usage.output == 5
 
 
 @pytest.mark.asyncio

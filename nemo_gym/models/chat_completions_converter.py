@@ -19,6 +19,7 @@ and the Chat Completions API format. It is used by model servers that need to
 convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
+import base64
 import json
 import logging
 import re
@@ -28,7 +29,7 @@ from uuid import uuid4
 
 from openai.types.completion_usage import CompletionUsage
 from openai.types.responses.response_create_params import ToolParam
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.responses_api_types import (
@@ -169,6 +170,8 @@ class ChatCompletionsConverterState:
     content_buffer: str = ""
     refusal_buffer: str = ""
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = field(default_factory=list)
+    # Provider-signed thinking blocks replayed onto the next assistant message (preserve_thinking_blocks).
+    thinking_blocks_buffer: List[Dict[str, Any]] = field(default_factory=list)
     assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
@@ -187,6 +190,8 @@ class ChatCompletionsConverterState:
             shared_params["tool_calls"] = self.tool_calls_buffer
         if self.refusal_buffer:
             shared_params["refusal"] = self.refusal_buffer
+        if self.thinking_blocks_buffer:
+            shared_params["thinking_blocks"] = self.thinking_blocks_buffer
 
         if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -201,6 +206,7 @@ class ChatCompletionsConverterState:
         self.content_buffer = ""
         self.refusal_buffer = ""
         self.tool_calls_buffer = []
+        self.thinking_blocks_buffer = []
         self.assistant_item_buffered = False
         self.token_information = None
 
@@ -318,12 +324,55 @@ CustomToolStrategy = Literal["passthrough", "function_bridge"]
 # so an unguarded warning would repeat each turn.
 _BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
+# The JSON types that `tool_parameter_types` can name for a tool parameter.
+ToolParameterType = Literal["integer", "boolean"]
+
+
+def _retype_tool_arguments(arguments: Any, parameter_types: Optional[Dict[str, ToolParameterType]]) -> Any:
+    """Convert string parameters of one tool call to the JSON types in `parameter_types`.
+
+    `arguments` is the JSON text of the call's arguments, and `parameter_types`
+    maps a parameter name to its type. A parameter is converted only when its
+    value is a string that spells a whole number of at most 18 ASCII digits,
+    which every 64-bit integer type holds (for `integer`), or `true` or `false`
+    in any letter case (for `boolean`). Whitespace and quote characters around
+    the value are ignored, because a model also writes `"1000"` or `False`.
+    Every other value is kept, and arguments that are not the text of a JSON
+    object are returned unchanged. When nothing was converted the same text is
+    returned, so a call that the backend already typed is not rewritten.
+    """
+    if not parameter_types or not isinstance(arguments, str):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        return arguments
+    if not isinstance(parsed, dict):
+        return arguments
+    changed = False
+    for key, kind in parameter_types.items():
+        value = parsed.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip().strip("\"'").strip()
+        if kind == "integer" and re.fullmatch(r"-?[0-9]{1,18}", text):
+            parsed[key] = int(text)
+            changed = True
+        elif kind == "boolean" and text.lower() in ("true", "false"):
+            parsed[key] = text.lower() == "true"
+            changed = True
+    return json.dumps(parsed) if changed else arguments
+
 
 class ChatCompletionsConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
     return_token_id_information: bool
     uses_reasoning_parser: bool = True
+    # Carry a Chat Completions provider's signed thinking blocks (LiteLLM's `thinking_blocks` for Anthropic models)
+    # through the Responses side: they ride in the reasoning item's encrypted_content, which a Responses client
+    # (Codex) returns verbatim, and go back on the next assistant message, so the model sees its own earlier thinking.
+    preserve_thinking_blocks: bool = False
     # How a Responses `custom` (free-form) tool crosses a Chat Completions
     # backend that admits function tools only (vLLM's chat schema).
     # "passthrough" keeps the historical behavior: the definition converts to a
@@ -340,8 +389,27 @@ class ChatCompletionsConverter(BaseModel):
     # default: OpenAI's chat tool messages carry text only, so such an output fails the conversion, or
     # becomes a text placeholder with ``drop_unrepresentable_request_fields``.
     inline_tool_output_images: bool = False
+    # The JSON type of tool parameters, by tool name and then parameter name.
+    # A backend's tool parser types a parameter from the schema that the
+    # request declares, so it returns every parameter of a tool that the
+    # request did not declare as a string. A harness that runs such a call all
+    # the same needs the types back: a returned function call to a tool named
+    # here has the listed parameters converted (`_retype_tool_arguments`).
+    # Empty leaves every call as the backend returned it.
+    tool_parameter_types: Dict[str, Dict[str, ToolParameterType]] = Field(default_factory=dict)
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+    THINKING_BLOCKS_PREFIX: ClassVar[str] = "gym.thinking_blocks.v1:"
+
+    @classmethod
+    def encode_thinking_blocks(cls, blocks: List[Dict[str, Any]]) -> str:
+        return cls.THINKING_BLOCKS_PREFIX + base64.urlsafe_b64encode(json.dumps(blocks).encode()).decode()
+
+    @classmethod
+    def decode_thinking_blocks(cls, encrypted_content: Any) -> Optional[List[Dict[str, Any]]]:
+        if not isinstance(encrypted_content, str) or not encrypted_content.startswith(cls.THINKING_BLOCKS_PREFIX):
+            return None
+        return json.loads(base64.urlsafe_b64decode(encrypted_content[len(cls.THINKING_BLOCKS_PREFIX) :]))
 
     @staticmethod
     def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:
@@ -881,6 +949,12 @@ class ChatCompletionsConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        blocks = self.decode_thinking_blocks(m.get("encrypted_content")) if self.preserve_thinking_blocks else None
+        if blocks is not None and not m.get("content"):
+            # The signed blocks carry the thinking; the summary is their readable copy and is not replayed.
+            state.assistant_item_buffered = True
+            state.thinking_blocks_buffer.extend(blocks)
+            return
         if m.get("encrypted_content") or m.get("content"):
             raise NotImplementedError(
                 "Responses reasoning content/encrypted_content cannot be preserved by this Chat Completions "
@@ -1253,13 +1327,19 @@ class ChatCompletionsConverter(BaseModel):
                 logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
-        if reasoning_matches:
+        thinking_blocks = None
+        if self.preserve_thinking_blocks:
+            thinking_blocks = message_dict.get("thinking_blocks") or (
+                message_dict.get("provider_specific_fields") or {}
+            ).get("thinking_blocks")
+        if reasoning_matches or thinking_blocks:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
                 type="reasoning",
                 summary=[
                     NeMoGymSummary(text=reasoning_text, type="summary_text") for reasoning_text in reasoning_matches
                 ],
+                encrypted_content=self.encode_thinking_blocks(thinking_blocks) if thinking_blocks else None,
                 status="completed",
             )
             response_output.append(reasoning_item)
@@ -1332,7 +1412,9 @@ class ChatCompletionsConverter(BaseModel):
                 response_output.append(
                     NeMoGymResponseFunctionToolCall(
                         name=tc["function"]["name"],
-                        arguments=tc["function"]["arguments"],
+                        arguments=_retype_tool_arguments(
+                            tc["function"]["arguments"], self.tool_parameter_types.get(tc["function"]["name"])
+                        ),
                         call_id=tc["id"],
                         type="function_call",
                         status="completed",
@@ -1542,9 +1624,5 @@ def split_responses_input_output_items(
     return items[:split_at], items[split_at:]
 
 
-# Backward-compatible aliases
-VLLMConverter = ChatCompletionsConverter
-VLLMConverterResponsesToChatCompletionsState = ChatCompletionsConverterState
-
-# Names this module had before ResponsesConverter was renamed ChatCompletionsConverter, with a warning.
+# Names this module had before the converter was renamed ChatCompletionsConverter, with a warning.
 __getattr__ = moved_names_getattr(__name__)

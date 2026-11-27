@@ -20,8 +20,10 @@ The Responses API and Chat Completions types it sends and receives live in `nemo
 import asyncio
 import json
 import logging
+import os
 import random
 import re
+import time
 import uuid
 from asyncio import sleep
 from collections.abc import Mapping
@@ -398,11 +400,55 @@ def _rollout_request_id(headers: Mapping[str, str]) -> Optional[str]:
     return f"{rollout_id}-{uuid.uuid4().hex[:8]}"
 
 
+API_COST_LOG_ENV_VAR_NAME = "NEMO_GYM_API_COST_LOG"
+
+
+def log_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any) -> None:
+    """Append one line per successful upstream call to $NEMO_GYM_API_COST_LOG (unset: nothing): the endpoint's
+    billed-cost headers (LiteLLM's x-litellm-response-cost*), the usage, the model and the prompt_cache_key (Codex's
+    per-conversation id), for pricing a run per call. Never request or response content, never auth headers."""
+    path = os.environ.get(API_COST_LOG_ENV_VAR_NAME)
+    if not path:
+        return
+    try:
+        cost = {
+            k.lower(): v for k, v in dict(headers or {}).items() if k.lower().startswith("x-litellm-response-cost")
+        }
+        record = {
+            "ts": time.time(),
+            "pid": os.getpid(),
+            "endpoint": endpoint,
+            "model": request.get("model"),
+            "prompt_cache_key": request.get("prompt_cache_key"),
+            "cost": cost,
+            "usage": body.get("usage") if isinstance(body, dict) else None,
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:  # accounting must never fail a model call
+        logging.getLogger(__name__).warning("could not write %s", path, exc_info=True)
+
+
+async def alog_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any) -> None:
+    """``log_api_cost`` off the event loop: nothing when the log is off, else the append runs in a worker thread so
+    a slow (e.g. shared) filesystem never stalls other requests."""
+    if not os.environ.get(API_COST_LOG_ENV_VAR_NAME):
+        return
+    await asyncio.to_thread(log_api_cost, endpoint, request, headers, body)
+
+
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
     base_url: str
-    api_key: str
+    api_key: str | list[str] = Field(
+        repr=False,
+        description=(
+            "API key, or a list of keys used in order: the next key replaces the current one once it is spent "
+            "(a budget_exceeded or insufficient_quota 429) or rejected (an invalid-key 401/403), and the failed "
+            "request is resent at once. The client trips only after the last key fails the same way."
+        ),
+    )
 
     internal: bool = Field(
         default=False,
@@ -498,10 +544,42 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     def validate_timeout_pair(self) -> "NeMoGymAsyncOpenAI":
         if self.connect_timeout_seconds is not None and self.request_timeout_seconds is None:
             raise ValueError("connect_timeout_seconds requires request_timeout_seconds")
+        if self.api_key == []:
+            raise ValueError("api_key needs at least one key")
         return self
 
     # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
     _permanent_trip: Optional[tuple[int, bytes, str]] = PrivateAttr(default=None)
+    # Index of the key in use when api_key is a list.
+    _api_key_index: int = PrivateAttr(default=0)
+
+    @property
+    def current_api_key(self) -> str:
+        """The key requests are sent with now."""
+        return self.api_key if isinstance(self.api_key, str) else self.api_key[self._api_key_index]
+
+    def _switch_to_next_api_key(self, failed_authorization: Optional[str]) -> bool:
+        """Retire the key a request failed with; True when a key not yet failed is now current.
+
+        Concurrent requests that failed on an already-retired key just resend with the current one.
+        """
+        if failed_authorization not in (None, f"Bearer {self.current_api_key}"):
+            return True
+        if isinstance(self.api_key, str) or self._api_key_index + 1 >= len(self.api_key):
+            return False
+        self._api_key_index += 1
+        print(
+            f"[model_key_failover base_url={self.base_url} keys_left={len(self.api_key) - self._api_key_index - 1}]",
+            flush=True,
+        )
+        return True
+
+    def _authorize(self, request_kwargs: Dict[str, Any]) -> None:
+        """Send the current key, which a later key may have replaced since the request was built."""
+        if isinstance(self.api_key, list) and "headers" in request_kwargs:
+            request_kwargs["headers"] = _merge_headers(
+                request_kwargs["headers"], {"Authorization": f"Bearer {self.current_api_key}"}
+            )
 
     def _raise_permanent_error(self, cause: Optional[NgFailureEvent] = None) -> None:
         assert self._permanent_trip is not None
@@ -560,7 +638,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             self.default_headers,
             self._session_headers(),
             request_headers,
-            {"Authorization": f"Bearer {self.api_key}"},
+            {"Authorization": f"Bearer {self.current_api_key}"},
         )
         request_id = _rollout_request_id(headers)
         if request_id is not None:
@@ -593,6 +671,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         # One logical model call; each HTTP attempt of it is observed under its own attempt id.
         operation_id = uuid.uuid4().hex
         transport_failures = 0
+        # Sends resent at once with the next key: each still counts as an HTTP attempt, but not against the retry
+        # allowance or the backoff.
+        key_switches = 0
         last_transport_failure: tuple[Exception, NgFailureEvent] | None = None
         # Response timeouts whose server queue is being read; each is recorded once its read returns.
         queue_reads: list[tuple[Exception, str, asyncio.Task]] = []
@@ -672,6 +753,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
             tries += 1
+            self._authorize(request_kwargs)
+            sent_authorization = (request_kwargs.get("headers") or {}).get("Authorization")
             try:
                 response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)
             except BaseException as error:
@@ -724,6 +807,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 permanent_auth = _error_body_is_permanent_auth(body)
                 content = _bounded_error_body(body)
                 del body
+                if permanent_auth and self._switch_to_next_api_key(sent_authorization):
+                    # The provider never ran the request, so it is resent with the next key at once.
+                    key_switches += 1
+                    max_num_tries += 1
+                    continue
                 if permanent_auth:
                     observe_terminal(
                         operation_id=operation_id,
@@ -762,6 +850,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             context_overflow = _error_body_is_context_overflow(body)
             content = _bounded_error_body(body)
             del body
+            if permanent_quota and self._switch_to_next_api_key(sent_authorization):
+                key_switches += 1
+                max_num_tries += 1
+                continue
             if permanent_quota:
                 observe_terminal(
                     operation_id=operation_id,
@@ -781,7 +873,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 )
                 await _raise_exhausted(response, content, last_failure)
 
-            wait = _retry_wait_seconds(tries, response)
+            wait = _retry_wait_seconds(tries - key_switches, response)
             # One counter (``tries``) and one elapsed budget (time since the call started, response time included) cover every retryable status, so a changing
             # status sequence never resets them. A busy provider is waited out until max_rate_limit_wait_seconds is
             # spent: a positive budget ends the request even when max_http_attempts allows more tries, and 0 leaves
@@ -862,7 +954,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await self._read_response_json(response)
+        body = await self._read_response_json(response)
+        await alog_api_cost("/chat/completions", kwargs, getattr(response, "headers", None), body)
+        return body
 
     async def create_completion(self, **kwargs):
         request_kwargs = dict(
@@ -882,7 +976,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await self._read_response_json(response)
+        body = await self._read_response_json(response)
+        await alog_api_cost("/responses", kwargs, getattr(response, "headers", None), body)
+        return body
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")

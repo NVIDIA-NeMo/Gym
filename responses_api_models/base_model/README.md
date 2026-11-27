@@ -11,7 +11,7 @@ instead of writing prose. Their defaults depend on the wire:
 | `wire` | the model writes | returned as |
 |---|---|---|
 | `backticks` (default) | one bash command in a ```` ```mswea_bash_command ```` fence (mini-swe-agent's text protocol) | assistant text |
-| `function_calling` | a JSON array of `bash` tool calls, following the schema in `tool_definitions_json` | `tool_calls` on the assistant message |
+| `function_calling` | a JSON array of tool calls, following the schema in `tool_definitions_json`: `bash` by default, or the tools in `tool_names` | `tool_calls` on the assistant message |
 
 The wire must match the one the trajectories were captured on, not the benchmark: crossed, every turn is a well-formed
 action the agent cannot execute. On `function_calling` no stop list is sent, because tool-call arguments routinely
@@ -33,7 +33,19 @@ against a path that does not exist, which scores as a quiet 0.
 | `steer`, `primer`, `prefill`, `stop` | per wire | each can be overridden; `stop: []` sends no stop list |
 | `tool_definitions_json` | none | the tool schema as a JSON string, rendered verbatim into the prompt |
 | `max_tool_calls_per_turn` | 3 | calls beyond this in one turn are dropped |
+| `tool_names` | none | `function_calling` only. None: `bash` calls, keeping just `command` (mini-swe-agent). A list: calls to any of these tools, with whatever JSON-object arguments the model wrote (e.g. AutomationBench's `api_search`, `api_fetch`, `base64_encode`) |
+| `render_assistant_text` | false | render the text an assistant turn carried alongside its tool calls, as an `Assistant:` line before the calls. Off matches the reference bridge, which dropped it. The primer still opens the candidate's turn on the tool-call line, so the candidate sees narrated turns but cannot narrate its own |
 | `max_tokens`, `temperature`, `top_p` | 1024, 0.6, none | sampling |
+| `request_timeout_seconds` | none | Time limit for each HTTP attempt, not for the whole call. A timed-out attempt is retried like any other transport error; a timeout while reading the response body is raised without resending the request. None means no limit |
+| `max_connection_retries` | none | Connection-error attempts one call makes before raising: `N` allows N attempts, so `1` means no retry. Also caps the timeout and error retry path. It does not cap the attempts of the separate HTTP-status retry loop. None means no limit |
+| `connection_retry_timeout_s` | none | Wall-clock seconds one call may spend retrying connection errors. Not a deadline for the whole call. None means no limit |
+
+**Truncated generations.** When a generation hits `max_tokens` with `tool_names` set, the calls written in full
+before the cut are returned and the call the cut landed in is dropped. The response is still marked truncated: on
+`/v1/responses` it has `status: "incomplete"` with `incomplete_details.reason = "max_output_tokens"`, and Simple Agent
+stops the rollout on `incomplete_details` before executing any of those recovered calls. Only agents that execute the
+calls of an incomplete turn use them, for example on `/v1/chat/completions`, where a turn with calls reports
+`finish_reason: "tool_calls"`.
 
 `configs/base_model.yaml` defines `policy_model`, which reads `policy_base_url` and `policy_model_name` from
 `env.yaml`. The prefix pass@K benchmark (`benchmarks/prefix_pass_k/`) serves checkpoints through this server on both

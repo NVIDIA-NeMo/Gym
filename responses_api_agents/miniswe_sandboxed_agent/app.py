@@ -22,6 +22,7 @@ from pydantic import Field, field_validator
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
     AgentSessionState,
@@ -50,6 +51,7 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
+from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentObservationBundle
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
@@ -188,6 +190,13 @@ def _instruction(input_value: Any) -> str:
     return "\n\n".join(part for part in messages if part)
 
 
+def _unsupported_grants_detail(names: list[str]) -> str:
+    return (
+        "mini-SWE sandboxed sessions reach only the MCP servers in the task's task.json and cannot use these "
+        "required tool grants: " + ", ".join(names)
+    )
+
+
 async def _read_task_context(sandbox: AsyncSandbox) -> dict[str, Any]:
     """``mcp_servers`` and ``skills_dir`` the resources server recorded for this task, if any.
 
@@ -312,7 +321,16 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         return budget
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> MiniSWEEpisodeSession:
-        """Borrow the resources server's sandbox for this episode."""
+        """Borrow the resources server's sandbox for this episode.
+
+        mini-SWE reaches only the MCP servers the task lists in ``task.json``, which it starts itself. A required
+        grant it cannot serve (any non-MCP grant, or an MCP grant ``task.json`` does not list, such as a Resources
+        Server's own tool) is refused here, so the episode fails once instead of running without the tool.
+        """
+        required = [access for access in self.effective_tool_accesses(body) if access.required]
+        required_other = sorted(access.name for access in required if not isinstance(access, MCPToolAccess))
+        if required_other:
+            raise AgentSeedRejectedError(_unsupported_grants_detail(required_other))
         if body.sandbox_access is None:
             raise HTTPException(422, "mini-SWE needs sandbox_access from the resources server")
         connection = body.sandbox_access.connection
@@ -333,6 +351,22 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         except BaseException:
             await provider.aclose()
             raise
+        if required:
+            # Harbor's task_mcp_grants: required grants the task's own MCP servers, which task.json also lists.
+            try:
+                task_context = await _read_task_context(sandbox)
+                task_servers = {
+                    server.get("name") for server in task_context.get("mcp_servers") or [] if isinstance(server, dict)
+                }
+                unsupported = sorted(access.name for access in required if access.name not in task_servers)
+                if unsupported:
+                    raise AgentSeedRejectedError(_unsupported_grants_detail(unsupported))
+            except BaseException:
+                try:
+                    await sandbox.disconnect()
+                finally:
+                    await provider.aclose()
+                raise
         # The environment server addresses the turn as /ng-rollout/<capture_key>/v1/responses and the base
         # agent's session cookie finds the state, so the owner half of the key only has to be unique.
         key = (f"episode:{body.agent_session_id}", body.episode_id.capture_key)

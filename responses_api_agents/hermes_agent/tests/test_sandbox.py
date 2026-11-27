@@ -94,6 +94,14 @@ def state():
     )
 
 
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+async def test_gzip_helper_is_uploaded_only_when_enabled(state, gzip_enabled):
+    await state.stage_activation({"gzip_requests_enabled": gzip_enabled})
+
+    uploaded = {call.args[0].name for call in state.session.sandbox.upload.await_args_list}
+    assert ("request_gzip.py" in uploaded) is gzip_enabled
+
+
 def mock_json_download(sandbox, **kwargs):
     """Supply files through the real text utility's sandbox download boundary."""
     download = AsyncMock(**kwargs)
@@ -133,6 +141,25 @@ async def test_unbound_compatibility_run_fails_before_calling_resources(agent):
         )
     assert error.value.status_code == 422
     agent.server_client.post.assert_not_awaited()
+
+
+def test_gzip_rejects_local_execution_before_calling_resources(agent):
+    agent.config.gzip_requests_enabled = True
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert (
+            response.json()["detail"]
+            == "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert (
+            run.json()["detail"]
+            == "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+    agent.server_client.post.assert_not_called()
 
 
 async def test_unbound_direct_responses_remains_available(agent):
@@ -434,7 +461,7 @@ async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state
             await stopped.wait()
             raise
 
-    state.session.sandbox.stop.side_effect = stopped.set
+    state.session.sandbox.stop.side_effect = lambda **_: stopped.set()
     download_json = mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
     state.task = asyncio.create_task(activation())
     await started.wait()
@@ -745,11 +772,13 @@ async def test_stop_before_launch_closes_without_starting_a_worker(agent, state,
         with pytest.raises(RuntimeError, match="exited without output"):
             await state.task
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
+        # The stop request fenced the launch, and the receipt says so.
         assert json.loads((directory / "cleanup.json").read_text()) == {
             "cleanup_confirmed": True,
             "error": None,
             "return_code": None,
             "timed_out": False,
+            "stopped": True,
         }
         await agent._close_agent_session_state(state)
         state.session.sandbox.disconnect.assert_awaited_once()
@@ -763,11 +792,14 @@ async def test_seed_import_check_ignores_task_hermes_home(tmp_path):
     private_home, task_home = tmp_path / "runtime-home", tmp_path / "task-home"
     private_home.mkdir()
     task_home.mkdir()
+    from responses_api_agents.hermes_agent.runtime import host_python
+
     code = (
-        hermes_sandbox._HERMES_RUNTIME.import_check + "; import json; print(json.dumps(str(run_agent._hermes_home)))"
+        hermes_sandbox._HERMES_RUNTIME.import_check
+        + "; import json, run_agent; print(json.dumps(str(run_agent._hermes_home)))"
     )
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
+        str(host_python()),
         "-I",
         "-c",
         code,
@@ -1139,13 +1171,11 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
     )
     original = body.model_dump()
     result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
-    runner = MagicMock()
-    runner.run_conversation.return_value = result
-    constructor = MagicMock(return_value=runner)
-    monkeypatch.setattr("run_agent.AIAgent", constructor)
-    monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+    host_worker = AsyncMock(return_value=({"result": result}, False))
+    monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
     await agent.responses(SimpleNamespace(session={}), body)
-    user_message, system_message, history = runner.run_conversation.call_args.args
+    host = host_worker.await_args.args[0]
+    user_message, system_message, history = host["user_message"], host["system_message"], host["history"]
 
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     state.upload_json = AsyncMock()
@@ -1172,12 +1202,8 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
         == system_message
         == ("Configured instruction\n\nRequest instruction\n\nInput system instruction")
     )
-    assert (
-        payload["temperature"]
-        == constructor.call_args.kwargs["temperature"]
-        == (temperature if temperature is not None else 0.7)
-    )
-    assert payload["max_tokens"] == constructor.call_args.kwargs["max_tokens"] == 500
+    assert payload["temperature"] == host["temperature"] == (temperature if temperature is not None else 0.7)
+    assert payload["max_tokens"] == host["max_tokens"] == 500
     assert body.model_dump() == original
     assert len(validations) == 2  # Exactly once per incoming request, not again in the runner.
 
@@ -1217,6 +1243,24 @@ def test_agent_timeout_is_the_task_budget_capped_by_the_ceiling(agent, raw, expe
     body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata=metadata)
     assert agent.config.sandbox_runner_timeout_seconds == 21600
     assert agent._agent_timeout_sec(body) == expected
+
+
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+async def test_agent_passes_gzip_flag_to_sandbox_runner(agent, state, gzip_enabled):
+    agent.config.gzip_requests_enabled = gzip_enabled
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}}
+    )
+
+    await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        agent_session_id="session",
+        state=state,
+    )
+
+    state.execute.assert_awaited_once()
+    (payload,) = state.execute.await_args.args
+    assert payload["gzip_requests_enabled"] is gzip_enabled
 
 
 @pytest.mark.parametrize("budget", [None, "900.0"])
@@ -1260,17 +1304,24 @@ async def test_task_timeout_reaches_the_sandbox_supervisor(agent, state, tmp_pat
     )
 
 
+@pytest.mark.parametrize(
+    "ending",
+    [
+        {"partial": True, "error": "Context length exceeded: max compression attempts (3) reached."},
+        # Hermes 0.23.2 marks an exhausted context `failed`; its `failure_reason` keeps it a model limit.
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "failure_retryable": False,
+            "compression_exhausted": True,
+            "error": "This conversation has grown too long for policy_model to read, and Hermes couldn't shrink it",
+        },
+    ],
+)
 @pytest.mark.parametrize("captured", [False, True])
-async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured):
+async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured, ending):
     messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
-    output = {
-        "result": {
-            "completed": False,
-            "partial": True,
-            "error": "Context length exceeded: max compression attempts (3) reached.",
-            "messages": messages,
-        }
-    }
+    output = {"result": {"completed": False, **ending, "messages": messages}}
     if captured:
         output["observations"] = {"invocations": [{"invocation_id": "root", "status": "failed", "messages": messages}]}
     state.execute = AsyncMock(return_value=output)
@@ -1294,6 +1345,7 @@ async def test_context_limit_keeps_partial_work_verifiable(agent, state, capture
     [
         "Response truncated due to output length limit",
         "Response remained truncated after 3 continuation attempts",
+        "Response remained truncated after 4 continuation attempts",
         "Model used all output tokens on reasoning with none left for the response. "
         "Try lowering reasoning effort or increasing max_tokens.",
     ],
@@ -1563,6 +1615,31 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
         sandbox.stop.assert_not_awaited()
 
 
+async def test_seed_refuses_sandbox_glibc_hermes_cannot_run(agent, state, monkeypatch):
+    import responses_api_agents.hermes_agent.app as module
+
+    sandbox = state.session.sandbox
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
+    unsupported = hermes_sandbox.HermesPlatformUnsupportedError("Hermes requires glibc 2.28 or newer")
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=unsupported))
+    ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="")
+    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok]
+
+    # Every rerun gets a sandbox from the same image, so the seed is a final 422, not a retried 500.
+    with pytest.raises(AgentSeedRejectedError, match=r"glibc 2\.28") as refused:
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    assert refused.value.status_code == 422
+    sandbox.disconnect.assert_awaited_once()
+    assert all(record.state is None for record in agent._session_records.values())
+
+
 @pytest.mark.parametrize("url", ["http://127.0.0.1:8000/ng-rollout/native-a1/v1", "http://[::1]:8000/v1"])
 async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, monkeypatch, url):
     import responses_api_agents.hermes_agent.app as module
@@ -1769,6 +1846,11 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
         ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response remained truncated after 3 continuation attempts"}, "agent_limit"),
+        ({"partial": True, "error": "Response remained truncated after 4 continuation attempts"}, "agent_limit"),
+        (
+            {"partial": True, "error": "Prompt used 4080 of 4096 context tokens; no room to answer"},
+            "model_context_limit",
+        ),
         (
             {
                 "partial": True,
@@ -1793,6 +1875,41 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
             "model_context_limit",
         ),
         ({"partial": True, "error": "Model generated invalid tool call: nonexistent"}, "agent_invalid_output"),
+        # Hermes 0.23.2 endings, identified by their `failure_reason` rather than their chat wording.
+        (
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compression_exhausted": True,
+                "error": "This conversation has grown too long for policy_model to read, and Hermes couldn't shrink it",
+            },
+            "model_context_limit",
+        ),
+        (
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compaction_disabled": True,
+                "error": "This conversation is too long for policy_model and automatic shrinking is turned off",
+            },
+            "model_context_limit",
+        ),
+        (
+            {
+                "partial": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
+            "agent_limit",
+        ),
+        (
+            {
+                "failed": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
+            "agent_limit",
+        ),
     ],
 )
 def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, expected_kind):
@@ -1819,6 +1936,35 @@ def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, exp
     }
     policy = AgentOutcomePolicyConfig(by_failure_kind=actions)
     assert agent_outcome_policy(reported, config=policy) == actions[expected_kind]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "compression_exhausted": True,
+            "turn_exit_reason": "context_compression_timeout",
+            "error": "Context compression timed out before it could shrink the conversation",
+        },
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "error": "The requested output length exceeds the provider's output cap for this model",
+        },
+    ],
+)
+def test_compression_timeout_and_output_cap_are_not_context_limits(agent, result):
+    """Hermes also stamps these with `context_overflow`; a slow compression call or a rejected cap is not the model's."""
+    assert agent.classify_outcome(result).failure_kind == "unknown"
+    response = agent._response_from_result(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        result=result | {"messages": []},
+        model_name="model",
+        retain_provider_failure=True,
+    )
+    assert response.metadata["provider_failed"] == "true"
 
 
 @pytest.mark.parametrize("status", [400, 413])
@@ -1866,12 +2012,11 @@ async def test_images_reach_host_and_sandbox_without_dropping_history(agent, sta
             await agent.responses(request(state), body.model_copy(update={"instructions": "different"}))
         assert error.value.status_code == 409
     else:
-        runner = MagicMock()
-        runner.run_conversation.return_value = result
-        monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
-        monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+        host_worker = AsyncMock(return_value=({"result": result}, False))
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
         await agent.responses(SimpleNamespace(session={}), body)
-        latest, _, history = runner.run_conversation.call_args.args
+        host = host_worker.await_args.args[0]
+        latest, history = host["user_message"], host["history"]
     expected = [
         {"type": "text", "text": "before"},
         {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "high"}},
@@ -1921,3 +2066,26 @@ async def test_invalid_images_fail_before_execution(agent, state, role, image, m
     )
     assert recovered.status == "completed"
     (agent._run_sandbox_episode if sandbox else agent._create_response).assert_awaited_once()
+
+
+@pytest.mark.parametrize("minor", [17, 27, None])
+async def test_hermes_explains_unsupported_glibc_before_downloading_wheels(tmp_path, minor):
+    from nemo_gym.agents import SandboxPlatform
+
+    with pytest.raises(hermes_sandbox.HermesPlatformUnsupportedError, match=r"Hermes requires glibc 2\.28 or newer"):
+        await hermes_sandbox._HERMES_RUNTIME._build_site_packages(
+            SandboxPlatform("x86_64", "gnu", minor), tmp_path / "bundle"
+        )
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(("reported", "supported"), [("glibc 2.17", False), ("", False), ("glibc 2.28", True)])
+def test_portable_runtime_refuses_an_image_whose_glibc_cannot_load_it(monkeypatch, reported, supported):
+    from responses_api_agents.hermes_agent import runtime
+
+    monkeypatch.setattr(runtime.os, "confstr", lambda name: reported)
+    if supported:
+        runtime._require_supported_glibc()
+    else:
+        with pytest.raises(RuntimeError, match=r"Hermes requires glibc 2\.28 or newer"):
+            runtime._require_supported_glibc()

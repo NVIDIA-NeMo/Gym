@@ -39,7 +39,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Dict, Optional, Tuple, Union
 
-from fastapi import Body, FastAPI, Request
+import anyio
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -250,6 +251,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             session_id = request.session.get(SESSION_ID_KEY)
             if session_id is not None:
                 await self._release(session_id)
+                self._raise_if_browser_held(session_id)
             return {"closed": True}
 
         try:
@@ -271,21 +273,35 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             # Usually `verify` has already released the browser; this is the path for an
             # episode that ended before it, and a no-op otherwise.
             await self._release(session_id)
+            self._raise_if_browser_held(session_id)
             self._episode_identity.pop(session_id, None)
             self._fences.fence(session_id, close.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def _release(self, session_id: str) -> None:
-        st = self._session_id_to_state.pop(session_id, None)
+        st = self._session_id_to_state.get(session_id)
         if st is None:
             return
         try:
-            await st.backend.close()
+            # Shielded, so a client that disconnects cannot cut the close short and leave the browser running.
+            # Each teardown step has its own time limit, so the shield cannot hold the request forever.
+            with anyio.CancelScope(shield=True):
+                await st.backend.close()
         except Exception:
-            # A browser we could not close is still held by this run; say so rather than
-            # let the close report success silently.
+            # A browser we could not close is still held by this run. The session keeps it, so a later close, a
+            # re-seed of the session or the shutdown closes it.
             logger.warning("could not close the browser for session %s", session_id, exc_info=True)
+            return
+        # A re-seed may have replaced the state while the close ran; drop the record only of the browser that closed.
+        if self._session_id_to_state.get(session_id) is st:
+            del self._session_id_to_state[session_id]
+
+    def _raise_if_browser_held(self, session_id: str) -> None:
+        # A close is acknowledged only once the session holds no browser. Until then it is not fenced, so the
+        # caller's retry of the close tries the browser's close again.
+        if session_id in self._session_id_to_state:
+            raise HTTPException(503, "The session's browser could not be closed; close it again to retry")
 
     async def _open_session(
         self, session_id: str, body: BrowserSeedSessionRequest, episode_id: Optional[EpisodeId] = None
@@ -299,6 +315,9 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         # If this session_id is re-seeded (e.g. a retried rollout), release the
         # old browser first so we don't leak a session/process.
         await self._release(session_id)
+        if session_id in self._session_id_to_state:
+            # Its close failed: keep it for a re-seed or the shutdown rather than replace it with a second browser.
+            raise HTTPException(503, "The session's previous browser could not be closed; seed it again to retry")
 
         # Identifiers travel with the session so a remote provider can tag (and later
         # account for) the browser it hands out. The episode is what the training side

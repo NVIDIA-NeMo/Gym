@@ -12,7 +12,7 @@
 #     --config nemo_gym/sandbox/providers/e2b/configs/e2b.yaml \
 #     --config responses_api_models/vllm_model/configs/vllm_model.yaml
 #
-# Requires the SDK: `pip install 'e2b>=2.46.0,<3.0.0'`.
+# Requires the SDK: `pip install 'e2b>=2.46.0,<2.51.0'`.
 #
 # Works against e2b.dev and against any e2b-compatible gateway -- point
 # `connection.api_url`/`connection.sandbox_url` at the gateway.
@@ -67,6 +67,17 @@ sandbox:
       # false deletes at timeout; true pauses and resumes on the next request (AgentENV).
       # null sends no lifecycle, which can leave timed-out sandboxes paused on AgentENV.
       auto_resume: false
+      # Lease in seconds, named as on OpenSandbox: create with this timeout and renew it every third of a
+      # lease, up to the sandbox's lifetime, so the sandboxes of a process that died end one lease later.
+      # null renews nothing and creates with the full lifetime. Needs timeout_s.
+      renew_ttl_s: null
+      # Seconds to wait after a create until a no-op command reaches the new sandbox; null hands it over at once.
+      reachable_timeout_s: null
+      # E2B runs every command in a login shell, and a Debian image's /etc/profile resets PATH, losing the
+      # image's toolchain directories (/usr/local/go/bin, ...). true writes a profile.d hook into each new
+      # sandbox that gives login shells back the environment they started with. Turn it on when commands
+      # do not find the tools the image's own PATH has.
+      restore_login_env: false
       # Secure the sandbox envd service with an access token.
       secure: true
       # Permit outbound internet access. Set false for offline/untrusted workloads.
@@ -89,7 +100,7 @@ sandbox:
     exec:
       # Fallback only when timeout_s=None. AsyncSandbox.exec() normally supplies
       # its own 180s wait/stream budget; pass an explicit timeout for longer
-      # commands. A background process can outlive a timed-out output stream.
+      # commands. A command that runs out its timeout returns 124, and what it left running is killed.
       default_timeout_s: 180.0
       user: null
       # Optional override for opening command and reconnect streams. E2B 2.36+
@@ -109,13 +120,32 @@ sandbox:
       # command that finishes while disconnected cannot be recovered at all.
       background: true
       reconnect_attempts: 2
+    snapshots:
+      # Send checkpoint snapshot names to the service. E2B files a named snapshot as a template
+      # alias visible to the whole team, so names stay off. With names on, a snapshot whose request fails
+      # or is cancelled is deleted by its name (see the provider README).
+      send_names: false
+      # Ask the service when snapshots are listed by a name prefix, as a checkpoint release does to find
+      # the snapshots its index never recorded. The listing reads every snapshot the key can see and the
+      # release waits for it, so it stays off: a prefix then finds nothing. Turn it on with send_names
+      # where the service's listing answers in time.
+      list_by_name: false
+      # AgentENV only: create a sandbox from a snapshot with customExtensionParams {keepGuestClock: true}, so
+      # its wall clock continues from the snapshot's instead of jumping to the current time. The clock then
+      # lags real time by the time the snapshot sat unused.
+      keep_guest_clock: false
     operations:
       # Retries for transient transport/5xx failures. Deterministic errors and
-      # rate limits are not retried. Command timeouts are terminal; kill
+      # rate limits are not retried. A command that runs out its own timeout is final (exit 124); kill
       # timeouts may be retried so cleanup is not abandoned.
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+      # Seconds after a create during which "not found" about the new sandbox means "not routable yet": AgentENV
+      # can briefly answer 404 for a sandbox that runs. A kill is repeated, and status reports UNKNOWN. 0 is off.
+      new_sandbox_grace_s: 15.0
+      # Budget of one whole snapshot listing, as on OpenSandbox.
+      snapshot_list_timeout_s: 300.0
     # Job attribution merged into every sandbox's metadata, so the list API's metadata
     # filter (`GET /v2/sandboxes?metadata=k=v` on E2B and AgentENV) finds a team's, user's
     # or run's sandboxes. Unset fields auto-detect from NEMO_GYM_TEAM / NEMO_GYM_USER /

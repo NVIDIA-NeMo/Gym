@@ -32,8 +32,8 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Managed lockfiles require uv 0.13.4+, including the corrected certificate trust store.
-  UV_INSTALL_URL: "https://astral.sh/uv/0.13.4/install.sh"
+  # Managed lockfiles require uv 0.13.4+ (corrected certificate trust store); CI installs the current pin.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.13.8/install.sh"
   CRANE_URL: "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz"
   CRANE_SHA256: "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0" # pragma: allowlist secret
 
@@ -101,6 +101,11 @@ jobs:
 
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
+
+      - name: Install Node.js for server tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -204,7 +209,7 @@ jobs:
   # same commit, as gym:main-offline: an image that runs the server suite without network access.
   offline-image:
     name: Publish offline server image
-    runs-on: nemo-ci-aws-cpu-4-16
+    runs-on: nemo-ci-aws-cpu-4-16-200
     needs: [server-suite]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     steps:
@@ -472,7 +477,7 @@ jobs:
           fi
       - name: Notify Gym alerts channel
         if: steps.ref_check.outputs.allowed == 'true'
-        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@7c09a9e67a5cd4f2e73803114195d6705738d6c1
         with:
           needs-json: ${{ toJSON(needs) }}
           webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}

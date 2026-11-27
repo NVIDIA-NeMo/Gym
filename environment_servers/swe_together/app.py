@@ -614,6 +614,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
 
     async def _next_user_turn(self, state: Episode, activation: CandidateTurn) -> UserTurn:
         turn = activation.activation_id - 1
+        # A full context cannot take another turn; score the work so far.
+        if activation.stop_reason == "context_limit":
+            return UserTurn(activation_id=activation.activation_id, kind="stop", stop_reason="context_limit")
         if turn >= self.config.max_resumes:
             return UserTurn(activation_id=activation.activation_id, kind="stop", stop_reason="max_resumes")
         remaining = self._remaining_interaction_seconds(state)

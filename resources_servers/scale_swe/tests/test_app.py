@@ -24,6 +24,8 @@ traffic hit them. Writing the same tests here from the start is cheaper than re-
 same two bugs on a second dataset.
 """
 
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -502,3 +504,21 @@ class TestMultiWorkerEntrypoint:
                 assert "is_nemo_gym_fastapi_entrypoint(__file__)" in self._source(), (
                     f"{name} sets num_workers={workers} but the entrypoint has no module-level app"
                 )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order(tmp_path) -> None:
+    """Providers return a command's stdout and stderr apart: the script's redirect puts both on stdout, in order."""
+    header, found, _ = build_eval_script(_inputs()).partition("\ncd ")
+    assert found, "the eval script no longer begins its work with a cd line; update this split"
+    # Only the redirect may run here: never the real script, which resets a checkout.
+    assert [line for line in header.splitlines() if line and not line.startswith("#")] == ["exec 2>&1"]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=30,
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""
