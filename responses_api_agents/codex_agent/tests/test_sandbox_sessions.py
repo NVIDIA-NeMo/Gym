@@ -4026,6 +4026,113 @@ def test_a_stopped_run_joins_a_cli_result_to_no_call_it_cannot_prove_is_its(setu
     assert "tool_results_from_cli_events" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
 
 
+MCP_CALL = {
+    "type": "function_call",
+    "call_id": "call_mcp",
+    "name": "search_docs",
+    "namespace": "mcp__gym_docs",
+    "arguments": '{"query": "pdf report", "limit": 2}',
+}
+
+
+def stopped_mcp_batch(*, server: str, cli_arguments: dict, calls: list[dict]) -> tuple[list[dict], str]:
+    """A run stopped during a batch of a shell command and a read-only MCP call, which Codex runs at once: the MCP
+    call ended and the CLI reported it, but the record waits for the command, the batch's first call."""
+    slow = "sleep 30 && echo slow"
+    mcp_item = {
+        "id": "item_1",
+        "type": "mcp_tool_call",
+        "server": server,
+        "tool": "search_docs",
+        "arguments": cli_arguments,
+    }
+    events = [
+        {"type": "turn.started"},
+        {
+            "type": "item.started",
+            "item": {"id": "item_0", "type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(slow)}"},
+        },
+        {"type": "item.started", "item": mcp_item | {"result": None, "error": None, "status": "in_progress"}},
+        {
+            "type": "item.completed",
+            "item": mcp_item
+            | {"result": {"content": [{"type": "text", "text": "doc hit"}]}, "error": None, "status": "completed"},
+        },
+    ]
+    record = native_transcript(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+            {
+                "type": "function_call",
+                "call_id": "call_slow",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": slow}),
+            },
+            *calls,
+        ]
+    )
+    return events, record
+
+
+@pytest.mark.parametrize(
+    ("server", "namespace"),
+    [("gym-docs", "mcp__gym_docs"), ("mcp__docs", "mcp__docs")],
+    ids=["hyphen-written-as-underscore", "server-named-with-the-prefix"],
+)
+def test_a_stopped_run_keeps_the_cli_result_of_an_mcp_call_the_session_record_has_not_written(
+    setup, caplog, server, namespace
+):
+    agent, sandbox = setup
+    events, record = stopped_mcp_batch(
+        server=server, cli_arguments={"limit": 2, "query": "pdf report"}, calls=[MCP_CALL | {"namespace": namespace}]
+    )
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    output = result.json()["output"]
+    assert [(item["type"], item.get("call_id")) for item in output] == [
+        ("function_call", "call_slow"),
+        ("function_call", "call_mcp"),
+        ("function_call_output", "call_mcp"),
+    ]
+    # The model's call as it made it, and the MCP tool's text as the CLI showed it.
+    assert (output[1]["namespace"], output[1]["name"], output[1]["arguments"]) == (
+        namespace,
+        "search_docs",
+        MCP_CALL["arguments"],
+    )
+    assert output[2]["output"] == "doc hit"
+    gaps = {gap["code"]: gap.get("detail") for gap in closed["agent_observations"]["gaps"]}
+    assert gaps["tool_results_from_cli_events"] == "the session record has no result for call_mcp"
+    assert "Codex tool results are kept as the CLI events show them" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("server", "cli_arguments", "calls"),
+    [
+        ("gym-docs", {"query": "other"}, [MCP_CALL]),
+        ("other-docs", {"query": "pdf report", "limit": 2}, [MCP_CALL]),
+        ("gym-docs", {"query": "pdf report", "limit": 2}, [MCP_CALL, MCP_CALL | {"call_id": "call_mcp_2"}]),
+        # Codex adds a hash to a namespace only to tell two servers' names apart.
+        ("gym-docs", {"query": "pdf report", "limit": 2}, [MCP_CALL | {"namespace": "mcp__gym_docs_0123456789ab"}]),
+    ],
+    ids=["other-arguments", "other-server", "same-call-twice", "renamed-namespace"],
+)
+def test_a_stopped_run_joins_an_mcp_result_to_no_call_it_cannot_prove_is_its(setup, server, cli_arguments, calls):
+    agent, sandbox = setup
+    events, record = stopped_mcp_batch(server=server, cli_arguments=cli_arguments, calls=calls)
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    assert [(item["type"], item.get("call_id")) for item in result.json()["output"]] == [
+        ("function_call", "call_slow"),
+        *(("function_call", call["call_id"]) for call in calls),
+    ]
+    assert "tool_results_from_cli_events" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
+
+
 def test_session_without_tool_calls_has_nothing_to_note_when_the_record_is_missing(setup, caplog):
     agent, sandbox = setup
     sandbox.events = "\n".join(

@@ -306,9 +306,9 @@ Harbor's:
 Only the record's `response_item` lines hold what the model produced and the results Codex gave it. Lines of every other
 kind are left out: the runtime events, turn settings, compaction summary and world state, inter-agent delivery, and the
 `token_usage_record` (one per model response), `retained_context`, `security_risk_score` and `realtime_item` lines that
-0.154.0 and 0.155.1 also write. A line of a kind none of the checked versions (0.144.4, 0.154.0, 0.155.1) writes is left out as well,
-because Codex adds such kinds between releases; the observations then carry an `unknown_session_records_skipped` gap
-that counts them by kind, and the agent server logs a warning.
+0.154.0 and 0.155.1 also write. A line of a kind none of the checked versions (0.144.4, 0.154.0, 0.155.1) writes is
+left out as well, because Codex adds such kinds between releases; the observations then carry an
+`unknown_session_records_skipped` gap that counts them by kind, and the agent server logs a warning.
 
 `response.output` falls back to the CLI events when the record cannot stand in for them: it is missing or unreadable
 (including a line whose values have a shape Codex does not write, or one nested too deeply to decode), holds a second
@@ -318,12 +318,20 @@ twice. When that output has tool calls, the observations carry a `tool_calls_in_
 the agent server logs a warning with it. The exported trajectory does not mark the fallback. Local `/run` execution
 still builds its output from the CLI events.
 
-Codex writes the results of a parallel batch of calls in call order, while the CLI reports each tool when it ends. A run
-stopped while one call of a batch ran can therefore have a later command's result in the CLI events but not in the
-record. An `exec_command` call the record leaves without a result then takes the CLI's result for it (the command's
-output, with its exit code when not 0), when the command the CLI shows finished is the call's `cmd` and no other call or
-finished command has that text; display IDs are never matched to calls by position. The observations carry a
-`tool_results_from_cli_events` gap naming those calls.
+Codex starts each call while the model's response streams and runs the calls of a batch at once where the tool
+allows it, but writes their results to the record only after the response ends, in call order; the CLI reports each
+tool when it ends. A run stopped before a result was written can therefore have it in the CLI events but not in the
+record. A call the record leaves without a result then takes the CLI's result for it (a command's output with its exit
+code when not 0, or an MCP tool's text or error) when both show the same call and no other call or finished CLI item
+matches it:
+- an `exec_command` call whose `cmd` is the command the CLI shows finished;
+- an MCP call whose namespace is `mcp__<server>` and whose name and arguments are the tool and arguments the CLI
+  shows, with each character of the server and tool names other than a letter, digit or `_` written as `_`, as Codex
+  names them for the model.
+
+Display IDs are never matched to calls by position. The observations carry a `tool_results_from_cli_events` gap
+naming those calls. An `apply_patch` or `update_plan` call stays without a result: the CLI shows the first only as the
+paths it changed, which does not identify the call, and the second without a result.
 
 Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; the cumulative totals in Codex's session files supplement CLI totals when a failed turn omits them. A turn stopped at its output or wall-time limit reports unknown usage, because neither total covers every call: Codex records no usage for an output-limited response and writes a call's token count only after the call's tools finish. A run stopped before any model call reports zero. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.

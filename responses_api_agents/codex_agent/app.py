@@ -557,27 +557,66 @@ def _executed_command(item: dict[str, Any]) -> Optional[str]:
     return argv[2] if len(argv) == 3 and argv[1] in ("-lc", "-c") else None
 
 
-def _model_command(item: Any) -> Optional[str]:
-    """The ``cmd`` of an ``exec_command`` call the model made; None for any other item."""
-    if getattr(item, "type", None) != "function_call" or item.name != "exec_command" or item.namespace:
+def _mcp_callable_name(name: str) -> str:
+    """An MCP server or tool name as Codex shows it to the model: each character other than an ASCII letter, digit
+    or ``_`` becomes ``_``."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", name)
+
+
+def _cli_result_key(item: dict[str, Any]) -> Optional[tuple[str, ...]]:
+    """What a finished CLI tool item is joined to a model call by: a shell command's text, or an MCP call's
+    namespace, tool name and arguments in the form the model called them. None for any other item.
+
+    Codex calls an MCP tool ``<tool>`` in the namespace ``mcp__<server>``, both with :func:`_mcp_callable_name`
+    applied (Codex 0.144.4, 0.154.0 and 0.155.1). It names a tool otherwise only to tell two names apart, to fit a
+    length limit, or when configured to leave out the prefix; a call under such a name has no key equal to one of
+    these, so it is not joined.
+    """
+    if item.get("type") == "command_execution":
+        command = _executed_command(item)
+        return None if command is None else ("exec_command", command)
+    server, tool = item.get("server"), item.get("tool")
+    if item.get("type") != "mcp_tool_call" or not isinstance(server, str) or not isinstance(tool, str):
+        return None
+    namespace = _mcp_callable_name(server)
+    if not namespace.startswith("mcp__"):
+        namespace = f"mcp__{namespace}"
+    return ("mcp", namespace, _mcp_callable_name(tool), json.dumps(item.get("arguments"), sort_keys=True))
+
+
+def _call_key(item: Any) -> Optional[tuple[str, ...]]:
+    """The :func:`_cli_result_key` of a call the model made: an ``exec_command`` call's ``cmd``, or an MCP call's
+    namespace, name and arguments. None for any other item."""
+    if getattr(item, "type", None) != "function_call":
         return None
     try:
         arguments = json.loads(item.arguments)
+        canonical_arguments = json.dumps(arguments, sort_keys=True)
     except (ValueError, RecursionError):
         return None
-    command = arguments.get("cmd") if isinstance(arguments, dict) else None
-    return command if isinstance(command, str) else None
+    if item.name == "exec_command" and not item.namespace:
+        command = arguments.get("cmd") if isinstance(arguments, dict) else None
+        return ("exec_command", command) if isinstance(command, str) else None
+    if item.namespace and item.namespace.startswith("mcp__"):
+        return ("mcp", item.namespace, item.name, canonical_arguments)
+    return None
 
 
 def _with_cli_results(output: list[Any], events: list[tuple[float, dict[str, Any]]]) -> tuple[list[Any], list[str]]:
-    """Add the CLI's result for each command the session record has a call for but no result, where the CLI events
-    show that command finished. Returns the output and the IDs of the calls given a CLI result.
+    """Add the CLI's result for each shell command or MCP call the session record has a call for but no result,
+    where the CLI events show that call finished. Returns the output and the IDs of the calls given a CLI result.
 
-    Codex writes the results of a parallel batch of calls in call order, while the CLI reports each tool when it
-    ends, so a run stopped while one call of a batch ran can have a later call's result in the CLI events and not in
-    the record. A finished CLI command and a call are joined only when the command text is the same and no other
-    call or finished CLI command has it; display IDs are never matched to calls by position. The result is the
-    CLI's (the command's output, and its exit code when not 0), not the text Codex would have given the model.
+    Codex starts each call while the model's response streams, and runs the calls of a batch at once where the tool
+    allows it (a shell command; an MCP tool marked read-only or on a server configured for parallel calls), but it
+    writes their results to the record only after the response ends, in call order. The CLI reports each tool when
+    it ends. So a run stopped before a result was written can have it in the CLI events and not in the record.
+    A finished CLI item and a call are joined only when their :func:`_cli_result_key` is the same and no other call
+    or finished CLI item has it; display IDs are never matched to calls by position. The result is the CLI's (a
+    command's output, and its exit code when not 0; an MCP tool's text or error), not the text Codex would have
+    given the model.
+
+    Other calls stay without a result: the CLI shows an ``apply_patch`` only as the paths it changed, which does not
+    identify the call, and an ``update_plan`` without a result.
     """
     answered = {item.call_id for item in output if item.type in ("function_call_output", "custom_tool_call_output")}
     unanswered = [
@@ -585,24 +624,19 @@ def _with_cli_results(output: list[Any], events: list[tuple[float, dict[str, Any
     ]
     if not unanswered:
         return output, []
-    finished: dict[str, list[dict[str, Any]]] = {}
+    finished: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     for _, event in events:
         item = event.get("item")
-        if (
-            event.get("type") == "item.completed"
-            and isinstance(item, dict)
-            and item.get("type") == "command_execution"
-        ):
-            command = _executed_command(item)
-            if command is not None:
-                finished.setdefault(command, []).append(event)
-    calls_per_command = Counter(_model_command(item) for item in output)
+        key = _cli_result_key(item) if event.get("type") == "item.completed" and isinstance(item, dict) else None
+        if key is not None:
+            finished.setdefault(key, []).append(event)
+    calls_per_key = Counter(_call_key(item) for item in output)
     results = []
     for call in unanswered:
-        command = _model_command(call)
-        if command is None or calls_per_command[command] != 1 or len(finished.get(command, ())) != 1:
+        key = _call_key(call)
+        if key is None or calls_per_key[key] != 1 or len(finished.get(key, ())) != 1:
             continue
-        cli_items, _ = parse_exec_jsonl(json.dumps(finished[command][0]))
+        cli_items, _ = parse_exec_jsonl(json.dumps(finished[key][0]))
         results.append(cli_items[-1].model_copy(update={"call_id": call.call_id}))
     return [*output, *results], [result.call_id for result in results]
 
