@@ -481,6 +481,7 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
             },
             resources=SandboxResources.from_mapping(resources),
             provider_options=self._provider_options(phase=phase),
+            sidecars=self.config.sandbox_config.get("sidecars", []) if phase == "agent" else [],
         )
         sandbox = AsyncSandbox(provider)
         if session_id is not None:

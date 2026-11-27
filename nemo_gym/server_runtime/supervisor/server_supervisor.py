@@ -21,6 +21,7 @@ import re
 import shlex
 import socket
 import sys
+from collections.abc import Callable
 from math import isfinite
 from pathlib import Path
 from signal import SIGINT, SIGKILL
@@ -557,6 +558,12 @@ def _process_starts_with(env: dict[str, str]) -> bool:
     return True
 
 
+class ServerStartupStopped(RuntimeError):
+    """A requested startup stop, with the resulting cleanup status."""
+
+    clean: bool = False
+
+
 class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
 
@@ -706,6 +713,14 @@ class ServerSupervisor:  # pragma: no cover
     # The file that holds a config too long for an environment variable, until shutdown.
     _config_dict_file: Path | None = None
 
+    def __init__(
+        self, *, use_current_environment: bool = False, stop_requested: Callable[[], bool] | None = None
+    ) -> None:
+        self._use_current_environment = use_current_environment
+        self._stop_requested = stop_requested
+        self._head_server = None
+        self._processes = {}
+
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
 
@@ -729,9 +744,22 @@ class ServerSupervisor:  # pragma: no cover
                     self._startup.abort(_startup_outcome(error), error)
                 # The sidecar rewrote the model URLs in the config; a second start would point them at a stopped one.
                 sidecar_started = self._h2_ping_sidecar is not None
-                self.shutdown()
-                if attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
+                clean = self.shutdown()
+                if isinstance(error, ServerStartupStopped):
+                    error.clean = clean
                     raise
+                if (
+                    attempt == 2
+                    or sidecar_started
+                    or self._use_current_environment
+                    or self._head_server is not None
+                    or not self._move_to_a_fresh_port(error)
+                ):
+                    raise
+
+    def _check_startup_stop(self) -> None:
+        if self._stop_requested is not None and self._stop_requested():
+            raise ServerStartupStopped("Gym server startup was stopped")
 
     def _move_to_a_fresh_port(self, error: BaseException) -> bool:
         """After a server found its port in use, give it a fresh one in the config every server is started from.
@@ -768,6 +796,7 @@ class ServerSupervisor:  # pragma: no cover
         # Each started server's node in the config it is started from, for a retry on a fresh port.
         self._server_configs: Dict[str, DictConfig] = {}
         self._startup = SupervisorStartup()
+        self._check_startup_stop()
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
@@ -815,6 +844,7 @@ class ServerSupervisor:  # pragma: no cover
             OmegaConf.to_yaml(global_config_dict), configured_servers, global_config_dict
         )
 
+        self._check_startup_stop()
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
         self._startup.mark("start_head_server")
@@ -832,9 +862,13 @@ class ServerSupervisor:  # pragma: no cover
             dir_path,
         ) in configured_servers:
             self._server_configs[top_level_path] = server_config_dict
-            # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
-            print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
-            command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
+            command: str | list[str]
+            if self._use_current_environment:
+                print(f"Starting `{top_level_path}` with {sys.executable}")
+                command = [sys.executable, str(entrypoint_fpath)]
+            else:
+                print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
+                command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
 
             extra_env = config_dict_env | {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path}
             if top_level_path not in ray_server_names:
@@ -850,6 +884,7 @@ class ServerSupervisor:  # pragma: no cover
                 extra_env=extra_env,
                 start_new_session=True,
             )
+            self._check_startup_stop()
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
             # cache size. For Nemotron's set of environments, parallel installation can produce
@@ -923,7 +958,7 @@ class ServerSupervisor:  # pragma: no cover
         variable_only = [
             server.top_level_path
             for server in configured_servers
-            if not _reads_config_dict_file(server, global_config_dict)
+            if not self._use_current_environment and not _reads_config_dict_file(server, global_config_dict)
         ]
         if variable_only:
             if _process_starts_with(in_variable):
@@ -945,7 +980,7 @@ class ServerSupervisor:  # pragma: no cover
     def _spawn_server(
         self,
         server_name: str,
-        command: str,
+        command: str | list[str],
         dir_path: Path,
         *,
         project_root: Path | None,
@@ -957,7 +992,7 @@ class ServerSupervisor:  # pragma: no cover
         if global_config_dict is None:
             global_config_dict = get_global_config_dict()
         # With a log dir the launch command merges stderr into stdout before `tee`, so the errors are on stdout.
-        merged = bool(global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME))
+        merged = isinstance(command, str) and bool(global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME))
         process = run_command(
             command,
             dir_path,
@@ -987,6 +1022,7 @@ class ServerSupervisor:  # pragma: no cover
         deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
         poll_count = 0
         while True:
+            self._check_startup_stop()
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
             if status == "success":
                 return
@@ -1129,6 +1165,7 @@ Process `{process_name}` stderr:
 
         # Until we spin up or error out.
         while True:
+            self._check_startup_stop()
             self.poll()
             statuses = self.check_http_server_statuses(successful_servers, deadline=deadline)
             if self._startup is not None:
@@ -1168,7 +1205,8 @@ Process `{process_name}` stderr:
             else:
                 sleep(max(0.0, min(sleep_interval, deadline - monotonic())))
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
+        """Stop the managed servers and report whether all exited cleanly."""
         # First, so that a shutdown cut short while it waits for the servers leaves no file. The config holds API
         # keys, and nothing that reads the file starts from here on.
         if self._config_dict_file is not None:
@@ -1186,6 +1224,7 @@ Process `{process_name}` stderr:
         shutdown_telemetry()
 
         deadline = monotonic() + self._server_shutdown_timeout_seconds
+        already_exited = any(process.poll() is not None for process in self._processes.values())
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
             _signal_server_group(process, SIGINT)
@@ -1232,6 +1271,11 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 f"within {_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL; "
                 "they may remain as zombies until this process exits."
             )
+        clean = (
+            not already_exited
+            and not killed_process_names
+            and all(process.returncode in (0, -SIGINT) for process in self._processes.values())
+        )
         self._processes = dict()
 
         # After the servers, so requests they were still finishing can drain through it. It gets its
@@ -1245,12 +1289,19 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
         # None before the head server starts and after an earlier shutdown.
         if self._head_server is not None:
             self._head_server.should_exit = True
-            self._head_server_thread.join()
+            if self._use_current_environment:
+                self._head_server_thread.join(timeout=self._server_shutdown_timeout_seconds)
+                if self._head_server_thread.is_alive():
+                    print("WARNING: the head server did not exit within its shutdown timeout.")
+                    return False
+            else:
+                self._head_server_thread.join()
 
         self._head_server = None
         self._head_server_thread = None
 
         print("NeMo Gym finished!")
+        return clean
 
     def run_forever(self) -> None:
         if self._server_client.global_config_dict[DRY_RUN_KEY_NAME]:

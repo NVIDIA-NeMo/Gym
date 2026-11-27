@@ -21,6 +21,7 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    ModelSidecarConfig,
     SandboxSession,
     check_agent_seed_rejected,
 )
@@ -1228,3 +1229,27 @@ async def test_a_network_policy_the_provider_cannot_enforce_closes_the_provider(
         await agent._seed_agent_session_state(seed(sandbox_access=None))
     sandbox.provider.aclose.assert_awaited_once()
     sandbox.box.start.assert_not_awaited()
+
+
+async def test_sidecar_seed_routes_model_calls_and_stops_before_disconnect(agent, sandbox, monkeypatch):
+    agent.config.model_sidecar = ModelSidecarConfig(image="test/gym:sidecar")
+    events = []
+    sandbox.box.disconnect = AsyncMock(side_effect=lambda **kwargs: events.append("disconnect"))
+    sidecar = SimpleNamespace(
+        base_url="http://gym-model:19001/ng-rollout/rollout/v1",
+        shutdown=AsyncMock(side_effect=lambda: events.append("shutdown")),
+    )
+    bootstrap = AsyncMock(return_value=sidecar)
+    monkeypatch.setattr(app_module, "start_model_sidecar", bootstrap)
+    host_url = MagicMock(side_effect=AssertionError("the sidecar route must not resolve the host model listener"))
+    monkeypatch.setattr(MiniSWEAgent, "resolve_model_base_url", host_url)
+
+    state = await agent._seed_agent_session_state(seed())
+    bootstrap.assert_awaited_once()
+    assert bootstrap.await_args.args[0] is sandbox.box
+    assert bootstrap.await_args.kwargs["rollout_id"] == state.request.episode_id.capture_key
+    kwargs = agent._activation_payload(state, body(), timeout=60)["config"]["model"]["model_kwargs"]
+    assert kwargs["api_base"] == sidecar.base_url
+    assert kwargs["extra_headers"]["x-session-id"] == state.request.episode_id.capture_key
+    await asyncio.gather(state.close(10), state.close(10))
+    assert events == ["shutdown", "disconnect"]

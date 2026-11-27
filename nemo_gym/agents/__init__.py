@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.testing.checkpoint_conformance import HarnessFixture, check_harness_checkpointing
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
     from nemo_gym.agents.utils.agent_context import resolve_agent_context_artifact
+    from nemo_gym.agents.utils.model_sidecar import ModelSidecarConfig, start_model_sidecar
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.run_with_checkpoint_pauses import (
         LaunchFinished,
@@ -145,6 +146,7 @@ _PUBLIC_API = {
     "HarnessPauseResult": "utils.sandbox_session",
     "LaunchFinished": "utils.run_with_checkpoint_pauses",
     "LaunchStopped": "utils.run_with_checkpoint_pauses",
+    "ModelSidecarConfig": "utils.model_sidecar",
     "NothingCapturedError": "utils.sandbox_session",
     "NotResumable": "utils.supervisor_client",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
@@ -192,6 +194,7 @@ _PUBLIC_API = {
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
     "stage_skills": "skills",
+    "start_model_sidecar": "utils.model_sidecar",
     "stop_and_confirm_cleanup": "utils.supervisor_client",
     "verification_failure_fields": "agent_tools",
     "verify_agent_response": "agent_tools",

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Supervised harness activations over one retained sandbox connection."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -12,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from time import monotonic
-from typing import Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
 
 from pydantic import TypeAdapter
 
@@ -47,6 +49,10 @@ from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
+
+
+if TYPE_CHECKING:
+    from nemo_gym.agents.utils.model_sidecar import ModelSidecar
 
 
 LOG = logging.getLogger(__name__)
@@ -245,6 +251,7 @@ class SandboxSession[Artifacts]:
     workdir: str | None
     harness: str
     owns_sandbox: bool = False
+    model_sidecar: ModelSidecar | None = field(default=None, init=False)
     pausable: bool = False
     pause_mode: PauseMode = "stop"
     launch_started: bool = field(default=False, init=False)
@@ -1070,6 +1077,11 @@ class SandboxSession[Artifacts]:
                 )
             if not self._capture_attempted:
                 self.capture_error = error
+        if self.model_sidecar is not None:
+            try:
+                await self.model_sidecar.shutdown()
+            except Exception:
+                LOG.exception("%s model sidecar shutdown could not be confirmed", self.harness)
         if self.owns_sandbox:
             if not self.sandbox_stopped:
                 try:

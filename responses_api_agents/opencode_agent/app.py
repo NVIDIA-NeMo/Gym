@@ -60,6 +60,7 @@ from nemo_gym.agents import (
     CleanupReceipt,
     LaunchFinished,
     LaunchStopped,
+    ModelSidecarConfig,
     NotResumable,
     RestoredLaunch,
     SandboxNetworkAccess,
@@ -72,6 +73,7 @@ from nemo_gym.agents import (
     resolve_agent_timeout,
     restrict_sandbox_network,
     run_with_checkpoint_pauses,
+    start_model_sidecar,
     stop_and_confirm_cleanup,
     verification_failure_fields,
 )
@@ -785,6 +787,7 @@ def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
+    model_sidecar: ModelSidecarConfig | None = None
     concurrency: int = 8
     command: str = "opencode"
     model: str = "openai/gpt-4o-mini"
@@ -883,6 +886,12 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
     # or tools.
     session_project_config: bool = False
+
+    @model_validator(mode="after")
+    def _validate_model_sidecar(self) -> Self:
+        if self.model_sidecar is not None and (self.model_server is None or self.model_server.name != "policy_model"):
+            raise ValueError("model_sidecar requires the policy_model vLLM model server")
+        return self
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -1485,6 +1494,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             return response
         # Only genuinely unseeded calls reach local execution; invalid or closed
         # session markers are rejected above, never retried on the host.
+        if self.config.model_sidecar is not None:
+            raise AgentSeedRejectedError("OpenCode model_sidecar requires a borrowed task sandbox session")
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         participant = self.checkpoint_participant
@@ -1508,11 +1519,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # evidence outside one: their episodes start over after a crash. So does a session that continues an
         # imported conversation: a relaunch could not tell it from one that is not this task's. And so do OpenCode 2
         # sessions: the relaunch that resumes a saved conversation speaks OpenCode 1's server API and reads its store.
+        # A model sidecar's supervisor belongs to this attempt and is not exported with the harness state.
         return (
             body.sandbox_access is None
             or body.continuation is not None
             or self.config.session_import_path is not None
             or self._opencode2
+            or self.config.model_sidecar is not None
         )
 
     async def export_agent_sessions(
@@ -1866,6 +1879,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if self.config.model_server is None:
             raise HTTPException(422, "OpenCode sandbox execution requires model_server")
         owns_sandbox = body.sandbox_access is None
+        if self.config.model_sidecar is not None and owns_sandbox:
+            raise AgentSeedRejectedError("OpenCode model_sidecar requires a borrowed task sandbox")
         if owns_sandbox:
             if not self.config.sandbox_provider:
                 raise HTTPException(422, "OpenCode requires sandbox_access or a configured sandbox_provider")
@@ -2001,7 +2016,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError("OpenCode session_import_path must be an absolute, normalized sandbox path")
         ripgrep = self._pinned_file("ripgrep")
         plugin_dependencies = self._pinned_file("plugin_dependencies")
-        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        global_config = get_global_config_dict()
+        provider = create_provider(resolve_provider_config(provider_ref, global_config))
         if owns_sandbox:
             try:
                 spec = restrict_sandbox_network(
@@ -2120,6 +2136,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             if self.config.session_import_path is not None:
                 await self._import_session(state)
+            if self.config.model_sidecar is not None:
+                state.session.model_sidecar = await start_model_sidecar(
+                    sandbox,
+                    global_config,
+                    self.config.model_sidecar,
+                    rollout_id=body.episode_id.capture_key,
+                    run_timeout_s=self.config.timeout + self.config.session_close_timeout_seconds,
+                )
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -3124,6 +3148,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         state.interrupted_tool_call_ids = []
         return payload(), 0
 
+    def _session_model_base_url(self, state: OpenCodeSandboxSession) -> str:
+        sidecar = state.require_session().model_sidecar
+        if sidecar is not None:
+            return sidecar.base_url
+        return self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+
     def _launch_payload(
         self,
         state: OpenCodeSandboxSession,
@@ -3140,7 +3170,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, list[str]]]:
         """The OpenCode 1 configuration, the runner payload and the MCP grants of one activation."""
-        base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        base_url = self._session_model_base_url(state)
         # The Gym model server substitutes its own model; the ID OpenCode sends selects its model-family prompts.
         model_id = self.config.sandbox_model_id
         model: dict[str, Any] = {"interleaved": {"field": self.config.interleaved_reasoning_field}}
@@ -3274,7 +3304,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         environment and receipt files, the request sampling, the MCP grants to check, the activation that prefixes
         ``X-Session-Id`` in continuation sessions, and, with model-call capture on, the file for its call labels.
         """
-        base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        base_url = self._session_model_base_url(state)
         directory = state.session.session_dir
         mcp_servers: dict[str, Any] = {}
         mcp_grants: dict[str, list[str]] = {"required": [], "optional": []}

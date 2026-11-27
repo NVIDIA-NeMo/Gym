@@ -245,10 +245,17 @@ async def test_create_sandbox_scales_phase_limits_from_task_toml(
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
 
+    sidecar = {"name": "gym-model", "image": "example/gym:sidecar", "ports": [19001]}
+    server.config.sandbox_config["sidecars"] = [sidecar]
     created = await server._create_sandbox(server._task_store.get("example-task"), phase=phase)
 
     assert created is sandbox
     spec = sandbox.start_with_setup.await_args.args[0]
+    assert len(spec.sidecars) == (1 if phase == "agent" else 0)
+    if phase == "agent":
+        assert spec.sidecars[0].name == sidecar["name"]
+        assert spec.sidecars[0].image == sidecar["image"]
+        assert spec.sidecars[0].ports == (19001,)
     assert spec.resources == expected_resources
     assert spec.image == UPSTREAM_IMAGE
 

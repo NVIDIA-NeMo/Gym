@@ -464,6 +464,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
             entrypoint=None,
             provider_options=provider_options,
+            sidecars=self.config.sandbox_config.get("sidecars", []) if task else [],
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)

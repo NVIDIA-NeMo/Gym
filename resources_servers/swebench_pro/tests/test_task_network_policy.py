@@ -42,6 +42,8 @@ async def test_task_only_policy_is_present_before_handoff_and_does_not_change_gr
     monkeypatch: MonkeyPatch, typed: bool
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False, task_network_policy=MODEL_POLICY)
+    sidecar = {"name": "gym-model", "image": "example/gym:sidecar", "ports": [19001]}
+    server.config.sandbox_config["sidecars"] = [sidecar]
     original_options = {
         "platform": {"os": "linux", "architecture": "amd64"},
         "network_policy": {"defaultAction": "allow", "egress": []},
@@ -81,6 +83,10 @@ async def test_task_only_policy_is_present_before_handoff_and_does_not_change_gr
         }
     }
     assert task_spec.image == "docker.io/jefzda/sweap-images:example-tag"
+    assert len(task_spec.sidecars) == 1
+    assert task_spec.sidecars[0].name == sidecar["name"]
+    assert task_spec.sidecars[0].image == sidecar["image"]
+    assert task_spec.sidecars[0].ports == (19001,)
     assert server._session_id_to_sandbox["session"] is task_sandbox
     if typed:
         assert response.sandbox_access.connection.descriptor == {"sandbox_id": "sandbox-id"}
@@ -91,6 +97,7 @@ async def test_task_only_policy_is_present_before_handoff_and_does_not_change_gr
     result = await server.verify(request, SWEBenchProVerifyRequest.model_validate(request_body()))
     grading_sandbox.start.assert_awaited_once()
     grading_spec = grading_sandbox.start.await_args.args[0]
+    assert grading_spec.sidecars == ()
     assert grading_spec.provider_options == original_options
     assert grading_spec.image == task_spec.image
     assert grading_spec.files  # Fresh verifier inputs, not the agent workspace.

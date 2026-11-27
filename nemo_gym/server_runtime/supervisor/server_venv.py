@@ -508,7 +508,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
 
 def run_command(
-    command: str,
+    command: str | list[str],
     working_dir_path: Path,
     server_name: str = "",
     project_root: Path | None = None,
@@ -562,7 +562,7 @@ def run_command(
         custom_env["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
 
     log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
-    if log_dir:
+    if log_dir and isinstance(command, str):
         safe_name = (server_name or working_dir_path.name).replace("/", "_")
         log_path = Path(log_dir) / f"{safe_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -570,14 +570,16 @@ def run_command(
 
     redirect_stdout = stdout if stdout_target is None else stdout_target
     redirect_stderr = stderr if stderr_target is None else stderr_target
+    shell = isinstance(command, str)
     return Popen(
         command,
-        executable="/bin/bash",
-        shell=True,
+        executable="/bin/bash" if shell else None,
+        shell=shell,
         env=custom_env,
         stdout=redirect_stdout,
         stderr=redirect_stderr,
         start_new_session=start_new_session,
+        **({} if shell else {"cwd": working_dir_path}),
     )
 
 

@@ -94,6 +94,7 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
+    ModelSidecarConfig,
     OutcomeAction,
     agent_outcome_policy,
 )
@@ -341,6 +342,7 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     tasksets: dict[str, HarborTasksetConfig] = Field(default_factory=dict)
     # Name of the top-level sandbox provider block in the merged config.
     sandbox_provider: str = "sandbox"
+    model_sidecar: ModelSidecarConfig | None = None
     sandbox_ready_timeout_s: float = Field(default=900, gt=0)
     # The sandbox outlives the episode's full budget (setup, queued agent work, verification) and the
     # final cleanup, so both must be finite here.
