@@ -202,6 +202,9 @@ def _bare_agent(**config):
         step_timeout=30,
         max_forwards=3,
         replay_through_target=False,
+        tool_executor="sandbox",
+        on_unparsed_forward="resample",
+        replay_assistant_text=False,
         debug=False,
         model_server=SimpleNamespace(name="policy_model"),
         outcome_policy=AGENT._default_commit_outcome_policy(),
@@ -1392,3 +1395,258 @@ def test_commit_rejection_diagnostics_are_bounded():
     with pytest.raises(NgFailureEvent) as caught:
         asyncio.run(_bare_agent()._commit_worktree(FakeSandbox(_result(return_code=1, stderr="x" * 10000))))
     assert len(caught.value.failure_reason) <= 500
+
+
+# --- tool_executor: resources_server ---------------------------------------------
+# An environment whose state lives in the resources server (AutomationBench): every
+# call goes to the server's `POST /<tool name>` on the seeded session.
+
+
+class TestToolCallRequests:
+    def test_every_named_call_in_order_with_decoded_arguments(self):
+        calls = [
+            _call("a", "api_search", '{"query": "gmail", "top_k": 5}'),
+            _call("b", "api_fetch", {"method": "GET", "url": "u", "params": {}, "body": {}}),
+        ]
+        assert AGENT.tool_call_requests(calls) == [
+            ("a", "api_search", {"query": "gmail", "top_k": 5}),
+            ("b", "api_fetch", {"method": "GET", "url": "u", "params": {}, "body": {}}),
+        ]
+
+    def test_unknown_tools_and_malformed_arguments_still_reach_the_server(self):
+        # The server answers both with error text, as the captured harness did, and that text is the transcript.
+        calls = [_call("a", "no_such_tool", "{}"), _call("b", "api_fetch", "{not json"), _call("c", "", "{}")]
+        assert AGENT.tool_call_requests(calls) == [("a", "no_such_tool", {}), ("b", "api_fetch", "{not json")]
+
+
+class FakeToolServer:
+    """The resources server's tool endpoints: records each call, answers with `answer(name, arguments)`."""
+
+    def __init__(self, answer=lambda name, arguments: f"{name} ok", status=200):
+        self.answer, self.status, self.calls = answer, status, []
+
+    async def post(self, server_name, url_path, json, cookies):
+        self.calls.append((server_name, url_path, json, cookies))
+        body = self.answer(url_path.lstrip("/"), json).encode()
+
+        class Content:
+            async def read(self):
+                return body
+
+        return SimpleNamespace(status=self.status, content=Content())
+
+
+def _tools(server=None, cookies=None):
+    return AGENT.ResourcesServerTools(server or FakeToolServer(), "rs", cookies or {"session": "seeded"})
+
+
+def _tool_agent(**config):
+    return _bare_agent(
+        **(dict(tool_executor="resources_server", max_forwards=None, on_unparsed_forward="stop") | config)
+    )
+
+
+def _tool_request(spec):
+    return SimpleNamespace(
+        session={AGENT.SESSION_ID_KEY: "s"},
+        cookies={},
+        state=SimpleNamespace(_ng_prefix_pass_k_row={"prefix_pass_k": spec}),
+    )
+
+
+def _tool_body():
+    return SimpleNamespace(
+        input=[{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}],
+        model=None,
+        temperature=None,
+        top_p=None,
+        max_output_tokens=None,
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=True,
+    )
+
+
+class TestResourcesServerReplay:
+    def test_every_call_goes_to_the_session_and_the_text_comes_back(self):
+        server = FakeToolServer(lambda name, arguments: f"{name}:{arguments['query']}")
+        agent = _tool_agent(replay_assistant_text=True)
+        step = {
+            "content": "Look it up first.",
+            "tool_calls": [_call("a", "api_search", '{"query": "x"}'), _call("b", "api_search", '{"query": "y"}')],
+            "captured_observations": ["api_search:x", "something else"],
+        }
+        messages, stats = [], {"prefix_observations_compared": 0, "prefix_observations_identical": 0}
+        assert asyncio.run(agent._replay_step(_tools(server), messages, step, stats)) is False
+        assert [(c[1], c[2], c[3]) for c in server.calls] == [
+            ("/api_search", {"query": "x"}, {"session": "seeded"}),
+            ("/api_search", {"query": "y"}, {"session": "seeded"}),
+        ]
+        assert messages[0] == {"role": "assistant", "content": "Look it up first.", "tool_calls": step["tool_calls"]}
+        assert messages[1:] == [
+            {"role": "tool", "tool_call_id": "a", "content": "api_search:x"},
+            {"role": "tool", "tool_call_id": "b", "content": "api_search:y"},
+        ]
+        assert stats == {"prefix_observations_compared": 2, "prefix_observations_identical": 1}
+
+    def test_captured_text_is_dropped_unless_asked_for(self):
+        messages = []
+        step = {"content": "narration", "tool_calls": [_call("a", "api_search", '{"query": "x"}')]}
+        asyncio.run(_tool_agent()._replay_step(_tools(), messages, step))
+        assert messages[0]["content"] is None
+
+    @pytest.mark.parametrize("status", [404, 500])
+    def test_a_call_the_server_fails_to_answer_aborts_the_attempt(self, status):
+        step = {"tool_calls": [_call("a", "api_search", '{"query": "x"}')]}
+        with pytest.raises(AGENT.SandboxExecError, match=f"HTTP {status}"):
+            asyncio.run(_tool_agent()._replay_step(_tools(FakeToolServer(status=status)), [], step))
+
+
+class TestResourcesServerCandidate:
+    def _run(self, agent, spec, replies, server=None):
+        server = server or FakeToolServer()
+        agent._session_id_to_sandbox["s"] = _tools(server)
+        replies = iter(replies)
+
+        async def fake_generate_chat(request, messages, body):
+            return next(replies)
+
+        object.__setattr__(agent, "_generate_chat", fake_generate_chat)
+        asyncio.run(agent.responses(_tool_request(spec), _tool_body()))
+        return agent._session_id_to_stats["s"], server
+
+    def test_the_rows_own_budget_bounds_the_candidate(self):
+        call = {"tool_calls": [_call("c", "api_search", '{"query": "z"}')]}
+        stats, server = self._run(
+            _tool_agent(), {"target_turn": 2, "prefix": [], "max_forwards": 2}, [(call, "tool_calls")] * 5
+        )
+        assert (stats["max_forwards"], stats["forwards"]) == (2, 2)
+        assert [c[1] for c in server.calls] == ["/api_search", "/api_search"]
+
+    def test_a_configured_budget_overrides_the_row(self):
+        # max_forwards: 0 is the contamination screen: the prefix alone is graded.
+        stats, server = self._run(_tool_agent(max_forwards=0), {"target_turn": 2, "prefix": [], "max_forwards": 4}, [])
+        assert (stats["max_forwards"], stats["forwards"], server.calls) == (0, 0, [])
+
+    def test_a_forward_without_calls_ends_the_turn_when_asked_to(self):
+        stats, server = self._run(
+            _tool_agent(), {"target_turn": 1, "prefix": [], "max_forwards": 3}, [({"content": "no call"}, "stop")]
+        )
+        assert (stats["forwards"], stats["unparsed_forwards"], server.calls) == (1, 1, [])
+
+    def test_a_row_without_a_budget_is_refused_when_the_config_defers_to_it(self):
+        with pytest.raises(ValueError, match="prefix_pass_k.max_forwards"):
+            self._run(_tool_agent(), {"target_turn": 1, "prefix": []}, [])
+
+
+class TestGoldCheckReplaysTheSuffix:
+    def test_target_then_suffix_run_and_the_model_is_never_called(self):
+        server = FakeToolServer()
+        agent = _tool_agent(replay_through_target=True)
+        agent._session_id_to_sandbox["s"] = _tools(server)
+
+        async def must_not_generate(*args, **kwargs):
+            raise AssertionError("the gold check called the model")
+
+        object.__setattr__(agent, "_generate_chat", must_not_generate)
+        spec = {
+            "target_turn": 2,
+            "max_forwards": 3,
+            "prefix": [{"tool_calls": [_call("p", "api_search", '{"query": "1"}')]}],
+            "target": {"tool_calls": [_call("t", "api_fetch", '{"url": "2"}')]},
+            "suffix": [{"tool_calls": [_call("s", "api_fetch", '{"url": "3"}')]}],
+        }
+        asyncio.run(agent.responses(_tool_request(spec), _tool_body()))
+        assert [(c[1], c[2]) for c in server.calls] == [
+            ("/api_search", {"query": "1"}),
+            ("/api_fetch", {"url": "2"}),
+            ("/api_fetch", {"url": "3"}),
+        ]
+        assert agent._session_id_to_stats["s"]["forwards"] == 0
+
+
+class TestResourcesServerRun:
+    def test_no_sandbox_or_git_step_and_verify_sees_the_seeded_session(self, monkeypatch):
+        agent = _tool_agent(resources_server=SimpleNamespace(name="rs"), commit_worktree=False, offline=False)
+        posted = []
+
+        class Seeded:
+            cookies = {"session": "seeded"}
+
+            async def json(self):
+                return {}
+
+        async def post(server_name, url_path, json, cookies):
+            posted.append((url_path, cookies))
+            return json | {"reward": 1.0} if url_path == "/verify" else Seeded()
+
+        async def must_not_run(*args, **kwargs):
+            raise AssertionError("a sandbox step ran")
+
+        async def responses(request, params):
+            assert isinstance(agent._session_id_to_sandbox["s"], AGENT.ResourcesServerTools)
+            assert agent._session_id_to_sandbox["s"].cookies == {"session": "seeded"}
+            agent._session_id_to_stats["s"] = {"forwards": 1, "exec_errors": 0}
+            return TestSandboxIsReleasedOnEveryExit._response()
+
+        async def ok(response):
+            return None
+
+        async def as_json(response):
+            return response
+
+        for name in ("_connect_sandbox", "_head", "_worktree_patch", "_git_state", "_take_offline"):
+            object.__setattr__(agent, name, must_not_run)
+        object.__setattr__(agent, "server_client", SimpleNamespace(post=post))
+        object.__setattr__(agent, "responses", responses)
+        monkeypatch.setattr(AGENT, "raise_for_status", ok)
+        monkeypatch.setattr(AGENT, "get_response_json", as_json)
+        body = AGENT.PrefixPassKRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "task"}]}}
+        )
+        request = SimpleNamespace(cookies={}, session={AGENT.SESSION_ID_KEY: "s"}, state=SimpleNamespace())
+        result = asyncio.run(agent.run(request, body))
+        assert (result.reward, result.forwards) == (1.0, 1)
+        assert posted == [("/seed_session", {}), ("/verify", {"session": "seeded"})]
+        assert agent._session_id_to_sandbox == {} and agent._session_id_to_stats == {}
+
+
+def _executor_config(**overrides):
+    """A real configuration, as `_commit_policy_config` builds it, with any field replaceable."""
+    fields = dict(
+        name="agent",
+        host="127.0.0.1",
+        port=0,
+        entrypoint="app.py",
+        sandbox_provider="sandbox",
+        resources_server={"type": "resources_servers", "name": "resources"},
+        model_server={"type": "responses_api_models", "name": "model"},
+    )
+    return AGENT.PrefixPassKAgentConfig(**(fields | overrides))
+
+
+class TestToolExecutorConfig:
+    def test_the_sandbox_executor_needs_a_provider(self):
+        with pytest.raises(ValueError, match="sandbox_provider"):
+            _executor_config(sandbox_provider=None)
+
+    def test_the_resources_server_executor_needs_function_calling(self):
+        with pytest.raises(ValueError, match="function_calling"):
+            _executor_config(tool_executor="resources_server", sandbox_provider=None)
+
+    @pytest.mark.parametrize("option", ["commit_worktree", "uncommit_worktree", "record_git_state", "offline"])
+    def test_sandbox_options_are_refused_without_a_sandbox(self, option):
+        with pytest.raises(ValueError, match=option):
+            _executor_config(
+                tool_executor="resources_server", wire="function_calling", sandbox_provider=None, **{option: True}
+            )
+
+    def test_a_resources_server_config_validates(self):
+        config = _executor_config(
+            tool_executor="resources_server", wire="function_calling", sandbox_provider=None, max_forwards=None
+        )
+        assert (config.tool_executor, config.max_forwards, config.on_unparsed_forward) == (
+            "resources_server",
+            None,
+            "resample",
+        )
