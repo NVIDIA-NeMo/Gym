@@ -643,6 +643,11 @@ def compute_pass_majority_metrics(
                 vals = [s.get(name) for s in task_scores if name in s]
                 if not vals or k > len(vals):
                     continue
+                if name == "no_answer":
+                    # A task has no answer at k only when all k rollouts lack one (as NeMo-Skills and
+                    # majority@k/no_answer count it): the chance a random k of the rollouts are all unanswered.
+                    pass_values.append(math.comb(sum(vals), k) / math.comb(len(vals), k))
+                    continue
                 is_binary = all(v in (0, 1, 0.0, 1.0) for v in vals)
                 if is_binary:
                     n_total = len(vals)
