@@ -421,7 +421,13 @@ def e2e_rollout_collection():  # pragma: no cover
     write_resolved_config(global_config_dict, output_fpath)
 
     supervisor = ServerSupervisor()
-    supervisor.start(None)
+    # Before the servers and the collector start, which take minutes: interrupted, start() stops what it started.
+    _interrupt_on_sigterm()
+    try:
+        supervisor.start(None)
+    except KeyboardInterrupt:
+        _exit_if_terminated()
+        raise
 
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
@@ -448,7 +454,6 @@ def e2e_rollout_collection():  # pragma: no cover
     )
     if driver_path:
         _remove_health_reports(output_fpath)
-    _interrupt_on_sigterm()
     collection_completed = False
     interrupted = False
     try:
