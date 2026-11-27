@@ -413,6 +413,8 @@ class TestEntrypoint:
             async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
                 if command == f"test -f {ENTRYPOINT_DIR}/started":
                     self.execs.append({"command": command})
+                    # Let the launcher start before asserting its cancellation handler ran.
+                    await asyncio.sleep(0)
                     return SandboxExecResult(stdout="", stderr="", return_code=1)
                 return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
