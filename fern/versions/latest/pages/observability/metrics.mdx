@@ -287,6 +287,24 @@ Host usage is `total - available`, matching the memory the operating system cann
 
 Descendants remain attributed while they stay in the server's Linux process tree. Detached or reparented processes and remote Ray actors are not included.
 
+The same profiler reports CPU, with the same switch and the same process trees:
+
+| Metric | Type | Attributes | Meaning |
+| --- | --- | --- | --- |
+| `gym.server.cpu.time_total` | Counter | server name and type, `cpu.mode` (`user`, `system`) | CPU seconds a server and its descendants used, such as the sandbox, unpacking and harness children that do the real work. Use `rate()` for cores in use. See below for how processes that exit between samples are counted. |
+| `gym.host.cpu.logical` | Gauge | | Logical CPUs on the host. |
+| `gym.host.cpu.physical` | Gauge | | Physical CPU cores on the host. |
+| `gym.host.cpu.allowed` | Gauge | | CPUs the supervisor's main thread may run on (its CPU affinity). Under Slurm or a container cpuset that is usually the allocation; compare summed `rate(gym.server.cpu.time_total)` with it. |
+
+Each process's CPU time includes the children it waited for (`cutime` and `cstime` in `/proc/<pid>/stat`), so a short command that starts and exits between two samples is counted once its parent waits for it. Processes are tracked by pid and start time, and time a child already reported, or a process that drops out of a single walk, is not counted again. The counter is a lower bound where an exited process's time cannot reach a process still in the tree:
+
+- A process whose parent does not wait for it, because the parent ignores `SIGCHLD` or exits first, can be undercounted by up to its whole CPU time. Once reparented outside the tree, it is no longer counted.
+- The time the server's root process uses after the last sample before it exits is lost.
+
+The exception is a child subreaper inside the server's tree (`PR_SET_CHILD_SUBREAPER`). The CritPt grader's runner is one under the `local` sandbox provider, where it runs as a descendant of the resources server and adopts the orphans of the code it grades. An orphan that a sample sees after its adoption, or sees missing but still running, is counted once. When an orphan and its old parent both exit between the same two samples, the time the orphan had already reported moves onto the old parent's nearest running ancestor rather than onto the subreaper that waited for it, so the subreaper counts it again. The counter then runs ahead by up to that time per such orphan until that ancestor exits: its held time passes up to the subreaper, which takes it back from its later CPU time.
+
+The rollout driver of a `--no-serve` run is not a supervisor-managed server and is not included; its own `process.cpu.time` covers it.
+
 Compare these series with `http.server.active_requests`, which requires traces, while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
 
 ### Partial-Rollout Checkpoint Metrics
