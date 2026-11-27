@@ -35,6 +35,10 @@ from responses_api_agents.claude_code_agent.observability import (
 
 
 LOG = logging.getLogger(__name__)
+# Claude Code does not receive a SandboxAccess.env entry whose name begins with one of these prefixes.
+# ANTHROPIC_ and CLAUDE_CODE_ begin the names of Claude Code's own settings, among them the model endpoint and
+# the credentials. NEMO_GYM_ begins the names of the variables that Gym sets for the harness.
+_RESERVED_ACCESS_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "NEMO_GYM_")
 
 
 class HarnessProcessInfo(BaseModel):
@@ -193,11 +197,28 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         if prompt is not None:
             stdin = f"{directory}/prompt.txt"
             await upload_text(self.session.sandbox, path=stdin, text=prompt)
+        command, env = payload["command"], payload["env"]
+        access = self.request.sandbox_access
+        access_env = {
+            key: value
+            for key, value in (access.env if access else {}).items()
+            if not key.startswith(_RESERVED_ACCESS_ENV_PREFIXES)
+        }
+        if access_env:
+            # shell_assignments rejects an entry whose name is not a shell variable name. env(1), which sets the
+            # entries below, could take such a name for an option or for an assignment to another variable.
+            shell_assignments({"access_env": access_env})
+            # env(1) sets the entries for the CLI alone. An entry replaces a variable of the same name of the
+            # sandbox. No entry becomes a variable of the runner's shell, where one named like a runner parameter,
+            # such as ``command``, would replace it. The names in ``env`` are left out, so the adapter's own
+            # variables keep their values, and so is PWD, which the runner's ``cd`` sets.
+            assignments = [f"{key}={value}" for key, value in access_env.items() if key not in env and key != "PWD"]
+            command = ["env", *assignments, *command]
         # Regular files avoid waiting for detached task services to close inherited pipes.
         params = {
             "cwd": payload["cwd"],
-            "command": payload["command"],
-            "env": payload["env"],
+            "command": command,
+            "env": env,
             "stdin": stdin,
             "stdout": f"{directory}/events.jsonl",
             "stderr": f"{directory}/stderr.log",
