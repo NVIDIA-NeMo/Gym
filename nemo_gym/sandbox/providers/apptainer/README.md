@@ -34,7 +34,7 @@ from nemo_gym.sandbox.api import Sandbox
 from nemo_gym.sandbox.providers import SandboxSpec
 
 spec = SandboxSpec(
-    image="docker://ubuntu:22.04",   # or "/path/to/image.sif"
+    image="docker://ubuntu:22.04",  # or "/path/to/image.sif"
     workdir="/sandbox",
     env={"GREETING": "hello"},
     files={"/sandbox/input.txt": "some seed content"},
@@ -57,6 +57,7 @@ with Sandbox({"apptainer": {}}, spec) as sandbox:
 ```python
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import SandboxSpec
+
 
 async def run():
     spec = SandboxSpec(image="docker://ubuntu:22.04", workdir="/sandbox")
@@ -197,6 +198,13 @@ channel:
 - **Fallback** — for arbitrary in-container paths, the provider stages the bytes in the
   shared folder and runs an in-container `cp` (as root) to move them to/from the target.
 
+Code inside the sandbox can write to the shared folder, so an upload does not trust what
+it finds there. It never follows a symbolic link below the mount: a symlinked directory
+in the target path raises `RuntimeError`, and a symlink or FIFO at the target name is
+replaced by the uploaded file. A target that is an existing directory also raises
+`RuntimeError`. The upload is written to a temporary name and renamed into place, in a
+worker thread and in chunks, so a command in the sandbox never sees a half-written file.
+
 ### Running as a specific user
 
 The neutral `user` argument to `exec` maps onto Apptainer like this:
@@ -316,6 +324,7 @@ binaries (`echo`, `cat`, `sleep`), each guarded so they skip where the binary is
 
 ```python
 import shutil, pytest
+
 
 @pytest.mark.skipif(shutil.which("apptainer") is None, reason="apptainer not installed")
 def test_real_apptainer(): ...
