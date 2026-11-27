@@ -11,7 +11,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError
+from nemo_gym.config.config_types import AlmostServerError, ConfigError, ConfigInterpolationError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
@@ -551,7 +551,7 @@ def test_resolve_config_servers_is_unknown_for_a_field_of_the_wrong_type(
 
 @pytest.mark.parametrize(
     ("case", "error_type"),
-    [("policy_model_port", StopIteration), ("unknown_home", RuntimeError), ("recursive_alias", RecursionError)],
+    [("policy_model_port", StopIteration), ("unknown_home", RuntimeError), ("recursive_alias", ConfigError)],
 )
 def test_resolve_config_servers_logs_unresolvable_configs(
     tmp_path: Path,

@@ -26,14 +26,18 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_runtime import BaseRunRequest
+from nemo_gym.verification import JudgeError
 from resources_servers.omniscience.app import (
     OmniscienceConfig,
+    OmniscienceRunRequest,
     OmniscienceServer,
     OmniscienceVerifyRequest,
     _strip_thinking_traces,
     extract_text_from_response,
     parse_judge_grade,
 )
+from resources_servers.omniscience.task_data import TaskData
 
 
 class TestStripThinkingTraces:
@@ -75,8 +79,8 @@ class TestParseJudgeGrade:
     def test_labelled_letter_in_text(self) -> None:
         assert parse_judge_grade("The grade is A based on analysis") == "A"
 
-    def test_fallback_to_b(self) -> None:
-        assert parse_judge_grade("no clear grade here") == "B"
+    def test_no_grade_returns_none(self) -> None:
+        assert parse_judge_grade("no clear grade here") is None
 
     @pytest.mark.parametrize(
         "text, expected",
@@ -106,8 +110,8 @@ class TestParseJudgeGrade:
             "",
         ],
     )
-    def test_ambiguous_text_defaults_to_incorrect(self, text: str) -> None:
-        assert parse_judge_grade(text) == "B"
+    def test_ambiguous_text_has_no_grade(self, text: str) -> None:
+        assert parse_judge_grade(text) is None
 
     def test_whitespace_handling(self) -> None:
         assert parse_judge_grade("  D  ") == "D"
@@ -475,6 +479,70 @@ class TestOmniscienceServer:
         assert result.extracted_answer == ""
         assert result.verdict == "not_attempted"
 
+    async def test_verify_without_a_grade_raises_judge_error(self, config: OmniscienceConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+        self._mock_judge_reply(server_mock, self._make_judge_response("The predicted answer matches the gold target."))
+
+        with pytest.raises(JudgeError, match="matches the gold target"):
+            await server.verify(self._make_request("1989"))
+
+    async def test_chat_completions_judge_strips_think_blocks(self, config: OmniscienceConfig) -> None:
+        config.use_chat_completions_for_judge = True
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+        self._mock_judge_reply(
+            server_mock,
+            {
+                "id": "judge_chat",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "judge_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "<think>Same year as the gold target.</think>\nA"},
+                    }
+                ],
+            },
+        )
+
+        result = await server.verify(self._make_request("1989"))
+
+        assert result.verdict == "correct"
+        assert result.judge_output == "A"
+
+    def _mock_judge_reply(self, server_mock: MagicMock, payload: dict) -> None:
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=payload)
+        response_mock.read = AsyncMock(return_value=orjson.dumps(payload))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+    def _make_request(self, policy_text: str) -> OmniscienceVerifyRequest:
+        return OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response(policy_text),
+            question="In what year did the Berlin Wall fall?",
+            expected_answer="1989",
+        )
+
+
+def test_run_request_fields_agree_with_task_data() -> None:
+    provenance_only = {
+        "aa_omniscience_version",
+        "aa_omniscience_dataset_revision",
+    }
+    wire_fields = set(OmniscienceRunRequest.model_fields) - set(BaseRunRequest.model_fields)
+    assert wire_fields == set(TaskData.model_fields) - provenance_only
+    assert OmniscienceRunRequest.model_config.get("extra") == TaskData.model_config.get("extra") == "allow"
+    for name in wire_fields:
+        wire_field = OmniscienceRunRequest.model_fields[name]
+        schema_field = TaskData.model_fields[name]
+        assert wire_field.annotation == schema_field.annotation, name
+        assert wire_field.is_required() == schema_field.is_required(), name
+        assert wire_field.default == schema_field.default, name
+
 
 class TestOmniscienceScoreFn:
     def test_correct(self) -> None:
@@ -558,49 +626,68 @@ class TestExtractTextNoStrip:
         ("Grade: B: INCORRECT", "B", True),
         ("Grade: C: PARTIAL_ANSWER", "C", True),
         ("Grade: B; Verdict: B", "B", True),
-        ("NOT CORRECT", "B", False),
-        ("It is not CORRECT", "B", False),
-        ("The predicted answer is NOT CORRECT.", "B", False),
-        ("PARTIALLY CORRECT", "B", False),
-        ("Grade: NOT CORRECT", "B", False),
-        ("Grade: PARTIALLY CORRECT", "B", False),
-        ("<think>Is it CORRECT? No.</think>B", "B", False),
-        ("<think>\nCORRECT\n</think>B", "B", False),
-        ("A\n\nExplanation: the answer is B-level", "B", False),
-        ("The gold answer is C and the predicted answer is C++, which is different.", "B", False),
-        ("<your_message>A</your_message>", "B", False),
-        ("b", "B", False),
-        ("Predicted answer: Berlin", "B", False),
-        ("The predicted answer is a city in France.", "B", False),
-        ("Answer: Berlin", "B", False),
-        ("Grade: Athens", "B", False),
-        ("Answer: C++", "B", False),
-        ("Grade: A+", "B", False),
-        ("Grade: A/B-level", "B", False),
-        ("Grade: A/B+", "B", False),
-        ("Grade: A/E", "B", False),
-        ("Grade:\nA reasonable attempt", "B", False),
-        ("Reasoning; Grade: A", "B", False),
-        ("C: CORRECT", "B", False),
-        ("Grade: A: INCORRECT", "B", False),
-        ("Grade: A/B", "B", False),
-        ("Grade: A & B", "B", False),
-        ("Grade: A | C", "B", False),
-        ("Grade: CORRECT or INCORRECT", "B", False),
-        ("The grade is A or B", "B", False),
-        ("Grade: A/B; Grade: A", "B", False),
-        ("Grade: A; Grade: B", "B", False),
-        ("Grade: A; Grade: B+", "B", False),
-        ("Grade: **A**/**B**", "B", False),
-        ("Grade: **A** and **B**", "B", False),
-        ("Grade: **A**, **B**", "B", False),
-        ("The answer A is not correct.", "B", False),
-        ("PARTIALLY_CORRECT", "B", False),
-        ("no clear grade", "B", False),
-        ("It is CORRECT in part but also INCORRECT in part", "B", False),
+        ("NOT CORRECT", None, False),
+        ("It is not CORRECT", None, False),
+        ("The predicted answer is NOT CORRECT.", None, False),
+        ("PARTIALLY CORRECT", None, False),
+        ("Grade: NOT CORRECT", None, False),
+        ("Grade: PARTIALLY CORRECT", None, False),
+        ("<think>Is it CORRECT? No.</think>B", None, False),
+        ("<think>\nCORRECT\n</think>B", None, False),
+        ("A\n\nExplanation: the answer is B-level", None, False),
+        ("The gold answer is C and the predicted answer is C++, which is different.", None, False),
+        ("<your_message>A</your_message>", None, False),
+        ("b", None, False),
+        ("Predicted answer: Berlin", None, False),
+        ("The predicted answer is a city in France.", None, False),
+        ("Answer: Berlin", None, False),
+        ("Grade: Athens", None, False),
+        ("Answer: C++", None, False),
+        ("Grade: A+", None, False),
+        ("Grade: A/B-level", None, False),
+        ("Grade: A/B+", None, False),
+        ("Grade: A/E", None, False),
+        ("Grade:\nA reasonable attempt", None, False),
+        ("Reasoning; Grade: A", None, False),
+        ("C: CORRECT", None, False),
+        ("Grade: A: INCORRECT", None, False),
+        ("Grade: A/B", None, False),
+        ("Grade: A & B", None, False),
+        ("Grade: A | C", None, False),
+        ("Grade: CORRECT or INCORRECT", None, False),
+        ("The grade is A or B", None, False),
+        ("Grade: A/B; Grade: A", None, False),
+        ("Grade: A; Grade: B", None, False),
+        ("Grade: A; Grade: B+", None, False),
+        ("Grade: **A**/**B**", None, False),
+        ("Grade: **A** and **B**", None, False),
+        ("Grade: **A**, **B**", None, False),
+        ("The answer A is not correct.", None, False),
+        ("PARTIALLY_CORRECT", None, False),
+        ("no clear grade", None, False),
+        ("It is CORRECT in part but also INCORRECT in part", None, False),
+        # A verdict followed by a short reason or closing punctuation still counts.
+        ("CORRECT because the predicted answer matches the gold target.", "A", True),
+        ("Grade: B (the predicted year differs)", "B", True),
+        ("Answer: D - the model declined to answer", "D", True),
+        ("Final grade: C since only part of the answer is given", "C", True),
+        ("Verdict: **A**.", "A", True),
+        # Prose that only starts like a verdict, from the #5783 review.
+        ("Answer: A different year (1990) was given, so this is incorrect.", None, False),
+        ("CORRECT answer would be 1989, but the model said 1990.", None, False),
+        ("CORRECT? No, the answers differ.", None, False),
+        ("Answer: C#", None, False),
+        ("<think>Let me consider the options:\nA", None, False),
+        ("<THINK>reasoning</THINK>\nA", None, False),
+        ("Grade A would require an exact match, so this is B.", None, False),
+        ("Grade A", None, False),
+        ("A: CORRECT\nB: INCORRECT\nC:", None, False),
+        ("B:", None, False),
+        ("B\n\nThe answer is CORRECT to one significant figure, but the gold target requires three.", None, False),
+        ("Grade: A，B", None, False),
     ],
 )
-def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str, parsed: bool) -> None:
+def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str | None, parsed: bool) -> None:
     from nemo_gym.trajectory import ModelCallRef
     from nemo_gym.verification import JudgeGrading
     from nemo_gym.verification.judge import _judge_grading
@@ -612,3 +699,146 @@ def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str, par
         assert grading.parsed_dependencies == ({0} if parsed else set())
     finally:
         _judge_grading.reset(token)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Grade: B; Verdict: B would be too harsh", None),
+        ("Grade: B; Verdict: B; Grade: B is too harsh", None),
+        ("Grade: B; Verdict: B would be too harsh\nGrade: A", None),
+        ("CORRECT (A) requires a full match.\nGrade: B. The predicted answer differs.", None),
+        ("Grade: B — the year differs.\nCORRECT (gold): 1989", None),
+        ("CORRECT answer would be 1989, but the model said 1990.\nGrade: B", None),
+        ("INCORRECT. The predicted answer names another county.\n\nGrade: B", "B"),
+        ("Grade: A Because the year matches", "A"),
+        ("Grade: A becauseof", None),
+    ],
+)
+def test_verdict_tail_on_later_clauses_and_lines(text: str, expected: str | None) -> None:
+    assert parse_judge_grade(text) == expected
+
+
+class TestChatCompletionsJudge:
+    """The Chat Completions judge path, which `configs/omniscience.yaml` selects (`use_chat_completions_for_judge`)."""
+
+    @fixture
+    def config(self) -> OmniscienceConfig:
+        return OmniscienceConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge_model"),
+            # Each value differs from the chat path's fallback (64, 0.0, 1.0), so a dropped setting fails the test.
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[], max_output_tokens=32768, temperature=0.2, top_p=0.9
+            ),
+            use_chat_completions_for_judge=True,
+        )
+
+    @staticmethod
+    def _server(config: OmniscienceConfig, content: str | None) -> tuple[OmniscienceServer, MagicMock]:
+        server_mock = MagicMock(spec=ServerClient)
+        reply = AsyncMock()
+        reply.ok = True
+        reply.status = 200
+        body = {
+            "id": "chatcmpl-judge",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "judge_model",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+        }
+        reply.read = AsyncMock(return_value=orjson.dumps(body))
+        server_mock.post = AsyncMock(return_value=reply)
+        return OmniscienceServer(config=config, server_client=server_mock), server_mock
+
+    @staticmethod
+    def _request(text: str) -> OmniscienceVerifyRequest:
+        return OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse(
+                id="policy_resp",
+                created_at=0.0,
+                model="policy_model",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id="msg",
+                        content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+            question="Which Internal Revenue Code section allows expensing equipment?",
+            expected_answer="179",
+        )
+
+    async def test_request_carries_the_configured_judge_settings(self, config: OmniscienceConfig) -> None:
+        server, server_mock = self._server(config, "A")
+        result = await server.verify(self._request("Section 179"))
+        assert result.verdict == "correct"
+        assert result.reward == approx(1.0)
+        kwargs = server_mock.post.call_args.kwargs
+        assert kwargs["url_path"] == "/v1/chat/completions"
+        payload = kwargs["json"].model_dump()
+        assert payload["max_tokens"] == 32768
+        assert payload["temperature"] == approx(0.2)
+        assert payload["top_p"] == approx(0.9)
+        assert "Which Internal Revenue Code section" in payload["messages"][0]["content"]
+
+    async def test_empty_judge_content_is_a_judge_failure(self, config: OmniscienceConfig) -> None:
+        from nemo_gym.verification import JudgeError
+
+        server, _ = self._server(config, None)
+        with pytest.raises(JudgeError):
+            await server.verify(self._request("Section 179"))
+
+    async def test_unclosed_thinking_block_is_an_empty_answer(self, config: OmniscienceConfig) -> None:
+        server, _ = self._server(config, "D")
+        result = await server.verify(self._request("<thinking>Let me recall the section"))
+        assert result.extracted_answer == ""
+        assert result.verdict == "not_attempted"
+
+
+def test_compute_metrics_index_and_hallucination_rate() -> None:
+    config = OmniscienceConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge_model"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    server = OmniscienceServer(config=config, server_client=MagicMock(spec=ServerClient))
+    verdicts = [
+        ["correct", "incorrect", "not_attempted", "partial"],
+        ["incorrect", "incorrect", "correct", "not_attempted"],
+    ]
+    tasks = [
+        [
+            {
+                "_ng_task_index": t,
+                "_ng_rollout_index": r,
+                "verdict": v,
+                "reward": 1.0 if v == "correct" else 0.0,
+                "extracted_answer": f"answer-{t}-{r}",
+            }
+            for r, v in enumerate(row)
+        ]
+        for t, row in enumerate(verdicts)
+    ]
+    metrics = server.compute_metrics(tasks)
+    # NeMo Skills OmniMetrics: index = 100 * (correct - incorrect) / n; hallucination = 100 * incorrect / not correct.
+    assert metrics["pass@1[avg-of-4]/judge_correct"] == approx(100 * 2 / 8)
+    assert metrics["pass@1[avg-of-4]/judge_omni_index"] == approx(100 * (2 - 3) / 8)
+    assert metrics["pass@1[avg-of-4]/judge_omni_hallucination"] == approx(100 * 3 / 6)
+    key_metrics = server.get_key_metrics(metrics)
+    for name in ("judge_omni_index", "judge_correct", "judge_omni_hallucination"):
+        assert f"pass@1[avg-of-4]/{name}" in key_metrics

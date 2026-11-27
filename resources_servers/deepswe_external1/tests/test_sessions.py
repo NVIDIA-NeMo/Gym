@@ -471,8 +471,10 @@ async def test_setup_failure_keeps_real_sandbox_owned_until_cleanup(
         assert "resources-session" not in owned
     else:
         if phase == "agent":
-            with pytest.raises(RuntimeError, match="stop failed"):
+            # The setup's own error is raised, with the failed rollback stop as its context.
+            with pytest.raises(RuntimeError, match="setup failed") as raised:
                 await run()
+            assert "stop failed" in repr(raised.value.__context__)
         else:
             body = DeepsweExternal1VerifyRequest.model_validate(verify_body(task))
             response = await server.verify(request, body)

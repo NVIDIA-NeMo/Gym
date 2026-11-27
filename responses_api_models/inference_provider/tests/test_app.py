@@ -807,3 +807,28 @@ async def test_responses_note_the_finish_reason_for_the_model_call_record(finish
 
     exchange = {"response": response.model_dump(mode="json"), **request.state.nemo_gym_model_execution}
     assert build_model_call_record(exchange, call_index=0).finish_reason == recorded
+
+
+class TestRequestBounds:
+    def test_the_provider_call_is_unbounded_by_default(self) -> None:
+        client = _make_server()._client
+
+        assert client.request_timeout_seconds is None
+        assert client.max_connection_retries is None
+        assert client.connection_retry_timeout_s is None
+
+    def test_configured_bounds_reach_the_client(self) -> None:
+        client = _make_server(
+            request_timeout_seconds=30.0, max_connection_retries=3, connection_retry_timeout_s=15.0
+        )._client
+
+        assert client.request_timeout_seconds == 30.0
+        assert client.max_connection_retries == 3
+        assert client.connection_retry_timeout_s == 15.0
+
+    @pytest.mark.parametrize(
+        "field", ["request_timeout_seconds", "max_connection_retries", "connection_retry_timeout_s"]
+    )
+    def test_a_bound_of_zero_is_rejected(self, field: str) -> None:
+        with pytest.raises(ValueError):
+            _make_server(**{field: 0})

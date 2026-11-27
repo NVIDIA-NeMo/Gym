@@ -9,7 +9,7 @@ source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
 
 : "${DEPS_DIR:?DEPS_DIR must be set}"
 : "${NEMO_GYM_ROOT:?NEMO_GYM_ROOT must be set}"
-NODE_VERSION="${NODE_VERSION:-22.19.0}"
+NODE_VERSION="${NODE_VERSION:-24.22.3}"
 # Node.js build; defaults to the host architecture. Override NODE_ARCH (e.g. linux-arm64) to cross-prepare.
 if [ -z "${NODE_ARCH:-}" ]; then
     case "$(uname -m)" in
@@ -18,12 +18,13 @@ if [ -z "${NODE_ARCH:-}" ]; then
         *) echo "unsupported node architecture: $(uname -m)" >&2; exit 1 ;;
     esac
 fi
+# Match the AnyTerminal preset on task images with glibc 2.31.
 OPENCLAW_SPEC="${OPENCLAW_SPEC:-openclaw@2026.6.11}"
 
 install_portable_python
 install_nemo_gym_deps
 
-if [ ! -x "$DEPS_DIR/bin/node" ]; then
+if [ "$("$DEPS_DIR/bin/node" --version 2>/dev/null || true)" != "v$NODE_VERSION" ]; then
     node_url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz"
     echo "Downloading portable node: $node_url"
     curl -fsSL "$node_url" | tar xJ -C "$DEPS_DIR" --strip-components=1

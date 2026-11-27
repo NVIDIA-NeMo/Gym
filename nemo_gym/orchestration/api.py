@@ -45,6 +45,19 @@ class _StrictModel(BaseModel):
 
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The node_exporter metrics the collector's local `metrics.jsonl` keeps by default: CPU time, load, memory, pressure
+# stall and network/InfiniBand byte totals, plus `up` to tell a filtered exporter from an unreachable one. The rest of
+# node_exporter's output (per-port InfiniBand error counters, systemd unit states, NFS mount statistics, hardware
+# sensors and the like) is node health rather than benchmark performance, and was about 90% of the file's bytes.
+LOCAL_NODE_METRICS = (
+    "up",
+    "node_cpu_seconds_total",
+    "node_load(1|5|15)",
+    "node_memory_(MemTotal|MemAvailable|MemFree|Cached|Buffers|Shmem|SwapTotal|SwapFree)_bytes",
+    "node_pressure_.*",
+    "node_network_(receive|transmit)_bytes_total",
+    "node_infiniband_port_data_(received|transmitted)_bytes_total",
+)
 # Canonical marker left on a resolved `env` value for `runtime:VAR` entries. Executors
 # (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
 # of a literal, so the value is picked up from the job's actual environment at run time.
@@ -483,6 +496,23 @@ _COMMAND_AND_RUN = (
 _TARGET_FLAGS = frozenset({"only_tasks", "exclude_tasks", "skip_unloadable"})
 
 
+_REVERIFY_STEP_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class ReverifyStepConfig(_StrictModel):
+    """One `gym eval reverify` the driver runs over a benchmark's rollouts after `gym eval run` succeeds.
+
+    The step re-judges every saved rollout with another resources server (a judge that labels rollouts, for
+    instance) and writes `<bench dir>/artifacts/rollouts_<step name>.jsonl`; the run's own rollouts and rewards are
+    not changed. It runs before the exports, and its failure does not fail the job.
+    """
+
+    # Config files of the resources server and of any judge model server it calls, relative to the Gym checkout.
+    config: list[str] = Field(min_length=1)
+    # Hydra overrides for `gym eval reverify`, flattened to +key=value tokens.
+    overrides: dict[str, Any] = {}
+
+
 class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
@@ -509,9 +539,21 @@ class BenchmarkRunConfig(_StrictModel):
     # Post-run exports of this benchmark's rollouts, by exporter name (see `gym eval export`). Each value is that
     # exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export.
     export: dict[str, dict[str, Any] | None] = {}
+    # Reverify steps over this benchmark's rollouts, by step name, run after `gym eval run` succeeds and before
+    # the exports (see ReverifyStepConfig).
+    reverify: dict[str, ReverifyStepConfig] = {}
 
     @model_validator(mode="after")
     def _validate_command(self, info: ValidationInfo) -> "BenchmarkRunConfig":
+        if unnamed := [name for name in self.reverify if not _REVERIFY_STEP_NAME_RE.fullmatch(name)]:
+            raise ValueError(f"Reverify step names must be lowercase snake_case: {', '.join(unnamed)}.")
+        if "materialized_inputs" in self.reverify:
+            raise ValueError("Reverify step name 'materialized_inputs' would overwrite the run's input file.")
+        if self.command is not None and self.reverify:
+            raise ValueError(
+                "A benchmark sets both `command` and `reverify`, but a reverify step reads the rollouts file "
+                "`gym eval run` writes, which `command` replaces. Drop `reverify`, or run through `gym eval run`."
+            )
         if self.command is not None and any(settings is not None for settings in self.export.values()):
             raise ValueError(
                 "A benchmark sets both `command` and `export`, but an export reads the rollouts file `gym eval run` "
@@ -676,8 +718,23 @@ class OtelConfig(_StrictModel):
     # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.
     gpu_metrics_port: int | None = 9400
     node_metrics_port: int | None = 9100
+    # node_exporter metrics kept in the local `metrics.jsonl`, as regular expressions matched against the whole
+    # metric name; the remote export keeps all of them. null keeps every node_exporter metric locally too.
+    local_node_metrics: list[str] | None = Field(default_factory=lambda: list(LOCAL_NODE_METRICS))
+    # More patterns kept on top of `local_node_metrics`, so a run can add a family without restating the list.
+    local_node_metrics_extra: list[str] = Field(default_factory=list)
     scrape_interval_seconds: int = 15
     health_check_timeout_seconds: int = 300
+
+    @field_validator("local_node_metrics", "local_node_metrics_extra")
+    @classmethod
+    def _validate_metric_patterns(cls, v: list[str] | None) -> list[str] | None:
+        for pattern in v or ():
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"{pattern!r} is not a valid regular expression: {e}") from e
+        return v
 
     @field_validator("token_env")
     @classmethod

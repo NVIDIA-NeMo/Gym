@@ -71,7 +71,8 @@ about an empty prediction; and judge failures are masked rows for re-judging rat
 ## Running
 
 ```bash
-gym eval run --benchmark mm_lifelong_v1_1 --model-type vllm_model \
+gym eval run --benchmark mm_lifelong_v1_1 --model-type vllm_model --split benchmark \
+    --output results/mm_lifelong_v1_1.jsonl \
     ++mm_lifelong_v1_1_data_dir=<data_dir> ++mm_lifelong_v1_1_frames_url_dir=<where vLLM reads frames_256> \
     ++policy_base_url=<vLLM URL> ++policy_model_name=<served model> \
     --max-output-tokens 65536 --temperature 1.0 --top-p 0.95

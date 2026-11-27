@@ -230,6 +230,74 @@ getent() { printf '10.0.0.1 node0\n'; }
                     else:
                         self.assertNotIn("mooncake_endpoint", metrics)
 
+    MULTINODE_ENV = {
+        "VLLM_MODE": "aggregated",
+        "VLLM_AGGREGATED_MULTINODE": "1",
+        "NUM_NODES": "4",
+        "NUM_PREFILL_NODES": "",
+        "NUM_DECODE_NODES": "",
+    }
+
+    def test_multinode_aggregated_metrics_scrape_only_the_api_node(self) -> None:
+        """One multi-node engine has one API server on node 0; the headless ranks expose nothing to scrape."""
+        for env, expected in ((self.MULTINODE_ENV, 1), ({"VLLM_MODE": "aggregated", "NUM_NODES": "4"}, 8)):
+            with self.subTest(env=env), TemporaryDirectory() as temporary_dir:
+                command, _ = self.generate_commands(env=env)
+                start = 'read -r -a nodes <<< "$ALL_NODES"'
+                setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                config_path = Path(temporary_dir) / "metrics.yaml"
+                status, _, stderr = self.run_shell(
+                    setup, env={"inference_metrics_config": str(config_path), "ROUTER_NODE": "separate-router"}
+                )
+                self.assertEqual(status, 0, stderr)
+                endpoints = yaml.safe_load(config_path.read_text())["inference_metrics"]["endpoints"]
+                self.assertEqual(len(endpoints), expected)
+                if expected == 1:
+                    [endpoint] = endpoints.values()
+                    self.assertRegex(endpoint, r"^http://node0:\d+/metrics$")
+
+    def test_multinode_warmup_waits_for_node_zero_but_dumps_every_node(self) -> None:
+        """Readiness names only the API node; the headless ranks' compiled caches are still exported."""
+        env = self.MULTINODE_ENV | {"SAVE_WARMED_CONTAINER": f"{self.workdir}/new.sqsh"}
+        _, _, batch, _ = self.capture_submission(env=env)
+
+        wait_start = "    cache_urls=()"
+        discovery = wait_start + batch.split(wait_start, 1)[1].split('    python3 -c "$warm_cache_helper" wait', 1)[0]
+        status, stdout, stderr = self.run_shell(
+            "set -euo pipefail\nnodes=(node0 node1 node2 node3)\n"
+            + discovery
+            + "printf '%s\\n' \"${cache_urls[@]}\"\n"
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(len(stdout.split()), 1)
+        self.assertTrue(stdout.startswith("http://node0:"), stdout)
+
+        dump_start = "    cache_export_dir=$(mktemp -d "
+        transfer = (
+            dump_start + batch.split(dump_start, 1)[1].split('    test -s "$cache_export_dir/warmed.sqsh"', 1)[0]
+        )
+        status, _, stderr = self.run_shell(
+            "set -euo pipefail\nnodes=(node0 node1 node2 node3)\nworker_container=test\nserver_step=123\n"
+            "kill() { :; }\nwait() { :; }\n"
+            "srun() { printf '%s\\0' \"$@\" >&2; printf '\\0' >&2; }\n" + transfer,
+            env={"warm_cache_helper": "helper code"},
+        )
+        self.assertEqual(status, 0, stderr)
+        calls = [call.split("\0") for call in stderr.removesuffix("\0\0").split("\0\0")]
+        self.assertEqual(len(calls), 5)  # a dump on each of the four nodes, then the install
+        self.assertEqual(
+            [c[c.index("--nodelist=node%d" % n)] for n, c in enumerate(calls[:4])],
+            [f"--nodelist=node{n}" for n in range(4)],
+        )
+        # Node 0 must hold a real warm cache; the headless ranks may hold only compiled artifacts, so only they may be empty.
+        dump_args = [c[c.index("dump") + 1 :] for c in calls[:4]]
+        self.assertNotIn("--allow-empty", dump_args[0])
+        for args in dump_args[1:]:
+            self.assertEqual([a for a in args if a != "--allow-empty"][0], "--output")
+            self.assertIn("--allow-empty", args)
+            self.assertEqual(len(args), 3)  # --output PATH --allow-empty, nothing else
+        self.assertNotIn("dump", calls[4])  # the install step
+
     def test_mooncake_storage_modes_and_cleanup(self) -> None:
         """Execute generated setup with stub services; SSD work requires explicit opt-in."""
         cases = (
@@ -444,7 +512,13 @@ printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
                     self.assertEqual(decode, ["--unrelated", "value with spaces"])
 
     def serving_arguments(
-        self, command: str, *, rank: int, coupled_head: bool = False, env: dict[str, str] | None = None
+        self,
+        command: str,
+        *,
+        rank: int,
+        coupled_head: bool = False,
+        env: dict[str, str] | None = None,
+        extra_stubs: str = "",
     ) -> tuple[str, str, list[str], list[str]]:
         # Record argv separately for vLLM and the router; marker files synchronize startup.
         stubs = r"""
@@ -477,7 +551,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
 """
         with TemporaryDirectory(prefix="gym-serving-args-") as state_dir:
             status, stdout, stderr = self.run_shell(
-                stubs + command,
+                stubs + extra_stubs + command,
                 env=(env or {})
                 | {
                     "SLURM_PROCID": str(rank),
@@ -1228,6 +1302,26 @@ trigger_prefill_profile() {
                                 self.assertEqual(args[-2:], ["--api-server-count", "1"])
                             else:
                                 self.assertIn("--api-server-count=2", args)
+
+    def test_multinode_aggregated_headless_ranks_drop_api_server_count(self) -> None:
+        """Model configs set --api-server-count for the serving rank; the headless ranks of one engine reject it."""
+        with TemporaryDirectory(prefix="gym-aggregated-headless-") as directory:
+            config = Path(directory) / "config with spaces.sh"
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--api-server-count 3 --common-test 'value with spaces')\n"
+                "VLLM_PREFILL_ARGS=(--prefill-test producer --api-server-count=2)\n"
+            )
+            env = self.MULTINODE_ENV | {"VLLM_CONFIG": str(config)}
+            _, command = self.generate_commands(env=env)
+            for rank in (1, 3):  # rank 0 serves the API and keeps its tuning
+                with self.subTest(rank=rank):
+                    _, _, args, _ = self.serving_arguments(
+                        command, rank=rank, env=env, extra_stubs='getent() { echo "127.0.0.1 STREAM node0"; }\n'
+                    )
+                    self.assertIn("--headless", args)
+                    self.assertIn("value with spaces", args)
+                    self.assertIn("producer", args)
+                    self.assertFalse(any(arg.startswith("--api-server-count") for arg in args), args)
 
     def test_coupled_nodes_use_correct_tier_roles_and_ranks(self) -> None:
         """Assign coupled tier roles, ranks, and ports while leaving router balancing thresholds at defaults."""

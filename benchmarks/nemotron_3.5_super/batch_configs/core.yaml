@@ -80,7 +80,13 @@ hle_equivalence_llm_judge_simple_agent:
 genrm_model:
   responses_api_models:
     openai_model:
+      _delete_key: extra_body
       max_concurrent_requests: 32
+omniscience_omniscience_resources_server:
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        max_output_tokens: 2048
 omniscience_omniscience_simple_agent:
   responses_api_agents:
     simple_agent:

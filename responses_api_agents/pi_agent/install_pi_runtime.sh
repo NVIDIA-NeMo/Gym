@@ -69,7 +69,8 @@ if [ ! -f "$runtime/ready" ]; then
   curl -fsSL --retry 3 "${node_dist}/SHASUMS256.txt" -o SHASUMS256.txt
   awk -v archive="$archive" '$2 == archive' SHASUMS256.txt | sha256sum -c -
   mkdir -p node
-  tar -xzf "$archive" --strip-components=1 -C node
+  # A root in a user namespace (rootless Podman) cannot take the archive's owner, uid 1000.
+  tar --no-same-owner -xzf "$archive" --strip-components=1 -C node
   if [ "$platform" = linux-x64-musl ] && ! "$runtime/node/bin/node" --version; then
     # Older Alpine images have libstdc++, but lack symbols needed by Node 22.
     # Give only this Node binary a private library; leave task libraries and env intact.
@@ -85,8 +86,10 @@ if [ ! -f "$runtime/ready" ]; then
   "$runtime/node/bin/node" --version
   PATH="$runtime/node/bin:$PATH" "$runtime/node/bin/node" \
     "$runtime/node/lib/node_modules/npm/bin/npm-cli.js" install \
-    --prefix "$runtime/pi" --ignore-scripts --no-audit --no-fund \
+    --prefix "$runtime/pi" --ignore-scripts --bin-links --no-audit --no-fund \
     "@earendil-works/pi-coding-agent@${pi_version}"
-  "$runtime/node/bin/node" "$runtime/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" --version
+  # Gym runs Pi through npm's bin link, which a task's npm config could otherwise turn off (--bin-links above).
+  # Pi's entry script enables Node's compile cache, which would leave files in the task's /tmp.
+  NODE_DISABLE_COMPILE_CACHE=1 "$runtime/node/bin/node" "$runtime/pi/node_modules/.bin/pi" --version
   touch "$runtime/ready"
 fi

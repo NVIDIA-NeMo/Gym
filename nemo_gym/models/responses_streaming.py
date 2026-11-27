@@ -397,7 +397,8 @@ def synthesize_responses_sse(
     Streaming clients build their view of the turn from ``response.output_item.done`` events.
     The terminal event reflects the response status, retaining partial output, usage and failure
     details; ``response.created`` is included for clients waiting for an acknowledgement, unless
-    ``include_created`` is false because keepalive events already opened the stream.
+    ``include_created`` is false to omit the initial snapshot, including when keepalive events
+    already opened the stream.
     """
     if "usage" in response_json:
         response_json = {**response_json, "usage": _wire_usage(response_json["usage"])}

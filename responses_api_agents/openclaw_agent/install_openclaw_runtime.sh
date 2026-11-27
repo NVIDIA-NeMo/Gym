@@ -6,7 +6,7 @@ trap 'status=$?; echo "OpenClaw installer failed (exit $status) at line $LINENO:
 
 runtime=$1
 openclaw_version=$2
-node_version=22.19.0
+node_version=24.22.3
 if [ "$(uname -s)" != Linux ]; then
   echo 'OpenClaw sandbox execution requires a Linux sandbox.' >&2
   exit 1
@@ -65,9 +65,20 @@ verify_version() {
     'const p=require(process.argv[1]); if(p.version!==process.argv[2])throw Error("OpenClaw version mismatch")' \
     "$runtime/openclaw/node_modules/openclaw/package.json" "$openclaw_version"
 }
+# OpenClaw 2026.11.5 runs exec-tool commands through its compiled process helper (@openclaw/proc-safe), whose glibc
+# build needs glibc 2.33 or newer. Releases without the helper pass. Exit 3 marks an image that cannot run the tool.
+verify_exec_helper() {
+  if ! "$runtime/node/bin/node" -e \
+    'const r=require("module").createRequire(process.argv[1]); let p; try { p=r.resolve("@openclaw/proc-safe/reaper") } catch { process.exit(0) } import(require("url").pathToFileURL(p).href).then((m)=>process.exit(m.isSupported()?0:4))' \
+    "$runtime/openclaw/node_modules/openclaw/package.json"; then
+    echo "OpenClaw ${openclaw_version} cannot run its exec tool in this image: its compiled process helper does not load (it needs glibc 2.33 or newer, or musl)." >&2
+    exit 3
+  fi
+}
 if [ -f "$runtime/ready" ]; then
   verify_version
   "$runtime/node/bin/node" "$runtime/openclaw/node_modules/openclaw/openclaw.mjs" --version
+  verify_exec_helper
   exit 0
 fi
 
@@ -92,7 +103,8 @@ curl -fsSL --retry 3 "${node_dist}/${archive}" -o "$archive"
 curl -fsSL --retry 3 "${node_dist}/SHASUMS256.txt" -o SHASUMS256.txt
 awk -v archive="$archive" '$2 == archive' SHASUMS256.txt | sha256sum -c -
 mkdir -p node
-tar -xzf "$archive" --strip-components=1 -C node
+# A root in a user namespace (rootless Podman) cannot take the archive's owner, uid 1000.
+tar --no-same-owner -xzf "$archive" --strip-components=1 -C node
 if [ "$platform" = linux-x64-musl ] && ! "$runtime/node/bin/node" --version; then
   # Confine the newer C++ runtime to our Node binary, preserving task libraries.
   command -v patchelf >/dev/null 2>&1 || install_packages patchelf
@@ -113,3 +125,4 @@ PATH="$runtime/node/bin:$PATH" "$runtime/node/bin/node" \
   "$runtime/openclaw/node_modules/openclaw/package.json" "$openclaw_version"
 "$runtime/node/bin/node" "$runtime/openclaw/node_modules/openclaw/openclaw.mjs" --version
 printf '%s\n' "$openclaw_version" > "$runtime/ready"
+verify_exec_helper

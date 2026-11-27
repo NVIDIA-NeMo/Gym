@@ -75,43 +75,14 @@ class TestSelectTasks:
 
         assert row["follow_up"]["sol_sql"] == ["SELECT 2"]
 
-    def test_rows_the_server_cannot_grade_are_left_out_with_their_reason(self) -> None:
-        management_follow_up = _row("management_follow_up")
-        management_follow_up["follow_up"]["category"] = "Management"
-        rows = [
-            _row("no_truth"),
-            _row("management", "Management"),
-            management_follow_up,
-            _row("follow_up_without_truth"),
-        ]
-        truth = {
-            "management": _truth("management", test_cases=(CUSTOM_TEST,)),
-            "management_follow_up": _truth("management_follow_up", follow_up_test_cases=(CUSTOM_TEST,)),
-            "follow_up_without_truth": _truth("follow_up_without_truth", follow_up=False),
-        }
+    def test_rows_without_their_ground_truth_are_left_out(self) -> None:
+        rows = [_row("no_truth"), _row("follow_up_without_truth")]
+        truth = {"follow_up_without_truth": _truth("follow_up_without_truth", follow_up=False)}
 
         kept, left_out = bird_prepare.select_tasks(rows, truth)
 
         assert kept == []
-        assert left_out == {"no ground truth": 2, "management task": 2}
-
-    @pytest.mark.parametrize("phase", ["task", "follow_up"])
-    def test_a_management_task_is_left_out_by_its_category_even_without_test_cases(self, phase: str) -> None:
-        row = _row("m1", "Management" if phase == "task" else "Query")
-        if phase == "follow_up":
-            row["follow_up"]["category"] = "Management"
-
-        kept, left_out = bird_prepare.select_tasks([row], {"m1": _truth("m1")})
-
-        assert (kept, left_out) == ([], {"management task": 1})
-
-    def test_a_phase_without_a_category_is_a_query_as_in_the_adk(self) -> None:
-        row = _row("q1")
-        del row["category"]
-
-        kept, _ = bird_prepare.select_tasks([row], {"q1": _truth("q1")})
-
-        assert [task["instance_id"] for task in kept] == ["q1"]
+        assert left_out == {"no ground truth": 2}
 
     def test_a_row_the_server_could_not_read_is_refused(self) -> None:
         row = _row("q1")
@@ -120,13 +91,21 @@ class TestSelectTasks:
         with pytest.raises(ValidationError):
             bird_prepare.select_tasks([row], {"q1": _truth("q1")})
 
-    def test_a_query_task_is_kept_whatever_its_test_cases(self) -> None:
-        # BIRD-Interact grades a query by comparing its result with the solution's, so its test cases do not count.
-        truth = {"query": _truth("query", test_cases=(CUSTOM_TEST,), follow_up_test_cases=(CUSTOM_TEST,))}
+    def test_query_and_management_tasks_are_kept_with_their_test_cases(self) -> None:
+        management_follow_up = _row("management_follow_up")
+        management_follow_up["follow_up"]["category"] = "Management"
+        rows = [_row("query"), _row("management", "Management"), management_follow_up]
+        truth = {
+            "query": _truth("query", test_cases=(CUSTOM_TEST,), follow_up_test_cases=(CUSTOM_TEST,)),
+            "management": _truth("management", test_cases=(CUSTOM_TEST,)),
+            "management_follow_up": _truth("management_follow_up", follow_up_test_cases=(CUSTOM_TEST,)),
+        }
 
-        kept, left_out = bird_prepare.select_tasks([_row("query")], truth)
+        kept, left_out = bird_prepare.select_tasks(rows, truth)
 
-        assert [row["instance_id"] for row in kept] == ["query"]
+        assert [row["instance_id"] for row in kept] == ["query", "management", "management_follow_up"]
+        assert kept[1]["test_cases"] == [CUSTOM_TEST]
+        assert kept[2]["follow_up"]["test_cases"] == [CUSTOM_TEST]
         assert not left_out
 
 
