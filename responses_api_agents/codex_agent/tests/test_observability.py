@@ -528,7 +528,7 @@ def test_output_keeps_the_models_command_arguments_and_ids_verbatim() -> None:
         _call("call_9f3", "exec_command", arguments),
         _result("call_9f3", "Chunk ID: a\nProcess exited with code 0\nOutput:\nskill text"),
     )
-    call, result = parse_codex_output(transcript)
+    call, result = parse_codex_output(transcript).items
     assert (call.type, call.name, call.call_id) == ("function_call", "exec_command", "call_9f3")
     assert call.arguments == arguments
     assert result.output == "Chunk ID: a\nProcess exited with code 0\nOutput:\nskill text"
@@ -546,7 +546,7 @@ def test_output_keeps_parallel_calls_in_model_order_and_write_stdin() -> None:
         _call("poll", "write_stdin", {"session_id": 7, "chars": "", "yield_time_ms": 30000}),
         _result("poll", "Process exited with code 0\nOutput:\nslow"),
     )
-    items = parse_codex_output(transcript)
+    items = parse_codex_output(transcript).items
     assert _shape(items) == [
         ("function_call", "slow"),
         ("function_call", "fast"),
@@ -568,7 +568,7 @@ def test_output_keeps_each_plan_update_and_mcp_namespace() -> None:
         _call("plan-2", "update_plan", {"plan": [{"step": "read", "status": "completed"}]}),
         _result("plan-2", "Plan updated"),
     )
-    items = parse_codex_output(transcript)
+    items = parse_codex_output(transcript).items
     assert [item.name for item in items if item.type == "function_call"] == [
         "update_plan",
         "search_docs",
@@ -584,7 +584,7 @@ def test_output_keeps_a_free_form_patch_call() -> None:
         {"type": "custom_tool_call", "call_id": "patch-1", "name": "apply_patch", "input": patch},
         _result("patch-1", "Success. Updated the following files:\nA notes.txt\n", "custom_tool_call_output"),
     )
-    call, result = parse_codex_output(transcript)
+    call, result = parse_codex_output(transcript).items
     assert (call.type, call.name, call.input) == ("custom_tool_call", "apply_patch", patch)
     assert (result.type, result.call_id, result.output.splitlines()[0]) == (
         "custom_tool_call_output",
@@ -599,7 +599,7 @@ def test_output_reads_a_content_item_result_as_text() -> None:
         {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
     ]
     transcript = _session(_call("view-1", "view_image", {"path": "/workspace/plot.png"}), _result("view-1", items))
-    assert parse_codex_output(transcript)[1].output == "viewing\n[image]"
+    assert parse_codex_output(transcript).items[1].output == "viewing\n[image]"
 
 
 def test_output_keeps_what_the_model_said_and_not_what_it_was_told() -> None:
@@ -621,7 +621,7 @@ def test_output_keeps_what_the_model_said_and_not_what_it_was_told() -> None:
         {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Without an ID."}]},
         extra=[{"type": "event_msg", "payload": {"type": "token_count", "info": None}}],
     )
-    reasoning, content_reasoning, call, result, answer, anonymous = parse_codex_output(transcript)
+    reasoning, content_reasoning, call, result, answer, anonymous = parse_codex_output(transcript).items
     assert [item.type for item in (reasoning, content_reasoning, call, result, answer, anonymous)] == [
         "reasoning",
         "reasoning",
@@ -659,14 +659,14 @@ def test_output_turns_a_web_search_into_the_call_harbor_exports_with_no_result(a
     """Harbor's own Codex agent exports a web search as ``web_search_call`` with ``action_type``: a grader reads that
     name and argument to tell a search from a page open."""
     transcript = _session({"type": "web_search_call", "id": "ws-1", "status": "completed", "action": action})
-    call, result = parse_codex_output(transcript)
+    call, result = parse_codex_output(transcript).items
     assert (call.name, call.call_id, json.loads(call.arguments)) == ("web_search_call", "ws-1", arguments)
     assert (result.call_id, result.output) == ("ws-1", "")
 
 
 def test_a_call_without_its_result_stays_open() -> None:
     """The run was stopped while the tool ran: the record has the call and nothing more."""
-    items = parse_codex_output(_session(_call("long", "exec_command", {"cmd": "sleep 1000"})))
+    items = parse_codex_output(_session(_call("long", "exec_command", {"cmd": "sleep 1000"}))).items
     assert _shape(items) == [("function_call", "long")]
 
 
@@ -678,7 +678,13 @@ def test_a_call_without_its_result_stays_open() -> None:
         (_session(_user("task")), "no model output"),
         ("not json", "not JSON"),
         ("[]", "not an object"),
-        (json.dumps({"type": "renamed", "payload": {}}), "unsupported session record"),
+        (json.dumps({"payload": {}}), "a session record has no kind"),
+        (json.dumps({"type": "", "payload": {}}), "a session record has no kind"),
+        (
+            _session(_call("c1", "t", {})) + "\n" + json.dumps({"type": "response_item", "payload": 5}),
+            "no payload object",
+        ),
+        (_session(_call("c1", "t", {})) + "\n" + json.dumps({"type": "response_item"}), "no payload object"),
         (_session({"type": "ghost_snapshot"}), "unsupported session item 'ghost_snapshot'"),
         (_session(_call("c1", "t", {}), _call("c1", "t", {})), "call c1 is made more than once"),
         (_session(_result("c404", "x")), "matches no open call"),
@@ -697,7 +703,7 @@ def test_a_call_without_its_result_stays_open() -> None:
         (_session({"type": "reasoning", "summary": 5}), "unexpected shape: TypeError"),
         (_session({"type": "reasoning", "summary": [], "content": 5}), "unexpected shape: TypeError"),
         (_session({"type": "web_search_call", "id": "ws-1", "action": "search"}), "action that is not an object"),
-        (json.dumps({"type": ["response_item"], "payload": {}}), "unexpected shape: TypeError"),
+        (json.dumps({"type": ["response_item"], "payload": {}}), "a session record has no kind"),
         (
             _session({"type": "message", "role": "assistant", "content": [{"type": "input_image"}]}),
             "unsupported content part",
@@ -716,10 +722,72 @@ def test_a_record_nested_too_deeply_to_decode_is_unavailable() -> None:
         parse_codex_output("[" * 100_000 + "]" * 100_000)
 
 
+def test_the_observation_reader_marks_a_record_nested_too_deeply_as_unparseable() -> None:
+    """The reader that builds the observation bundle decodes the same record; it must report it, not raise."""
+    nested = "[" * 100_000 + "]" * 100_000
+    transcript = _session(_call("c1", "exec_command", {"cmd": "ls"}), _result("c1", "a"), extra=[]) + "\n" + nested
+    bundle = parse_codex_observations(
+        transcript, "run", returncode=0, timed_out=False, observation_schema_version="2.0"
+    )
+    assert [gap.code for gap in bundle.gaps].count("agent_artifact_record_unparseable") == 1
+    assert [item.call_id for item in bundle.records[0].conversation if item.type == "function_call"] == ["c1"]
+    assert parse_codex_usage(nested) is None
+
+
+# Every kind of record other than session_meta and response_item that Codex 0.144.4, 0.154.0 and 0.155.1 write.
+_NON_OUTPUT_RECORDS = [
+    {"type": "event_msg", "payload": {"type": "token_count", "info": None}},
+    {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
+    {"type": "compacted", "payload": {"message": "summary"}},
+    {"type": "world_state", "payload": {"full": True, "state": {}}},
+    {"type": "inter_agent_communication", "payload": {"author": "/root", "recipient": "/root/a", "content": "go"}},
+    {"type": "inter_agent_communication_metadata", "payload": {"trigger_turn": True}},
+    {"type": "token_usage_record", "payload": {"response_id": "resp-1", "usage": {"input_tokens": 3}}},
+    {"type": "retained_context", "payload": {"entries": []}},
+    {"type": "security_risk_score", "payload": {"score": 0}},
+    {"type": "realtime_item", "payload": {}},
+]
+
+
+def test_records_that_carry_no_model_output_are_skipped_and_counted() -> None:
+    """Codex 0.154.0 and later write a token_usage_record after each model response, among other kinds; the output
+    is built from the response items around them, and each skipped record is counted."""
+    transcript = _session(
+        _call("c1", "exec_command", {"cmd": "ls"}),
+        _result("c1", "a"),
+        extra=[*_NON_OUTPUT_RECORDS, {"type": "token_usage_record", "payload": 5}],
+    )
+    output = parse_codex_output(transcript)
+    assert _shape(output.items) == [("function_call", "c1"), ("function_call_output", "c1")]
+    assert output.skipped_records == {
+        "turn_context": 2,  # one from the session's header
+        "token_usage_record": 2,  # the payload is not read, so its shape does not matter
+        **{
+            record["type"]: 1
+            for record in _NON_OUTPUT_RECORDS
+            if record["type"] not in ("turn_context", "token_usage_record")
+        },
+    }
+    assert output.unknown_records == {}
+
+
+def test_a_record_of_a_kind_no_checked_version_writes_is_skipped_and_named() -> None:
+    """Only response items hold what the model produced, so a record of a kind added by a later Codex is left out
+    rather than discard the record, and named so that a reader of the run can tell."""
+    transcript = _session(
+        _call("c1", "exec_command", {"cmd": "ls"}),
+        _result("c1", "a"),
+        extra=[{"type": "future_bookkeeping", "payload": {"anything": 1}}, {"type": "future_bookkeeping"}],
+    )
+    output = parse_codex_output(transcript)
+    assert _shape(output.items) == [("function_call", "c1"), ("function_call_output", "c1")]
+    assert output.unknown_records == {"future_bookkeeping": 2}
+
+
 @pytest.mark.parametrize("search_id", [None, "", "  ", ["ws-1"], 7])
 def test_a_web_search_without_a_usable_id_is_given_one_the_export_accepts(search_id) -> None:
     transcript = _session({"type": "web_search_call", "id": search_id, "action": {"type": "search"}})
-    call, result = parse_codex_output(transcript)
+    call, result = parse_codex_output(transcript).items
     assert call.call_id == result.call_id == "ws_0"
     transcript_to_atif(
         "task",
@@ -779,7 +847,7 @@ def test_a_record_of_any_shape_is_either_unavailable_or_output_the_export_accept
             for value in ([], {}, 5, None, "", " ", ["a"], [[]], {"a": 1}):
                 mutated = [*records[:index], _replaced(record, path, value), *records[index + 1 :]]
                 try:
-                    output = parse_codex_output("\n".join(json.dumps(r) for r in mutated))
+                    output = parse_codex_output("\n".join(json.dumps(r) for r in mutated)).items
                 except CodexOutputUnavailable:
                     unavailable += 1
                     continue
@@ -818,7 +886,7 @@ def test_output_joins_the_models_captured_call_where_the_cli_display_cannot() ->
     )
     stamp_lineage(captured, None, parent_resolution=ParentResolutionStatus.ROOT)
     stopped_on_the_call = _session(_call("call_abc", "exec_command", arguments))
-    from_record = [item.model_dump(mode="json") for item in parse_codex_output(stopped_on_the_call)]
+    from_record = [item.model_dump(mode="json") for item in parse_codex_output(stopped_on_the_call).items]
     command = {
         "id": "item_0",
         "type": "command_execution",

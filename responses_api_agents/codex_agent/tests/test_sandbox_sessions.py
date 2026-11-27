@@ -3869,8 +3869,10 @@ def test_session_output_holds_the_models_calls_not_the_cli_display(setup):
             native_transcript([{"type": "message", "role": "assistant", "content": 5}]),
             "a session record has an unexpected shape: TypeError: 'int' object is not iterable",
         ),
+        # Decoding raises RecursionError; the observation reader that reads the same record must not raise it either.
+        ("[" * 100_000 + "]" * 100_000, "a session record is not JSON"),
     ],
-    ids=["missing", "orphan-result", "unsupported-item", "blank-tool-name", "malformed-record"],
+    ids=["missing", "orphan-result", "unsupported-item", "blank-tool-name", "malformed-record", "nested-too-deeply"],
 )
 def test_session_output_without_a_usable_session_record_keeps_the_cli_events_and_says_so(
     setup, caplog, record, reason
@@ -3895,6 +3897,133 @@ def test_session_output_without_a_usable_session_record_keeps_the_cli_events_and
         if entry.name == "responses_api_agents.codex_agent.app" and entry.levelno == logging.WARNING
     ]
     assert f"Codex tool calls are kept in the executed form the CLI shows: {reason}" in warnings
+
+
+def test_session_output_leaves_out_records_without_model_output_and_names_unknown_kinds(setup, caplog):
+    """Codex 0.155.1 writes a token_usage_record after each model response: the output is still the model's calls.
+    A record of a kind no checked version writes is left out too, and named in a gap and the server log."""
+    agent, sandbox = setup
+    record = native_transcript(
+        [
+            {"type": "function_call", "call_id": "call_ls", "name": "exec_command", "arguments": '{"cmd":"ls"}'},
+            {"type": "function_call_output", "call_id": "call_ls", "output": "Process exited with code 0"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
+        ]
+    )
+    record += "\n" + "\n".join(
+        json.dumps(line)
+        for line in (
+            {"type": "token_usage_record", "payload": {"response_id": "resp-1", "usage": {"input_tokens": 3}}},
+            {"type": "retained_context", "payload": {}},
+            {"type": "security_risk_score", "payload": {}},
+            {"type": "future_bookkeeping", "payload": {}},
+        )
+    )
+    publish_session_record(sandbox, record)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert [(item["type"], item.get("call_id")) for item in response.json()["output"]] == [
+        ("function_call", "call_ls"),
+        ("function_call_output", "call_ls"),
+        ("message", None),
+    ]
+    gaps = {gap["code"]: gap.get("detail") for gap in closed["agent_observations"]["gaps"]}
+    assert "tool_calls_in_executed_form" not in gaps
+    assert gaps["unknown_session_records_skipped"] == "future_bookkeeping 1"
+    assert "Codex session records of unknown kinds are left out of the output: future_bookkeeping 1" in caplog.text
+
+
+def stopped_batch(*, second: str = "echo fast", finished: str = "echo fast") -> tuple[list[dict], str]:
+    """A run stopped at its time limit during a parallel batch: the first command still runs. The CLI reported the
+    second when it ended; Codex writes a batch's results in call order, so the record has neither result."""
+    slow = "sleep 30 && echo slow"
+    events = [
+        {"type": "turn.started"},
+        *(
+            {
+                "type": "item.started",
+                "item": {"id": key, "type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(command)}"},
+            }
+            for key, command in (("item_0", slow), ("item_1", finished))
+        ),
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "command_execution",
+                "command": f"/bin/bash -lc {shlex.quote(finished)}",
+                "aggregated_output": "fast\n",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+    ]
+    record = native_transcript(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+            {
+                "type": "function_call",
+                "call_id": "call_slow",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": slow}),
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_fast",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": second, "workdir": "/app"}),
+            },
+        ]
+    )
+    return events, record
+
+
+def test_a_stopped_run_keeps_the_cli_result_the_session_record_has_not_written(setup, caplog):
+    agent, sandbox = setup
+    events, record = stopped_batch()
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "incomplete"
+    # The model's calls, in its order; the finished command keeps the result the CLI showed, the running one none.
+    assert [(item["type"], item.get("call_id")) for item in body["output"]] == [
+        ("function_call", "call_slow"),
+        ("function_call", "call_fast"),
+        ("function_call_output", "call_fast"),
+    ]
+    assert body["output"][2]["output"] == "fast\n"
+    assert json.loads(body["output"][1]["arguments"]) == {"cmd": "echo fast", "workdir": "/app"}
+    gaps = {gap["code"]: gap.get("detail") for gap in closed["agent_observations"]["gaps"]}
+    assert gaps["tool_results_from_cli_events"] == "the session record has no result for call_fast"
+    assert "tool_calls_in_executed_form" not in gaps
+    assert "Codex tool results are kept as the CLI events show them" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("second", "finished"),
+    [
+        ("sleep 30 && echo slow", "sleep 30 && echo slow"),  # two calls of one command: either could be the one
+        ("echo fast", "echo other"),  # the command that finished is not the call's
+    ],
+    ids=["same-command-twice", "other-command"],
+)
+def test_a_stopped_run_joins_a_cli_result_to_no_call_it_cannot_prove_is_its(setup, second, finished):
+    agent, sandbox = setup
+    events, record = stopped_batch(second=second, finished=finished)
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    assert [(item["type"], item.get("call_id")) for item in result.json()["output"]] == [
+        ("function_call", "call_slow"),
+        ("function_call", "call_fast"),
+    ]
+    assert "tool_results_from_cli_events" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
 
 
 def test_session_without_tool_calls_has_nothing_to_note_when_the_record_is_missing(setup, caplog):

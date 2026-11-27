@@ -23,6 +23,7 @@ import shutil
 import signal
 import tempfile
 from asyncio import Semaphore
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import deepcopy
@@ -117,6 +118,8 @@ LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _EXECUTED_FORM_GAP = "tool_calls_in_executed_form"
+_CLI_RESULT_GAP = "tool_results_from_cli_events"
+_UNKNOWN_RECORDS_GAP = "unknown_session_records_skipped"
 _PROVIDER_ERROR = "provider_error"
 # Codex's final error when a model response ends at its output-token limit (the output cap), a gradable outcome.
 # Codex 0.144.4 and 0.154.0 retry such a response as a stream disconnect and report the first text; Codex 0.163.0
@@ -542,6 +545,66 @@ def parse_exec_jsonl(
     if errors:
         metadata["errors"] = errors
     return output_items, metadata
+
+
+def _executed_command(item: dict[str, Any]) -> Optional[str]:
+    """The command a CLI ``command_execution`` item ran. Codex runs a command as ``<shell> -lc <command>`` (``-c``
+    without a login shell) and shows that argv joined with shell quoting; any other form gives None."""
+    try:
+        argv = shlex.split(item["command"])
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+    return argv[2] if len(argv) == 3 and argv[1] in ("-lc", "-c") else None
+
+
+def _model_command(item: Any) -> Optional[str]:
+    """The ``cmd`` of an ``exec_command`` call the model made; None for any other item."""
+    if getattr(item, "type", None) != "function_call" or item.name != "exec_command" or item.namespace:
+        return None
+    try:
+        arguments = json.loads(item.arguments)
+    except (ValueError, RecursionError):
+        return None
+    command = arguments.get("cmd") if isinstance(arguments, dict) else None
+    return command if isinstance(command, str) else None
+
+
+def _with_cli_results(output: list[Any], events: list[tuple[float, dict[str, Any]]]) -> tuple[list[Any], list[str]]:
+    """Add the CLI's result for each command the session record has a call for but no result, where the CLI events
+    show that command finished. Returns the output and the IDs of the calls given a CLI result.
+
+    Codex writes the results of a parallel batch of calls in call order, while the CLI reports each tool when it
+    ends, so a run stopped while one call of a batch ran can have a later call's result in the CLI events and not in
+    the record. A finished CLI command and a call are joined only when the command text is the same and no other
+    call or finished CLI command has it; display IDs are never matched to calls by position. The result is the
+    CLI's (the command's output, and its exit code when not 0), not the text Codex would have given the model.
+    """
+    answered = {item.call_id for item in output if item.type in ("function_call_output", "custom_tool_call_output")}
+    unanswered = [
+        item for item in output if item.type in ("function_call", "custom_tool_call") and item.call_id not in answered
+    ]
+    if not unanswered:
+        return output, []
+    finished: dict[str, list[dict[str, Any]]] = {}
+    for _, event in events:
+        item = event.get("item")
+        if (
+            event.get("type") == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type") == "command_execution"
+        ):
+            command = _executed_command(item)
+            if command is not None:
+                finished.setdefault(command, []).append(event)
+    calls_per_command = Counter(_model_command(item) for item in output)
+    results = []
+    for call in unanswered:
+        command = _model_command(call)
+        if command is None or calls_per_command[command] != 1 or len(finished.get(command, ())) != 1:
+            continue
+        cli_items, _ = parse_exec_jsonl(json.dumps(finished[command][0]))
+        results.append(cli_items[-1].model_copy(update={"call_id": call.call_id}))
+    return [*output, *results], [result.call_id for result in results]
 
 
 def _is_error_event(event: dict[str, Any]) -> bool:
@@ -1334,14 +1397,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
         # The CLI's events show each tool as the command Codex executed (a shell-wrapped string, without the model's
         # other arguments, merged results, display IDs). The session record holds what the model called, so the
         # output comes from it, and from the events only when it cannot stand in.
-        executed_form_gap = None
+        # The exported trajectory carries no mark of any of these gaps, so the server log says each next to its gap.
+        output_gaps = []
         try:
-            output = parse_codex_output(state.native_transcript)
+            session_output = parse_codex_output(state.native_transcript)
         except CodexOutputUnavailable as exc:
             if any(getattr(item, "type", None) == "function_call" for item in output):
-                executed_form_gap = ObservationGap(code=_EXECUTED_FORM_GAP, detail=str(exc))
-                # The exported trajectory carries no mark of this, so the server log says it next to the gap.
+                output_gaps.append(ObservationGap(code=_EXECUTED_FORM_GAP, detail=str(exc)))
                 LOG.warning("Codex tool calls are kept in the executed form the CLI shows: %s", exc)
+        else:
+            output, cli_results = _with_cli_results(session_output.items, events)
+            if cli_results:
+                detail = "the session record has no result for " + ", ".join(cli_results)
+                output_gaps.append(ObservationGap(code=_CLI_RESULT_GAP, detail=detail))
+                LOG.warning("Codex tool results are kept as the CLI events show them: %s", detail)
+            if session_output.unknown_records:
+                detail = ", ".join(f"{kind} {count}" for kind, count in sorted(session_output.unknown_records.items()))
+                output_gaps.append(ObservationGap(code=_UNKNOWN_RECORDS_GAP, detail=detail))
+                LOG.warning("Codex session records of unknown kinds are left out of the output: %s", detail)
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
@@ -1430,7 +1503,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable"),
-            *([executed_form_gap] if executed_form_gap else []),
+            *output_gaps,
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
