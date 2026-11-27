@@ -257,6 +257,22 @@ class TestExecuteSqlEndpoint:
         assert response.status_code == 422
         assert "db_id" in response.text
 
+    def test_rejects_second_episode_on_same_session(self, client) -> None:
+        first = {
+            "resources_session_id": "session-1",
+            "episode_id": {"rollout_id": "rollout-1"},
+            "task_id": {"taskset": "example", "task_id": "0"},
+            "task_data": {"db_id": "SchoolDB", "question": "q", "gt_sql": "SELECT 1"},
+        }
+        # Same session, different episode
+        second = {**first, "episode_id": {"rollout_id": "rollout-2"}}
+
+        response = client.post("/seed_session", json=first)
+        assert response.status_code == 200
+
+        # A live session can't be taken over by another episode
+        response = client.post("/seed_session", json=second)
+        assert response.status_code == 409
 
 # ---------------------------------------------------------------------------
 # verify: bird_sql scoring + tool-use counts
