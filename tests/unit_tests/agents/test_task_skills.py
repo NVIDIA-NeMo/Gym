@@ -262,6 +262,20 @@ async def test_a_folder_the_caller_names_must_be_an_absolute_path(local_sandbox)
     assert not destination.exists()
 
 
+async def test_read_only_skills_copied_again_over_an_earlier_copy_are_staged(local_sandbox, read_only_skills) -> None:
+    """A re-bound OpenCode session copies its skills again over what the fork kept, which can be the copy its seed
+    made. A copy that kept the task's read-only modes could not be written over, and the re-bind kept failing."""
+    session_dir = local_sandbox.root / "session"
+    destination = session_dir / "config" / "opencode" / "skills"
+    await stage_task_skills(local_sandbox.sandbox, str(destination), skills_dir=str(read_only_skills))
+
+    staged = await stage_task_skills(local_sandbox.sandbox, str(destination), skills_dir=str(read_only_skills))
+
+    assert staged == str(read_only_skills)
+    assert (destination / "demo" / "SKILL.md").read_text() == (read_only_skills / "demo" / "SKILL.md").read_text()
+    await _close_seeded_session(local_sandbox.sandbox, session_dir)
+
+
 @pytest.mark.parametrize(
     "context",
     [
