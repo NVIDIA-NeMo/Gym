@@ -36,6 +36,7 @@ Requires ``bm25s`` and ``nltk`` (``uv sync --locked --project benchmarks/birdben
 
 import argparse
 import json
+import re
 import shutil
 import sqlite3
 import urllib.request
@@ -62,13 +63,42 @@ def output_fpath_for(dialect: str, split: str = "dev") -> Path:
     return DATA_DIR / f"birdbench_{dialect}_{split}.jsonl"
 
 
+# A table heading of a spark/postgres ``sql_context``: ``- `db_id`.`table`:`` (see build_db_values.render_sql_context).
+_QUOTED_TABLE_HEADING = re.compile(r"^- `[^`]+`\.`([^`]+)`:$", re.MULTILINE)
+
+
+def is_prepared_data_current(fpath: Path) -> bool:
+    """Whether a cached prepared file can be reused (``gym eval prepare +use_cached_prepared_benchmarks=true``).
+
+    A Spark file is stale when a table heading in its ``sql_context`` is not a name Spark can hold: the server
+    registers tables under ``setup_bird_spark.spark_table_name`` (``\\w`` characters only), so a file prepared before
+    that mapping existed shows the model names such as ``air carriers`` that its SQL then cannot resolve.
+    """
+    fpath = Path(fpath)
+    if not fpath.is_file():
+        return False
+    if "_spark_" not in fpath.name:
+        return True
+    with fpath.open() as f_in:
+        for line in f_in:
+            if not line.strip():
+                continue
+            for table in _QUOTED_TABLE_HEADING.findall(json.loads(line).get("sql_context", "")):
+                if not re.fullmatch(
+                    r"\w+", table
+                ):  # == spark_table_name(table) != table, without importing pyspark deps
+                    return False
+    return True
+
+
 def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """BIRD train rows with each ReViSQL-verified row swapped in for the original it corrects.
 
     A verified row's ``question_id`` is the 0-indexed position of the row it replaces in ``train.json``. Matching on
     that (rather than on question text) is robust because verification sometimes edits the question itself; the
     original text is then kept in ``original_question`` (``None`` when unchanged). Verified rows are appended after
-    the untouched originals, so the result has the same length as ``train_entries``.
+    the untouched originals, so the result has the same length as ``train_entries``. Each original gets its own
+    position in ``train.json`` as ``question_id``, so every row of the result has one.
     """
     replaced = set()
     mismatched = []
@@ -83,7 +113,8 @@ def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Di
         raise ValueError(
             f"{len(mismatched)} verified rows do not match train.json at their question_id: {mismatched[:10]}"
         )
-    uberset = [e for i, e in enumerate(train_entries) if i not in replaced] + list(verified_entries)
+    originals = [{**e, "question_id": i} for i, e in enumerate(train_entries) if i not in replaced]
+    uberset = originals + list(verified_entries)
     assert len(uberset) == len(train_entries), "uberset must be the same size as train.json"
     return uberset
 
@@ -206,6 +237,7 @@ def prepare(
                 question = entry["question"]
             assert question, f"Entry {i} (db_id={db_id!r}) has no question"
             row = {
+                "task_id": str(entry["question_id"]),
                 "question": question,
                 "gt_sql": entry["SQL"],
                 "sql_context": db_handles[db_id].sql_context_for_question(question),

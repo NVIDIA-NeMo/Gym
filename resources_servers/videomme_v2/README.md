@@ -1,4 +1,4 @@
-# VideoMME-v2: single-turn video evaluation
+# VideoMME-v2: single-turn and agentic video evaluation
 
 This resources server provides the shared task/scoring primitives and a
 stateless Gym verifier. Its single-turn config runs the stock `simple_agent`
@@ -8,9 +8,14 @@ on the prepared video, followed by deterministic verification, and reports Raw
 Acc and the official Nonlinear Score, overall and by L1/L2/L3, under
 `Video_MME_v2`.
 
-An agentic setting (a sandboxed agent with video tools) is planned as a
-separate change. The verifier already accepts `setting: agentic` cohorts and
-reports them under their own namespace, `Video_MME_v2_agentic`.
+The agentic config, `configs/videomme_v2_agentic.yaml`, runs the stock
+`opencode_agent` with the video tools `watch_video` and `view_image` in a
+sandbox that this server lends each episode, through a
+`single_agent_turn_legacy` Environment Server (see the shared
+[agentic setting](../video_mcqa/README.md#agentic-setting)). It needs
+`videomme_v2_agentic_cohort_manifest`, `videomme_v2_agentic_video_roots` and a
+sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`), and reports under its own
+namespace, `Video_MME_v2_agentic`.
 
 This is not an EF-certified benchmark: a registered dataset artifact and a full
 real-model baseline are separate steps. No checkpoint, credential, benchmark
@@ -25,12 +30,14 @@ and optional level/group. It has no gold-answer field.
 
 `prepare_single_turn()` emits one user turn containing an already-prepared
 `input_video` and question text. It does not choose sampling parameters.
-`prepare_agentic()` emits question text plus the bound sandbox video path for
-the planned agentic setting; it does not force a tool call or add
-benchmark-specific system instructions.
+`prepare_agentic()` emits question text plus the sandbox path of the video for
+the agentic setting; it does not force a tool call or add benchmark-specific
+system instructions.
 
 Both builders return the standard `responses_create_params` /
-`verifier_metadata` separation. Gold and provenance stay in verifier metadata.
+`verifier_metadata` separation. Gold and provenance stay in verifier metadata,
+with the question as asked (`question`, and `options` in label order), which a
+judge model reads under `llm_extraction_v1`; every row needs them.
 Changing the gold label while keeping the question/media fixed produces exactly
 the same model-facing request. Callers must forward **only**
 `responses_create_params` to the model, never the whole prepared row.
@@ -100,6 +107,10 @@ unclosed reasoning does not count as a final answer.
   identical boxed letters are unambiguous; conflicting letters are rejected.
 - `boxed_or_letter_v1`: additionally accepts final visible text consisting of
   exactly one uppercase option letter. It never guesses a letter from prose.
+- `llm_extraction_v1`: a judge model reads which option the final answer gives,
+  for bare-letter answers to rows built with `prompt="videomme_v2"`. Run it with
+  `configs/videomme_v2_single_turn_llm_extraction.yaml`; see
+  [answer extraction](../video_mcqa/README.md#answer-extraction-by-a-judge-model).
 
 The outcomes distinguish correct, incorrect, no answer, format error, ambiguous
 answer, completed execution failure and infrastructure failure. The caller owns
@@ -162,7 +173,8 @@ Results record their answer policy and outcome labels. The prompt asks for a
 boxed letter, and `boxed_only_v1` scores an unboxed or conflicting answer
 as 0. The official script asks for a bare letter and takes the first A-H
 letter it finds, so these scores are not comparable to official Video-MME-v2
-results.
+results. Under `llm_extraction_v1` a judge reads the chosen option instead; it
+does not take the first letter.
 
 Rows that Gym adds to count a task as zero (`count_failure_classes_as_zero`,
 `count_missing_rollouts_as_zero`) carry no verifier fields. Aggregation skips
@@ -177,7 +189,9 @@ and a counter that ends on 5. The clips are stored once, in
 as an MP4 `data:` URL; `video_source` names the committed file and
 `video_sha256` is its SHA-256. `data/example_cohort.json` freezes the five
 example task IDs, and `data/example_rollouts.jsonl` holds one real-model
-rollout per row. The model and serving setup are in the
+rollout per row. The agentic counterparts are `data/example_agentic.jsonl`,
+`data/example_agentic_cohort.json` and `data/example_agentic_rollouts.jsonl`.
+The model, serving and sandbox setup are in the
 [shared README](../video_mcqa/README.md#example-data).
 
 ## CPU tests

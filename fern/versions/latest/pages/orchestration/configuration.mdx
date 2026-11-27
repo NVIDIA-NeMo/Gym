@@ -181,6 +181,7 @@ Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0
 | `command` | `null` | A shell script that runs **instead of** `gym eval run`. See [Custom Harness](/orchestration/how-to/custom-harness). Cannot be combined with `run` or `resumable`. |
 | `resumable` | `false` | `true` for auto-resume with defaults, or `{max_retries, max_walltime}` to tune it. See [Resumable Runs](/orchestration/how-to/resumable-runs). |
 | `export` | `{}` | Exports of the finished run, by exporter name (`atif`, `mlflow`, `wandb`). Each value is that exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export. Slurm only, and not combinable with `command`. See [export](#export). |
+| `reverify` | `{}` | Reverify steps over the finished run, by step name: `{config: [paths], overrides: {...}}` each. Slurm only, and not combinable with `command`. See [reverify](#reverify). |
 
 `prepare` and `run` are nested mappings that are flattened to Hydra overrides: `{split: benchmark, config_paths: [a.yaml, b.yaml]}` becomes `+split=benchmark` and `+config_paths=[a.yaml,b.yaml]`, and nested keys become dotted paths.
 
@@ -248,6 +249,23 @@ Credentials are not export settings. `resolved-config.yaml` and `--resolve-only`
 **Validation.** Submit rejects, before anything is sent: an unknown exporter or setting, settings the exporter would not accept (for example a missing `agent_version` for `atif`, or an `mlflow` export without a tracking URI and experiment), an export on a benchmark that also enables the same live exporter in its `run` settings (the run would be logged twice), `export` on a benchmark with a `command`, and exports on Kubernetes compute.
 
 The duplicate check only sees the settings written in the benchmark's `run` block. A live exporter that is switched on some other way is not detected before submit: through a config file listed in `config_paths`, through an `env.yaml`, or through a file in the `gym_install` checkout. If you also use an `export` for that backend, the run is logged twice, once live and once as a separate run by the export, and `gym eval export` logs a warning naming the live run. To avoid it, do not enable the live exporter for a backend you export with `export`.
+
+### reverify
+
+A reverify step judges every saved rollout of the benchmark again with another resources server, such as a judge that labels reward hacking, without running the policy again and without changing the run's rewards:
+
+```yaml
+driver:
+  benchmarks:
+    terminal_bench:
+      reverify:
+        second_pass:
+          config: [resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml]
+          overrides:
+            concurrency_hint: 4
+```
+
+After `gym eval run` exits 0, the driver runs `gym eval reverify` for each step, before the exports, with the step's `config` files (relative to the Gym checkout) and `overrides`. It reads `<benchmark dir>/artifacts/rollouts.jsonl` and its materialized inputs, and writes `<benchmark dir>/artifacts/rollouts_<step name>.jsonl` with its aggregate metrics. `NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS` names the run's rollouts file, so a server config can read what `/verify` is not sent, such as the saved rewards. When the job runs again, a step whose output exists resumes it. A failed step is reported in the driver log and does not change the job's exit code; its judge model must be reachable from the driver node.
 
 ## job
 

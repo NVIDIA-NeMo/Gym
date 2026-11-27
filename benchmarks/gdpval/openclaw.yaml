@@ -28,12 +28,12 @@ gdpval_openclaw_agent:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
-      openclaw_version: 2026.6.11
+      openclaw_version: 2026.11.5
       # Concurrent OpenClaw runs, as Stirrup's concurrency. Keep it at least the environment server's
       # max_concurrent_episodes: an episode beyond it waits with its sandbox started and its deadline running.
       concurrency: 32
       # The served model's context length. OpenClaw lowers a call's output request, compacts and caps long tool
-      # results against it, and assumes 200,000 tokens when it is unset.
+      # results against it, and OpenClaw 2026.11.5 assumes 128,000 tokens when it is unset.
       context_window: 262144
       # Per model call (OpenClaw's maxTokens); OpenClaw requests less when the input leaves less room.
       max_output_tokens: 32768

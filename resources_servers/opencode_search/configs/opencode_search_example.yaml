@@ -26,6 +26,8 @@ opencode_search_example_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       entrypoint: app.py
+      # As in opencode_sandboxed_agent.yaml: the release this deprecated agent was checked on.
+      opencode_version: 1.17.11
       resources_server:
         type: resources_servers
         # The INSTANCE name declared in opencode_search.yaml, not the implementation directory.

@@ -44,9 +44,9 @@ records why in ``grading_status``:
 4. ``answer_too_long``: the judge would see the whole final answer and it is
    over ``max_answer_chars``.
 
-Then one judge call. Answer rows end with ``Judgement: 'yes'|'no'`` (reward 1
-or 0). Rubric rows end with a JSON object marking every criterion; the server
-sums the points itself. A judge reply that cannot be parsed scores 0
+After the gates, the server makes one judge call. By default, answer rows end with
+``Judgement: 'yes'|'no'`` (reward 1 or 0). Rubric rows end with a JSON object
+marking every criterion and the server sums the points. A judge reply that cannot be parsed scores 0
 (``judge_unparsed``). A failed judge call is retried by ``call_judge`` when another
 attempt can succeed (408, 429, 5xx, timeout, lost connection) and otherwise fails at
 once; either way it is reported as a judge failure, which masks the row instead of
@@ -70,6 +70,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -85,6 +86,19 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
+from resources_servers.stem_judge.answer_options import (
+    AnswerRuleList,
+    GuidelineScope,
+    JsonJudgment,
+    VerdictFormat,
+    VerdictMode,
+    add_answer_rules,
+    answer_template,
+    final_verdict,
+    judge_text,
+    parse_json_judgment,
+    policy_text,
+)
 from resources_servers.stem_judge.task_data import RubricCriterion, TaskData, reference_of
 
 
@@ -145,6 +159,12 @@ class StemJudgeConfig(BaseResourcesServerConfig):
                 raise ValueError(f"question_extract_regex does not compile: {e}") from e
         return regex
 
+    guideline_scope: GuidelineScope = "stem"
+    extra_answer_rules: AnswerRuleList = Field(default_factory=list)
+    verdict_mode: VerdictMode = "binary"
+    verdict_format: VerdictFormat = "line"
+    box_parser: Literal["exact", "last_command"] = "exact"
+
     # --- Answer contract. A row's own answer_format wins. ---
     default_answer_format: Literal["boxed", "free"] = "boxed"
     # What the judge sees on boxed rows: "final_answer" gates on the box but shows
@@ -182,11 +202,10 @@ class StemJudgeVerifyRequest(StemJudgeRunRequest, BaseVerifyRequest):
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
-    # "Judgement: yes" or "Judgement: no" on answer rows (the form Gym's rollout recovery checks
-    # against the reward); None when the reply could not be parsed, on any row. A parsed
-    # rubric grade leaves the field out: its verdict is criteria_met, and Gym's recovery reads a
-    # None verdict_label as a reply without a verdict.
+    # Answer rows record "Judgement: yes", "Judgement: no", or "Judgement: unresolved".
+    # An unparsed reply records None. A parsed rubric grade omits the label and uses criteria_met.
     verdict_label: Optional[str] = None
+    judgment: JsonJudgment | None = Field(default=None, exclude_if=lambda value: value is None)
     # Rubric rows: criterion id -> met; None when the output could not be parsed.
     criteria_met: Optional[dict[str, bool]] = Field(default=None, exclude_if=lambda value: value is None)
 
@@ -205,7 +224,7 @@ class StemJudgeVerifyResponse(BaseVerifyResponse):
 
     expected_answer: str
     answer_format: str
-    # "judged", "judge_unparsed", or why the judge was not called.
+    # "judged", "judge_unresolved", "judge_unparsed", or why the judge was not called.
     grading_status: str
     # Rubric rows only: earned / total positive points, before rubric_reward.
     rubric_score: Optional[float] = None
@@ -220,34 +239,6 @@ FAILURE_FIELDS = (
     "failure_outcome_action",
     "failure_outcome_attribution",
 )
-
-
-def _assistant_text(response: NeMoGymResponse) -> str:
-    """Text of the last assistant message; content blocks are joined with newlines."""
-    for item in reversed(response.output):
-        if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
-            content = getattr(item, "content", None)
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "\n".join(t for t in (getattr(c, "text", None) for c in content) if isinstance(t, str))
-            return ""
-    return ""
-
-
-def judge_text(response: NeMoGymResponse) -> Optional[str]:
-    """Text of the judge's closing message; None when the reply does not end in a message with text.
-
-    A reply cut off while the judge was still reasoning ends in a reasoning item instead.
-    """
-    last = response.output[-1] if response.output else None
-    content = getattr(last, "content", None) if getattr(last, "type", None) == "message" else None
-    if isinstance(content, str):
-        return content
-    if not content:
-        return None
-    text = getattr(content[-1], "text", None)
-    return text if isinstance(text, str) else None
 
 
 def _is_length_truncated(response: NeMoGymResponse) -> bool:
@@ -268,23 +259,39 @@ def final_answer(response: NeMoGymResponse) -> tuple[Optional[str], str]:
     """
     if _is_length_truncated(response):
         return None, "truncated"
-    text = _assistant_text(response).strip()
+    text = policy_text(response).strip()
     if not text:
         return None, "empty_final_answer"
     return text, "ok"
 
 
-def last_boxed(text: str) -> Optional[str]:
+def last_boxed(text: str, *, last_command: bool = False) -> Optional[str]:
     r"""Content of the last ``\boxed{...}``, brace-balanced; None if absent, unclosed or blank.
 
     As in math_with_judge's ``_extract_last_boxed_answer``, only the last ``\boxed{``
-    counts and a blank box is no answer. Escaped braces (``\{``, ``\}``) are literal, so
+    counts in exact mode. With last_command, a final bare or spaced command
+    supersedes earlier boxes. A blank box is no answer. Escaped braces (``\{``, ``\}``) are literal, so
     ``\boxed{f=\left\{ ... \right.}`` closes at its last brace.
     """
-    start = text.rfind("\\boxed{")
-    if start < 0:
-        return None
-    content_start = start + len("\\boxed{")
+    if last_command:
+        # Select the final unescaped command first. An invalid final argument
+        # belongs to that command and cannot expose an earlier boxed answer.
+        opening = None
+        for match in re.finditer(r"\\\\|\\boxed(?![A-Za-z])", text):
+            if match[0].endswith("boxed"):
+                opening = match.end()
+        if opening is None:
+            return None
+        while opening < len(text) and text[opening].isspace():
+            opening += 1
+        if opening == len(text) or text[opening] != "{":
+            return None
+        content_start = opening + 1
+    else:
+        start = text.rfind("\\boxed{")
+        if start < 0:
+            return None
+        content_start = start + len("\\boxed{")
     depth = 1
     index = content_start
     while index < len(text):
@@ -420,7 +427,7 @@ def _extract_step(req: BaseVerifyRequest) -> Optional[str]:
 
 
 class StemJudgeResourcesServer(SimpleResourcesServer):
-    # Each verification is one judge call: there is no session state to export,
+    # Verification has no session state to export,
     # and a checkpoint can re-run a verification after a crash instead of waiting for it.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
@@ -436,7 +443,13 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             self._judge_endpoint_max_concurrency = nullcontext()
 
         with open(self.config.answer_prompt_template_fpath, encoding="utf-8") as f:
-            self._answer_template = f.read().strip()
+            template = answer_template(
+                f.read().strip(),
+                scope=self.config.guideline_scope,
+                verdict_mode=self.config.verdict_mode,
+                verdict_format=self.config.verdict_format,
+            )
+        self._answer_template = add_answer_rules(template, self.config.extra_answer_rules)
         with open(self.config.rubric_prompt_template_fpath, encoding="utf-8") as f:
             self._rubric_template = f.read().strip()
         # A custom template with an unknown placeholder or a stray brace fails here, not on every judged row.
@@ -475,7 +488,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
 
         solution = final
         if answer_format == "boxed":
-            box = last_boxed(final)
+            box = last_boxed(final, last_command=cfg.box_parser == "last_command")
             if box is None:
                 return await zero("no_boxed")
             if cfg.max_box_chars is not None and len(box) > cfg.max_box_chars:
@@ -496,12 +509,22 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         prompt = self._answer_template.format(
             question=question, expected_answer=render_reference(expected), generated_answer=solution
         )
-        evaluation, text = await self._call_judge(prompt)
-        verdict = parse_verdict(text) if text is not None else None
+        json_answer = self.config.verdict_format == "json"
+        evaluation, text = await self._call_judge(
+            prompt, json_answer=json_answer, join_blocks=json_answer or self.config.verdict_mode == "yes_no_unresolved"
+        )
+        if json_answer:
+            evaluation.judgment = parse_json_judgment(text, verdict_mode=self.config.verdict_mode)
+            verdict = evaluation.judgment.label if evaluation.judgment else None
+        else:
+            parser = final_verdict if self.config.verdict_mode == "yes_no_unresolved" else parse_verdict
+            verdict = parser(text) if text is not None else None
         evaluation.verdict_label = f"Judgement: {verdict}" if verdict is not None else None
         if evaluation.verdict_label is None:
             return await self._finish(body, expected, answer_format, "judge_unparsed", 0.0, solution, [evaluation])
         record_parsed_judge_verdict()
+        if verdict == "unresolved":
+            return await self._finish(body, expected, answer_format, "judge_unresolved", 0.0, solution, [evaluation])
         reward = 1.0 if verdict == "yes" else 0.0
         return await self._finish(body, expected, answer_format, "judged", reward, solution, [evaluation])
 
@@ -529,10 +552,16 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             body, expected, answer_format, "judged", reward, solution, [evaluation], rubric_score=score
         )
 
-    async def _call_judge(self, prompt: str) -> tuple[JudgeEvaluation, Optional[str]]:
+    async def _call_judge(
+        self, prompt: str, *, json_answer: bool = False, join_blocks: bool = False
+    ) -> tuple[JudgeEvaluation, Optional[str]]:
         """One judge call. Returns the evaluation and the text of the judge's last message, if any."""
         cfg = self.config
         params = cfg.judge_responses_create_params.model_copy(deep=True)
+        if json_answer:
+            text = params.text or {}
+            if (text.get("format") or {}).get("type") not in ("json_schema", "json_object"):
+                params.text = {**text, "format": {"type": "json_object"}}
         msgs: list[NeMoGymEasyInputMessage] = []
         if cfg.judge_system_message:
             msgs.append(NeMoGymEasyInputMessage(role="system", content=cfg.judge_system_message))
@@ -555,7 +584,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         if judge_response.status == "incomplete":
             # A cut-off reply has no final judgement; a verdict-like line in it could be quoted text.
             return evaluation, None
-        return evaluation, judge_text(judge_response)
+        return evaluation, judge_text(judge_response, join_blocks=join_blocks)
 
     async def _finish(
         self,
@@ -573,8 +602,30 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             await asyncio.to_thread(self._append_log_line, line)
         payload = body.model_dump()
         # Fields this server sets; a row that carries them (e.g. one rebuilt from a rollout) must not override them.
-        for key in (*RESPONSE_FIELDS, *FAILURE_FIELDS):
+        for key in (
+            *RESPONSE_FIELDS,
+            *FAILURE_FIELDS,
+            "verdict",
+            "correctness",
+            "evaluation_completed",
+            "library_reward",
+        ):
             payload.pop(key, None)
+        if self.config.verdict_mode == "yes_no_unresolved" and not body.rubric:
+            unknown = status in ("judge_unparsed", "judge_unresolved")
+            payload.update(
+                verdict="unresolved" if unknown else ("yes" if reward else "no"),
+                evaluation_completed=status != "judge_unparsed",
+                correctness=None if unknown else bool(reward),
+                mask_sample=unknown,
+            )
+            if unknown:
+                # NeMo RL's loss mask reads this flag from the instance config.
+                instance = payload.get("instance_config")
+                payload["instance_config"] = {**(instance if isinstance(instance, dict) else {}), "mask_sample": True}
+            if status == "judge_unparsed":
+                payload["failure_kind"] = JUDGE_UNPARSEABLE
+                payload["failure_reason"] = "Missing or incomplete final verdict"
         return StemJudgeVerifyResponse(
             **payload,
             reward=reward,
@@ -596,7 +647,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         evaluations: list[JudgeEvaluation],
     ) -> str:
         """One JSONL record for the generation log."""
-        judge_texts = [judge_text(e.response) or "" for e in evaluations]
+        judge_texts = [judge_text(e.response, join_blocks=True, allow_partial=True) or "" for e in evaluations]
         record = {
             "ts": time.time(),
             "step": _extract_step(body),
@@ -605,7 +656,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             "expected_answer": expected,
             "answer_format": answer_format,
             "rubric": [c.model_dump() for c in body.rubric] if body.rubric else None,
-            "generation": _assistant_text(body.response),
+            "generation": policy_text(body.response),
             "judged_generation": judged,
             "grading_status": status,
             "reward": reward,
@@ -613,6 +664,8 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             "criteria_met": [e.criteria_met for e in evaluations],
             "judge_generations": judge_texts,
         }
+        if judgments := [e.judgment.model_dump() for e in evaluations if e.judgment is not None]:
+            record["judgments"] = judgments
         return json.dumps(record, ensure_ascii=False, default=str) + "\n"
 
     def _append_log_line(self, line: str) -> None:

@@ -138,7 +138,12 @@ class UpstreamRetryPolicy(BaseModel):
 
 class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_base_url: str
-    openai_api_key: str
+    openai_api_key: str | list[str] = Field(
+        description=(
+            "API key, or a list of keys used in order: the next key replaces one that is spent "
+            "(budget_exceeded or insufficient_quota) or rejected as invalid."
+        ),
+    )
     openai_model: str
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)

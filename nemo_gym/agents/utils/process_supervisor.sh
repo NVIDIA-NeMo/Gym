@@ -16,7 +16,8 @@
 # Not reached: processes that had already left the harness when the stop began (detached
 # services), which are left for the sandbox owner, and a process that leaves the harness between two
 # scans after dropping the marker from its environment. The receipt confirms that no reached
-# process can still run; it is not a sandbox-empty check.
+# process can still run; it is not a sandbox-empty check. Its "stopped" field says the stop file,
+# not the harness's own exit or the deadline, ended the harness or fenced its launch.
 #
 # Stop signals (TERM, INT, HUP) count only once the stop file exists. Others are counted in the
 # receipt's foreign_signals and ignored: a tool command in the same sandbox that signals every process
@@ -28,16 +29,53 @@
 #
 # The expire file, when given, moves the deadline to now: once it appears, the harness ends exactly
 # as at its time limit and the receipt records timed_out. If it appears before launch, the harness
-# never starts. The supervisor never deletes it.
+# never starts. The supervisor never deletes it. An expire that arrives while the harness is paused
+# takes effect when the pause ends.
+#
+# Pause and continue, for a checkpoint that snapshots the sandbox while the harness keeps its state:
+# writing a number N greater than any earlier one to the pause file sends STOP to every process the
+# harness reaches, as a stop would find them, and to every process carrying the marker, including
+# services that left the harness: unlike a kill, a pause is undone. The supervisor waits until each
+# is stopped (longer while some are in uninterruptible sleep) and acknowledges in the paused file:
+# {"seq": N, "confirmed": BOOL, "pids": [...], "error": STRING|null}. Writing N to the continue file
+# sends CONT to the same processes and acknowledges in the continued file the same way. The time
+# spent paused does not count against the deadline. A pause requested before the launch holds the
+# launch until it is continued. A stop requested while paused continues the processes first, so the
+# harness is running when it receives TERM; one that ignores TERM is killed after the cleanup timeout.
+# The receipt, written when the harness ends, answers any pause the supervisor never acknowledged.
+# Every acknowledgement also names the pause mode and the supervisor's identity, PID.START (its /proc
+# start time), which marks the processes it launched.
+#
+# With --pause-mode hold, for a sandbox whose snapshot keeps its processes, a pause sends no signal: the
+# harness keeps running, the supervisor acknowledges at once and stops counting the deadline until the
+# continue, which sends nothing either. The checkpoint holds the harness's model calls instead. During a hold
+# the supervisor does not watch the harness either: one that exits is reaped, and its receipt written, after
+# the continue.
+#
+# A pause nobody continues would hold the harness for good: the deadline does not run, and an expire
+# waits for the continue. With --max-pause, a pause that lasts longer ends as an expire does: the
+# processes are continued, the harness is terminated, and the receipt records timed_out and
+# pause_expired. The limit counts the supervisor's own polls, not the clock, so the time a sandbox
+# spends snapshotted and not running is not counted. A pause that stops the harness also ends when the
+# harness is gone.
+#
+# --abandon IDENTITY ends a launch for good after a restore of such a snapshot, when nothing of it may run
+# again: it sends KILL, never CONT, to the supervisor IDENTITY names, the shell that started it, every
+# process carrying its marker and their descendants, and writes a stopped, abandoned receipt unless the
+# supervisor wrote one.
 #
 # usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
-#        [--expire-file PATH] -- COMMAND...
+#        [--expire-file PATH]
+#        [--pause-file PATH --paused PATH --continue-file PATH --continued PATH [--max-pause SECONDS]
+#         [--pause-mode stop|hold]]
+#        -- COMMAND...
+#        process_supervisor.sh --abandon IDENTITY --receipt PATH [--cleanup-timeout SECONDS]
 
 # An inherited BASH_ENV or SHELLOPTS must not turn an expected failure into a missing receipt.
 set +o errexit +o nounset +o pipefail
 
 usage() {
-    echo "usage: process_supervisor.sh --timeout S --cleanup-timeout S --receipt PATH --stop-file PATH [--expire-file PATH] -- COMMAND..." >&2
+    echo "usage: process_supervisor.sh --timeout S --cleanup-timeout S --receipt PATH --stop-file PATH [--expire-file PATH] [--pause-file PATH --paused PATH --continue-file PATH --continued PATH [--max-pause S] [--pause-mode stop|hold]] -- COMMAND..." >&2
     exit 2
 }
 
@@ -190,7 +228,8 @@ reached_alive() {
 
 stopped() { ((stopping)) || [[ -e $stop_file ]]; }
 
-expired() { [[ -n $expire_file && -e $expire_file ]]; }
+# A pause that outlasted --max-pause ends the harness as an expire does.
+expired() { ((${pause_expired:-0})) || [[ -n $expire_file && -e $expire_file ]]; }
 
 # A stop signal stops the harness only once the stop file exists; any other is counted and ignored.
 stop_signal() {
@@ -201,15 +240,253 @@ stop_signal() {
     fi
 }
 
+# How a pause treats the processes it reaches: stop sends STOP and CONT, hold sends nothing (see the header).
+pause_mode=stop
+# Named in every acknowledgement once the supervisor has claimed the launch; empty until then, whatever the
+# environment holds under this name.
+identity=
+# The command line of a shell running this script, for --abandon to tell the shell that started a supervisor.
+SUPERVISOR_NAME=process_supervisor.sh
+
 write_receipt() {
     local foreign=
     ((${foreign_signals:-0} > 0)) && foreign=", \"foreign_signals\": $foreign_signals"
-    printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s%s}' \
-        "$1" "$return_code" "$2" "$timed_out" "$foreign" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
+    ((${pause_expired:-0})) && foreign+=', "pause_expired": true'
+    printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s, "stopped": %s%s}' \
+        "$1" "$return_code" "$2" "$timed_out" "$requested_stop" "$foreign" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
+}
+
+# Set SEQ to the sequence number in request file $1, or 0 when it is missing or malformed. Polled
+# every round, so it does not fork.
+request_seq() {
+    local value=
+    SEQ=0
+    [[ -n $1 && -e $1 ]] && IFS= read -r value 2>/dev/null <"$1"
+    [[ $value =~ ^[0-9]{1,15}$ ]] && SEQ=$((10#$value))
+    return 0
+}
+
+# Write acknowledgement $1 for request $2 atomically.
+acknowledge() {
+    local named=null
+    [[ -n ${identity-} ]] && named="\"$identity\""
+    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s, "mode": "%s", "identity": %s}' \
+        "$2" "$3" "$4" "$5" "$pause_mode" "$named" >"$1.tmp" && mv -f "$1.tmp" "$1"
+}
+
+# Record in paused[PID]=START every process a pause reaches: what a stop would reach now, and
+# every marked process, including services that left the harness. Runs the scan in a subshell so
+# that the stop's own bookkeeping is unchanged.
+pause_scan() {
+    local pid start
+    while read -r pid start; do
+        [[ -n $pid ]] && paused[pid]=$start
+    done < <(
+        preserving=1 preserved=()
+        scan >/dev/null
+        for pid in "${!tracked[@]}"; do echo "$pid ${tracked[pid]}"; done
+    )
+}
+
+# Send signal $1 to every process recorded in paused whose start time still matches.
+signal_paused() {
+    local pid
+    for pid in "${!paused[@]}"; do
+        stat_fields "$pid" && [[ ${fields[19]} == "${paused[pid]}" ]] && kill "-$1" "$pid" 2>/dev/null
+    done
+    return 0
+}
+
+# Succeed once no recorded process is in a state other than $1 (a glob of /proc states); set
+# blocked to 1 when only processes in uninterruptible sleep are left.
+paused_settled() {
+    local pid others=0 waiting=0
+    for pid in "${!paused[@]}"; do
+        stat_fields "$pid" && [[ ${fields[19]} == "${paused[pid]}" ]] || continue
+        case ${fields[0]} in
+        [ZX]) ;;
+        $1) ;;
+        D) waiting=1 ;;
+        *) others=1 ;;
+        esac
+    done
+    blocked=$((waiting && !others))
+    ((!others && !waiting))
+}
+
+# Pause request $1: stop every reached process and acknowledge. A harness not launched yet has
+# nothing to stop; the launch waits instead.
+pause() {
+    local limit error=null pid list= known round
+    paused=()
+    if [[ $pause_mode == hold ]]; then
+        acknowledge "$paused_ack" "$1" true "" null
+        return
+    fi
+    if [[ -n ${harness-} ]]; then
+        pause_scan
+        [[ -n ${groups[harness]} ]] && owned_group "$harness" "${groups[harness]}" && kill -STOP -- "-$harness" 2>/dev/null
+        signal_paused STOP
+        # A process forked between a scan and its parent's stop is found by the next scan: scan until one finds
+        # nothing new.
+        for round in 1 2 3 4 5 6 7 8 9 10; do
+            known=${#paused[@]}
+            pause_scan
+            signal_paused STOP
+            ((${#paused[@]} == known)) && break
+        done
+    fi
+    now
+    limit=$((NOW + pause_wait))
+    while ! paused_settled '[Tt]'; do
+        now
+        if ((NOW >= limit + (blocked ? pause_blocked_wait : 0))); then
+            error='"A process the pause reached did not stop"'
+            break
+        fi
+        signal_paused STOP
+        sleep 0.02
+    done
+    for pid in "${!paused[@]}"; do list+="${list:+, }$pid"; done
+    acknowledge "$paused_ack" "$1" "$([[ $error == null ]] && echo true || echo false)" "$list" "$error"
+}
+
+# Continue request $1: continue every process the pause stopped and acknowledge.
+resume_paused() {
+    local limit error=null
+    if [[ $pause_mode == hold ]]; then
+        acknowledge "$continued_ack" "$1" true "" null
+        return
+    fi
+    now
+    limit=$((NOW + pause_wait))
+    signal_paused CONT
+    while ! paused_settled '[!Tt]'; do
+        now
+        if ((NOW >= limit)); then
+            error='"A paused process did not continue"'
+            break
+        fi
+        signal_paused CONT
+        sleep 0.02
+    done
+    paused=()
+    acknowledge "$continued_ack" "$1" "$([[ $error == null ]] && echo true || echo false)" "" "$error"
+}
+
+# Serve a new pause request: pause, wait for its continue or a stop, then continue. Succeeds when a
+# pause was served; the paused time is added to paused_total. The wait also ends when the harness is
+# gone, and after --max-pause, which sets pause_expired.
+serve_pause() {
+    # Not named started: pause_scan reads the supervisor's own start time under that name.
+    local paused_since waited=0
+    [[ -n $pause_file && -e $pause_file ]] || return 1
+    request_seq "$pause_file"
+    ((SEQ > pause_seq)) || return 1
+    pause_seq=$SEQ
+    now
+    paused_since=$NOW
+    pause "$pause_seq"
+    while request_seq "$continue_file" && ((SEQ < pause_seq)) && ! stopped; do
+        # A hold does not watch the harness: one that exits is reaped after the continue (see the header).
+        [[ $pause_mode != hold && -n ${harness-} ]] && ! kill -0 "$harness" 2>/dev/null && break
+        if ((max_pause && waited >= max_pause)); then
+            pause_expired=1
+            break
+        fi
+        sleep 0.05
+        # Counted in polls of 5 centiseconds, not read from the clock: see the header.
+        waited=$((waited + 5))
+    done
+    # A stop while paused continues the processes first, so TERM reaches a running harness.
+    request_seq "$continue_file"
+    resume_paused "$SEQ"
+    now
+    paused_total=$((paused_total + NOW - paused_since))
+    return 0
+}
+
+# Abandon the launch of the supervisor whose identity is $1 (PID.START), after a restore of a snapshot that
+# kept its processes (see the header). Kills, and never continues, the supervisor, the shell that started it
+# outside its own group, every process carrying its marker, and their descendants, until none runs or the
+# cleanup timeout passes. A process reached once stays reached, by PID and start time: one that outlives its
+# parent is reparented, out of the tree a later scan walks. Writes a stopped, abandoned receipt unless the
+# supervisor wrote one; succeeds when nothing it reached still runs.
+abandon() {
+    local supervisor=${1%%.*} entry pid shell= word limit changed confirmed=true error=null
+    local -a parent=() doomed=() start=() reached=()
+    [[ $1 == *.* && $supervisor =~ ^[0-9]+$ && ${1#*.} =~ ^[0-9]+$ ]] || { echo "--abandon needs PID.START" >&2; return 2; }
+    started=${1#*.} marker=NEMO_GYM_SUPERVISOR=$1
+    # The shell that started the supervisor in a new process group waits for it and passes on its status.
+    if stat_fields "$supervisor" && [[ ${fields[19]} == "$started" ]]; then
+        while IFS= read -r -d '' word; do
+            [[ $word == *"/$SUPERVISOR_NAME" || $word == "$SUPERVISOR_NAME" ]] && shell=${fields[1]}
+        done 2>/dev/null <"/proc/${fields[1]}/cmdline"
+    fi
+    # The shell is reached by PID and start time, like every other process, so a later holder of its PID is not.
+    [[ $shell ]] && stat_fields "$shell" && reached[shell]=${fields[19]}
+    now
+    limit=$((NOW + ${cleanup:-1000}))
+    while :; do
+        parent=() doomed=() start=()
+        for entry in /proc/[0-9]*; do
+            pid=${entry#/proc/}
+            [[ $pid != "$$" ]] && stat_fields "$pid" || continue
+            [[ ${fields[0]} == [ZX] ]] && continue
+            parent[pid]=${fields[1]} start[pid]=${fields[19]}
+            if [[ ($pid == "$supervisor" && ${fields[19]} == "$started") || ${reached[pid]-} == "${fields[19]}" ]] ||
+                marked "$pid" "${fields[19]}"; then
+                doomed[pid]=1
+            fi
+        done
+        changed=1
+        while ((changed)); do
+            changed=0
+            for pid in "${!parent[@]}"; do
+                [[ -z ${doomed[pid]} && -n ${doomed[parent[pid]]} ]] || continue
+                doomed[pid]=1 changed=1
+            done
+        done
+        ((${#doomed[@]})) || break
+        for pid in "${!doomed[@]}"; do
+            reached[pid]=${start[pid]}
+            # A process that exited since the scan can have handed its PID on: signal only the process it reached.
+            stat_fields "$pid" && [[ ${fields[19]} == "${start[pid]}" ]] && kill -KILL "$pid" 2>/dev/null
+        done
+        now
+        if ((NOW >= limit)); then
+            confirmed=false error='"An abandoned process did not exit"'
+            break
+        fi
+        sleep 0.05
+    done
+    if [[ ! -e $receipt ]]; then
+        printf '{"cleanup_confirmed": %s, "return_code": null, "error": %s, "timed_out": false, "stopped": true, "abandoned": true}' \
+            "$confirmed" "$error" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
+    fi
+    [[ $confirmed == true ]]
 }
 
 # Tests source the functions above without running the supervisor.
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+
+if [[ ${1-} == --abandon ]]; then
+    (($# >= 2)) || usage
+    abandon_identity=$2
+    shift 2
+    while (($#)); do
+        (($# >= 2)) || usage
+        case $1 in
+        --receipt) receipt=$2 ;;
+        --cleanup-timeout) cleanup=$(centiseconds "$2") || { echo "--cleanup-timeout must be finite and positive" >&2; exit 2; } ;;
+        *) echo "unexpected argument: $1" >&2; exit 2 ;;
+        esac
+        shift 2
+    done
+    [[ -n ${receipt-} ]] || usage
+    abandon "$abandon_identity"
+    exit
+fi
 
 arguments=("$@")
 while (($#)) && [[ $1 != -- ]]; do
@@ -220,6 +497,15 @@ while (($#)) && [[ $1 != -- ]]; do
     --receipt) receipt=$2 ;;
     --stop-file) stop_file=$2 ;;
     --expire-file) expire_file=$2 ;;
+    --pause-file) pause_file=$2 ;;
+    --paused) paused_ack=$2 ;;
+    --continue-file) continue_file=$2 ;;
+    --continued) continued_ack=$2 ;;
+    --max-pause) max_pause=$(centiseconds "$2") || { echo "--max-pause must be finite and positive" >&2; exit 2; } ;;
+    --pause-mode)
+        [[ $2 == stop || $2 == hold ]] || { echo "--pause-mode must be stop or hold" >&2; exit 2; }
+        pause_mode=$2
+        ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
     shift 2
@@ -227,6 +513,17 @@ done
 [[ $1 == -- ]] || usage
 shift
 [[ -n ${timeout-} && -n ${cleanup-} && -n ${receipt-} && -n ${stop_file-} && $# -gt 0 ]] || usage
+pause_file=${pause_file-} paused_ack=${paused_ack-} continue_file=${continue_file-} continued_ack=${continued_ack-}
+if [[ -n $pause_file$paused_ack$continue_file$continued_ack ]] &&
+    [[ -z $pause_file || -z $paused_ack || -z $continue_file || -z $continued_ack ]]; then
+    echo "--pause-file, --paused, --continue-file and --continued go together" >&2
+    exit 2
+fi
+max_pause=${max_pause-0}
+if ((max_pause)) && [[ -z $pause_file ]]; then
+    echo "--max-pause needs --pause-file" >&2
+    exit 2
+fi
 
 # Leave the provider's process group, so that a KILL sent to it cannot end the supervisor before
 # the receipt. This shell stays behind to pass on TERM and the exit status.
@@ -244,10 +541,21 @@ if [[ ${NEMO_GYM_SUPERVISOR-} != detached ]] && stat_fields $$ && [[ ${fields[2]
     exit
 fi
 
-return_code=null timed_out=false stopping=0 preserving=0 forced=0 foreign_signals=0
-tracked=() groups=() preserved=()
+return_code=null timed_out=false stopping=0 preserving=0 forced=0 foreign_signals=0 requested_stop=false
+tracked=() groups=() preserved=() paused=()
+# A pause waits this long (centiseconds) for reached processes to stop, and this much longer while
+# only processes in uninterruptible sleep are left.
+pause_wait=500 pause_blocked_wait=2500 pause_seq=0 paused_total=0 blocked=0 pause_expired=0
+# A pause already continued before this supervisor started is not served: the launch starts running,
+# and the continue is acknowledged for a client that waits for it.
+if [[ -n $pause_file ]]; then
+    request_seq "$continue_file"
+    pause_seq=$SEQ
+    ((pause_seq)) && acknowledge "$continued_ack" "$pause_seq" true "" null
+fi
 trap stop_signal TERM INT HUP
 if stopped; then
+    [[ -e $stop_file ]] && requested_stop=true
     write_receipt true null # Nothing was launched.
     exit 0
 fi
@@ -263,6 +571,20 @@ fi
 started=${fields[19]}
 identity=$$.$started
 marker=NEMO_GYM_SUPERVISOR=$identity
+# A pause requested before the launch holds it until continued.
+while ! stopped && serve_pause; do :; done
+# The hold ended before the deadline starts, so its time is not added to the deadline again.
+paused_total=0
+if stopped; then
+    [[ -e $stop_file ]] && requested_stop=true
+    write_receipt true null # Nothing was launched.
+    exit 0
+fi
+if expired; then
+    timed_out=true
+    write_receipt true null # The deadline arrived during the hold, so nothing was launched.
+    exit 0
+fi
 
 # Job control gives the harness its own process group.
 set -m
@@ -274,11 +596,17 @@ stat_fields "$harness" && groups[harness]=${fields[19]} tracked[harness]=${field
 now
 deadline=$((NOW + timeout))
 while kill -0 "$harness" 2>/dev/null && ! stopped && ! expired && ((NOW < deadline)); do
+    if serve_pause; then
+        # Paused time does not count against the deadline.
+        deadline=$((deadline + paused_total))
+        paused_total=0
+    fi
     sleep 0.05
     now
 done
 if kill -0 "$harness" 2>/dev/null; then
     stopped || timed_out=true
+    [[ $timed_out == false && -e $stop_file ]] && requested_stop=true
     forced=1
     scan
     kill -TERM "$harness" 2>/dev/null

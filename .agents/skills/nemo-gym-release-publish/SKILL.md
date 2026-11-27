@@ -11,16 +11,20 @@ publish. A PyPI upload cannot be undone or overwritten.
 
 ## Workflow facts
 
-- Workflow: `.github/workflows/release.yaml`, which calls the shared
-  `_release_library.yml` template from `NVIDIA-NeMo/FW-CI-templates`.
+- Workflow: `.github/workflows/release.yaml`. Version preparation, artifact
+  build/validation, and finalization call `_release_bump.yml`,
+  `_build_test_wheel.yml`, and `_release_finalize.yml` from
+  `NVIDIA-NeMo/FW-CI-templates`. The repository-owned `publish-wheel` job uses
+  trusted publishing in the `pypi` environment.
+- The `release-workflow-tests` CPU job must pass before version preparation.
 - Trigger it from `main`. The `release-ref` SHA decides what gets released,
   not the branch you trigger from.
 - The template restricts the run to repository admins.
 - `skip-test-wheel: true` is set, so the workflow never installs the wheel.
   The install check below fills that gap.
-- After publishing, the workflow pushes a version bump to
-  `version-bump-branch`. A run with `release-ref` set to a branch name races
-  that bump, so `release-ref` must be a full 40-character SHA.
+- The release App opens a version bump PR against `version-bump-branch`.
+  Publication uses the selected full 40-character `release-ref` SHA. Maintainers
+  merge the bump PR after its required checks and reviews pass.
 
 ## 1. Resolve the inputs
 
@@ -104,10 +108,11 @@ gh run view <RUN_ID> -R $REPO --json conclusion,jobs \
   -q '{conclusion, jobs: [.jobs[] | {name, conclusion}]}'
 ```
 
-The run passes when `conclusion` is `success`. The `build-wheel`,
-`validate-wheel`, `publish-wheel`, and `create-gh-release` jobs succeed, and in
-a dry run they compute without publishing. `test-wheel`, `build-docs`, and
-`publish-docs` are skipped by design.
+The dry run passes when `conclusion` and `release-summary` are `success`.
+The `release-workflow-tests`, version preparation, `build-wheel`,
+`validate-wheel`, and `create-gh-release` jobs succeed without publishing.
+The `publish-wheel`, `test-wheel`, `build-docs`, and `publish-docs` jobs are
+skipped by design. A skipped upload is required for a healthy dry run.
 
 Then confirm that the dry run published nothing: PyPI still returns `404`, the
 latest GitHub release is unchanged, and `BRANCH` has not moved.
@@ -148,15 +153,19 @@ publish the SHA that was already dry-run. Never switch SHAs silently.
 dispatch false
 ```
 
-Find and watch the run ID as in step 3.
+Find and watch the run ID as in step 3. For a real release, require
+`publish-wheel` and `release-summary` to succeed; a failed, cancelled, or
+skipped upload must not finalize the release.
 
 ## 6. Verify the release
+
+Set `BUMP_PR_URL` to the version bump PR in the bump job's step summary.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/nemo-gym/$VERSION/json
 gh release list -R $REPO --limit 2
-gh api "repos/$REPO/contents/nemo_gym/package_info.py?ref=$BRANCH" -q .content \
-  | base64 -d | grep -E '^(PATCH|PRE_RELEASE) ='
+gh pr view "$BUMP_PR_URL" --repo "$REPO" --json baseRefName,headRefName,state,files
+gh pr diff "$BUMP_PR_URL" --repo "$REPO"
 
 uv venv pypi-venv --python $PYTHON -q
 uv pip install --python pypi-venv/bin/python --no-cache "nemo-gym==$VERSION"
@@ -166,7 +175,7 @@ pypi-venv/bin/python -I -c "import nemo_gym; print(nemo_gym.__version__)"
 - PyPI returns `200`. If the install cannot find the version yet, wait a
   minute for the PyPI index to update and retry.
 - The new release uses tag `v$VERSION`.
-- `package_info.py` on `BRANCH` has moved past `VERSION`.
+- The PR targets `BRANCH` and advances the version in `nemo_gym/package_info.py`.
 - The install from PyPI prints `VERSION`.
 
 ## 7. Hand off the remaining steps
@@ -175,6 +184,7 @@ Tell the user which of these are left. They are not automated:
 
 - Review the release page at `https://github.com/$REPO/releases` and the
   package page at https://pypi.org/project/nemo-gym/.
+- Merge the release workflow's bump PR into `BRANCH` after the required checks and reviews pass.
 - Merge the version bump pull request on `main` that was opened when the
   release branch was cut.
 - Announce the release.

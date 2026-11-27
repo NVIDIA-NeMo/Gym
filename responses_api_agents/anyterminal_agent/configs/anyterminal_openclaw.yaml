@@ -11,6 +11,7 @@ anyterminal_openclaw:
       agent_config_class: OpenClawAgentConfig
       agent_kwargs:
         model: model
+        # Bullseye task images need the release whose exec tool runs on glibc 2.31.
         openclaw_version: "2026.6.11"
         timeout: 3600
         setup_timeout: 1200

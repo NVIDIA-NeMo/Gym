@@ -20,8 +20,8 @@ Always use a **new output directory**; existing directories are rejected.
 
 - Simple Agent needs `sh` and uses a direct HTTP shell tool, without a sandbox.
 - Other registered adapters require Linux. Their runtimes come from locked Python
-  dependencies or session setup. Hermes must be importable in the same Python
-  environment; sync `responses_api_agents/hermes_agent` before running it.
+  dependencies or session setup. Hermes runs in its own pinned Python 3.14 worker, which
+  the adapter builds on first use with `git`, `uv` and network access.
 - Terminus requires root and `tmux` in a disposable Linux runner. Its runtime creates
   `/logs/agent`; each episode uses a separate tmux socket directory that is cleaned up.
   For example: `sudo .venv/bin/python -m scripts.run_harness_conformance

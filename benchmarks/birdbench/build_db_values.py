@@ -462,9 +462,10 @@ class DbHandle:
         corpus_limit_per_column: Optional[int] = None,
     ):
         """``dialect="spark"`` (needs ``db_id``) renders the schema for Spark SQL: schema-qualified, backtick-quoted
-        table headings and column names, and the Spark column types the ``bird_sql`` server will actually load.
-        ``dialect="postgres"`` does the same with double quotes, the PostgreSQL column types and the column names as
-        loaded (lower case; see ``setup_bird_postgres.postgres_column_name``).
+        table headings (named as Spark loads them, see ``setup_bird_spark.spark_table_name``) and column names, and
+        the Spark column types the ``bird_sql`` server will actually load. ``dialect="postgres"`` does the same with
+        double quotes, the PostgreSQL column types and the column names as loaded (lower case; see
+        ``setup_bird_postgres.postgres_column_name``).
         ``corpus_limit_per_column`` bounds the BM25 corpus scan per column (see ``_collect_column_values``).
         """
         if dialect not in ("sqlite", "spark", "postgres"):
@@ -473,13 +474,16 @@ class DbHandle:
             raise ValueError(f"dialect={dialect!r} requires db_id (the schema name)")
         self.cur = cur
         self.dialect = dialect
+        self._table_name: Callable[[str], str] = lambda table: table
         self.db_id = db_id
         self._column_name: Callable[[str], str] = lambda column: column
         self.table_names = _table_names(cur)
         self.column_types_by_table = {t: _column_types(cur, t) for t in self.table_names}
         if dialect == "spark":
             # Imported here: only the Spark dialect needs pandas/pyarrow.
-            from resources_servers.bird_sql.setup_bird_spark import spark_column_types
+            from resources_servers.bird_sql.setup_bird_spark import spark_column_types, spark_table_name
+
+            self._table_name = spark_table_name
 
             sqlite_path = Path(cur.execute("PRAGMA database_list").fetchall()[0][2])
             self.column_types_by_table = spark_column_types(sqlite_path)
@@ -507,7 +511,8 @@ class DbHandle:
 
     def _column_ref(self, table: str, column: str) -> str:
         if self.dialect != "sqlite":
-            return f"{self._quote(self.db_id)}.{self._quote(table)}.{self._quote(self._column_name(column))}"
+            table_name, column_name = self._table_name(table), self._column_name(column)
+            return f"{self._quote(self.db_id)}.{self._quote(table_name)}.{self._quote(column_name)}"
         return f"{table}.{column}"
 
     def relevant_hits_for_question(self, question: str) -> List[Dict[str, str]]:
@@ -529,7 +534,7 @@ class DbHandle:
     def _labels(self) -> Dict[str, Callable[[str], str]]:
         if self.dialect != "sqlite":
             return {
-                "table_label": lambda table: f"{self._quote(self.db_id)}.{self._quote(table)}",
+                "table_label": lambda table: f"{self._quote(self.db_id)}.{self._quote(self._table_name(table))}",
                 "column_label": lambda column: self._quote(self._column_name(column)),
             }
         return {}

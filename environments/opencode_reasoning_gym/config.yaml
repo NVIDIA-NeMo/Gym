@@ -17,7 +17,6 @@ opencode_reasoning_gym_agent:
       concurrency: 8
       command: opencode
       model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
-      opencode_version: 1.17.11
       thinking: false
       setup_timeout: 900
       timeout: 900

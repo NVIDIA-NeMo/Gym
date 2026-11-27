@@ -18,7 +18,7 @@ model_server: policy_model
 datasets:
 - name: example
   type: example
-  jsonl_fpath: resources_servers/pdf_analyst_qa/data/example_bundle/gym_input.jsonl
+  jsonl_fpath: resources_servers/pdf_analyst_qa/data/example/gym_input.jsonl
   num_repeats: 1
 session_model: episode
 state: per_session

@@ -388,6 +388,8 @@ Managed servers run in separate process sessions. On shutdown, Gym sends each se
 
 Agent servers use their lifespan shutdown to close remaining sessions concurrently. One `session_close_timeout_seconds` budget bounds the whole drain, including incomplete setup and cleanup already in progress. This field still bounds individual close phases during normal operation. Its base default is `60` seconds; adapters may keep their own defaults, including `30` for Hermes and Stirrup. A timeout cancels pending cleanup and reports unconfirmed session IDs. Unconfirmed cleanup retains its handle and leaves no saved reply; process exit does not establish that a remote sandbox stopped, so its owner and provider TTL remain responsible after forced termination.
 
+Every server then stops the sandboxes it still owns through `self.sandboxes`, concurrently and within at most 150 seconds; each stop is bounded by its own 120-second limit. Under the default one-second grace the process usually ends first, and each sandbox's `ttl_s` reclaims what is left, so set `ttl_s` on every sandbox a server starts.
+
 Allow the managed-server grace to exceed the longest agent drain plus Uvicorn request cancellation and process overhead. The default one-second grace does not guarantee a sixty-second agent drain. For example, if request cancellation and shutdown overhead fit within ten seconds:
 
 ```yaml
