@@ -956,13 +956,19 @@ def _rejudge_saved_judge_failures(
     start of a resumed run, with ``aggregate`` off since its collection aggregates afterwards. The saved results to
     grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
-    ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
-    incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
+    ``complete_only`` recomputes metrics when the settled run completes, or when the run opts into an incomplete
+    aggregate and nothing remains retryable. Only a complete run exports its score. Completeness is returned
     (always False without ``complete_only``). Recomputed metrics also refresh the per-agent completion files written
     during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
-    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_collection import (
+        RolloutAggregationConfig,
+        RolloutAggregationHelper,
+        _credentials_rejected_stop,
+        _quota_exhausted_stop,
+    )
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
     if isinstance(global_config_dict, DictConfig):
@@ -990,12 +996,25 @@ def _rejudge_saved_judge_failures(
     if collection_config.disable_aggregation or not aggregate:
         return complete
     if complete_only and not complete:
-        # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
-        # pass settled: the aggregation that rewrites it is skipped with the metrics. No completion file can follow
-        # it either, so they are removed. An aggregate `allow_incomplete_aggregate` wrote before the pass is
-        # recomputed from the new grades instead, and still not exported.
+        # Rejudging may produce the first scored row. Decide from the opt-in and settled state, not whether
+        # collection had enough scored rows to write an aggregate. Completion files still require a complete run.
         _remove_completion_files(output)
-        if not aggregate_metrics_path_for(output).exists():
+        allow_incomplete = False
+        if collection_config.allow_incomplete_aggregate:
+            try:
+                store = RolloutStore.read(output, import_legacy=False)
+                allow_incomplete = (
+                    store is not None
+                    and store.coverage()["retryable"] == 0
+                    and not _credentials_rejected_stop(store.failures())
+                    and not _quota_exhausted_stop(store.failures())
+                )
+            except Exception:  # unreadable evidence cannot authorize a partial score
+                logger.warning(
+                    "Could not check the saved run's eligibility for an incomplete aggregate.", exc_info=True
+                )
+        if not allow_incomplete:
+            aggregate_metrics_path_for(output).unlink(missing_ok=True)
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
             return complete
     try:

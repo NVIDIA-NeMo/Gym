@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""After its re-judge pass, a strict run that was rejected as incomplete recomputes no metrics until it is complete,
-and a run whose metrics are recomputed refreshes or removes its per-agent completion files."""
+"""A strict run needs completeness or the explicit opt-in before saved-answer rejudging recomputes its metrics.
+Its per-agent completion files still require a complete run."""
 
 from types import SimpleNamespace
 
@@ -34,8 +34,8 @@ def pass_settles_one_row(monkeypatch):
     "complete_only, run_is_complete, aggregate_written, recomputed",
     [
         pytest.param(True, False, False, 0, id="rejected-and-still-incomplete"),
-        # allow_incomplete_aggregate wrote the settled score before the pass: it follows the new grades.
-        pytest.param(True, False, True, 1, id="rejected-and-still-incomplete-with-its-aggregate"),
+        # A stale aggregate does not authorize publishing without the opt-in.
+        pytest.param(True, False, True, 0, id="rejected-and-still-incomplete-with-stale-aggregate"),
         pytest.param(True, True, False, 1, id="rejected-and-completed-by-the-pass"),
         pytest.param(False, False, False, 1, id="not-a-rejection"),
     ],
@@ -51,7 +51,7 @@ def test_metrics_are_recomputed_only_for_a_run_that_may_publish_them(
     returned = eval_cli._rejudge_saved_judge_failures(
         {},
         tmp_path / "rollouts.jsonl",
-        SimpleNamespace(disable_aggregation=False),
+        SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False),
         complete_only=complete_only,
     )
 
@@ -81,7 +81,7 @@ def test_a_pass_that_raises_still_lets_a_completed_strict_run_publish_its_metric
     eval_cli._rejudge_saved_judge_failures(
         {},
         tmp_path / "rollouts.jsonl",
-        SimpleNamespace(disable_aggregation=False),
+        SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False),
         complete_only=complete_only,
     )
 
@@ -128,7 +128,9 @@ def test_completion_files_follow_the_recomputed_metrics_or_are_removed(
     monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.RolloutAggregationHelper", Helper)
     monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.refresh_agent_complete_files", refresh)
 
-    eval_cli._rejudge_saved_judge_failures({}, output, SimpleNamespace(disable_aggregation=False))
+    eval_cli._rejudge_saved_judge_failures(
+        {}, output, SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False)
+    )
 
     assert refreshed == ([output] if failing_step is None else [])
     assert complete_dir.exists() is (failing_step is None)
@@ -144,7 +146,10 @@ def test_a_strict_run_left_incomplete_by_the_pass_removes_its_completion_files(
     monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: False)
 
     eval_cli._rejudge_saved_judge_failures(
-        {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=True
+        {},
+        tmp_path / "rollouts.jsonl",
+        SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False),
+        complete_only=True,
     )
 
     assert pass_settles_one_row == []
@@ -172,7 +177,10 @@ def test_an_incomplete_strict_run_refreshes_its_quality_summary_without_publishi
     monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: calls.append(kwargs) or {})
 
     eval_cli._rejudge_saved_judge_failures(
-        {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=complete_only
+        {},
+        tmp_path / "rollouts.jsonl",
+        SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False),
+        complete_only=complete_only,
     )
 
     assert len(calls) == refreshed
@@ -203,7 +211,10 @@ def test_a_pass_that_settled_rows_and_then_disconnected_refreshes_the_quality_su
     monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: calls.append(kwargs) or {})
 
     eval_cli._rejudge_saved_judge_failures(
-        {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=complete_only
+        {},
+        tmp_path / "rollouts.jsonl",
+        SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False),
+        complete_only=complete_only,
     )
 
     assert len(calls) == refreshed
@@ -238,7 +249,9 @@ def test_a_pass_that_returns_zero_but_saved_evidence_refreshes_the_quality_summa
     monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda path: False)
     monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: calls.append(kwargs) or {})
 
-    eval_cli._rejudge_saved_judge_failures({}, output, SimpleNamespace(disable_aggregation=False), complete_only=True)
+    eval_cli._rejudge_saved_judge_failures(
+        {}, output, SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False), complete_only=True
+    )
 
     assert len(calls) == refreshed
     assert all(call["metrics"] is False for call in calls)

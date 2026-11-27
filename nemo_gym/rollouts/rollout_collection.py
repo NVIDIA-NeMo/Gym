@@ -152,6 +152,7 @@ from nemo_gym.rollouts.rollout_records import (
     journal_path_for,
     logical_rollout_id,
     read_record_rows,
+    read_records,
     resolve_rollout_path,
 )
 from nemo_gym.rollouts.rollout_recovery import (
@@ -3052,12 +3053,13 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
 
 
 def _refresh_shard_status_aggregation(
-    input_paths: List[str],
-    aggregate_metrics_fpath: Optional[Path],
+    input_paths: list[str],
+    aggregate_metrics_fpath: Path | None,
     *,
     scored_rows: Iterable[Mapping[str, Any]] = (),
+    incomplete: bool = False,
 ) -> None:
-    """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
+    """Refresh each shard's run status from its saved rows and the outcome of aggregation.
 
     EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
     """
@@ -3072,7 +3074,26 @@ def _refresh_shard_status_aggregation(
             members = status.get("members")
             if status.get("tracking") != "enabled" or not isinstance(members, dict):
                 continue
+            store = RolloutStore.read(Path(path), import_legacy=False)
+            if store is not None:
+                status_rows = [_batch_status_row(row, {}) for row in read_records(materialized_path_for(Path(path)))]
+                for row in status_rows:
+                    row.setdefault(AGENT_REF_KEY_NAME, {"name": RolloutCollectionHelper._dispatch_name(row)})
+                agent_refs = {
+                    (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
+                    for row in status_rows
+                }
+                tracker = RunStatusTracker(status_fpath, status_rows)
+                progress = tracker.build_status(
+                    [_batch_status_row(row, agent_refs) for row in store.selected("success")],
+                    [_batch_status_row(row, agent_refs) for row in store.failures()],
+                )
+                status.update(progress)
+                members = status["members"]
             for agent, member in members.items():
+                if incomplete:
+                    member["aggregation_status"] = "pending"
+                    continue
                 entry, _ = _aggregate_entry_for_member(entries, agent, environment_member=agent in environment_members)
                 failed = (
                     aggregate_metrics_fpath is None
@@ -7222,11 +7243,13 @@ class RolloutAggregationHelper(BaseModel):
             batch_tracker.write_status(
                 batch_completed_rows,
                 batch_failure_rows,
-                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                aggregate_metrics_fpath=aggregate_metrics_fpath if not incomplete else None,
                 force=True,
             )
         else:
-            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath, scored_rows=scored)
+            _refresh_shard_status_aggregation(
+                input_paths, aggregate_metrics_fpath, scored_rows=scored, incomplete=incomplete
+            )
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
