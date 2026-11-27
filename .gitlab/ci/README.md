@@ -56,7 +56,7 @@ flowchart LR
 ```
 
 The GitLab adapter is pinned to
-`b25bc687148715ae495590ad1711064072f951dd`
+`1568515d1a1b7b403f224ff537615b216ce0e2d7`
 ([FW-CI-templates PR 632](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/632),
 which adds `--require-codeowners`). The adapter skips mapped users without active
 Developer-or-higher project membership and reports them in `warnings`. It manages
