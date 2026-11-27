@@ -811,8 +811,8 @@ class CodexSessionOutput:
 
     @property
     def unknown_records(self) -> dict[str, int]:
-        """The skipped records of kinds the checked Codex versions do not write: a newer Codex's bookkeeping, most
-        likely, but nothing shows that they carry no model output."""
+        """The skipped records of kinds the checked Codex versions do not write: most likely the bookkeeping of a later
+        Codex version, but nothing shows that they carry no model output."""
         return {kind: count for kind, count in self.skipped_records.items() if kind not in _NON_OUTPUT_RECORDS}
 
 
