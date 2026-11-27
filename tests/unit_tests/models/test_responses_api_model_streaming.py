@@ -354,6 +354,33 @@ NAMESPACE_TOOL = {
     ],
 }
 
+# A message between two Codex agents, in the two forms the CLI sends: the task of a spawned subagent, whose
+# payload is the model's tool-call argument in an `encrypted_content` part, and a subagent's answer to its parent.
+AGENT_TASK = {
+    "type": "agent_message",
+    "id": "amsg_1",
+    "author": "/root",
+    "recipient": "/root/check",
+    "content": [
+        {"type": "input_text", "text": "Message Type: NEW_TASK\nTask name: /root/check\nSender: /root\nPayload:\n"},
+        {"type": "encrypted_content", "encrypted_content": "Check the result."},
+    ],
+}
+AGENT_TASK_TEXT = "Message Type: NEW_TASK\nTask name: /root/check\nSender: /root\nPayload:\nCheck the result."
+AGENT_ANSWER_TEXT = "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/check\nPayload:\nThe result holds."
+AGENT_ANSWER = {
+    "type": "agent_message",
+    "id": "amsg_2",
+    "author": "/root/check",
+    "recipient": "/root",
+    "content": [{"type": "input_text", "text": AGENT_ANSWER_TEXT}],
+}
+
+
+def _user_message(text: str) -> dict:
+    """Return a user message that holds ``text`` in one ``input_text`` part."""
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
 
 class TestSanitizeStreamingBody:
     @pytest.mark.parametrize("missing_id", [False, True])
@@ -625,6 +652,58 @@ class TestSanitizeStreamingBody:
         )
         assert [i["type"] for i in cleaned["input"]] == ["message"]
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    @pytest.mark.parametrize(
+        "item, text",
+        [
+            (AGENT_TASK, AGENT_TASK_TEXT),
+            (AGENT_ANSWER, AGENT_ANSWER_TEXT),
+            # The text is the sender's: white space at its start and end stays.
+            ({**AGENT_ANSWER, "content": [{"type": "input_text", "text": "\n  indented\n\n"}]}, "\n  indented\n\n"),
+        ],
+        ids=["task", "answer", "white-space"],
+    )
+    def test_agent_message_becomes_a_user_message_in_place(self, item, text) -> None:
+        call = {"type": "function_call", "name": "wait_agent", "arguments": "{}", "call_id": "call_1"}
+        output = {"type": "function_call_output", "call_id": "call_1", "output": "{}"}
+        cleaned, _ = sanitize_streaming_responses_body(
+            {"stream": True, "input": [_user_message("hi"), call, output, item, _user_message("go on")]}
+        )
+        assert cleaned["input"] == [_user_message("hi"), call, output, _user_message(text), _user_message("go on")]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            None,
+            "Check the result.",
+            # Codex writes at least one part, and its own trace reader rejects an item without one.
+            [],
+            [None],
+            [{"type": "input_text"}],
+            [{"type": "input_text", "text": None}],
+            [{"type": "encrypted_content", "text": "Check the result."}],
+            # Codex's parts of an agent message are `input_text` and `encrypted_content` only.
+            [{"type": "output_text", "text": "Check the result."}],
+            [
+                {"type": "input_text", "text": "Look at "},
+                {"type": "input_image", "image_url": "data:image/png;base64,"},
+            ],
+            [{"type": ["input_text"], "text": "Check the result."}],
+        ],
+    )
+    def test_agent_message_with_other_content_is_kept_for_the_request_error(self, content) -> None:
+        item = {**AGENT_TASK, "content": content}
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [item]})
+        assert cleaned["input"] == [item]
+        with pytest.raises(ValidationError) as refusal:
+            validate_streaming_responses_params(cleaned)
+        (error,) = refusal.value.errors()
+        assert (error["type"], error["loc"], error["input"]) == (
+            "agent_message_content",
+            ("input", 0, "content"),
+            content,
+        )
 
     def test_additional_tools_carrier_functions_hoisted_into_tools(self) -> None:
         # Codex's code mode ships tools inside an `additional_tools` input item; plain and
@@ -1192,6 +1271,29 @@ class TestResponsesDispatchRoute:
         assert response.status_code == 422
         assert server.last_params is None
         assert response.json()["detail"][0]["loc"][0] == "body"
+
+    def test_streaming_agent_messages_reach_the_backend_as_user_messages(self) -> None:
+        client, server = _client(_EchoModel)
+        response = client.post(
+            "/v1/responses", json={"stream": True, "input": [_user_message("hi"), AGENT_TASK, AGENT_ANSWER]}
+        )
+        assert response.status_code == 200
+        assert [item.model_dump(mode="json", exclude_none=True) for item in server.last_params.input] == [
+            _user_message("hi"),
+            _user_message(AGENT_TASK_TEXT),
+            _user_message(AGENT_ANSWER_TEXT),
+        ]
+
+    def test_malformed_streaming_agent_message_fails_before_backend(self) -> None:
+        client, server = _client(_EchoModel)
+        item = {**AGENT_TASK, "content": [{"type": "input_image", "image_url": "data:image/png;base64,"}]}
+        response = client.post("/v1/responses", json={"stream": True, "input": [_user_message("hi"), item]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        (error,) = response.json()["detail"]
+        assert (error["type"], error["loc"]) == ("agent_message_content", ["body", "input", 1, "content"])
+        # The error names the parts that an item may hold, not an unknown item type.
+        assert "input_text" in error["msg"] and "encrypted_content" in error["msg"]
 
     def test_streaming_model_length_limit_is_not_a_completed_event(self) -> None:
         client, _ = _client(_IncompleteModel)
