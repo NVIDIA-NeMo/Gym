@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import math
+from typing import Optional
 from unittest.mock import MagicMock
 
 from pytest import approx, fixture, raises
@@ -35,9 +36,16 @@ from resources_servers.math_advanced_calculations.app import (
 )
 
 
-def _make_verify_request(predicted_solutions: list, ground_truth_expression: str) -> MultiVerseMathHardVerifyRequest:
+def _make_verify_request(
+    predicted_solutions: list, ground_truth_expression: str, final_answer_text: Optional[str] = None
+) -> MultiVerseMathHardVerifyRequest:
     """Build a MultiVerseMathHardVerifyRequest whose response.output has one
-    function_call_output per predicted solution, mirroring test_verify's existing shape.
+    function_call_output per predicted solution, mirroring test_verify's existing shape,
+    plus a final assistant message stating the answer (reward now also checks
+    response.output_text -- see app.py's [CUSTOM-MATHCALC-FINAL-ANSWER]). Defaults to
+    stating the last predicted solution, matching the realistic case of a model that
+    restates its last tool result as its answer; pass final_answer_text explicitly to
+    test a model whose final answer diverges from its own tool outputs.
     """
     output = []
     for i, solution in enumerate(predicted_solutions):
@@ -48,6 +56,18 @@ def _make_verify_request(predicted_solutions: list, ground_truth_expression: str
                 "output": json.dumps({"solution": solution}),
             }
         )
+
+    if final_answer_text is None:
+        final_answer_text = str(predicted_solutions[-1]) if predicted_solutions else ""
+    output.append(
+        {
+            "id": "msg_1",
+            "content": [{"annotations": [], "text": final_answer_text, "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+    )
 
     response = NeMoGymResponse(
         **{
@@ -436,6 +456,31 @@ class TestApp:
         response = await resources_server.verify(verify_request)
 
         assert response.reward == 1.0
+
+    async def test_verify_scores_zero_when_final_answer_contradicts_tool_output(
+        self, config: MultiVerseMathHardResourcesServerConfig
+    ) -> None:
+        """[CUSTOM-MATHCALC-FINAL-ANSWER] regression test for the exact case in the audit:
+        the model calls add(a=0, b=9), sees the correct altered-semantics tool result (10.2),
+        but then "corrects" it back to real-math in its own final answer (9.0) instead of
+        restating what the tool actually returned. Before this fix, reward was 1.0 because
+        the ground-truth value (10.2) was still sitting in the tool_call_output list,
+        regardless of what the model's own stated answer said; now it must be 0.0.
+        """
+        resources_server = self.init_server(config)
+
+        altered_value = 10.2  # add(a=0, b=9) under this benchmark's altered semantics
+        real_math_value = 9.0  # what a model "correcting" the tool back to real math would say
+
+        verify_request = _make_verify_request(
+            predicted_solutions=[altered_value],
+            ground_truth_expression="add(a=0.0, b=9.0)",
+            final_answer_text=f"The answer is {real_math_value}.",
+        )
+
+        response = await resources_server.verify(verify_request)
+
+        assert response.reward == 0.0
 
     async def test_verify_tolerates_float_noise(self, config: MultiVerseMathHardResourcesServerConfig) -> None:
         """A predicted value differing only by float64-level noise (not a real answer

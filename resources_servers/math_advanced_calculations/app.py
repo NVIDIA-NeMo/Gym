@@ -16,6 +16,7 @@ import ast
 import json
 import logging
 import math
+import re
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -118,6 +119,8 @@ _ALLOWED_FUNCTIONS = frozenset(
 )
 _GROUND_TRUTH_RTOL = 1e-9
 _GROUND_TRUTH_ATOL = 1e-9
+
+_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
 
 
 class GroundTruthExpressionError(ValueError):
@@ -250,12 +253,33 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
             )
             return MultiVerseMathHardVerifyResponse(**body.model_dump(), reward=0.0)
 
+        # [CUSTOM-MATHCALC-FINAL-ANSWER 2026-11-27] Previously, reward only checked that each
+        # ground-truth value appeared SOMEWHERE among the raw tool_call_output values --
+        # never the model's own final answer. A model could call a tool, see the (correctly
+        # altered-semantics) result, then "correct" it back to real-math in its final message
+        # and still score reward=1, since the real tool output value was still sitting in the
+        # trajectory somewhere. Confirmed in the audit: add(0, 9) returns 10.2 under this
+        # benchmark's altered semantics; a rollout that calls it, then answers "9.0" (real
+        # math, ignoring the altered tool), still passed. Now additionally require each
+        # ground-truth value to appear in the model's own final answer text
+        # (`response.output_text`, the same convenience property used by every other
+        # resources server in this codebase, e.g. bigcodebench/aalcr/circle_count) --
+        # this is a strict tightening (can only turn a reward=1 into reward=0, never the
+        # reverse), so it does not introduce new false positives relative to before.
+        final_answer_text = body.response.output_text or ""
+        final_answer_numbers = [float(m) for m in _NUMBER_PATTERN.findall(final_answer_text)]
+
         reward = 1.0
         for gt in ground_truth_values:
-            if not any(
+            in_tool_outputs = any(
                 p is not None and math.isclose(p, gt, rel_tol=_GROUND_TRUTH_RTOL, abs_tol=_GROUND_TRUTH_ATOL)
                 for p in predicted_tool_call_output
-            ):
+            )
+            in_final_answer = any(
+                math.isclose(n, gt, rel_tol=_GROUND_TRUTH_RTOL, abs_tol=_GROUND_TRUTH_ATOL)
+                for n in final_answer_numbers
+            )
+            if not (in_tool_outputs and in_final_answer):
                 reward = 0.0
                 break
 
