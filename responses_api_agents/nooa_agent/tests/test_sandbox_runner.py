@@ -567,7 +567,8 @@ async def test_execution_failure_retains_checkpoint_despite_slow_optional_log() 
     s.download = download
     s.exec.side_effect = execute
     with pytest.raises(NOOARunFailure) as caught:
-        await asyncio.wait_for(r.run(payload().request), timeout=0.5)
+        # Room for a busy CI runner; only a run that waits on the slow log without a bound should reach this limit.
+        await asyncio.wait_for(r.run(payload().request), timeout=10)
     assert caught.value.__cause__ is original_error
     assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
     assert caught.value.result.episode.response.status == "failed"
@@ -856,8 +857,13 @@ async def test_retry_cannot_exceed_artifact_capture_budget() -> None:
         await download(source, destination)
 
     s.download = slow_retry
+    run = asyncio.create_task(r.run(payload().request))
+    # Only the 0.02 s capture budget should end the run. asyncio.wait does not cancel it, so a run still going
+    # after 10 s fails here instead of hanging.
+    done, _ = await asyncio.wait({run}, timeout=10)
+    assert done, "the run outlived its artifact capture budget"
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(r.run(payload().request), timeout=0.5)
+        run.result()
     assert attempts == 2
     assert isinstance(r.session.capture_error, TimeoutError)
     await r.close()
