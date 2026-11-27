@@ -37,7 +37,7 @@ class ModelSidecarConfig(BaseModel):
     # A task-sandbox route provisioned independently from the framework's model endpoint.
     upstream_base_url: str | None = None
     name: str = "gym-model"
-    python: str = "/opt/nemo_gym_venv/bin/python"
+    python: str = "python"
     remote_dir: str = "/tmp/nemo-gym-model"
     port: int = Field(default=19001, ge=1024, le=65535)
     registry_port: int = Field(default=19000, ge=1024, le=65535)

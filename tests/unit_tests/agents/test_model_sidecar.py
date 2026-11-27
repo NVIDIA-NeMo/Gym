@@ -167,7 +167,6 @@ class LocalSidecarSandbox:
 def _local_config(tmp_path, unused_tcp_port_factory, *, start_timeout_s=12):
     return ModelSidecarConfig(
         image="preinstalled-test-image",
-        python=sys.executable,
         remote_dir=str(tmp_path / "runtime"),
         port=unused_tcp_port_factory(),
         registry_port=unused_tcp_port_factory(),

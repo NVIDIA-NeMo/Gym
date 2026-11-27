@@ -105,7 +105,7 @@ command.
 
 For an agent session that borrows a Harbor task sandbox, set `model_sidecar` on both the Harbor server and the
 mini-SWE agent to the same mapping. The mapping requires `image`, a trusted image with Gym and the vLLM model
-server already installed. The default Python is `/opt/nemo_gym_venv/bin/python`. The sandbox provider must support
+server already installed. The default `python` resolves through the image's `PATH`. The sandbox provider must support
 sidecars and let the task reach the declared model port (19001 by default). If the provider restricts sidecar
 egress, use the sidecar's `provider_options` to allow its upstream.
 
