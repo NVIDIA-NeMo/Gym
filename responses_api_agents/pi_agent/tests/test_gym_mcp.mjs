@@ -493,8 +493,9 @@ test("a timed-out stdio call leaves the shared server usable and its late answer
   t.after(() => rmSync(pidDir, { recursive: true, force: true }));
   const pidFile = join(pidDir, "pid");
   const a = agent();
+  // Long enough that the calls answered at once finish on a loaded machine; only `hold` waits out the timeout.
   const stop = await registerGymTools(a, {
-    magic: { ...stdioServer(t, { script: holding, env: { PID_FILE: pidFile } }), timeout: 300 },
+    magic: { ...stdioServer(t, { script: holding, env: { PID_FILE: pidFile } }), timeout: 2000 },
   });
   t.after(stop);
   const [echo] = a.tools;
