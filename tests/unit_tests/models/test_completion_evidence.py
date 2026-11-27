@@ -59,6 +59,48 @@ def test_chat_reasoning_removal_changes_evidence():
     assert evidence("<think>work</think>answer") != evidence("<think>edited</think>answer")
 
 
+def _custom_tool_call(tool_input: str, **fields: str) -> dict:
+    return {"type": "custom_tool_call", "call_id": "call-1", "name": "exec", "input": tool_input, **fields}
+
+
+@pytest.mark.parametrize(
+    "served",
+    [
+        {"output": [_custom_tool_call("print(1)", id="item-1", status="completed")]},
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {"id": "call-1", "type": "custom", "custom": {"name": "exec", "input": "print(1)"}}
+                        ]
+                    }
+                }
+            ]
+        },
+    ],
+    ids=["responses", "chat"],
+)
+def test_custom_tool_call_evidence_matches_the_unchanged_returned_call(served: dict) -> None:
+    (evidence,) = completion_items(served)
+    # A harness returns the call as a Responses item, without the fields only a served response carries.
+    assert output_item_fingerprint(evidence) == output_item_fingerprint(_custom_tool_call("print(1)"))
+
+
+@pytest.mark.parametrize("served,returned", [("print(1)", "  print(1)"), ('{"a": 1}', '{"a":1}')])
+def test_custom_tool_call_evidence_covers_the_exact_input(served: str, returned: str) -> None:
+    (evidence,) = completion_items({"output": [_custom_tool_call(served)]})
+    assert output_item_fingerprint(evidence) != output_item_fingerprint(_custom_tool_call(returned))
+
+
+def test_custom_tool_call_evidence_covers_the_item_kind() -> None:
+    function_call = {"type": "function_call", "call_id": "call-1", "name": "exec", "arguments": '{"a": 1}'}
+    custom_tool_call = _custom_tool_call('{"a": 1}')
+    for served, returned in ((function_call, custom_tool_call), (custom_tool_call, function_call)):
+        (evidence,) = completion_items({"output": [served]})
+        assert output_item_fingerprint(evidence) != output_item_fingerprint(returned)
+
+
 @pytest.mark.parametrize(
     "payload,expected",
     [

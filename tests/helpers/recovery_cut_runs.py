@@ -27,11 +27,13 @@ from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 
 
-def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, allocation="100", chain=True):
-    """A run cut while ``in_flight`` reservations had no row; ``masked`` results and ``unowned`` failures."""
+def _cut_run(
+    job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, retryable=0, allocation="100", chain=True
+):
+    """A run cut while ``in_flight`` reservations had no row; ``masked`` results, ``unowned`` and ``retryable`` failures."""
     artifacts = job / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
-    total = scored + in_flight + not_started + masked + unowned
+    total = scored + in_flight + not_started + masked + unowned + retryable
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(total)]
     source = job / "source.jsonl"
     source.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -59,6 +61,19 @@ def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, 
                 store.record_dispatch(row)
                 store.record_outcome(row | {"_ng_failure_class": "unowned_class", "failure_kind": "not_registered"})
                 index += 1
+            for _ in range(retryable):
+                row = dict(rows[index])
+                store.record_dispatch(row)
+                store.record_outcome(
+                    row
+                    | {
+                        "failure_kind": "provider_unavailable",
+                        "_ng_failure_class": "evaluation",
+                        "_ng_failure_terminal": False,
+                        "_ng_failure_max_attempts": 3,
+                    }
+                )
+                index += 1
             for _ in range(in_flight):
                 # Reserved and dispatched; the allocation ended before any outcome was saved.
                 store.record_dispatch(dict(rows[index]))
@@ -67,6 +82,24 @@ def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, 
         (job / ".gym_job_chain").write_text(f"{allocation}\n")
         (job / ".gym_accumulated_walltime").write_text("14400\n")
     return artifacts / "rollouts.jsonl"
+
+
+def _hang_until_cut(job, *, allocation):
+    """Resume the run as ``allocation`` and dispatch every unfinished row, none of which ends before the cut."""
+    source = job / "source.jsonl"
+
+    def prepare():
+        inputs = [json.loads(line) for line in source.read_text().splitlines()]
+        return inputs, RunManifest.create(source, json.loads(json.dumps(inputs)), {}, {}).model_copy(
+            update={"max_rollout_attempts": 3}
+        )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("SLURM_JOB_ID", allocation)
+        with RolloutStore.start_or_resume(job / "artifacts" / "rollouts.jsonl", prepare, resume=True) as store:
+            for row in store.pending():
+                store.record_dispatch(row)
+    (job / ".gym_job_chain").write_text(f"{allocation}\n")
 
 
 def _decide(job, *, allocation_cut, live_job=False):

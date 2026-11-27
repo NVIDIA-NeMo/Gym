@@ -3,6 +3,7 @@
 """Egress rules that limit a sandbox to a few hosts, for agents and for resources servers that lend a sandbox."""
 
 import ipaddress
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 
@@ -29,8 +30,11 @@ def restricted_network_policy(provider_name: str, urls: list[str]) -> dict[str, 
     """Fail closed when a provider or endpoint cannot support network isolation."""
     if provider_name != "opensandbox":
         raise ValueError("Restricted network access requires the OpenSandbox network-policy provider")
-    targets = set()
-    for url in urls:
-        # The egress sidecar strips a query name's trailing dot, so a rule written with one would never match.
-        targets.add(reachable_host(url).rstrip("."))
-    return {"defaultAction": "deny", "egress": [{"action": "allow", "target": t} for t in sorted(targets)]}
+    return allowlist_policy([reachable_host(url) for url in urls])
+
+
+def allowlist_policy(hosts: Iterable[str]) -> dict[str, object]:
+    """The OpenSandbox egress policy that denies everything but ``hosts``; no hosts denies all egress."""
+    # The egress sidecar strips a query name's trailing dot, so a rule written with one would never match.
+    targets = sorted({host.rstrip(".") for host in hosts})
+    return {"defaultAction": "deny", "egress": [{"action": "allow", "target": target} for target in targets]}

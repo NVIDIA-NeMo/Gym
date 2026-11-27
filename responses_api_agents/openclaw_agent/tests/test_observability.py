@@ -34,7 +34,8 @@ def _session(path: Path, session_id: str, text: str = "done") -> None:
                     {
                         "type": "message",
                         "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
-                    }
+                    },
+                    ensure_ascii=False,
                 ),
             ]
         )
@@ -48,7 +49,7 @@ def test_discovers_cross_agent_session_tree(tmp_path: Path) -> None:
     worker.mkdir(parents=True)
     _session(main / "root.jsonl", "root")
     _session(main / "child.jsonl", "child")
-    _session(worker / "grandchild.jsonl", "grandchild")
+    _session(worker / "grandchild.jsonl", "grandchild", text="first\u2028second")
     (main / "sessions.json").write_text(
         json.dumps(
             {
@@ -76,6 +77,8 @@ def test_discovers_cross_agent_session_tree(tmp_path: Path) -> None:
         ("agent:worker:subagent:grandchild", "agent:main:subagent:child"),
     ]
     assert gaps == []
+
+    assert sessions[2][2][-1]["message"]["content"][0]["text"] == "first\u2028second"
 
     bundle = build_openclaw_observation_tree(
         (

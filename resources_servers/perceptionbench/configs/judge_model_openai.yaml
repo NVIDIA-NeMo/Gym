@@ -1,0 +1,10 @@
+# Default judge model server for PerceptionBench (upstream JUDGE_MODEL default: gpt-oss-120b at temperature 0.3).
+# Set judge_base_url, judge_api_key, and judge_model_name in env.yaml or via CLI overrides.
+perceptionbench_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      host: 127.0.0.1
+      openai_base_url: ${oc.select:judge_base_url,https://integrate.api.nvidia.com/v1}
+      openai_api_key: ${oc.select:judge_api_key,null}
+      openai_model: ${oc.select:judge_model_name,openai/gpt-oss-120b}

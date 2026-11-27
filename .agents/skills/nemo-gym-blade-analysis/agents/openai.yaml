@@ -1,4 +1,4 @@
 interface:
-  display_name: "NeMo Gym BLADE Analysis"
-  short_description: "Analyze NeMo Gym rollout reports and root causes"
-  default_prompt: "Use $nemo-gym-blade-analysis to turn benchmark rollout artifacts into an evidence-backed BLADE analysis report."
+  display_name: "NeMo Gym BLADE Packages"
+  short_description: "Build and check BLADE benchmark analysis packages"
+  default_prompt: "Use $nemo-gym-blade-analysis to check whether my benchmark has a complete BLADE package: analysis skill, rollout data, golden reports and anchor facts."
