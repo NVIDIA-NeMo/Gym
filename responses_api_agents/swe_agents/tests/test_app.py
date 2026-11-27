@@ -86,7 +86,8 @@ from responses_api_agents.swe_agents.opencode_replay import (
 
 
 SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent
-NODE_CPU_CAP = f"--require={swe_app._NODE_CPU_CAP_PATH}"
+# What a NODE_OPTIONS assignment gets in front of its value: the cap's preload once it is set up, else nothing.
+KEPT_NODE_CPU_CAP = f'"${{{swe_app._NODE_CPU_CAP_ENV}:-}}"'
 
 
 @pytest.fixture(autouse=True)
@@ -747,31 +748,55 @@ class TestNVInternalDatasetProcessor:
     @pytest.mark.parametrize(
         ("cpu_count", "line", "rewritten"),
         [
-            # A Jest invocation runs in band and exits once its tests are done, with or without a count.
+            # A Jest command runs in band and exits once its tests are done, with or without a count.
             (0, "npx jest tests/", "npx jest --runInBand --forceExit tests/"),
             (0, ". nvm.sh && jest -c x.json", ". nvm.sh && jest --runInBand --forceExit -c x.json"),
+            (0, "pnpm --filter x exec jest --runInBand", "pnpm --filter x exec jest --forceExit --runInBand"),
+            (0, "npx cross-env A=b jest", "npx cross-env A=b jest --runInBand --forceExit"),
             # A worker count that the row sets is respected.
             (0, "yarn jest --maxWorkers=2 suite/", "yarn jest --forceExit --maxWorkers=2 suite/"),
-            # A mention of Jest that does not invoke it stays as it is.
+            # Each Jest command is judged by its own options, wherever its lines break.
+            (
+                0,
+                "npx jest --maxWorkers=2 a/ && npx jest b/",
+                "npx jest --forceExit --maxWorkers=2 a/ && npx jest --runInBand --forceExit b/",
+            ),
+            (0, "npx jest \\\n  --maxWorkers=2 a/", "npx jest --forceExit \\\n  --maxWorkers=2 a/"),
+            (0, "npx \\\n  jest a/", "npx \\\n  jest --runInBand --forceExit a/"),
+            (0, "n=$(( 1 << 2 ))\nnpx jest a/", "n=$(( 1 << 2 ))\nnpx jest --runInBand --forceExit a/"),
+            # Text that is not a command stays as it is.
+            (
+                0,
+                "if grep -q 'npx jest' package.json; then npx jest a/; fi",
+                "if grep -q 'npx jest' package.json; then npx jest --runInBand --forceExit a/; fi",
+            ),
             (0, "elif grep -q '\"jest\"' package.json; then", None),
-            (0, '"preset": "ts-jest",', None),
-            (0, "config_jest", None),
+            (0, "echo 'first && npx jest a/' \"then; npx jest b/\"", None),
+            (0, "# before: cd x; npx jest a/", None),
+            (0, "cat <<EOF\nnpx jest a/\nEOF", None),
+            (0, 'case "$runner" in\n  jest) echo;;\n  (jest) echo;;\nesac', None),
+            (0, "yarn add jest && npx jest-junit", None),
             # With a count, a NODE_OPTIONS that the row or its Dockerfile assigns would drop the cap, so it gets it.
-            (2, 'export NODE_OPTIONS="--a"', f'export NODE_OPTIONS="{NODE_CPU_CAP} --a"'),
-            (2, "NODE_OPTIONS=--a yarn test", f'NODE_OPTIONS="{NODE_CPU_CAP} --a" yarn test'),
+            (2, 'export NODE_OPTIONS="--a"', f'export NODE_OPTIONS={KEPT_NODE_CPU_CAP}"--a"'),
+            (2, "export NODE_OPTIONS=--a; node x", f"export NODE_OPTIONS={KEPT_NODE_CPU_CAP}--a; node x"),
             (
                 2,
                 "npx cross-env NODE_OPTIONS=--a TZ=UTC \\",
-                f'npx cross-env NODE_OPTIONS="{NODE_CPU_CAP} --a" TZ=UTC \\',
+                f"npx cross-env NODE_OPTIONS={KEPT_NODE_CPU_CAP}--a TZ=UTC \\",
             ),
-            (2, "NODE_OPTIONS='--a' npx jest", f"NODE_OPTIONS='{NODE_CPU_CAP} --a' npx jest --runInBand --forceExit"),
-            (2, "ENV NODE_OPTIONS=--a", f'export NODE_OPTIONS="{NODE_CPU_CAP} --a"'),
-            # A parameter expansion is not an assignment, and without a count there is no preload to keep.
+            (
+                2,
+                "NODE_OPTIONS='--a' npx jest",
+                f"NODE_OPTIONS={KEPT_NODE_CPU_CAP}'--a' npx jest --runInBand --forceExit",
+            ),
+            (2, "ENV NODE_OPTIONS=--a", f"export NODE_OPTIONS={KEPT_NODE_CPU_CAP}--a"),
+            # Quoted text and a parameter expansion are not assignments; without a count there is no preload to keep.
+            (2, 'bash -c "NODE_OPTIONS=--a node x"', None),
             (2, 'echo "${NODE_OPTIONS=--a}"', None),
             (0, 'export NODE_OPTIONS="--a"', None),
         ],
     )
-    def test_get_run_command_rewrites_node_lines(self, cpu_count: int, line: str, rewritten: Optional[str]) -> None:
+    def test_get_run_command_rewrites_node_lines(self, cpu_count: int, line: str, rewritten: str | None) -> None:
         # A Dockerfile ENV line ends up as an export in the command, any other line in the row's run script.
         field = "instance_dockerfile" if line.startswith("ENV ") else "run_script.sh"
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2553,8 +2578,9 @@ class TestSWEBenchWrapperBuildApptainerCommand:
         wrapper._build_apptainer_command(params, args["eval"])
         assert "NODE_OPTIONS" not in eval_script.read_text()
 
-    def _node_options_after_cap(self, cap_path: Path, probe: str = "true") -> str:
-        script = f'{swe_app._node_cpu_cap_command(1, str(cap_path))} && {probe} && echo "$NODE_OPTIONS"'
+    def _run_with_node_cpu_cap(self, cap_path: Path, row: str) -> str:
+        """What a row's shell prints when it runs after the cap's setup, as the eval container runs it."""
+        script = f"{swe_app._node_cpu_cap_command(1, str(cap_path))}\n{swe_app._keep_node_cpu_cap(row)}"
         env = {**os.environ, "NODE_OPTIONS": "--no-warnings"}
         return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
 
@@ -2565,12 +2591,27 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             f"node -e \"const {{ cpus, availableParallelism }} = require('os'); {log}\" && "
             f"node --input-type=module -e \"import {{ cpus, availableParallelism }} from 'node:os'; {log}\""
         )
-        # A count of 1 shows on any host with two or more cores, in CommonJS and in ESM; NODE_OPTIONS keeps its value.
-        expected = f"1 1\n1 1\n--require={tmp_path}/cap.cjs --no-warnings\n"
-        assert self._node_options_after_cap(tmp_path / "cap.cjs", probe) == expected
+        # A count of 1 shows on any host with two or more cores, in CommonJS and in ESM, also after the row has
+        # assigned NODE_OPTIONS itself.
+        row = f'export NODE_OPTIONS="--no-deprecation"; {probe}'
+        assert self._run_with_node_cpu_cap(tmp_path / "cap.cjs", row) == "1 1\n1 1\n"
 
-    def test_unwritable_node_cpu_cap_leaves_node_options_alone(self, tmp_path) -> None:
-        assert self._node_options_after_cap(tmp_path / "missing" / "cap.cjs") == "--no-warnings\n"
+    @pytest.mark.parametrize(
+        ("row", "node_options"),
+        [
+            ("bash -c 'echo \"$NODE_OPTIONS\"'", "--no-warnings"),
+            ("export NODE_OPTIONS=--a; bash -c 'echo \"$NODE_OPTIONS\"'", "--a"),
+            ('export NODE_OPTIONS=--a \\\n  TZ=UTC\nbash -c \'echo "$NODE_OPTIONS" "$TZ"\'', "--a UTC"),
+            ('NODE_OPTIONS="--a --b" bash -c \'echo "$NODE_OPTIONS"\'', "--a --b"),
+            ('env NODE_OPTIONS=--a TZ=UTC bash -c \'echo "$NODE_OPTIONS" "$TZ"\'', "--a UTC"),
+        ],
+    )
+    def test_node_cpu_cap_follows_its_setup_through_a_rows_node_options(self, tmp_path, row, node_options) -> None:
+        # The cap is in front of whatever the row sets, and when the preload could not be written the row's own value
+        # is all there is, so Node is never told to load a file that does not exist.
+        cap_path = tmp_path / "cap.cjs"
+        assert self._run_with_node_cpu_cap(cap_path, row) == f"--require={cap_path} {node_options}\n"
+        assert self._run_with_node_cpu_cap(tmp_path / "missing" / "cap.cjs", row) == f"{node_options}\n"
 
     def test_overlay_upperdir_lives_and_dies_with_the_container(self, monkeypatch, tmp_path) -> None:
         """Run the built command with a stub apptainer: the upperdir must

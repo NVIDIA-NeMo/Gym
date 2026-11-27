@@ -410,6 +410,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `apptainer_memory_limit_mb`        | `65536` (64 GiB)                                  | Cumulative tree-RSS limit enforced by the gym-side memory watchdog (no cgroups in the enroot sandbox — see [Memory watchdog](#memory-watchdog-oom-handling)). `<= 0` disables it. |
 | `memory_watchdog_enabled`          | `true`                                            | Enable the RSS memory watchdog for the agent and eval containers.       |
 | `memory_watchdog_poll_interval_s`  | `1.0`                                             | Watchdog poll interval (seconds); bounds worst-case RSS overshoot of a fast allocator. |
+| `eval_node_cpu_count`              | `0` (off)                                         | CPU count that Node reports inside the eval container, which bounds the worker pools of Jest and Vitest. See [Node worker pools](#node-worker-pools). |
 | `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container. Exported as both `COMMAND_EXEC_TIMEOUT` (caps explicit per-action timeouts) and `SANDBOX_TIMEOUT` (default for actions without one; requires an OpenHands checkout whose eval sandbox config reads `SANDBOX_TIMEOUT`). |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
@@ -713,9 +714,9 @@ The enroot/apptainer sandbox this runs under has no cgroup support (v1 + fakeroo
 
 Jest and Vitest size their worker pools from the host's CPU count, and a container sees every host core. On a large node one test run then starts a core-count fleet of Node workers, which can starve the container's FUSE root filesystem or exhaust its memory until the eval hits its timeout.
 
-- For `nv-internal-1`, each line of `run_script.sh` that invokes Jest (`npx jest`, `yarn jest`, or a bare `jest`) gets `--runInBand` (unless the row sets `--maxWorkers`) and `--forceExit`, so a suite that leaves handles open still exits.
+- For `nv-internal-1`, each Jest command in `run_script.sh` (`jest`, or Jest started through `npx`, `yarn`, `pnpm exec` or `cross-env`) gets `--runInBand`, unless that command sets `--maxWorkers`, and `--forceExit`, so a suite that leaves handles open still exits. Only commands are rewritten: quoted text, comments and here-doc bodies stay as the row wrote them, so Jest started through an npm script is not reached.
 - `eval_node_cpu_count` (default `0`, off) sets the CPU count that Node reports inside the eval container. A small preload (`/tmp/node-cpu-cap.cjs`, added to `NODE_OPTIONS`) applies it, so it reaches a runner however it is started, for example through `npm test`. A runner starts one worker fewer than that count, so `2` means one worker. If the file cannot be written, `NODE_OPTIONS` is left alone.
-- With a count set, a `NODE_OPTIONS` that an `nv-internal-1` row's Dockerfile or `run_script.sh` assigns gets the preload added, because the assignment would otherwise drop it.
+- With a count set, a `NODE_OPTIONS` that an `nv-internal-1` row's Dockerfile or `run_script.sh` assigns gets the preload in front of its own value, because the assignment would otherwise drop it. An assignment inside quoted text is not changed.
 
 ---
 
