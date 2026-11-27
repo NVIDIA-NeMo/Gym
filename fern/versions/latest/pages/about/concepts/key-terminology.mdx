@@ -49,6 +49,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Task attempt** | One rollout for a specific task. Multiple attempts per task capture different approaches and support pass@k. |
 | **Trace** | Debug-oriented log of a rollout (timing, tool I/O, metadata) beyond the scored trajectory. |
 | **Rollout batch** | Multiple rollouts generated together (across tasks for throughput, or grouped on one task for methods like GRPO). |
+| **Group** | The rollouts of one task that a trainer compares with each other, as GRPO does. The caller names a group with the row key `_ng_group_id`, shared by every member, and may give its size as `_ng_group_size`; Gym never stamps either. A `run_outcomes()` caller can cancel a group's unfinished members; see [evaluation resume](/main/evaluation/resume#structured-failures-for-direct-callers). |
 | **Rollout collection** | Running inference, tools, and verification at scale to produce scored rollouts. Start with the [Quickstart](/get-started/quickstart) or [Evaluate](/evaluation). |
 
 ### Environment

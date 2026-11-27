@@ -210,6 +210,27 @@ async def test_cancelled_episode_stops_owned_sandbox(tmp_path, monkeypatch, stag
     await server.shutdown()
 
 
+async def test_cancelled_agent_turn_closes_the_agent_session_and_stops_the_sandbox(tmp_path, monkeypatch):
+    """A rollout cancelled mid-turn, as cancel_groups or aclose cancels it, releases what its episode holds."""
+    server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+    entered = asyncio.Event()
+
+    async def hold():
+        entered.set()
+        await asyncio.Future()
+
+    during_turn(server, hold)
+    running = asyncio.create_task(server.run_request(episode(task)))
+    await asyncio.wait_for(entered.wait(), 5)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(running, 10)
+    paths = server.server_client.paths()
+    assert paths.index("/ng-rollout/r1/v1/responses") < paths.index("/v1/agent_sessions/close")
+    assert sandbox.stopped and not server._sandboxes and not server._sessions and server._active == set()
+    await server.shutdown()
+
+
 @pytest.mark.parametrize("retry", ["final cleanup", "shutdown"])
 async def test_failed_stop_keeps_ownership_until_a_stop_succeeds(tmp_path, monkeypatch, retry, caplog):
     server, task, sandbox, _ = make_server(tmp_path, monkeypatch)

@@ -415,6 +415,11 @@ MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 # A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
 # the rollout's model calls is captured. False or absent leaves capture to the run's token_id_capture block.
 SKIP_TOKEN_CAPTURE_KEY_NAME = "_ng_skip_token_capture"
+# A caller that compares the rollouts of one task, such as a GRPO trainer, stamps one group ID and group size on
+# every member of the group. Gym never stamps them, and a materialized row's episode request does not carry them.
+# run_outcomes reads them, so the caller can cancel a group's unfinished members with cancel_groups.
+GROUP_ID_KEY_NAME = "_ng_group_id"
+GROUP_SIZE_KEY_NAME = "_ng_group_size"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"

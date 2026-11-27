@@ -2615,3 +2615,198 @@ async def test_a_connection_that_dropped_is_reported_as_possibly_delivered_and_n
     assert len(calls) == 1
     assert (outcome.source, outcome.delivery) == ("collector", "possibly_delivered")
     assert outcome.exception_type == "ServerDisconnectedError"
+
+
+def grouped_row(task_index: int, group_id, size=2) -> dict:
+    return failing_row(task_index) | {"_ng_group_id": group_id, "_ng_group_size": size}
+
+
+async def test_run_outcomes_cancel_groups_cancels_only_that_groups_members(monkeypatch):
+    started, cancelled = set(), set()
+    group_a_started = asyncio.Event()
+
+    async def post(**kwargs):
+        body = kwargs["json"]
+        if body["_ng_group_id"] == "A":
+            started.add(body["_ng_task_index"])
+            if len(started) == 2:
+                group_a_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.add(body["_ng_task_index"])
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    rows = [grouped_row(0, "A"), grouped_row(1, "A"), grouped_row(2, "B"), grouped_row(3, "B")]
+    outcomes = RolloutCollectionHelper().run_outcomes(rows, run_id="run")
+    try:
+        async with asyncio.timeout(5):
+            awaitables = list(outcomes)
+            await group_a_started.wait()
+            outcomes.cancel_groups(["A"])
+            outcomes.cancel_groups(["A"])  # A repeated cancel leaves the records in place.
+            results = [await awaitable for awaitable in awaitables]
+    finally:
+        await outcomes.aclose()
+
+    assert cancelled == {0, 1}
+    assert len(results) == 4
+    by_task = {row["_ng_task_index"]: result for row, result in results}
+    assert by_task[2] == by_task[3] == {"reward": 1.0, "response": {}}
+    for task in (0, 1):
+        record = by_task[task]
+        assert isinstance(record, RolloutFailureRecord)
+        assert record.episode_id == EpisodeId(rollout_id=logical_rollout_id(rows[task]), attempt=0)
+        assert (record.run_id, record.source, record.delivery) == ("run", "collector", "possibly_delivered")
+        assert (record.failure.failure_kind, record.failure.terminal) == ("cancelled", True)
+        assert "'A'" in record.failure.failure_reason
+
+
+async def test_run_outcomes_cancel_groups_before_dispatch_sends_nothing(monkeypatch):
+    post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}}))
+    install_fake_server_client(monkeypatch, post)
+    outcomes = RolloutCollectionHelper().run_outcomes([grouped_row(0, "A"), grouped_row(1, "A"), grouped_row(2, "B")])
+    outcomes.cancel_groups(["A"])
+    by_task = {row["_ng_task_index"]: result for row, result in [await awaitable for awaitable in outcomes]}
+
+    assert [call.kwargs["json"]["_ng_task_index"] for call in post.await_args_list] == [2]
+    assert by_task[2] == {"reward": 1.0, "response": {}}
+    for task in (0, 1):
+        assert (by_task[task].failure.failure_kind, by_task[task].delivery) == ("cancelled", "not_sent")
+
+
+async def test_cancel_groups_reports_a_member_waiting_for_the_semaphore_as_not_sent(monkeypatch):
+    entered = asyncio.Event()
+
+    async def hold(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    post = AsyncMock(side_effect=hold)
+    install_fake_server_client(monkeypatch, post)
+    outcomes = RolloutCollectionHelper().run_outcomes(
+        [grouped_row(0, "A"), grouped_row(1, "A")], semaphore=asyncio.Semaphore(1)
+    )
+    try:
+        async with asyncio.timeout(5):
+            awaitables = list(outcomes)
+            await entered.wait()
+            outcomes.cancel_groups(["A"])
+            by_task = {row["_ng_task_index"]: result for row, result in [await awaitable for awaitable in awaitables]}
+    finally:
+        await outcomes.aclose()
+
+    assert [call.kwargs["json"]["_ng_task_index"] for call in post.await_args_list] == [0]
+    assert (by_task[0].failure.failure_kind, by_task[0].delivery) == ("cancelled", "possibly_delivered")
+    assert (by_task[1].failure.failure_kind, by_task[1].delivery) == ("cancelled", "not_sent")
+
+
+async def test_run_outcomes_aclose_wins_over_a_group_cancel(monkeypatch):
+    entered, unwinding, unwound = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def post(**kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # The group's cancel reaches the request, which takes time to unwind; the close arrives meanwhile.
+            unwinding.set()
+            await unwound.wait()
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    outcomes = RolloutCollectionHelper().run_outcomes([grouped_row(0, "A", size=1)])
+    waiter = asyncio.ensure_future(next(outcomes))
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            outcomes.cancel_groups(["A"])
+            await unwinding.wait()
+            await outcomes.aclose()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+    finally:
+        unwound.set()
+        await outcomes.aclose()
+
+
+async def test_cancel_groups_during_aclose_leaves_an_unwinding_member_alone(monkeypatch):
+    entered, unwinding, unwound, cleaned_up = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def post(**kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # The close's cancel reaches the request, which takes time to unwind; the group's cancel arrives meanwhile.
+            unwinding.set()
+            await unwound.wait()
+            cleaned_up.set()
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    outcomes = RolloutCollectionHelper().run_outcomes([grouped_row(0, "A", size=1)])
+    waiter = asyncio.ensure_future(next(outcomes))
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            closing = asyncio.ensure_future(outcomes.aclose())
+            await unwinding.wait()
+            outcomes.cancel_groups(["A"])
+            unwound.set()
+            await closing
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+    finally:
+        unwound.set()
+        await outcomes.aclose()
+
+    # A second cancel would have cut the request's cleanup short.
+    assert cleaned_up.is_set()
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param([failing_row(0) | {"_ng_group_size": 2}], id="size-without-id"),
+        pytest.param([grouped_row(0, "")], id="empty-id"),
+        pytest.param([grouped_row(0, 7)], id="non-string-id"),
+        pytest.param([grouped_row(0, "A", size=0)], id="size-0"),
+        pytest.param([grouped_row(0, "A", size=True)], id="size-true"),
+        pytest.param([grouped_row(0, "A", size="2")], id="size-string"),
+        pytest.param([grouped_row(0, "A", size=2), grouped_row(1, "A", size=3)], id="sizes-disagree"),
+        pytest.param([grouped_row(0, "A", size=2), grouped_row(1, "A", size=None)], id="size-missing-on-one"),
+        pytest.param([grouped_row(i, "A", size=2) for i in range(3)], id="more-members-than-size"),
+    ],
+)
+def test_run_outcomes_rejects_inconsistent_group_fields(monkeypatch, rows):
+    post = AsyncMock()
+    install_fake_server_client(monkeypatch, post)
+    with pytest.raises(ValueError, match="_ng_group_"):
+        RolloutCollectionHelper().run_outcomes(rows)
+    post.assert_not_called()
+
+
+async def test_cancel_groups_ignores_unknown_ids_and_rows_without_a_group(monkeypatch):
+    post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}}))
+    install_fake_server_client(monkeypatch, post)
+    # Attempts of one rollout are one member, so a group of size 1 may carry a retried attempt.
+    rows = [failing_row(0), grouped_row(1, "A", size=1), grouped_row(1, "A", size=1) | {"_ng_attempt_index": 1}]
+    outcomes = RolloutCollectionHelper().run_outcomes(rows)
+    outcomes.cancel_groups(["B"])
+    results = [await awaitable for awaitable in outcomes]
+    await outcomes.aclose()
+
+    assert [result for _, result in results] == [{"reward": 1.0, "response": {}}] * 3
+    assert post.await_count == 3
+
+
+async def test_cancel_groups_needs_run_outcomes_and_a_collection_of_ids(monkeypatch):
+    install_fake_server_client(monkeypatch, AsyncMock())
+    completions = RolloutCollectionHelper().run_examples([grouped_row(0, "A")])
+    with pytest.raises(ValueError, match="cancel_groups needs run_outcomes"):
+        completions.cancel_groups(["A"])
+    await completions.aclose()
+    outcomes = RolloutCollectionHelper().run_outcomes([grouped_row(0, "A")])
+    with pytest.raises(TypeError, match="collection of group IDs"):
+        outcomes.cancel_groups("A")
+    await outcomes.aclose()
