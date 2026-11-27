@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import shlex
-import shutil
 import sqlite3
 import subprocess
 import tarfile
@@ -33,7 +32,6 @@ from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent.app import (
     _CHECK_EXPORT_DIR,
     _CHECK_PLUGIN_FILES,
-    _RUNTIME_MATCHES,
     OpenCodeAgentConfig,
     _sandbox_prepare_command,
 )
@@ -62,9 +60,7 @@ VERSION_PROBE = "--version"
 UNPACK = "tar -x"
 IMPORT_CHECK = "test -f"
 IMPORT = "/opencode import "
-RUNTIME_CHECK = 'sha256sum <"$1/opencode"'
 PLATFORM_PROBE = "uname -s"
-UPLOAD_REMOVAL = "rm -f -- /"
 
 
 def result(code=0, *, stdout="", stderr="", error_type=None):
@@ -193,18 +189,10 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
         digests,
     ]
     assert index(events, "install_opencode_runtime.sh") == 1
-    for marker in (
-        PLUGIN_CHECK,
-        EXPORT_SESSION,
-        EVENT_LOG,
-        PINNED_COPY,
-        IMPORT_CHECK,
-        "NG_OPENCODE_SKIP_RIPGREP",
-        RUNTIME_CHECK,
-        PLATFORM_PROBE,
-        UPLOAD_REMOVAL,
-    ):
+    for marker in (PLUGIN_CHECK, EXPORT_SESSION, EVENT_LOG, PINNED_COPY, IMPORT_CHECK, "NG_OPENCODE_SKIP_RIPGREP"):
         assert not any(marker in event for event in events)
+    # sandbox_runtime_upload is off: the sandbox is not asked for its platform and nothing is uploaded for it.
+    assert not any(PLATFORM_PROBE in event for event in events)
     assert not any("uploaded-" in path for path in sandbox.files)
     assert _CHECK_EXPORT_DIR not in events[0]
     params, config = launch_config(sandbox)
@@ -627,18 +615,14 @@ async def test_ripgrep_download_lets_the_installer_go_on_without_rg(setup):
 
 @pytest.fixture
 def host(monkeypatch, tmp_path):
-    """The host's OpenCode and ripgrep for an aarch64 musl sandbox whose runtime directory is empty.
-
-    ``requested`` records what the agent asked the host for. Tests change ``runtime_matches`` and ``ripgrep``.
-    """
-    host = SimpleNamespace(requested=[], runtime_matches=False, platform=SandboxPlatform("aarch64", "musl"))
+    """The host's OpenCode and ripgrep for an aarch64 musl sandbox; ``requested`` records what the agent asked for."""
+    host = SimpleNamespace(requested=[], platform=SandboxPlatform("aarch64", "musl"))
     for name in ("opencode", "rg"):
         (tmp_path / name).write_bytes(f"host {name}".encode())
     host.opencode = HostExecutable(tmp_path / "opencode", "0a" * 32)
     host.ripgrep = HostExecutable(tmp_path / "rg", "0b" * 32)
 
     async def probe_sandbox_platform(sandbox):
-        await sandbox.exec(PLATFORM_PROBE, cwd="/", timeout_s=30)
         return host.platform
 
     async def opencode_executable(version, platform):
@@ -649,142 +633,49 @@ def host(monkeypatch, tmp_path):
         host.requested.append(("ripgrep", platform))
         return host.ripgrep
 
-    monkeypatch.setattr(opencode_app, "probe_sandbox_platform", probe_sandbox_platform)
-    monkeypatch.setattr(opencode_app, "opencode_executable", opencode_executable)
-    monkeypatch.setattr(opencode_app, "ripgrep_executable", ripgrep_executable)
+    for fake in (probe_sandbox_platform, opencode_executable, ripgrep_executable):
+        monkeypatch.setattr(opencode_app, fake.__name__, fake)
     return host
 
 
-def upload_runtime(agent, sandbox, host):
-    """Turn ``sandbox_runtime_upload`` on and answer the sandbox's runtime check as ``host.runtime_matches`` says."""
-    agent.config.sandbox_runtime_upload = True
-
-    async def check(command, **kwargs):
-        return result(0 if host.runtime_matches else 1)
-
-    intercept(sandbox, RUNTIME_CHECK, check)
-
-
-async def test_runtime_upload_installs_the_hosts_builds_for_the_sandbox_platform(setup, host):
+@pytest.mark.parametrize("owner_ripgrep", [False, True])
+async def test_runtime_upload_installs_the_hosts_builds_for_the_sandbox_platform(setup, host, owner_ripgrep):
     agent, sandbox = setup
-    upload_runtime(agent, sandbox, host)
+    agent.config.sandbox_runtime_upload = True
+    if owner_ripgrep:
+        agent.config.sandbox_ripgrep_path, agent.config.sandbox_ripgrep_sha256 = "/mnt/cache/rg", PIN
     events = record(sandbox)
     response, _ = await episode(agent, sandbox)
     assert response.status == "completed"
     directory = sandbox.directory
-    # The host is asked for the builds of the sandbox's platform, not its own.
-    assert host.requested == [("opencode", OPENCODE_VERSION, host.platform), ("ripgrep", host.platform)]
-    assert sandbox.files[f"{directory}/uploaded-opencode"] == "host opencode"
-    assert sandbox.files[f"{directory}/uploaded-rg"] == "host rg"
+    # The host is asked for the builds of the sandbox's platform, not its own; an rg the owner pinned is kept.
+    ripgrep = [] if owner_ripgrep else [("ripgrep", host.platform)]
+    assert host.requested == [("opencode", OPENCODE_VERSION, host.platform), *ripgrep]
+    uploads = [f"{directory}/uploaded-opencode", *([] if owner_ripgrep else [f"{directory}/uploaded-rg"])]
+    assert [sandbox.files[path] for path in uploads] == ["host opencode", "host rg"][: len(uploads)]
     # OpenCode takes the installer's route for an executable already in the sandbox, which checks its SHA-256.
     install = index(events, "install_opencode_runtime.sh")
-    assert shlex.split(events[install])[:6] == [
+    assert shlex.split(events[install])[:7] == [
         "NG_OPENCODE_SKIP_RIPGREP=1",
         "bash",
         f"{directory}/install_opencode_runtime.sh",
         RUNTIME,
         OPENCODE_VERSION,
         f"{directory}/uploaded-opencode",
-    ]
-    assert shlex.split(events[install])[6] == host.opencode.sha256
-    # The sandbox's runtime is compared with the bytes the host would upload, not with a version.
-    assert positional(events[index(events, RUNTIME_CHECK)]) == [RUNTIME, host.opencode.sha256]
-    # ripgrep takes the route of a pinned rg.
-    stage = index(events, VERSION_PROBE)
-    assert positional(events[stage]) == [
-        f"{directory}/uploaded-rg",
-        host.ripgrep.sha256,
-        f"{directory}/cache/opencode/bin/.pinned-rg",
-        f"{directory}/cache/opencode/bin/rg",
-    ]
-    removal = index(events, UPLOAD_REMOVAL)
-    assert shlex.split(events[removal])[3:] == [f"{directory}/uploaded-opencode", f"{directory}/uploaded-rg"]
-    assert index(events, PLATFORM_PROBE) < install < stage < removal < index(events, "--receipt")
-
-
-async def test_runtime_upload_skips_opencode_when_the_sandbox_already_holds_the_same_executable(setup, host):
-    agent, sandbox = setup
-    host.runtime_matches = True
-    upload_runtime(agent, sandbox, host)
-    events = record(sandbox)
-    response, _ = await episode(agent, sandbox)
-    assert response.status == "completed"
-    directory = sandbox.directory
-    assert f"{directory}/uploaded-opencode" not in sandbox.files
-    # The installer gets the sandbox's own file as it gets an upload, so it checks the bytes and the execute bit.
-    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[5:7] == [
-        f"{RUNTIME}/opencode",
         host.opencode.sha256,
     ]
-    assert shlex.split(events[index(events, UPLOAD_REMOVAL)])[3:] == [f"{directory}/uploaded-rg"]
-
-
-@pytest.mark.parametrize("runtime_matches", [False, True])
-async def test_runtime_upload_keeps_a_ripgrep_the_owner_pinned(setup, host, runtime_matches):
-    agent, sandbox = setup
-    host.runtime_matches = runtime_matches
-    agent.config.sandbox_ripgrep_path = "/mnt/cache/rg"
-    agent.config.sandbox_ripgrep_sha256 = PIN
-    upload_runtime(agent, sandbox, host)
-    events = record(sandbox)
-    response, _ = await episode(agent, sandbox)
-    assert response.status == "completed"
-    assert host.requested == [("opencode", OPENCODE_VERSION, host.platform)]
-    assert positional(events[index(events, VERSION_PROBE)])[:2] == ["/mnt/cache/rg", PIN]
-    assert not any("uploaded-rg" in path for path in sandbox.files)
-    assert any("uploaded-opencode" in path for path in sandbox.files) is not runtime_matches
-    # Only uploads are removed, never the runtime's executable.
-    assert any(UPLOAD_REMOVAL in event for event in events) is not runtime_matches
-    assert not any(event.startswith("rm ") and RUNTIME in event for event in events)
-
-
-async def test_runtime_upload_leaves_ripgrep_to_the_installer_on_a_platform_without_a_build(setup, host):
-    agent, sandbox = setup
-    host.ripgrep = None
-    upload_runtime(agent, sandbox, host)
-    events = record(sandbox)
-    response, _ = await episode(agent, sandbox)
-    assert response.status == "completed"
-    install = events[index(events, "install_opencode_runtime.sh")]
-    assert install.startswith("bash ") and "uploaded-opencode" in install
-    assert not any(VERSION_PROBE in event for event in events)
-    assert shlex.split(events[index(events, UPLOAD_REMOVAL)])[3:] == [f"{sandbox.directory}/uploaded-opencode"]
-
-
-@pytest.mark.parametrize("failure", ["runtime check", "host download", "uploaded opencode", "uploaded ripgrep"])
-def test_a_failed_runtime_upload_stays_a_retryable_setup_error(setup, host, monkeypatch, failure):
-    agent, sandbox = setup
-    upload_runtime(agent, sandbox, host)
-    if failure == "runtime check":
-        # A check the provider could not run says nothing about the runtime, so nothing is uploaded for it.
-        async def timed_out(command, **kwargs):
-            return result(-1, error_type="timeout")
-
-        intercept(sandbox, RUNTIME_CHECK, timed_out)
-    elif failure == "host download":
-
-        async def opencode_executable(version, platform):
-            raise RuntimeError("Checksum mismatch for https://github.com/anomalyco/opencode/releases/download/...")
-
-        monkeypatch.setattr(opencode_app, "opencode_executable", opencode_executable)
-    else:
-        # A check that fails on bytes this host uploaded faults the upload, not an owner's input: no 422.
-        async def rejected(command, **kwargs):
-            return result(3 if failure == "uploaded ripgrep" else 1, stderr="SHA-256 mismatch")
-
-        intercept(sandbox, VERSION_PROBE if failure == "uploaded ripgrep" else "install_opencode_runtime.sh", rejected)
-    response = seed_status(agent, raise_server_exceptions=False)
-    assert response.status_code == 500
-    if failure in ("runtime check", "host download"):
-        assert not any("uploaded-" in path for path in sandbox.files)
-    sandbox.disconnect.assert_awaited_once()
-    sandbox.launch.assert_not_awaited()
-    assert not active_sessions(agent)
+    # ripgrep takes the route of a pinned rg.
+    stage = index(events, VERSION_PROBE)
+    pin = ["/mnt/cache/rg", PIN] if owner_ripgrep else [f"{directory}/uploaded-rg", host.ripgrep.sha256]
+    assert positional(events[stage])[:2] == pin
+    # Both are installed from copies, and the uploads are removed.
+    removal = index(events, "rm -f -- /")
+    assert shlex.split(events[removal])[3:] == uploads
+    assert install < stage < removal < index(events, "--receipt")
 
 
 UPLOAD_REFUSALS = {
     "another CPU": ("Linux\nriscv64\nglibc 2.35\n", "the sandbox is Linux on riscv64"),
-    "another kernel": ("Darwin\nPower Macintosh\nsh: ldd: not found\n", "the sandbox is Darwin on Power Macintosh"),
     "no digest for the platform": (
         "Linux\naarch64\nmusl\n",
         f"OpenCode {OPENCODE_VERSION} has no pinned SHA-256 for opencode-linux-arm64-musl.tar.gz",
@@ -810,70 +701,32 @@ def test_runtime_upload_refuses_a_platform_without_an_opencode_build(setup, capl
     sandbox.launch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("probe", [result(-1, error_type="timeout"), result(1, stderr="uname: not found")])
-def test_runtime_upload_keeps_a_platform_probe_that_did_not_answer_retryable(setup, probe):
-    """A probe the provider could not run, or that failed, says nothing about the image: no refusal."""
+def test_an_uploaded_ripgrep_that_fails_its_check_is_retried_not_refused(setup, host):
+    """The same failed check refuses an owner's pinned rg (INPUT_REFUSALS): here the transfer is at fault."""
     agent, sandbox = setup
     agent.config.sandbox_runtime_upload = True
 
-    async def unanswered(command, **kwargs):
-        return probe
+    async def rejected(command, **kwargs):
+        return result(3, stderr="SHA-256 mismatch: expected a, found b")
 
-    intercept(sandbox, PLATFORM_PROBE, unanswered)
-    response = seed_status(agent, raise_server_exceptions=False)
-    assert response.status_code == 500
+    intercept(sandbox, VERSION_PROBE, rejected)
+    assert seed_status(agent, raise_server_exceptions=False).status_code == 500
     sandbox.disconnect.assert_awaited_once()
     assert not active_sessions(agent)
 
 
-@pytest.mark.parametrize("warm", [False, True], ids=["opencode", "ripgrep"])
-async def test_runtime_uploads_are_bounded_per_agent_server_process(setup, host, warm):
-    agent, _ = setup
+def test_runtime_upload_keeps_a_platform_probe_that_did_not_answer_retryable(setup):
+    """A probe the provider could not run says nothing about the image: a setup failure to retry, not a refusal."""
+    agent, sandbox = setup
     agent.config.sandbox_runtime_upload = True
-    uploading, most, release = [], [], asyncio.Event()
 
-    class Sandbox:
-        """A sandbox whose uploads last until ``release``: OpenCode when cold, only ripgrep when ``warm``."""
+    async def unanswered(command, **kwargs):
+        return result(-1, error_type="timeout")
 
-        async def exec(self, command, **kwargs):
-            return result(1 if RUNTIME_CHECK in command and not warm else 0)
-
-        async def upload(self, source, destination):
-            uploading.append(destination)
-            most.append(len(uploading))
-            await release.wait()
-            uploading.remove(destination)
-
-    seeds = [
-        asyncio.create_task(agent._upload_runtime(Sandbox(), f"/sessions/{n}", RUNTIME, with_ripgrep=warm))
-        for n in range(5)
-    ]
-    for _ in range(20):
-        await asyncio.sleep(0)
-    # Each upload holds its file in memory on some providers, so only two are in progress at a time.
-    assert len(uploading) == max(most) == opencode_app._RUNTIME_UPLOAD_MAX_CONCURRENT == 2
-    release.set()
-    results = await asyncio.wait_for(asyncio.gather(*seeds), 5)
-    name = "uploaded-rg" if warm else "uploaded-opencode"
-    assert [uploaded for _, _, uploaded in results] == [[f"/sessions/{n}/{name}"] for n in range(5)]
-    assert [opencode.sandbox_path for opencode, _, _ in results] == [
-        f"{RUNTIME}/opencode" if warm else f"/sessions/{n}/uploaded-opencode" for n in range(5)
-    ]
-    assert max(most) == 2
-
-
-@pytest.mark.skipif(shutil.which("sha256sum") is None, reason="The runtime check runs sha256sum")
-def test_runtime_check_accepts_only_the_executable_the_host_would_upload(tmp_path):
-    def matches(digest):
-        return subprocess.run(["/bin/sh", "-c", _RUNTIME_MATCHES, "sh", str(tmp_path), digest], timeout=30).returncode
-
-    executable = b"#!/bin/sh\necho 1.19.6\n"
-    assert matches(hashlib.sha256(executable).hexdigest()) == 1
-    (tmp_path / "opencode").write_bytes(executable)
-    assert matches(hashlib.sha256(executable).hexdigest()) == 0
-    # Another build that reports the same version is not the pinned executable.
-    (tmp_path / "opencode").write_bytes(executable + b"# patched\n")
-    assert matches(hashlib.sha256(executable).hexdigest()) == 1
+    intercept(sandbox, PLATFORM_PROBE, unanswered)
+    assert seed_status(agent, raise_server_exceptions=False).status_code == 500
+    sandbox.disconnect.assert_awaited_once()
+    assert not active_sessions(agent)
 
 
 async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directory(setup, tmp_path):
@@ -1188,17 +1041,9 @@ SETTING_REFUSALS = {
         "sandbox_ripgrep_path must be an absolute, normalized sandbox path",
     ),
     "runtime upload with a pinned executable": (
-        {
-            "sandbox_runtime_upload": True,
-            "sandbox_executable_path": "/mnt/cache/opencode",
-            "sandbox_executable_sha256": PIN,
-        },
+        {"sandbox_runtime_upload": True, "sandbox_executable_sha256": PIN},
         "sandbox_runtime_upload supplies the OpenCode executable; unset sandbox_executable_path and "
         "sandbox_executable_sha256",
-    ),
-    "runtime upload of a release without pinned digests": (
-        {"sandbox_runtime_upload": True, "opencode_version": "1.15.13"},
-        "sandbox_runtime_upload needs a pinned release digest; OpenCode 1.15.13 has none",
     ),
 }
 

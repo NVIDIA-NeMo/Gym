@@ -18,12 +18,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agents.utils import sandbox_python
-from nemo_gym.agents.utils.sandbox_python import (
-    SandboxPlatform,
-    SandboxPythonRuntime,
-    UnsupportedSandboxPlatformError,
-    probe_sandbox_platform,
-)
+from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
@@ -119,7 +114,7 @@ async def test_the_probe_rejects_platforms_without_a_runtime(stdout: str, return
     with pytest.raises(RuntimeError, match=match) as error:
         await probe_sandbox_platform(sandbox)
     # Only a sandbox that answered is told apart as unsupported: callers may refuse it instead of retrying.
-    assert isinstance(error.value, UnsupportedSandboxPlatformError) is (return_code == 0)
+    assert isinstance(error.value, sandbox_python.UnsupportedSandboxPlatformError) is (return_code == 0)
 
 
 @pytest.mark.parametrize(
