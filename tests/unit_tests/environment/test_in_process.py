@@ -14,15 +14,17 @@ from nemo_gym.config.config_types import BaseServerConfig, ConfigError
 from nemo_gym.config.global_config import maybe_get_global_config_dict, scoped_global_config_dict
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_records import EpisodeFailure
-from nemo_gym.environment import in_process
 from nemo_gym.environment.in_process import (
     PlannedBenchmark,
     RolloutOutcome,
     TaskFailure,
     TaskRunner,
     plan_benchmark,
+    planning,
     serve_benchmark,
+    task_runner,
 )
+from nemo_gym.environment.in_process import overrides as override_checks
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 from nemo_gym.rollouts import rollout_collection
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
@@ -277,8 +279,8 @@ class TestRolloutMetrics:
         def rewarded(*args, **kwargs):
             calls.append(("reward", args, kwargs))
 
-        monkeypatch.setattr(in_process, "record_rollout_completed", completed)
-        monkeypatch.setattr(in_process, "record_rollout_reward", rewarded)
+        monkeypatch.setattr(task_runner, "record_rollout_completed", completed)
+        monkeypatch.setattr(task_runner, "record_rollout_reward", rewarded)
         return calls
 
     @pytest.mark.parametrize(
@@ -648,15 +650,16 @@ class TestPlanBenchmark:
             seen["task_ids"] = task_ids
             return "the plan"
 
-        monkeypatch.setattr(in_process, "_benchmark_config", fake_config)
-        monkeypatch.setattr("nemo_gym.environment.in_process.plan_for_config", fake_plan)
+        monkeypatch.setattr(planning, "_benchmark_config", fake_config)
+        monkeypatch.setattr("nemo_gym.environment.in_process.planning.plan_for_config", fake_plan)
         monkeypatch.setattr(
-            "nemo_gym.environment.in_process.PrepareBenchmarkConfig.model_validate", lambda config: "prepare"
+            "nemo_gym.environment.in_process.planning.PrepareBenchmarkConfig.model_validate", lambda config: "prepare"
         )
         monkeypatch.setattr(
-            "nemo_gym.environment.in_process.asset_config_path", lambda flag, name: f"benchmarks/{name}/config.yaml"
+            "nemo_gym.environment.in_process.planning.asset_config_path",
+            lambda flag, name: f"benchmarks/{name}/config.yaml",
         )
-        monkeypatch.setattr(in_process, "_collated_rows", lambda config, directory: [_row("a"), _row("b"), _row("a")])
+        monkeypatch.setattr(planning, "_collated_rows", lambda config, directory: [_row("a"), _row("b"), _row("a")])
 
         planned = plan_benchmark("bench", task_ids=["a"], overrides={"x": 1}, work_dir=Path("/unused"))
 
@@ -677,13 +680,15 @@ class TestPlanBenchmark:
             seen["config"] = get_global_config_dict()
             return "the plan"
 
-        monkeypatch.setattr(in_process, "_benchmark_config", lambda path, overrides: {"hf_token": "given"})
-        monkeypatch.setattr("nemo_gym.environment.in_process.plan_for_config", fake_plan)
+        monkeypatch.setattr(planning, "_benchmark_config", lambda path, overrides: {"hf_token": "given"})
+        monkeypatch.setattr("nemo_gym.environment.in_process.planning.plan_for_config", fake_plan)
         monkeypatch.setattr(
-            "nemo_gym.environment.in_process.PrepareBenchmarkConfig.model_validate", lambda config: "prepare"
+            "nemo_gym.environment.in_process.planning.PrepareBenchmarkConfig.model_validate", lambda config: "prepare"
         )
-        monkeypatch.setattr("nemo_gym.environment.in_process.asset_config_path", lambda flag, name: "bench.yaml")
-        monkeypatch.setattr(in_process, "_collated_rows", lambda config, directory: [])
+        monkeypatch.setattr(
+            "nemo_gym.environment.in_process.planning.asset_config_path", lambda flag, name: "bench.yaml"
+        )
+        monkeypatch.setattr(planning, "_collated_rows", lambda config, directory: [])
 
         plan_benchmark("bench")
 
@@ -697,9 +702,9 @@ class TestPlanBenchmark:
             parsed.append(parser_config)
             return {}
 
-        monkeypatch.setattr(in_process.GlobalConfigDictParser, "parse", parse)
+        monkeypatch.setattr(planning.GlobalConfigDictParser, "parse", parse)
 
-        in_process._benchmark_config("benchmarks/bench/config.yaml", None)
+        planning._benchmark_config("benchmarks/bench/config.yaml", None)
 
         assert parsed[0].skip_exporters
 
@@ -728,20 +733,20 @@ class TestDottedOverrides:
     @pytest.mark.parametrize("overrides", DOTTED_OVERRIDES)
     def test_planning_refuses_a_dotted_key(self, monkeypatch: pytest.MonkeyPatch, overrides: dict) -> None:
         monkeypatch.setattr(
-            "nemo_gym.environment.in_process.asset_config_path", lambda flag, name: f"{flag}/{name}.yaml"
+            "nemo_gym.environment.in_process.planning.asset_config_path", lambda flag, name: f"{flag}/{name}.yaml"
         )
 
         with pytest.raises(ConfigError, match="dotted"):
             plan_benchmark("bench", overrides=overrides)
 
     def test_nested_keys_are_accepted(self) -> None:
-        assert in_process._checked_overrides({"judge": {"model": "x"}, "items": [{"a": 1}]}) == {
+        assert override_checks._checked_overrides({"judge": {"model": "x"}, "items": [{"a": 1}]}) == {
             "judge": {"model": "x"},
             "items": [{"a": 1}],
         }
 
     def test_no_overrides_are_an_empty_dict(self) -> None:
-        assert in_process._checked_overrides(None) == {}
+        assert override_checks._checked_overrides(None) == {}
 
 
 class _FakeServerSupervisor:
@@ -770,9 +775,9 @@ class TestServeBenchmark:
         _FakeServerSupervisor.shut_down = 0
         _FakeServerSupervisor.start_error = None
         _FakeServerSupervisor.registry_port = None
-        monkeypatch.setattr("nemo_gym.environment.in_process.ServerSupervisor", _FakeServerSupervisor)
+        monkeypatch.setattr("nemo_gym.environment.in_process.serving.ServerSupervisor", _FakeServerSupervisor)
         monkeypatch.setattr(
-            "nemo_gym.environment.in_process.asset_config_path",
+            "nemo_gym.environment.in_process.serving.asset_config_path",
             lambda flag, name: f"{'benchmarks' if flag == 'benchmark' else 'responses_api_models'}/{name}.yaml",
         )
         monkeypatch.setattr(
