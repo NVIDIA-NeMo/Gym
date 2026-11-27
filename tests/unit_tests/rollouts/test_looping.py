@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import os
 from concurrent.futures import Future
+from concurrent.futures.process import BrokenProcessPool
 from random import Random
 from unittest.mock import Mock
 
@@ -35,29 +37,27 @@ def test_content_defaults_selection_and_unreadable_text():
     for message in (item, item.model_dump(exclude_defaults=True)):
         response = {"output": [message, {"type": "reasoning", "content": [{"text": "think"}], "summary": []}]}
         assert collect_response_text(response, LoopingLimits()) == (" a b", "think")
-    assert (
-        collect_response_text(
-            {"output": [{"role": "user", "content": "x"}, {"type": "function_call", "arguments": "x"}]},
-            LoopingLimits(),
-        )
-        == ()
-    )
+    ignored = [{"role": "user", "content": "x"}, {"type": "function_call", "arguments": "x"}]
+    assert collect_response_text({"output": ignored}, LoopingLimits()) == ()
     assert collect_response_text({"output": [{"content": [{"text": 3}]}]}, LoopingLimits()) is None
     assert collect_response_text({"output": [{"content": "long"}]}, LoopingLimits(max_text_chars=2)) is None
 
 
-@pytest.mark.asyncio
-async def test_spawned_assessment_and_observed_empty_output():
+async def test_spawned_assessment_recovers_after_worker_crash():
     assessor = LoopingAssessor()
     try:
         assert (await assessor.assess({"output": [{"content": "loop " * 600}]})).is_looping is True
+        broken_pool = assessor._pool
+        with pytest.raises(BrokenProcessPool):
+            await asyncio.wrap_future(broken_pool.submit(os._exit, 1))
+        assert (await assessor.assess({"output": []})).is_looping is None
         assert (await assessor.assess({"output": []})).is_looping is False
+        assert assessor._pool is not broken_pool
         assert (await assessor.assess({})).is_looping is None
     finally:
         assessor.close()
 
 
-@pytest.mark.asyncio
 async def test_cancellation_reserves_capacity_until_submitted_work_finishes(monkeypatch):
     import nemo_gym.rollouts.looping as module
 

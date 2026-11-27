@@ -7,6 +7,7 @@ import asyncio
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from typing import Mapping
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse
@@ -45,6 +46,7 @@ class LoopingAssessor:
 
     async def assess(self, response: NeMoGymResponse | Mapping[str, object] | None) -> LoopingAssessment:
         """Assess returned episode text from a Gym response or its serialized mapping."""
+        pool = None
         try:
             async with asyncio.timeout(self._timeout_s):
                 await self._capacity.acquire()
@@ -59,7 +61,8 @@ class LoopingAssessor:
                         self._pool = ProcessPoolExecutor(
                             max_workers=self._max_workers, mp_context=multiprocessing.get_context("spawn")
                         )
-                    future = self._pool.submit(assess_text, chunks, self._limits)
+                    pool = self._pool
+                    future = pool.submit(assess_text, chunks, self._limits)
                     loop = asyncio.get_running_loop()
 
                     def release(_):
@@ -72,7 +75,10 @@ class LoopingAssessor:
                 finally:
                     if not submitted:
                         self._capacity.release()
-        except Exception:
+        except Exception as error:
+            if isinstance(error, BrokenProcessPool) and pool is not None and self._pool is pool:
+                self._pool = None
+                pool.shutdown(wait=False, cancel_futures=True)
             logger.warning("Severe text looping assessment unavailable.", exc_info=True)
             return LoopingAssessment()
 
