@@ -88,6 +88,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     MCPToolAccess,
+    mcp_server_urls,
 )
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -350,9 +351,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-                    tool_urls=[str(access.connection.url) for access in mcp_grants],
+                    # A stdio server runs in the sandbox beside the MCP CLI, so it needs no host.
+                    tool_urls=mcp_server_urls(mcp_grants),
                     # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
-                    required_tool_urls=[str(access.connection.url) for access in mcp_grants if access.required],
+                    required_tool_urls=mcp_server_urls(access for access in mcp_grants if access.required),
                 )
             except BaseException:
                 await provider.aclose()
@@ -419,18 +421,12 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """The MCP servers the task-local CLI connects to: the episode's grants, then the task's own servers.
 
-        Every granted server that is required must connect before the first model call. The task's own servers are
-        required too, as the task declares them for its tools.
+        A grant keeps its connection's fields: a streamable HTTP or SSE grant its URL and headers, a stdio grant the
+        command, arguments and environment the CLI starts in the sandbox. Every granted server that is required must
+        connect before the first model call. The task's own servers are required too, as the task declares them for
+        its tools.
         """
-        servers = [
-            {
-                "name": grant.name,
-                "transport": grant.connection.transport,
-                "url": str(grant.connection.url),
-                "headers": grant.connection.headers,
-            }
-            for grant in grants
-        ]
+        servers = [{"name": grant.name, **grant.connection.model_dump(mode="json")} for grant in grants]
         required = [grant.name for grant in grants if grant.required]
         granted = {grant.name for grant in grants}
         for server in task_context.get("mcp_servers") or []:

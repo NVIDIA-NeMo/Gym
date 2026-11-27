@@ -27,7 +27,13 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.data.tasks.harbor import HarborMCPServer
-from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.server_runtime import (
+    DirectHTTPToolAccess,
+    MCPSSEConnection,
+    MCPStdioConnection,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+)
 from responses_api_agents.mini_swe_agent import app as app_module
 from responses_api_agents.mini_swe_agent import mcp_cli
 from responses_api_agents.mini_swe_agent.app import MiniSWEAgent, MiniSWEAgentConfig
@@ -282,7 +288,7 @@ def test_task_data_errors_are_final_refusals(agent, sandbox, monkeypatch, task_j
     close.assert_awaited_once()
 
 
-def fake_mcp_sdk(monkeypatch) -> list[tuple]:
+def fake_mcp_sdk(monkeypatch, *, with_env: bool = False) -> list[tuple]:
     """Stand-ins for the runtime's MCP 2 SDK that record which client each server reached."""
     opened: list[tuple] = []
 
@@ -319,7 +325,12 @@ def fake_mcp_sdk(monkeypatch) -> list[tuple]:
         "mcp": SimpleNamespace(ClientSession=ClientSession, StdioServerParameters=SimpleNamespace),
         "mcp.client.sse": SimpleNamespace(sse_client=lambda url, headers=None: streams("sse", url, headers)),
         "mcp.client.stdio": SimpleNamespace(
-            stdio_client=lambda parameters: streams("stdio", parameters.command, tuple(parameters.args))
+            stdio_client=lambda parameters: streams(
+                "stdio",
+                parameters.command,
+                tuple(parameters.args),
+                *((parameters.env,) if with_env else ()),
+            )
         ),
         "mcp.client.streamable_http": SimpleNamespace(
             streamable_http_client=lambda url, http_client: streams("streamable_http", url, http_client.headers)
@@ -354,6 +365,42 @@ async def test_each_harbor_task_server_transport_reaches_its_mcp_client(
     }
     assert opened == [expected[transport]]
     assert state.required_mcp_servers == ["task_tools"]
+
+
+@pytest.mark.parametrize(
+    ("connection", "expected"),
+    [
+        (
+            MCPStdioConnection(command="python3", args=["/opt/magic/server.py"], env={"MAGIC_LOG": "/tmp/m.log"}),
+            ("stdio", "python3", ("/opt/magic/server.py",), {"MAGIC_LOG": "/tmp/m.log"}),
+        ),
+        (
+            MCPSSEConnection(url="http://memory:9000/sse", headers={"Authorization": "Bearer t"}),
+            ("sse", "http://memory:9000/sse", {"Authorization": "Bearer t"}),
+        ),
+    ],
+    ids=["stdio", "sse"],
+)
+async def test_a_stdio_or_sse_grant_reaches_the_mcp_client_over_its_transport(
+    agent, sandbox, monkeypatch, connection, expected
+) -> None:
+    """The Harbor environment server grants a task's stdio and SSE servers; the grant replaces the task.json entry of
+    the same name, so the grant must carry what the CLI needs to start or reach the server."""
+    sandbox.task_context.return_value = {
+        "mcp_servers": [
+            {"name": "magic", "transport": connection.transport, "url": "http://stale/sse", "command": "x"}
+        ]
+    }
+    grant = MCPToolAccess(name="magic", required=True, connection=connection)
+    state = await asyncio.wait_for(agent._seed_agent_session_state(seed(tool_accesses=[grant])), timeout=5)
+    (server,) = state.mcp_servers
+    opened = fake_mcp_sdk(monkeypatch, with_env=True)
+
+    async with AsyncExitStack() as stack:
+        await mcp_cli.connect(server, stack)
+
+    assert opened == [expected]
+    assert state.required_mcp_servers == ["magic"]
 
 
 async def test_a_task_server_that_harbor_also_grants_is_connected_once_and_required(agent, sandbox) -> None:

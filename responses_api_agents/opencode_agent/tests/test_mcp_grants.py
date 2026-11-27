@@ -41,7 +41,57 @@ def grant(name: str, *, required: bool) -> dict:
     }
 
 
+def stdio_grant(name: str, *, required: bool, env: dict | None = None) -> dict:
+    connection = {"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"], "env": env or {}}
+    return {"kind": "mcp", "name": name, "required": required, "connection": connection}
+
+
+def sse_grant(name: str, *, required: bool) -> dict:
+    connection = {"transport": "sse", "url": f"http://memory.example:9000/{name}/sse", "headers": {"x-session": "t"}}
+    return {"kind": "mcp", "name": name, "required": required, "connection": connection}
+
+
 _UNCONFIRMED = "Required Gym MCP tools were not confirmed before the model call: task_tools"
+
+
+def test_stdio_and_sse_grants_are_local_and_remote_servers(setup):  # noqa: F811
+    """OpenCode starts a stdio grant's command itself, in the sandbox, and tries a remote server over streamable
+    HTTP and then SSE; the plugin checks every grant before the first model call, whatever its transport."""
+    agent, sandbox = setup
+    agent.config.mcp_tool_timeout_seconds = 60
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [
+        stdio_grant("magic", required=True, env={"MAGIC_LOG": "/tmp/magic.log"}),
+        sse_grant("memory", required=False),
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        payload = read_params(sandbox.files[f"{sandbox.directory}/params.sh"])
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["mcp"] == {
+            "magic": {
+                "type": "local",
+                "command": ["python3", "/opt/magic/server.py"],
+                "enabled": True,
+                "environment": {"MAGIC_LOG": "/tmp/magic.log"},
+                "timeout": 60000,
+            },
+            "memory": {
+                "type": "remote",
+                "url": "http://memory.example:9000/memory/sse",
+                "enabled": True,
+                "oauth": False,
+                "headers": {"x-session": "t"},
+                "timeout": 60000,
+            },
+        }
+        assert json.loads(sandbox.files[f"{sandbox.directory}/mcp-grants.json"]) == {
+            "required": ["magic"],
+            "optional": ["memory"],
+        }
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
 
 
 @pytest.mark.parametrize(
@@ -234,6 +284,19 @@ def test_a_configured_grant_and_a_session_grant_that_could_collide_are_refused(s
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=body)
     assert response.status_code == 422 and "'company_files'" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("make_grant", [sse_grant, stdio_grant], ids=["sse", "stdio"])
+def test_an_sse_or_stdio_grant_opencode_1_configures_counts_toward_a_tool_name_collision(setup, make_grant):  # noqa: F811
+    """OpenCode 1 configures SSE and stdio grants too, so their tools take part in the naming check."""
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("company_files", required=True), make_grant("company", required=False)]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422
+    assert "'company'" in response.json()["detail"] and "'company_files'" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
 
 

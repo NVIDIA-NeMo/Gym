@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.agents.agent_activation_types import AgentContinuationCapabilities
@@ -35,6 +36,7 @@ from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.server_runtime.agent_context import AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTurn
+from tests.unit_tests.server_runtime.test_tool_access import MCP_CONNECTIONS
 
 
 class _Agent(SimpleResponsesAPIAgent):
@@ -195,6 +197,26 @@ def test_an_unsupported_seed_fails_with_a_terminal_422_and_keeps_no_session() ->
     assert agent._session_records == {}
     # The refusal bound nothing, so the same ID can still be seeded with a request the agent supports.
     assert TestClient(app).post("/v1/agent_sessions", json=_seed_request().model_dump(mode="json")).status_code == 200
+
+
+class _TakesAnyGrant(_Agent):
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        return AgentSessionState(request=body)
+
+
+@pytest.mark.parametrize(("connection", "valid"), MCP_CONNECTIONS)
+def test_the_seed_routes_schema_accepts_exactly_the_grants_it_parses(connection: dict, valid: bool) -> None:
+    """A client that checks a seed body against the route's published request schema sends exactly the MCP grants
+    the route parses: an untagged connection is streamable HTTP, and every other transport names itself."""
+    app = _TakesAnyGrant.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock()).setup_webserver()
+    openapi = app.openapi()
+    request_body = openapi["paths"]["/v1/agent_sessions"]["post"]["requestBody"]
+    body_schema = request_body["content"]["application/json"]["schema"]
+    grant = {"kind": "mcp", "name": "tools", "required": True, "connection": connection}
+    body = {**_seed_request().model_dump(mode="json"), "tool_accesses": [grant]}
+
+    assert Draft202012Validator({**body_schema, "components": openapi["components"]}).is_valid(body) is valid
+    assert TestClient(app).post("/v1/agent_sessions", json=body).status_code == (200 if valid else 422)
 
 
 @pytest.mark.parametrize(

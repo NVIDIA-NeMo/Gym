@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
     AgentSessionSetupError,
@@ -74,7 +75,13 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPToolAccess,
+    mcp_grants_over,
+    unusable_required_grants,
+)
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -89,6 +96,8 @@ from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
 
 
 LOG = logging.getLogger(__name__)
+# The MCP transport the adapter configures Kilo with (`remote` servers).
+KILO_MCP_TRANSPORTS = frozenset({"streamable_http"})
 
 
 def _think_message(index: int, text: str) -> NeMoGymResponseOutputMessage:
@@ -519,12 +528,14 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     def _mcp_grants(self, body: AgentSeedSessionRequest) -> list[MCPToolAccess]:
         """Validate external tool access before allocating a sandbox or overwriting static config."""
         accesses = self.effective_tool_accesses(body)
-        unsupported = [access.name for access in accesses if access.required and not isinstance(access, MCPToolAccess)]
+        unsupported = unusable_required_grants(accesses, KILO_MCP_TRANSPORTS)
         if unsupported:
-            raise HTTPException(
-                422, "Kilo supports only MCP tool grants; unsupported required grants: " + ", ".join(unsupported)
+            raise AgentSeedRejectedError(
+                "Kilo supports only streamable HTTP MCP tool grants; unsupported required grants: "
+                + ", ".join(unsupported)
             )
-        grants = [access for access in accesses if isinstance(access, MCPToolAccess)]
+        # An optional grant over another transport is left out.
+        grants = mcp_grants_over(accesses, KILO_MCP_TRANSPORTS)
         static = self.config.kilo_config.get("mcp") or {}
         if not isinstance(static, dict):
             raise HTTPException(422, "kilo_config.mcp must be a mapping")

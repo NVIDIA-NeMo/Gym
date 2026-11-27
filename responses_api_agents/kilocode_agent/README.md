@@ -172,7 +172,10 @@ gym eval run --no-serve \
 ```
 
 This SWE-bench Pro recipe uses `resources_tool_transports: []` because Kilo operates on the task's
-sandbox files. For Resources MCP tools, use `[mcp]`; required direct HTTP grants remain unsupported.
+sandbox files. For Resources MCP tools, use `[mcp]`; required direct HTTP grants remain unsupported. The adapter
+configures Kilo with streamable HTTP (`remote`) MCP servers only, so a required `sse` or `stdio` grant, such as a
+Harbor task's own stdio MCP server, is refused at seed with a 422 that names it and its transport, and an optional one
+is left out.
 See [Kilo MCP and sandbox ownership](https://docs.nvidia.com/nemo/gym/main/agent-server/integrate-existing-agents#kilo-mcp-and-sandbox-ownership)
 for MCP readiness checks and the configuration when Resources supplies no sandbox.
 Collection calls the Environment Server's `/run`, never the agent's `/run`.

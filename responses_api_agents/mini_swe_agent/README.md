@@ -66,7 +66,9 @@ Both benchmarks' default `miniswe` presets run `mini_swe_agent` through the Harb
 `miniswe_sandboxed_agent` installs mini-SWE in the sandbox at setup, as the
 task user, from PyPI, so the sandbox needs PyPI access, and it reports `miniswe_termination`. This adapter installs a
 runtime built on the agent server at seed, so the sandbox needs no network; it runs mini-SWE under Gym's process
-supervisor, can start its own sandbox, serves `mcp` tool grants, and reports `mini_swe_termination`. Use this adapter
+supervisor, can start its own sandbox, serves `mcp` tool grants over every transport (a `stdio` grant, such as a
+Harbor task's own stdio MCP server, is a command its MCP CLI starts inside the sandbox), and reports
+`mini_swe_termination`. Use this adapter
 for new integrations that satisfy the limits below. Existing legacy `/run` presets and tasks with `[agent].user`
 must keep the older adapter until they have a supported migration path.
 

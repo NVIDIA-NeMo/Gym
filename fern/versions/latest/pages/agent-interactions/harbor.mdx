@@ -82,8 +82,8 @@ is seeded (`_ng_failure_stage: agent`).
 
 Other harnesses that meet both conditions above, such as `claude_code_agent`, also work. A dataset can limit its
 harnesses with `allowed_agents` in its `dataset.toml`; `--allow-unsupported-pairing` waives the check. A task that
-declares its own MCP servers needs a harness that takes required MCP tool grants or reads the task's tool context,
-which `terminus_2_sandboxed_agent` does not; see
+declares its own MCP servers needs a harness that takes required MCP tool grants over the server's transport (`stdio`,
+`sse` or `streamable-http`) or reads the task's tool context, which `terminus_2_sandboxed_agent` does not; see
 [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool).
 
 ### A benchmark config that names a target

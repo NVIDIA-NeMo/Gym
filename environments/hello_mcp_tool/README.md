@@ -23,7 +23,7 @@ gym eval run environments/hello_mcp_tool --agent miniswe_sandboxed_agent --sandb
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider.
+The `harbor` Environment Server grants the task's `stdio` MCP server to the agent as a command to start inside the sandbox. mini-SWE, Claude Code, Codex, OpenCode, Hermes and Pi start it there; a harness that cannot, such as Kilo, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider.
 
 ## Validate it
 

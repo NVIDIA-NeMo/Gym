@@ -280,10 +280,12 @@ Per-session OpenClaw state/config, prompt, transcript, and supervisor output are
 or creating bootstrap files in the task repository. Task HOME, XDG directories, PATH and
 dependencies are preserved for tools and verification.
 The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
-execution and required direct-HTTP tool grants are unsupported. MCP tool grants become streamable-HTTP
-`mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`: the adapter turns off OpenClaw's tool
-search, which 2026.11.5 enables by default to hide them behind `tool_search`. `mcp_tool_timeout_seconds` sets
-their per-request timeout. Before the agent runs, the adapter connects to each grant with
+execution and required direct-HTTP tool grants are unsupported. Streamable HTTP MCP tool grants become
+streamable-HTTP `mcp.servers` entries; a required `sse` or `stdio` grant, such as a Harbor task's own stdio MCP
+server, is refused at seed with a 422 that names it and its transport, and an optional one is left out. The model
+sees the granted tools as `<grant>__<tool>`: the adapter turns off OpenClaw's tool search, which 2026.11.5 enables
+by default to hide them behind `tool_search`. `mcp_tool_timeout_seconds` sets their per-request timeout. Before the
+agent runs, the adapter connects to each grant with
 `openclaw mcp probe <grant> --json`: a required grant that does not connect fails the activation, and an optional
 one is left out and reported as an `mcp_server_skipped` gap. `probe --json` exits 0 when a connection fails on
 2026.6.11 and 1 on 2026.11.5, so a grant counts as connected only when the probe exits 0 and its JSON lists the

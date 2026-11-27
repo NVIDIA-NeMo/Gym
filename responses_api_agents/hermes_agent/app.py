@@ -80,7 +80,15 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPStdioConnection,
+    MCPToolAccess,
+    mcp_grants_over,
+    mcp_server_urls,
+    unusable_required_grants,
+)
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
@@ -99,6 +107,30 @@ from responses_api_agents.hermes_agent.sandbox import (
     HermesSandboxSession,
     parse_runtime_info,
 )
+
+
+# The MCP transports Gym configures for Hermes: a `command` entry over stdio, a `url` entry over streamable HTTP. The
+# pinned Hermes client also has an SSE transport, but Gym does not configure SSE grants for Hermes yet.
+HERMES_MCP_TRANSPORTS = frozenset({"stdio", "streamable_http"})
+
+
+def _hermes_mcp_server(access: MCPToolAccess) -> dict[str, Any]:
+    """The ``mcp_servers`` entry of ``config.yaml`` for one grant.
+
+    Hermes starts a stdio grant's command in the sandbox, as the user it runs as, with the grant's ``env`` over the
+    few variables it passes its servers (PATH, HOME, USER, the locale, TERM, SHELL, TMPDIR and XDG_*), and reaches a
+    streamable HTTP grant at its URL with its headers. A grant is for tools, so Hermes' resource and prompt helper
+    tools stay off.
+    """
+    connection = access.connection
+    entry: dict[str, Any]
+    if isinstance(connection, MCPStdioConnection):
+        entry = {"command": connection.command, "args": list(connection.args)}
+        if connection.env:
+            entry["env"] = dict(connection.env)
+    else:
+        entry = {"url": str(connection.url), "headers": connection.headers}
+    return {**entry, "tools": {"resources": False, "prompts": False}}
 
 
 # Legacy /run grades these request rejections and masks other provider failures.
@@ -453,17 +485,16 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> HermesSandboxSession:
         tool_accesses = self.effective_tool_accesses(body)
-        unsupported = [
-            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
-        ]
+        unsupported = unusable_required_grants(tool_accesses, HERMES_MCP_TRANSPORTS)
         if unsupported:
-            raise HTTPException(
-                422,
-                "Hermes Agent supports only MCP tool grants; required grants it cannot use: "
-                + ", ".join(sorted(unsupported)),
+            raise AgentSeedRejectedError(
+                "Hermes Agent supports only stdio and streamable HTTP MCP tool grants (Gym does not configure SSE "
+                "grants for Hermes yet); required grants it cannot use: " + ", ".join(unsupported)
             )
-        # Hermes exposes each MCP server as a toolset of the same name, so a name must not shadow a built-in one.
-        granted = [access.name for access in tool_accesses if isinstance(access, MCPToolAccess)]
+        # Hermes exposes each MCP server it configures as a toolset of the same name, so such a name must not shadow a
+        # built-in one. An optional grant over a transport Hermes cannot use is left out at activation, so it is not
+        # checked here.
+        granted = [access.name for access in mcp_grants_over(tool_accesses, HERMES_MCP_TRANSPORTS)]
         colliding = sorted(set(granted) & await asyncio.to_thread(builtin_toolsets)) if granted else []
         if colliding:
             raise AgentSeedRejectedError(
@@ -554,15 +585,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             },
         }
         if mcp_accesses:
-            # A grant is for tools, so Hermes' resource and prompt helper tools stay off.
-            config["mcp_servers"] = {
-                access.name: {
-                    "url": str(access.connection.url),
-                    "headers": access.connection.headers,
-                    "tools": {"resources": False, "prompts": False},
-                }
-                for access in mcp_accesses
-            }
+            config["mcp_servers"] = {access.name: _hermes_mcp_server(access) for access in mcp_accesses}
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
@@ -618,17 +641,16 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider=provider,
                     model_base_url=model_base_url,
-                    tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess)
-                    ],
+                    # A stdio server runs in the sandbox beside Hermes, so it needs no host.
+                    tool_urls=mcp_server_urls(
+                        mcp_grants_over(self.effective_tool_accesses(body), HERMES_MCP_TRANSPORTS)
+                    ),
                     # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
-                    required_tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess) and access.required
-                    ],
+                    required_tool_urls=mcp_server_urls(
+                        access
+                        for access in mcp_grants_over(self.effective_tool_accesses(body), HERMES_MCP_TRANSPORTS)
+                        if access.required
+                    ),
                 )
                 sandbox = AsyncSandbox(provider)
                 await sandbox.start(spec)
@@ -808,9 +830,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         state: HermesSandboxSession,
     ) -> AgentEpisode:
-        mcp_accesses = [
-            access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
-        ]
+        # Seeding refused a required SSE grant; an optional one is left out.
+        mcp_accesses = mcp_grants_over(self.effective_tool_accesses(state.request), HERMES_MCP_TRANSPORTS)
         payload = self._worker_payload(
             body,
             agent_session_id=agent_session_id,

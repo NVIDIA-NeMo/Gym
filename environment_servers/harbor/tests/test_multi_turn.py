@@ -1686,12 +1686,18 @@ GRANTED_USER_SERVER = {
     "required": True,
     "connection": {"transport": "streamable_http", "url": "http://user-server:8000/mcp", "headers": {}},
 }
+GRANTED_LEGACY_SERVER = {
+    "kind": "mcp",
+    "name": "legacy",
+    "required": True,
+    "connection": {"transport": "sse", "url": "http://legacy:9000/sse", "headers": {}},
+}
 
 
 async def test_every_turns_session_is_seeded_with_the_task_mcp_grant(tmp_path, monkeypatch):
-    """One agent session per step: each step's seed carries the grant, since a session that was not handed the
-    server would run that step without its tools. Only the streamable-http entry can be granted, with the sidecar's
-    own host as declared; the SSE one reaches the harness in task.json only."""
+    """One agent session per step: each step's seed carries the grants, since a session that was not handed the
+    servers would run that step without their tools. Each entry is granted over its own transport, with the
+    sidecar's own host as declared."""
     server, task, sandbox, _ = multi_turn_server(
         tmp_path,
         monkeypatch,
@@ -1706,7 +1712,7 @@ async def test_every_turns_session_is_seeded_with_the_task_mcp_grant(tmp_path, m
 
     assert response.failure is None, response.failure
     seeds = server.server_client.seed_bodies()
-    assert [seed["tool_accesses"] for seed in seeds] == [[GRANTED_USER_SERVER]] * 3
+    assert [seed["tool_accesses"] for seed in seeds] == [[GRANTED_USER_SERVER, GRANTED_LEGACY_SERVER]] * 3
 
 
 def turn(
