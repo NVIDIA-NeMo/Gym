@@ -96,6 +96,8 @@ class VerificationResult:
     test_output: str
     error: str | None = None
     test_patch_failed: bool = False
+    # The eval script hit ``evaluation_timeout``: incomplete, so it is retried, but scored 0 rather than masked.
+    timed_out: bool = False
 
 
 def patch_section_path(section: str) -> str | None:
@@ -187,9 +189,16 @@ set +e
 
 {reset_tests}
 {apply_test_patch}
+# Runners such as jest report on stderr, which a provider may return apart from stdout, so both
+# streams go inside the markers. Each is captured whole: an interleaved stream can split a result
+# line, as when a subprocess's stderr lands between `test x ... ok` and its newline. The subshell
+# keeps a test command's own `exit` or `exec` from skipping the replay below.
 echo "{TEST_OUTPUT_BEGIN}"
+(
 {run_tests}
+) >/tmp/nemo_gym_test_stdout.log 2>/tmp/nemo_gym_test_stderr.log
 __test_exit=$?
+cat /tmp/nemo_gym_test_stdout.log; echo; cat /tmp/nemo_gym_test_stderr.log
 echo "{TEST_OUTPUT_END}"
 {reset_tests}
 exit $__test_exit
@@ -262,9 +271,25 @@ async def run_verification(
 
         await asyncio.to_thread(_persist_log)
 
-    if result.return_code == EXIT_NO_REPO:
+    if result.error_type is not None:
+        # The sandbox reported no exit for the eval script (a dropped stream, a timeout, a provider error), so the
+        # partial log cannot grade the run: report it inconclusive so it is retried. A run that still has no verdict
+        # is masked, except a timeout (``timed_out``): a test the patch made hang scores 0.
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=f"test run did not finish ({result.error_type}): {(result.stderr or '')[-500:]}",
+            timed_out=result.error_type == "timeout",
+        )
+
+    # The script exits with these codes only before it prints the begin marker. After it, the exit status is the test
+    # command's own, which code from the patch can choose.
+    if result.return_code == EXIT_NO_REPO and TEST_OUTPUT_BEGIN not in output:
         return VerificationResult(False, False, False, None, output, f"{REPO_DIRECTORY} is not present in the image")
-    if result.return_code == EXIT_NO_CONDA:
+    if result.return_code == EXIT_NO_CONDA and TEST_OUTPUT_BEGIN not in output:
         return VerificationResult(False, False, False, None, output, f"conda env {CONDA_ENV!r} missing in the image")
     if PATCH_FAILED in output:
         # A verdict, not an infrastructure fault: the patch does not apply to base_commit.

@@ -137,5 +137,9 @@ names the session for `/verify`, and `/close_session` ends it.
   progress gets that long to finish, and then its sandboxes are stopped anyway. A stop that fails is logged,
   and the provider's TTL reclaims the sandbox.
 
-The cookie path that an Agent's `/run` uses is unchanged: it does not replay or mask, the stops inside its
-requests are not bounded, and the sandboxes it still holds at shutdown are left to the provider's TTL.
+The cookie path that an Agent's `/run` uses grades and masks the same way: a verification without a verdict
+(including a capture lost to infrastructure) is masked with a `failure_kind`, and a repository the agent broke
+scores a completed 0. It does not replay. Its task sandbox stop gets the same bounded wait, but its verifier
+sandbox stops do not. A verification takes the task sandbox and its state out of the session before the capture,
+so a new seed with the same cookie keeps its own sandbox. If the stop of the captured sandbox fails, the
+provider's TTL reclaims it, as it does for the sandboxes the cookie path still holds at shutdown.

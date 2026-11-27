@@ -323,6 +323,15 @@ class TestRunVerification:
         assert "not present in the image" in result.error
 
     @pytest.mark.asyncio
+    async def test_a_test_run_that_exits_97_is_still_graded(self) -> None:
+        """Code from the patch can make pytest exit 97. After the begin marker, that is not a missing workdir, so the
+        run is a completed 0."""
+        log = f"{TEST_OUTPUT_BEGIN}\nFAILED {F2P_SCRIPT_NAME}::test_thing\n{TEST_OUTPUT_END}"
+        result = await run_verification(sandbox=_FakeSandbox(log, return_code=97), inputs=_inputs())
+        assert result.completed is True
+        assert result.resolved is False
+
+    @pytest.mark.asyncio
     async def test_only_the_marked_region_reaches_the_parser(self) -> None:
         log = (
             f"pip: FAILED to fetch\n{TEST_OUTPUT_BEGIN}\n"

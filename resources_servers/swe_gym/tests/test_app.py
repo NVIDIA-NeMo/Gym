@@ -18,6 +18,8 @@ These cover the parts that decide whether a task counts as resolved and what rea
 sandbox lifecycle itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -251,6 +253,31 @@ class TestBuildEvalScript:
         script = build_eval_script(_inputs())
         assert script.rstrip().endswith("exit $__test_exit")
 
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+    @pytest.mark.parametrize(("ending", "exit_code"), [("false", 1), ("exit 3", 3)])
+    def test_a_runner_s_stderr_and_own_exit_stay_inside_the_markers(self, tmp_path, ending, exit_code) -> None:
+        """A runner that reports on stderr is graded, and a runner's own `exit` still closes the markers."""
+        inputs = _inputs()
+        runner = f"echo 'PASSED tests/a.py::test_out'; echo 'PASSED tests/a.py::test_err' >&2; {ending}"
+        script = build_eval_script(inputs).replace("/tmp/", f"{tmp_path}/")
+        script = script.replace(pytest_command(inputs.repo, inputs.version, inputs.test_patch), runner)
+        start = script.index(f'echo "{TEST_OUTPUT_BEGIN}"')
+        end = script.index(f'echo "{TEST_OUTPUT_END}"') + len(f'echo "{TEST_OUTPUT_END}"')
+        result = subprocess.run(
+            ["bash", "-c", script[start:end] + "\nexit $__test_exit"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            timeout=30,
+        )
+        output = result.stdout + ("\n" + result.stderr if result.stderr else "")
+        assert TEST_OUTPUT_END in result.stdout
+        assert parse_log_pytest(slice_test_output(output)) == {
+            "tests/a.py::test_out": "PASSED",
+            "tests/a.py::test_err": "PASSED",
+        }
+        assert result.returncode == exit_code
+
 
 class TestVerificationFiles:
     def test_ships_the_script_and_only_the_patches_that_exist(self) -> None:
@@ -275,8 +302,8 @@ class TestDropTestPatchFiles:
 
 
 class _FakeSandbox:
-    def __init__(self, stdout: str, return_code: int = 0, stderr: str = "") -> None:
-        self.result = SimpleNamespace(stdout=stdout, stderr=stderr, return_code=return_code)
+    def __init__(self, stdout: str, return_code: int = 0, stderr: str = "", error_type: str | None = None) -> None:
+        self.result = SimpleNamespace(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None, cwd=None):
@@ -285,6 +312,24 @@ class _FakeSandbox:
 
 
 class TestRunVerification:
+    @pytest.mark.asyncio
+    async def test_a_dropped_test_run_is_incomplete_not_a_zero(self) -> None:
+        """A dropped exec stream leaves no test results; grading that log would score every test as failing."""
+        result = await run_verification(sandbox=_FakeSandbox("", error_type="sandbox"), inputs=_inputs())
+        assert result.completed is False
+        assert result.resolved is False
+        assert result.error.startswith("test run did not finish (sandbox)")
+        assert result.timed_out is False, "a provider failure is no verdict, so it is masked"
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_test_run_is_incomplete_but_marked_as_a_timeout(self) -> None:
+        """Retried like any run without a verdict, then scored 0 rather than masked: the patch can make tests hang."""
+        result = await run_verification(
+            sandbox=_FakeSandbox("", return_code=124, error_type="timeout"), inputs=_inputs()
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.timed_out is True
+
     @pytest.mark.asyncio
     async def test_grades_a_passing_run(self) -> None:
         log = (
@@ -311,6 +356,15 @@ class TestRunVerification:
     async def test_a_wrong_image_is_incomplete_not_a_zero(self, code) -> None:
         result = await run_verification(_FakeSandbox("", return_code=code), _inputs())
         assert result.completed is False and result.test_results is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", [EXIT_NO_REPO, EXIT_NO_CONDA])
+    async def test_a_test_run_that_exits_with_a_reserved_code_is_still_graded(self, code) -> None:
+        """Code from the patch can make the test command exit 97 or 96. After the begin marker, that is not a broken
+        image, so the run is a completed 0."""
+        log = f"{TEST_OUTPUT_BEGIN}\nFAILED tests/test_x.py::test_a\n{TEST_OUTPUT_END}"
+        result = await run_verification(_FakeSandbox(log, return_code=code), _inputs())
+        assert result.completed is True and result.resolved is False and result.test_results is not None
 
     @pytest.mark.asyncio
     async def test_only_the_marked_region_reaches_the_parser(self) -> None:
