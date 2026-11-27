@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.data.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.data.tasks.harbor.digest import context_digest, inputs_differences, inputs_digest
 from nemo_gym.data.tasks.harbor.dockerfile import (
@@ -38,7 +39,7 @@ from nemo_gym.data.tasks.harbor.models import HarborEnvironment
 from nemo_gym.data.tasks.harbor.records import MAIN_SERVICE, VERIFIER_SERVICE, read_image_configs
 from nemo_gym.data.tasks.harbor.registry import PLATFORM
 from nemo_gym.data.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTaskConfig, is_task_folder, iter_task_folders
-from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
+from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_contexts
 
 
 if TYPE_CHECKING:
@@ -261,13 +262,14 @@ def plan_builds(
     not interpolated here, only scanned for ``build`` keys: resolving each section is the build's job
     (:meth:`ImageBuilder.build_many`), so a file one task gets wrong fails that task's build and nothing else.
 
-    A task in separate verifier mode whose effective verifier environment declares no ``docker_image`` and that ships
-    ``tests/Dockerfile`` (:func:`~nemo_gym.data.tasks.harbor.task.verifier_build_context`) plans one more entry, service
-    ``verifier`` with ``tests/`` as its context and digest (its own group, after the task's ``environment/`` entries),
-    whatever the file holds, as Harbor builds it whatever it holds. A shared verifier, a declared or inherited
-    ``docker_image`` or a task without the file plans none (the loader refuses the last shape when no image is
-    declared either, as Harbor does). A ``tests/docker-compose.yaml`` is read for ``main``'s build section only; one
-    that declares other services fails the verifier's build before any command (:meth:`ImageBuilder.build_many`).
+    Each folder a separate verifier is built from (:func:`~nemo_gym.data.tasks.harbor.verifier_env.verifier_build_contexts`:
+    the task's ``tests/``, or for a multi-step task each separate step's ``steps/<name>/tests/``, else ``tests/``, whose
+    effective verifier environment declares no ``docker_image`` and that holds a ``Dockerfile``) plans one more entry,
+    service ``verifier`` with that folder as its context and digest (its own group, after the task's ``environment/``
+    entries), whatever the file holds, as Harbor builds it whatever it holds. A shared verifier, a declared or inherited
+    ``docker_image`` or a context without the file plans none (the loader refuses the last shape when no image is
+    declared either, as Harbor does). The context's ``docker-compose.yaml`` is read for ``main``'s build section only;
+    one that declares other services fails the verifier's build before any command (:meth:`ImageBuilder.build_many`).
     """
     folder = Path(folder).resolve()
     single = is_task_folder(folder)
@@ -315,13 +317,27 @@ def plan_builds(
         folders: list[tuple[Path, list[str], HarborEnvironment]] = []
         if planned:
             folders.append((context, planned, config.environment))
-        verifier_context = verifier_build_context(child, config)
-        if verifier_context is not None:
-            # Harbor builds the verifier's environment from tests/ with the effective verifier config's settings
-            # (the task's, or the first separate step's that starts from tests/ without an image).
-            verifier_environment = verifier_build_environment(child, config)
-            assert verifier_environment is not None  # verifier_build_context returned a context
-            folders.append((verifier_context, [VERIFIER_SERVICE], verifier_environment))
+        # Harbor builds each separate verifier's environment from its folder with the effective verifier config's
+        # settings (the task's, or for a step the first separate step's that starts from that folder without an image).
+        # Steps whose folders hash the same (a tests/ folder copied byte for byte) share one image, planned once,
+        # unless the build would read the copies differently.
+        verifier_contexts: list[tuple[Path, HarborEnvironment]] = []
+        held: dict[str, Path] = {}
+        conflict = None
+        for folder_path, environment in verifier_build_contexts(child, config):
+            digest = context_digest(folder_path)
+            if digest not in held:
+                held[digest] = folder_path
+                verifier_contexts.append((folder_path, environment))
+            elif inputs_digest(folder_path) != inputs_digest(held[digest]):
+                conflict = BuildConflict(
+                    child.name, _conflict_reason(child.name, folder_path, child.name, held[digest], digest)
+                )
+                break
+        if conflict is not None:
+            conflicts[child.name] = conflict
+            continue
+        folders += [(folder_path, [VERIFIER_SERVICE], environment) for folder_path, environment in verifier_contexts]
         # Every folder is checked before any is added, so a task left out is in no entry, not even its other folder's.
         digests = [context_digest(folder_path) for folder_path, _, _ in folders]
         conflict = next(
@@ -339,7 +355,7 @@ def plan_builds(
             _plan_context(
                 child.name, folder_path, digest, folder_services, environment, entries, contexts, services, settings
             )
-            if folder_path == verifier_context:
+            if any(folder_path == verifier_context for verifier_context, _ in verifier_contexts):
                 verifier_digests.add(digest)
             elif force and config.environment.docker_image and MAIN_SERVICE in folder_services:
                 forced.setdefault(digest, []).append(child.name)
@@ -457,3 +473,6 @@ class BuildResult:
     record: dict[str, Any] = field(default_factory=dict)
     service: str = MAIN_SERVICE
     forced_tasks: tuple[str, ...] = ()
+
+
+__getattr__ = moved_names_getattr(__name__)

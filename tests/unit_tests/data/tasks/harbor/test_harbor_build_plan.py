@@ -181,6 +181,66 @@ class TestPlan:
         assert [(entry.service, entry.tasks) for entry in plan] == [("main", ("b",)), ("verifier", ("b",))]
         assert list(conflicts) == ["c"] and conflicts["c"].first == "b"
 
+    def test_each_separate_steps_verifier_folder_is_planned_once(self, tmp_path):
+        """A multi-step task plans a verifier build for each folder its separate steps start from: a step's own
+        steps/<name>/tests/, else the task's tests/, shared by every step that starts there (one entry, as the folder's
+        digest names one image). A step with a declared image and a shared step plan none."""
+        folder = tmp_path / "ds"
+        toml = TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n') + "".join(
+            f'\n[[steps]]\nname = "{name}"\n' for name in ("01", "02", "03", "04", "05")
+        )
+        toml += '[steps.verifier]\nenvironment_mode = "shared"\n'
+        write_task(
+            folder / "a",
+            toml=toml.replace(
+                '[[steps]]\nname = "04"\n',
+                '[[steps]]\nname = "04"\n[steps.verifier.environment]\ndocker_image = "org/v:1"\n',
+            ),
+        )
+        task = folder / "a"
+        (task / "tests" / "Dockerfile").write_text("FROM x\nCOPY . /tests/\n")
+        for name in ("01", "03", "04", "05"):
+            (task / "steps" / name / "tests").mkdir(parents=True)
+            (task / "steps" / name / "tests" / "Dockerfile").write_text(f"FROM x\nCOPY . /tests/\nENV STEP={name}\n")
+        plan = plan_builds(folder)
+        # 01 and 03 start from their own folders, 02 from the task's tests/; 04 declares an image, 05 verifies shared.
+        assert [(entry.service, entry.context, entry.verifier) for entry in plan] == [
+            ("main", task / "environment", False),
+            ("verifier", task / "steps" / "01" / "tests", True),
+            ("verifier", task / "tests", True),
+            ("verifier", task / "steps" / "03" / "tests", True),
+        ]
+        assert [entry.digest for entry in plan][1:] == [
+            context_digest(task / "steps" / "01" / "tests"),
+            context_digest(task / "tests"),
+            context_digest(task / "steps" / "03" / "tests"),
+        ]
+
+    def test_steps_with_identical_verifier_folders_share_one_entry(self, tmp_path):
+        """Two steps that ship the same tests/ folder byte for byte hash the same, so they name one image: planned
+        once, with the task listed once. When the build would read the copies differently (a file mode), the task is
+        left out with the reason, as for two tasks."""
+        folder = tmp_path / "ds"
+        toml = TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n') + (
+            '\n[[steps]]\nname = "01"\n\n[[steps]]\nname = "02"\n'
+        )
+        task = write_task(folder / "a", toml=toml)
+        for name in ("01", "02"):
+            tests = task / "steps" / name / "tests"
+            tests.mkdir(parents=True)
+            (tests / "Dockerfile").write_text("FROM x\nCOPY . /tests/\n")
+            (tests / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+            (tests / "test.sh").chmod(0o755)
+        plan = plan_builds(folder)
+        assert [(entry.service, entry.context, entry.tasks) for entry in plan] == [
+            ("main", task / "environment", ("a",)),
+            ("verifier", task / "steps" / "01" / "tests", ("a",)),
+        ]
+        (task / "steps" / "02" / "tests" / "test.sh").chmod(0o700)
+        conflicts: dict[str, BuildConflict] = {}
+        assert plan_builds(folder, conflicts=conflicts) == []
+        assert list(conflicts) == ["a"] and "test.sh is a file 0700" in conflicts["a"].reason
+
     def test_select_and_dataset_overrides_apply(self, tmp_path):
         folder = tmp_path / "ds"
         write_task(folder / "a")

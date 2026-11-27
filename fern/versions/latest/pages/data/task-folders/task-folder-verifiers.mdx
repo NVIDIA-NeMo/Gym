@@ -176,7 +176,7 @@ The separate verifier's image:
 | --- | --- |
 | `[verifier.environment].docker_image` | That image. |
 | No `[verifier.environment]`, and `[environment].docker_image` | The task's own image. |
-| A `[verifier.environment]` without `docker_image`, or no image at all, and `tests/Dockerfile` | An image prepare builds from `tests/`, named `hb__<hash>-verifier`. |
+| A `[verifier.environment]` without `docker_image`, or no image at all, and `tests/Dockerfile` | An image prepare builds from `tests/`, named `hb__<hash>-verifier`. A step of a [multi-step task](/main/data/task-folders/multi-step-tasks#verification-per-step) builds from its own `steps/<name>/tests/` when it has one. |
 
 A separate-mode task with none of these is refused. When Gym has the verifier image's configuration on record, its
 `ENTRYPOINT` and `HEALTHCHECK` run before `test.sh`. A `tests/docker-compose.yaml` may hold only `services`, `name`,
@@ -200,6 +200,20 @@ and other secrets go in the server's `secrets` block and fill `${NAME}` template
 `[steps.verifier].env` only, and win over the host environment. A sandbox with a CPU limit also gets CPU-count hints
 such as `OMP_NUM_THREADS`; a variable the task sets wins, as does one the image sets when Gym has its configuration
 on record.
+
+To set a judge for every task of a run without editing the tasks, use the server's `verifier_env`, as Harbor's
+job-level `verifier.env`. Its variables override the task's and the step's and reach `test.sh` only. Here the key
+comes from `judge_api_key` in `env.yaml`:
+
+```yaml
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      verifier_env:
+        REWARDKIT_JUDGE: openai/gpt-5.4
+        OPENAI_BASE_URL: https://judge.example.com/v1
+        OPENAI_API_KEY: ${judge_api_key}
+```
 
 ## Users
 

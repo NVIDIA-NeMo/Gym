@@ -76,7 +76,7 @@ but not their collect hooks or health checks. See
 4. **Collect artifacts and verify.**
 
 The top-level `instruction.md` is never sent, so it can hold material the agent must not see. Each verifier's
-transcript holds its own turn alone. A job-level `prompt_template` wraps the first turn's instruction only.
+transcript holds its own turn alone. A job-level `prompt_template` wraps every turn's instruction.
 
 ## Prepare each step
 
@@ -152,8 +152,10 @@ docker_image = "org/build-verifier:1"
 
 A separate turn verifies in a fresh sandbox, as in
 [Shared and separate verification](/main/data/task-folders/task-folder-verifiers#shared-and-separate-verification), from
-`[steps.verifier.environment]`, else `[verifier.environment]`, else a copy of `[environment]`. The agent's sandbox
-keeps running unless this is the last step. The episode's `verifier_mode` is the one every turn used, or `mixed`.
+`[steps.verifier.environment]`, else `[verifier.environment]`, else a copy of `[environment]`. Without a
+`docker_image` there, its image is built from `steps/<name>/tests/Dockerfile`, or `tests/Dockerfile` when the step
+has no `tests/` folder of its own, as Harbor builds it; `gym eval run` and `gym dataset validate` build each one. The
+agent's sandbox keeps running unless this is the last step. The episode's `verifier_mode` is the one every turn used, or `mixed`.
 
 ## Reward roll-up
 
@@ -239,7 +241,7 @@ Under `continue`, the episode's `responses_create_params` and `response` hold on
 | Refused | When |
 | --- | --- |
 | A missing `steps/<name>/` folder, `instruction.md` or `test.sh` | Load |
-| A separate step with a `steps/<name>/tests/` folder, even one without a Dockerfile, and no `docker_image` in its verifier environment; declare one | Load |
+| A separate step with no `docker_image` in its verifier environment whose verifier folder (`steps/<name>/tests/`, else `tests/`) has no `Dockerfile`, or whose image was not built | Load |
 | `environment_mode = "shared"` with `[steps.verifier.environment]` | Load |
 | A network restriction on `[steps.agent]`, `[steps.verifier]` or its environment | Load |
 | A `[verifier]` network restriction while any step verifies shared | Load |

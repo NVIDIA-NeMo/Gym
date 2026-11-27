@@ -74,47 +74,53 @@ def step_verifier_build_context(task_folder: Path, step: HarborTaskStep) -> Path
     return step_tests if step_tests.is_dir() else Path(task_folder) / TESTS_DOCKERFILE.parent
 
 
+def verifier_build_contexts(task_folder: Path, config: HarborTaskConfig) -> list[tuple[Path, HarborEnvironment]]:
+    """Every folder Harbor builds a separate verifier's image from, each with the effective verifier environment
+    whose settings its build sees, in step order; ``[]`` when nothing is built.
+
+    Harbor starts a separate verifier's environment with a build context as its environment dir
+    (``_verifier_env_build_context`` in trial.py at v0.22.0): the task's ``tests/`` for a single-step task, and for a
+    step ``steps/<name>/tests/`` when that folder exists, else the task's ``tests/``
+    (:func:`step_verifier_build_context`). Its config is the effective verifier environment
+    (:func:`effective_verifier_environment`, :func:`step_verifier_environment` for a step). Its Docker environment then
+    uses the config's ``docker_image`` when there is one and otherwise runs ``docker compose build`` on the context's
+    ``Dockerfile`` (``should_use_prebuilt_docker_image``, ``start`` in docker.py), whatever that Dockerfile holds: a
+    ``FROM`` plus ``RUN`` file is built, not overlaid. So shared mode, a declared or inherited ``docker_image``, or a
+    context without a ``Dockerfile`` means no build; without the file and without an image Harbor refuses the
+    verifier (``require_agent_environment_definition`` on the context), and so does :func:`load_task`. Steps that start
+    from one folder share its build, with the first such step's settings, where Harbor builds it once per step under
+    the same ``hb__<digest>`` name. Prepare plans one build entry per context
+    (``nemo_gym.data.tasks.harbor.build_plan.plan_builds``) and the loader reads each context's record.
+    """
+    if config.steps:
+        candidates = [
+            (step_verifier_build_context(task_folder, step), step_verifier_environment(config, step))
+            for step in config.steps
+        ]
+    else:
+        candidates = [(Path(task_folder) / TESTS_DOCKERFILE.parent, effective_verifier_environment(config))]
+    contexts: dict[Path, HarborEnvironment] = {}
+    for context, environment in candidates:
+        if environment is not None and not environment.docker_image and (context / TESTS_DOCKERFILE.name).is_file():
+            contexts.setdefault(context, environment)
+    return list(contexts.items())
+
+
 def verifier_build_environment(task_folder: Path, config: HarborTaskConfig) -> HarborEnvironment | None:
-    """The effective verifier environment whose settings Harbor's build of ``tests/Dockerfile`` sees, or ``None``
-    when nothing builds from ``tests/``: the task's own (:func:`effective_verifier_environment`) when it declares no
-    ``docker_image``, else the first step's whose separate verifier declares none and starts from ``tests/``
-    (:func:`step_verifier_build_context`; a step with a ``tests/`` folder of its own starts from that folder, which
-    this server does not build, and the loader refuses such a step). Steps that would build ``tests/`` under
-    different environments share the first one's settings here, where Harbor builds once per step."""
-    environment = effective_verifier_environment(config)
-    if environment is not None and not environment.docker_image:
-        return environment
+    """The effective verifier environment whose settings the build of the task's own ``tests/`` sees, or ``None``
+    when nothing is built from ``tests/`` (:func:`verifier_build_contexts`): the task's for a single-step task, the
+    first separate step's that starts from ``tests/`` for a multi-step one."""
     tests = Path(task_folder) / TESTS_DOCKERFILE.parent
-    for step in config.steps:
-        step_environment = step_verifier_environment(config, step)
-        if (
-            step_environment is not None
-            and not step_environment.docker_image
-            and step_verifier_build_context(task_folder, step) == tests
-        ):
-            return step_environment
-    return None
+    return next(
+        (environment for context, environment in verifier_build_contexts(task_folder, config) if context == tests),
+        None,
+    )
 
 
 def verifier_build_context(task_folder: Path, config: HarborTaskConfig) -> Path | None:
-    """The folder Harbor builds the separate verifier's image from, ``tests/``, when it builds one; else ``None``.
-
-    Harbor starts the separate verifier's environment with ``tests/`` as its environment dir
-    (``_verifier_env_build_context`` in trial.py at v0.22.0) and the effective verifier environment as its config
-    (:func:`effective_verifier_environment`). Its Docker environment then uses the config's ``docker_image`` when there
-    is one and otherwise runs ``docker compose build`` on ``tests/Dockerfile`` (``should_use_prebuilt_docker_image``,
-    ``start`` in docker.py), whatever that Dockerfile holds: a ``FROM`` plus ``RUN`` file is built, not overlaid. So:
-    shared mode, a declared or inherited ``docker_image``, or no ``tests/Dockerfile`` means no build. Without the file
-    and without an image Harbor refuses the task (``require_agent_environment_definition`` on ``tests/``, which is
-    always its verifier environment dir: there is no fallback to ``environment/``), and so does :func:`load_task`.
-    Prepare plans one build entry per returned context (``nemo_gym.data.tasks.harbor.image_build.plan_builds``) and the
-    loader reads its record. A multi-step task whose steps verify separately builds ``tests/`` for the steps that
-    declare no image and start from it (:func:`verifier_build_environment`), whatever the task's own mode.
-    """
-    if verifier_build_environment(task_folder, config) is None:
-        return None
-    dockerfile = Path(task_folder) / TESTS_DOCKERFILE
-    return dockerfile.parent if dockerfile.is_file() else None
+    """The task's own ``tests/`` when a separate verifier image is built from it, else ``None``
+    (:func:`verifier_build_contexts`, which also names the steps' own folders)."""
+    return Path(task_folder) / TESTS_DOCKERFILE.parent if verifier_build_environment(task_folder, config) else None
 
 
 # The keys of ``main`` in a ``tests/docker-compose.yaml`` this server reads when prepare builds the verifier from

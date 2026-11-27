@@ -66,9 +66,10 @@ for the verifier with ``tests/`` as its environment dir and the effective verifi
 else a copy of ``[environment]``; ``_separate_verifier_env`` and ``_verifier_env_build_context`` in trial.py,
 ``resolve_effective_verifier_env_config`` in verifier_mode.py at v0.22.0), so without a ``docker_image`` it runs the
 same ``docker compose build`` over its template with ``CONTEXT_DIR`` = ``tests/`` and builds ``tests/Dockerfile``,
-and it uploads no ``tests/`` into that image (``skip_tests_upload``). Prepare plans that build as one entry per task
-with ``tests/`` as its context (``nemo_gym.data.tasks.harbor.task.verifier_build_context``), the verifier config's env and
-resources, and service name ``verifier``: the context is hashed on its own, as Harbor's ``environment_id`` hashes the
+and it uploads no ``tests/`` into that image (``skip_tests_upload``); a step's separate verifier starts from
+``steps/<name>/tests/`` the same way when the step has that folder. Prepare plans each such build as one entry with
+its folder as the context (``nemo_gym.data.tasks.harbor.verifier_env.verifier_build_contexts``), the verifier config's
+env and resources, and service name ``verifier``: the context is hashed on its own, as Harbor's ``environment_id`` hashes the
 verifier environment's dir, so the digest is Harbor's and ``hb__<digest>`` is the ``MAIN_IMAGE_NAME`` Harbor exports
 for the verifier env; Gym tags the image ``hb__<digest>-verifier`` (its sidecar form, naming the role; Harbor's own
 tag of it is Compose's per-session ``<session>-main``, never published) and records it under the ``tests/`` digest as

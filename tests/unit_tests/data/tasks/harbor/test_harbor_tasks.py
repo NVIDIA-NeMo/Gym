@@ -1435,36 +1435,82 @@ class TestMultiStepTasks:
 
     def test_a_separate_step_without_an_image_follows_harbors_build_context(self, tmp_path):
         """Harbor builds a step's separate verifier from steps/<name>/tests/Dockerfile when the step has a tests/ folder,
-        else from tests/Dockerfile (_verifier_env_build_context with a step). Prepare builds tests/Dockerfile only, so a
-        step that starts from its own folder is refused naming the image to declare; one that starts from tests/ reads
-        the recorded build, and is planned by prepare whatever the task's own mode."""
-        from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
+        else from tests/Dockerfile (_verifier_env_build_context with a step). Each folder needs a Dockerfile and then
+        its recorded build, which prepare plans for the step whatever the task's own mode; the step reads the record
+        under its own folder's digest."""
+        from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_context, verifier_build_contexts
 
         root = write_multi_step_task(tmp_path / "t")
         toml = (root / "task.toml").read_text() + '[steps.verifier]\nenvironment_mode = "separate"\n'
         (root / "task.toml").write_text(toml)
-        with pytest.raises(HarborTaskError, match="steps/02_implement/tests/Dockerfile.*builds tests/Dockerfile only"):
+        config = HarborTaskConfig.model_validate(tomllib.loads(toml))
+        step_tests = root / "steps" / "02_implement" / "tests"
+        # The step's own tests/ is its verifier's folder: a Dockerfile is required there...
+        with pytest.raises(HarborTaskError, match="steps/02_implement/tests has no environment definition"):
             load_task(root)
+        (step_tests / "Dockerfile").write_text("FROM python:3.12\nCOPY . /tests/\nENV STEP=implement\n")
+        assert [context for context, _ in verifier_build_contexts(root, config)] == [step_tests]
+        # The task's tests/ is no step's verifier folder, and a multi-step task has no verifier of its own.
+        assert verifier_build_context(root, config) is None
+        # ...and then its recorded build, under that folder's digest.
+        with pytest.raises(HarborTaskError, match="steps/02_implement/tests/Dockerfile .*no built image is recorded"):
+            load_task(root)
+        step_built = "registry.example/t-step-verifier:abc"
+        records = {context_digest(step_tests): {"services": {"verifier": {"image": step_built}}}}
+        (tmp_path / BUILT_IMAGES_FILE).write_text(json.dumps(records))
+        write_image_config(tmp_path, step_built, Env=["PATH=/bin", "STEP=implement"], WorkingDir="/tests")
+        plan, implement = load_task(root).turns
+        assert (plan.verifier_mode, plan.verifier_image) == ("shared", None)
+        assert (implement.verifier_mode, implement.verifier_image) == ("separate", step_built)
+        assert (
+            implement.verifier_image_config is not None and implement.verifier_image_config.env["STEP"] == "implement"
+        )
         # Without a tests/ folder of its own the step starts from the task's tests/: a Dockerfile is required there...
-        shutil.rmtree(root / "steps" / "02_implement" / "tests")
+        shutil.rmtree(step_tests)
         with pytest.raises(HarborTaskError, match="tests/ has no Dockerfile"):
             load_task(root)
         # ...and then its recorded build, which prepare plans for the step (the task itself is shared).
         (root / "tests" / "Dockerfile").write_text("FROM python:3.12\nCOPY . /tests/\n")
-        config = HarborTaskConfig.model_validate(tomllib.loads(toml))
-        assert verifier_build_context(root, config) == root / "tests"
-        assert verifier_build_environment(root, config) is not None and config.is_shared_verifier
+        assert verifier_build_contexts(root, config) == [(root / "tests", config.environment)]
+        assert config.is_shared_verifier
         with pytest.raises(HarborTaskError, match="no built image is recorded"):
             load_task(root)
         built = "registry.example/t-verifier:abc"
-        (tmp_path / BUILT_IMAGES_FILE).write_text(
-            json.dumps({context_digest(root / "tests"): {"services": {"verifier": {"image": built}}}})
-        )
+        records[context_digest(root / "tests")] = {"services": {"verifier": {"image": built}}}
+        (tmp_path / BUILT_IMAGES_FILE).write_text(json.dumps(records))
         write_image_config(tmp_path, built, Env=["PATH=/bin"], WorkingDir="/tests")
         plan, implement = load_task(root).turns
         assert (plan.verifier_mode, plan.verifier_image) == ("shared", None)
         assert (implement.verifier_mode, implement.verifier_image) == ("separate", built)
         assert implement.verifier_image_config is not None and implement.verifier_image_config.workdir == "/tests"
+
+    def test_a_separate_multi_step_task_without_a_task_level_verifier_folder_loads_from_its_steps(self, tmp_path):
+        """The memory team's generated tasks: `[verifier] environment_mode = "separate"` with a `[verifier.environment]`
+        that names no image, every step with its own steps/<name>/tests/Dockerfile and no top-level tests/. Harbor
+        builds each step's verifier from its folder and never builds tests/, so the task loads with one image per step
+        and none of its own, where it was refused for its missing tests/Dockerfile."""
+        root = write_multi_step_task(tmp_path / "t")
+        toml = (root / "task.toml").read_text().replace(
+            "[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'
+        ) + "\n[verifier.environment]\ncpus = 1\n"
+        (root / "task.toml").write_text(toml)
+        shutil.rmtree(root / "tests", ignore_errors=True)
+        records = {}
+        for index, name in enumerate(("01_plan", "02_implement")):
+            context = root / "steps" / name / "tests"
+            (context / "Dockerfile").write_text(f"FROM python:3.12\nCOPY . /tests/\nENV STEP={index}\n")
+            image = f"registry.example/step-verifier:{index}"
+            records[context_digest(context)] = {"services": {"verifier": {"image": image}}}
+            write_image_config(tmp_path, image, Env=["PATH=/bin", f"STEP={index}"], WorkingDir="/tests")
+        (tmp_path / BUILT_IMAGES_FILE).write_text(json.dumps(records))
+        task = load_task(root)
+        assert task.verifier_image is None
+        assert [turn.verifier_mode for turn in task.turns] == ["separate", "separate"]
+        assert [turn.verifier_image for turn in task.turns] == [
+            "registry.example/step-verifier:0",
+            "registry.example/step-verifier:1",
+        ]
+        assert [turn.verifier_image_config.env["STEP"] for turn in task.turns] == ["0", "1"]
 
     def test_a_steps_verifier_compose_file_with_runtime_settings_on_main_is_refused_like_the_tasks(self, tmp_path):
         """Harbor stacks the docker-compose.yaml of the folder a step's separate verifier starts from (the step's own
