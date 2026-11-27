@@ -24,9 +24,11 @@ This module imports only pydantic. It never requires nemo-lens, so it is safe to
 unconditionally from Gym's config machinery.
 """
 
+import re
 from typing import Optional
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # The node_exporter metrics the collector's local `metrics.jsonl` keeps by default: CPU time, load, memory, pressure
@@ -42,6 +44,130 @@ LOCAL_NODE_METRICS = (
     "node_network_(receive|transmit)_bytes_total",
     "node_infiniband_port_data_(received|transmitted)_bytes_total",
 )
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SCRAPE_TARGET_RE = re.compile(r"^[^\s:/]+:\d{1,5}$")
+# Resource attributes the collector sets itself, which `resource_attributes` may not name.
+COLLECTOR_RESOURCE_ATTRIBUTES = frozenset({"service.name", "user", "run_id", "host", "slurm_job_id", "Authorization"})
+
+
+class CollectorConfig(BaseModel, extra="forbid"):
+    """An OpenTelemetry Collector that the process starting Gym's servers runs beside them.
+
+    That is ``gym env start`` and a ``gym eval run`` that starts its own servers; ``gym eval submit`` has its own
+    collector (the ``otel`` block). Setting this block is what turns it on: without it no collector starts, so a
+    machine without ``otelcol-contrib`` runs as before. It needs ``telemetry.enabled``.
+    """
+
+    binary: str = "otelcol-contrib"
+    """The collector executable: a path, or a name looked up on ``PATH``."""
+
+    output_dir: Optional[str] = None
+    """Where ``otel/<run id>/`` (the JSONL, the rendered config and the collector's log) is written.
+    Defaults to ``nemo_gym_log_dir`` when set, else the working directory."""
+
+    remote_export: bool = False
+    """Also export to ``endpoint`` over OTLP/HTTP. Off by default: local JSONL only."""
+
+    endpoint: Optional[str] = None
+    """OTLP/HTTP ingest base URL, for remote export."""
+
+    service_name: Optional[str] = None
+    """The ``service.name`` the backend routes the token by, for remote export."""
+
+    token_env: str = "OTEL_TOKEN"
+    """The environment variable holding the ingest token. Read by the collector; never written to a file."""
+
+    scrape_targets: dict[str, str] = Field(default_factory=dict)
+    """Prometheus ``/metrics`` endpoints to scrape, as ``host:port`` by name, e.g. ``{policy: "localhost:8000"}``
+    for a vLLM server. Each is scraped as job ``<component>/<name>`` with the label ``gym_service: <name>``."""
+
+    component: str = "gym-vllm"
+    """Display identity prefix of the scraped metrics (``service.name.override``)."""
+
+    gpu_metrics_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    """dcgm-exporter on this host, scraped as job ``dcgm`` when set."""
+
+    node_metrics_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    """node_exporter on this host, scraped as job ``node`` when set."""
+
+    local_node_metrics: Optional[list[str]] = Field(default_factory=lambda: list(LOCAL_NODE_METRICS))
+    """node_exporter metrics kept in the local ``metrics.jsonl``, as regular expressions matched against the whole
+    name. ``null`` keeps all of them."""
+
+    local_node_metrics_extra: list[str] = Field(default_factory=list)
+    """More patterns kept on top of ``local_node_metrics``."""
+
+    resource_attributes: dict[str, str] = Field(default_factory=dict)
+    """Added to everything the collector exports, e.g. ``benchmark``, ``cluster`` or ``model``, so a run can be
+    filtered like a submitted one. A producer's own value of the same attribute is kept. ``user``, ``run_id``,
+    ``host`` and, under Slurm, ``slurm_job_id`` are set already."""
+
+    scrape_interval_seconds: int = Field(default=15, ge=1)
+
+    # The ports the collector listens on, on localhost only. Two runs on one host each need their own.
+    otlp_grpc_port: int = Field(default=4317, ge=1, le=65535)
+    otlp_http_port: int = Field(default=4318, ge=1, le=65535)
+    health_port: int = Field(default=4319, ge=1, le=65535)
+
+    health_check_timeout_seconds: float = Field(default=60.0, gt=0)
+    """How long a collector that was started has to answer its health check, as ``otel.health_check_timeout_seconds``
+    for a submitted job. At the run's start, failing it fails the start; at a restart, it counts as one."""
+
+    shutdown_timeout_seconds: float = Field(default=30.0, gt=0)
+    """How long the collector has to flush and exit after the servers have stopped, before it is killed."""
+
+    max_restarts: int = Field(default=5, ge=0)
+    """How many times a collector that exits during the run is started again. After that the run goes on without one."""
+
+    @field_validator("token_env")
+    @classmethod
+    def _validate_token_env(cls, v: str) -> str:
+        if not _ENV_VAR_NAME_RE.match(v):
+            raise ValueError(f"{v!r} is not a valid environment variable name")
+        return v
+
+    @field_validator("scrape_targets")
+    @classmethod
+    def _validate_scrape_targets(cls, v: dict[str, str]) -> dict[str, str]:
+        for name, target in v.items():
+            if not _SCRAPE_TARGET_RE.match(target):
+                raise ValueError(f"scrape target {name!r}: {target!r} is not host:port")
+        return v
+
+    @field_validator("local_node_metrics", "local_node_metrics_extra")
+    @classmethod
+    def _validate_metric_patterns(cls, v: list[str] | None) -> list[str] | None:
+        for pattern in v or ():
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"{pattern!r} is not a valid regular expression: {e}") from e
+        return v
+
+    @field_validator("resource_attributes")
+    @classmethod
+    def _validate_resource_attributes(cls, v: dict[str, str]) -> dict[str, str]:
+        reserved = sorted(COLLECTOR_RESOURCE_ATTRIBUTES & v.keys())
+        if reserved:
+            raise ValueError(f"{', '.join(reserved)} are set by Gym and cannot be given here")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_collector(self) -> "CollectorConfig":
+        ports = (self.otlp_grpc_port, self.otlp_http_port, self.health_port)
+        if len(set(ports)) != len(ports):
+            raise ValueError(f"otlp_grpc_port, otlp_http_port and health_port must differ, got {ports}")
+        if not self.remote_export:
+            return self
+        # Blank counts as missing: an unset `${oc.env:VAR,""}` resolves to "".
+        missing = [field for field in ("endpoint", "service_name") if not (getattr(self, field) or "").strip()]
+        if missing:
+            raise ValueError(f"remote_export needs {' and '.join(missing)}; set them, or remote_export: false")
+        parts = urlsplit(self.endpoint.strip())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(f"endpoint must be an http:// or https:// URL with a host, got {self.endpoint!r}")
+        return self
 
 
 class MemoryProfilingConfig(BaseModel):
@@ -145,3 +271,7 @@ class TelemetryConfig(BaseModel, extra="allow"):
     run_id: Optional[str] = None
     """Correlates every process of one ``gym env start`` / ``gym env test`` invocation.
     Generated in the supervisor and inherited by the servers when unset."""
+
+    collector: Optional[CollectorConfig] = None
+    """Start an OpenTelemetry Collector beside the servers (see :class:`CollectorConfig`). Unless an
+    OTLP endpoint is set, the process that starts it points the servers at it."""

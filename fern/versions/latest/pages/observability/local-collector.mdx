@@ -1,0 +1,132 @@
+---
+title: "Collector for Local Runs"
+description: "gym env start can run an OpenTelemetry Collector beside its servers."
+position: 10
+---
+
+`gym env start`, and a `gym eval run` that starts its own servers, can run an OpenTelemetry Collector beside
+the servers. It receives the servers' OTLP, scrapes the Prometheus endpoints you name (a vLLM server,
+dcgm-exporter, node_exporter), stamps the run's identity on everything, and writes local JSONL files. It can
+also export to an OTLP/HTTP backend. It is the same collector configuration that
+[`gym eval submit`](/main/observability/eval-submit-collector) runs beside a Slurm job, started by Gym instead
+of by the job script.
+
+It is off unless the config has a `telemetry.collector` block, so a machine without `otelcol-contrib` runs as
+before. It also needs telemetry on (`telemetry.enabled`), because without it Gym's servers export nothing.
+
+## Configure
+
+```yaml
+telemetry:
+  enabled: true
+  collector:
+    binary: otelcol-contrib            # a path, or a command on PATH
+    output_dir: null                   # default: nemo_gym_log_dir, else the working directory
+    scrape_targets:                    # Prometheus /metrics endpoints, as host:port by name
+      policy: localhost:8000
+    gpu_metrics_port: null             # dcgm-exporter on this host, e.g. 9400
+    node_metrics_port: null            # node_exporter on this host, e.g. 9100
+    resource_attributes:               # stamped on everything, to filter runs by
+      benchmark: aime
+      model: my-model
+    remote_export: false               # true also exports to `endpoint`
+    endpoint: null                     # OTLP/HTTP ingest base URL, for remote export
+    service_name: null                 # the backend's routing identity, for remote export
+    token_env: OTEL_TOKEN              # the variable holding the ingest token
+    component: gym-vllm                # display name prefix of the scraped metrics
+    local_node_metrics_extra: []       # more node_exporter metrics to keep in metrics.jsonl
+    scrape_interval_seconds: 15
+    otlp_grpc_port: 4317
+    otlp_http_port: 4318
+    health_port: 4319
+    health_check_timeout_seconds: 60
+    shutdown_timeout_seconds: 30
+    max_restarts: 5
+```
+
+`local_node_metrics`, not shown, replaces the list of node_exporter metrics kept in `metrics.jsonl`; `null`
+keeps all of them.
+
+### Where the servers export
+
+Once the collector is healthy, the process that started it points its own telemetry and its servers' at it,
+unless an OTLP endpoint is already set by `telemetry.otlp_endpoint` or `OTEL_EXPORTER_OTLP_ENDPOINT`:
+
+- With no protocol set, it sets `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` and
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` (`otlp_http_port`).
+- With `telemetry.otlp_protocol: grpc` (or the variable, in any case), it uses the gRPC port, `otlp_grpc_port`.
+- A signal whose own protocol (`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`, `..._METRICS_...`, `..._LOGS_...`) needs the
+  other port gets its own endpoint, for example `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` on the gRPC port.
+- An endpoint that is already set, general or for one signal, is kept. Gym warns, naming the signals, when it is
+  not the collector's port for the signal's protocol; with no protocol set that is gRPC, the OpenTelemetry SDK's
+  default.
+- If `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or `GRPC_PROXY` is set, `127.0.0.1` and `localhost` are added to
+  `NO_PROXY` (and `no_proxy`), so exports to the collector go to it directly. Its health check never uses a proxy.
+
+This is for the `otlp` exporter. With `telemetry.exporter: console` (or `NEMO_GYM_OTEL_EXPORTER=console`), Gym's
+own telemetry goes to stdout; Gym warns and sets no endpoint, and the collector only scrapes. Commands that
+start no collector are not changed.
+
+Remote export needs `endpoint`, an `http://` or `https://` URL, and `service_name`; blank values count as unset. If the variable named by `token_env` is missing or empty,
+Gym warns and keeps collection local. The collector reads the token from its environment; it is not written
+to the rendered configuration.
+
+## What runs
+
+1. Before the supervisor's own telemetry starts and before any server is spawned, Gym checks that the
+   collector's three ports are free on `127.0.0.1`, starts the collector in its own session, and waits for its
+   health check. If the binary is missing, a port is taken, or the collector exits or does not answer within
+   `health_check_timeout_seconds`, the start fails with the collector's log.
+2. If the collector exits during the run, Gym starts it again after a delay that grows from 1 to 30 seconds,
+   up to `max_restarts` times. A restart that cannot be started, or that does not answer its health check
+   within `health_check_timeout_seconds` (it is then stopped), counts as one. After that the run goes on without a
+   collector. Telemetry exported while no collector runs is lost, and the log says when that happens. A
+   collector's first scrape comes a few seconds after it starts.
+3. On shutdown, after every server has exited and flushed its final values, Gym sends the collector SIGTERM,
+   waits up to `shutdown_timeout_seconds` for it to flush, then kills it. A SIGTERM to `gym eval run` while it
+   is still starting its servers shuts down what it started, the collector included, and exits 143.
+
+A dry run starts no collector. A `gym eval run --no-serve` starts no servers and so no collector: its driver
+exports wherever its telemetry settings say, for example to the collector of the `gym env start` it talks to.
+
+The collector listens on `127.0.0.1` only, so nothing outside the host can send it data. Two runs on one host
+each need their own `otlp_grpc_port`, `otlp_http_port` and `health_port`.
+
+## Files
+
+Everything one Gym process collected is in `<output_dir>/otel/<run id>/<host>-<pid>-<random>/`, a directory it
+creates and no other process uses. Processes that share a run id, such as one Slurm job's on several nodes or
+containers with the same host name, each get their own. A run id containing `/` or that is `.` or `..` is
+percent-encoded into one directory name; the telemetry carries it unchanged.
+
+| File | Contents |
+| --- | --- |
+| `metrics.jsonl`, `traces.jsonl`, `logs.jsonl` | what the collector received and scraped, one OTLP batch per line |
+| `metrics.jsonl.truncated` (and the others) | only if a collector was killed while writing: its unfinished last record |
+| `collector.yaml` | the rendered collector configuration |
+| `collector.log` | the collector's output, across restarts |
+
+Each collector process writes its JSONL into a directory of its own, inside a private `gym-otel-*` directory
+under the system temporary directory, because the collector's file exporter truncates its file when it starts.
+Each time a collector exits, Gym appends its files to the run's, oldest first, and removes them, so a restarted
+collector's records follow the previous one's. Every line of a run's `.jsonl` file is a whole record: if a
+collector was killed partway through one, that fragment goes to the `.truncated` file instead, with a warning.
+If an append fails, for example because the disk is full, the run's files are returned to their size before it,
+and that collector's files and later ones stay in the temporary directory, to be appended at the next exit or at
+shutdown; the warning names them. If the process running Gym is killed with SIGKILL, it cannot append at
+all: the collector keeps running and its last files stay in the temporary directory.
+
+The local `metrics.jsonl` keeps the same subset of node_exporter metrics as a submitted job's; see
+[The local metrics file](/main/observability/eval-submit-collector#the-local-metrics-file).
+
+## Resource attributes
+
+Every record carries `user`, `run_id` (the run id every Gym server reports), `host`, `slurm_job_id` when the
+run is inside a Slurm job, `service.name` when `service_name` is set, and your `resource_attributes`. Those
+cannot name the ones Gym sets, and are only added: a record that already has the attribute keeps its value.
+Each producer keeps its own name in `service.name.override`, as in a submitted job.
+
+## Not covered
+
+- NeMo RL starts Gym's servers itself and does not run this collector.
+- Scrape targets are not discovered: a vLLM server Gym starts is scraped only if you list it.

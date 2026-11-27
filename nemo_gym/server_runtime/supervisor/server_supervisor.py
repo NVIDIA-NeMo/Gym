@@ -63,6 +63,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
+from nemo_gym.server_runtime.supervisor.collector import LocalCollector, start_local_collector
 from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.server_runtime.supervisor.server_venv import (
     _is_complete_venv,
@@ -700,6 +701,7 @@ class ServerSupervisor:  # pragma: no cover
     _memory_profiling_config: MemoryProfilingConfig
     _telemetry_metrics_enabled: bool
     _h2_ping_sidecar: H2PingSidecarManager | None
+    _collector: LocalCollector | None = None
     # Created by `_start`, so its clock starts with the startup it measures.
     _startup: Optional[SupervisorStartup] = None
     _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
@@ -718,6 +720,7 @@ class ServerSupervisor:  # pragma: no cover
             self._output_tails = dict()
             self._head_server = None
             self._h2_ping_sidecar = None
+            self._collector = None
             # Until every server is ready, a server that exits is a failed start (see poll()).
             self._servers_ready = False
             try:
@@ -783,7 +786,12 @@ class ServerSupervisor:  # pragma: no cover
         # the only channel these settings have — the servers share no memory with this one.
         # Also mints the run id they all report, so a backend can group one run's processes.
         telemetry_config = telemetry_config_from_global_config(global_config_dict)
-        configure_telemetry_env(telemetry_config)
+        run_id = configure_telemetry_env(telemetry_config)
+        # Before this process's telemetry and any server start exporting to it. A dry run exports nothing.
+        if not global_config_dict[DRY_RUN_KEY_NAME]:
+            self._collector = start_local_collector(telemetry_config, run_id, global_config_dict)
+            if self._collector is not None:
+                self._startup.mark("start_collector")
         init_telemetry(server_name="supervisor", server_type="supervisor")
         self._memory_profiler = None
         self._memory_profiling_config = memory_profiling_config_from_env(telemetry_config.memory_profiling)
@@ -1271,6 +1279,13 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             print("Stopping h2-ping-sidecar...")
             h2_ping_sidecar.stop()
             self._h2_ping_sidecar = None
+
+        # After every server has exited, so what each one flushed on its way out reaches the collector's files.
+        collector = getattr(self, "_collector", None)
+        if collector is not None:
+            print("Stopping the OpenTelemetry Collector...")
+            collector.stop()
+            self._collector = None
 
         # None before the head server starts and after an earlier shutdown.
         if self._head_server is not None:

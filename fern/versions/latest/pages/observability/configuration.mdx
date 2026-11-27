@@ -41,6 +41,7 @@ telemetry:
 | `event_loop_task_count` | `false` | Also report the number of asyncio tasks on each event loop. See below. |
 | `logs_enabled` | `false` | Bridge Python logging to OpenTelemetry logs. |
 | `run_id` | generated | Correlates every process of one run. |
+| `collector` | unset | Start an OpenTelemetry Collector beside the servers, and export to it unless an endpoint is set. See [Collector for Local Runs](/main/observability/local-collector). |
 
 ### Memory Profiling
 
@@ -146,6 +147,11 @@ OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 The standard `OTEL_EXPORTER_OTLP_*` variables are read by the OpenTelemetry SDK, so any
 OTLP-compatible backend or an OpenTelemetry Collector works. gRPC is the default protocol.
 Set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` to use HTTP instead.
+
+With `telemetry.collector` set and no endpoint given, by `telemetry.otlp_endpoint` or
+`OTEL_EXPORTER_OTLP_ENDPOINT`, the process that starts the collector points itself and its servers at it, over
+HTTP (`http://127.0.0.1:4318`) unless the protocol is gRPC. See
+[Collector for Local Runs](/main/observability/local-collector#where-the-servers-export).
 
 ## How Settings Reach Each Server
 
