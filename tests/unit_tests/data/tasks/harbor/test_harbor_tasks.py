@@ -2663,6 +2663,107 @@ def test_declared_sidecar_inputs_come_from_dataset_toml_and_are_plain_file_names
         load_task(folder / "hello")
 
 
+def test_reward_key_comes_from_dataset_defaults_and_a_task_override_wins(tmp_path):
+    """#5641: `[gym.defaults] reward_key` names the reward.json key that is the score of every task, a
+    `[gym.tasks."<id>".verifier] reward_key` replaces it for one task, and setting it changes the task's digest."""
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    write_task(folder / "b")
+    plain = load_task(folder / "a")
+    assert plain.config.verifier.reward_key is None
+    (folder / "dataset.toml").write_text(
+        '[gym.defaults]\nreward_key = "overall"\n[gym.tasks."b".verifier]\nreward_key = "score"\n'
+    )
+    a, b = load_task(folder / "a"), load_task(folder / "b")
+    assert (a.config.verifier.reward_key, b.config.verifier.reward_key) == ("overall", "score")
+    assert a.digest != plain.digest
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = ""\n')
+    with pytest.raises(HarborTaskError, match="reward_key"):
+        load_task(folder / "a")
+
+
+def test_reward_key_in_a_task_toml_is_ignored_as_harbor_ignores_it(tmp_path, caplog):
+    """#5641: the score key comes from dataset.toml alone, so a task folder scores the same under Gym and Harbor."""
+    folder = tmp_path / "ds"
+    write_task(folder / "a", toml=HELLO_TOML.replace("[verifier]\n", '[verifier]\nreward_key = "overall"\n', 1))
+    with caplog.at_level(logging.WARNING):
+        task = load_task(folder / "a")
+    assert task.config.verifier.reward_key is None
+    assert "ignoring unknown key `verifier.reward_key`" in caplog.text
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "score"\n')
+    assert load_task(folder / "a").config.verifier.reward_key == "score"
+
+
+@pytest.mark.parametrize("value", ['""', "1"])
+def test_a_task_local_reward_key_does_not_drop_the_task_from_preparation(tmp_path, caplog, value):
+    """The base-image scan and the build plan read task.toml too, and validated it with a task-local `reward_key`
+    still in place: a value the field refuses (empty, not a string) left the task out of both, so discovery then
+    refused it for the missing records. They ignore the key as the loader does."""
+    from nemo_gym.data.tasks.harbor.build_plan import plan_builds
+    from nemo_gym.data.tasks.harbor.image_configs import dockerfile_base_images
+
+    toml = HELLO_TOML.replace("[verifier]\n", f"[verifier]\nreward_key = {value}\n", 1)
+    workdir = write_task(tmp_path / "workdir" / "a", dockerfile="FROM ubuntu:24.04\nWORKDIR src\n", toml=toml)
+    copy = write_task(tmp_path / "copy" / "a", dockerfile="FROM ubuntu:24.04\nCOPY . /app\n", toml=toml)
+    plain = write_task(tmp_path / "plain" / "a", toml=toml)
+    for dataset_toml in ("", '[gym.defaults]\nreward_key = "overall"\n'):
+        for task in (workdir, copy, plain):
+            (task.parent / "dataset.toml").write_text(dataset_toml)
+        assert dockerfile_base_images(workdir.parent) == {"ubuntu:24.04": ["a"]}
+        assert [entry.tasks for entry in plan_builds(copy.parent)] == [("a",)]
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert load_task(plain).config.verifier.reward_key == ("overall" if dataset_toml else None)
+        assert "ignoring unknown key `verifier.reward_key`" in caplog.text
+
+
+def test_a_python_verifier_takes_reward_key_reward_alone(tmp_path):
+    """A Python verifier's runner writes a returned number as `reward`, so another reward_key is refused at load for a
+    task graded by the dataset's verifier.py or by its own tests/verifier.py, with the file named. `reward` is the
+    per-task setting that keeps such a task in a dataset whose test.sh tasks score another key."""
+    folder = tmp_path / "ds"
+    write_task(folder / "shared")
+    shutil.rmtree(folder / "shared" / "tests")
+    (folder / "verifier.py").write_text("def verify(workspace):\n    return 1.0\n")
+    write_task(folder / "local")
+    (folder / "local" / "tests" / "test.sh").unlink()
+    (folder / "local" / "tests" / "verifier.py").write_text("def verify(workspace):\n    return 1.0\n")
+    write_task(folder / "script")
+    assert load_task(folder / "shared").python_verifier == folder / "verifier.py"
+    assert load_task(folder / "local").python_verifier == folder / "local" / "tests" / "verifier.py"
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+    with pytest.raises(HarborTaskError, match="reward_key 'overall' applies to test.sh verifiers, and the dataset's"):
+        load_task(folder / "shared")
+    with pytest.raises(
+        HarborTaskError, match=r"and tests/verifier\.py grades this task .*\[gym\.tasks\.\"local\"\.verifier\]"
+    ):
+        load_task(folder / "local")
+    assert load_task(folder / "script").config.verifier.reward_key == "overall"
+    overrides = (
+        '[gym.tasks."shared".verifier]\nreward_key = "reward"\n[gym.tasks."local".verifier]\nreward_key = "reward"\n'
+    )
+    (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n' + overrides)
+    assert load_task(folder / "shared").config.verifier.reward_key == "reward"
+    assert load_task(folder / "local").config.verifier.reward_key == "reward"
+    assert load_task(folder / "script").config.verifier.reward_key == "overall"
+
+
+def test_an_unset_reward_key_leaves_the_digest_of_a_shaping_dataset_unchanged(tmp_path):
+    """Adding `reward_key` to `[gym.defaults]` must not move the digest of a dataset that does not set it. The value
+    is what main computed for this dataset before the key existed, pinned rather than recomputed here, so a change to
+    the digest's inputs fails this test instead of moving its expectation along."""
+    from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
+    from nemo_gym.data.tasks.harbor.task import task_digest
+
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+    assert (
+        task_digest("folder", read_dataset_config(folder), "a")
+        == "6895b51f6c7fbe56884e57c8d71f15168af9f7341fbd94ad56118c1ae6c64713"
+    )
+
+
 def _with_steps(root: Path, names: list[str]) -> Path:
     """``root`` with one ``steps/<name>/`` folder per name (an instruction and a stub test.sh), as the loader reads."""
     for name in names:

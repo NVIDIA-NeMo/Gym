@@ -314,6 +314,22 @@ def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
 
 
+def read_task_toml(path: Path) -> tuple[dict[str, Any], bool]:
+    """The ``task.toml`` at ``path`` parsed, without a ``[verifier].reward_key``, and whether it held one.
+
+    ``reward_key`` changes the score and Harbor ignores it, so it comes from ``dataset.toml`` alone: in the task's
+    own file it stays an unknown key, and the folder scores the same under Gym and under Harbor. Every reader that
+    validates a ``task.toml`` (the loader, the base-image scan and the build plan) drops it here first, so a value
+    the field would refuse never leaves the task out of one of them.
+    """
+    data = tomllib.loads(Path(path).read_text())
+    verifier_table = data.get("verifier")
+    if not isinstance(verifier_table, dict) or "reward_key" not in verifier_table:
+        return data, False
+    data["verifier"] = {key: value for key, value in verifier_table.items() if key != "reward_key"}
+    return data, True
+
+
 def built_service_images(task_folder: Path, root: Path | None = None) -> dict[str, str]:
     """The images prepare built for the task's ``environment/`` context, by Compose service name (``{}`` when none
     are recorded): ``main`` for the task's own Dockerfile, each built sidecar under its service name.
@@ -411,9 +427,11 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     if not is_task_folder(path):
         raise HarborTaskError(f"{path} has no {TASK_FILE}")
     try:
-        data = tomllib.loads((path / TASK_FILE).read_text())
+        data, had_reward_key = read_task_toml(path / TASK_FILE)
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
+        if had_reward_key:
+            logger.warning("%s: ignoring unknown key `verifier.reward_key` (set it in dataset.toml)", path / TASK_FILE)
         legacy_mode = data.get("multi_step_reward_mode")
         if legacy_mode is not None and legacy_mode != LEGACY_AGGREGATE_REWARD_MODE:
             # Harbor 0.22.0 drops the key whatever it says and rolls the steps up with `mean` (or the task's own
@@ -483,6 +501,17 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
     python_verifier = python_verifier_for(path, root) if not turns else None
+    # A Python verifier's runner writes a returned number as `reward`, which is also the score key of a returned dict
+    # that has one, so `reward` is the one reward_key it can honor; a mixed dataset sets it for such a task.
+    if python_verifier is not None and config.verifier.reward_key not in (None, "reward"):
+        where = (
+            f"tests/{VERIFIER_FILE}" if python_verifier.parent == path / "tests" else f"the dataset's {VERIFIER_FILE}"
+        )
+        raise HarborTaskError(
+            f"{path.name}: reward_key {config.verifier.reward_key!r} applies to test.sh verifiers, and {where} grades "
+            f'this task (its runner writes a returned number as `reward`). Set reward_key = "reward" for it in '
+            f'[gym.tasks."{path.name}".verifier]; verify() must then return a number or a dict with a `reward` key'
+        )
     if not turns and python_verifier is None and not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder (and the dataset has no {VERIFIER_FILE} to grade it with)")
     try:
@@ -772,9 +801,10 @@ def task_digest(
     if not dataset.shapes_tasks and shared_verifier_digest is None:
         return folder_digest
     # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
-    # shaping table with a repeat count hashes the same as one without.
+    # shaping table with a repeat count hashes the same as one without. Defaults left unset (None) are left out
+    # too, so a dataset that sets none of them keeps the digests it had before those keys existed.
     applied: dict[str, Any] = {
-        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
+        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}, exclude_none=True),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
     if shared_verifier_digest is not None:

@@ -1114,6 +1114,38 @@ async def test_a_step_verifier_user_with_a_group_follows_the_provider_at_seed(tm
         assert runs == [] and response.result is None
 
 
+async def test_every_turn_reads_the_dataset_reward_key(tmp_path, monkeypatch):
+    """#5641: a step's verification reads the task's `reward_key` too; without it each turn scored the sum (1.5)."""
+    (tmp_path / "datasets" / "ds").mkdir(parents=True)
+    (tmp_path / "datasets" / "ds" / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
+    reward_json = json.dumps({"accuracy": 1.0, "overall": 0.5})
+    rewards_per_turn(server, sandbox, [reward_json, reward_json], name="reward.json")
+
+    result = (await server.run_request(request_for(task))).result
+
+    assert [(turn.reward, turn.reward_components) for turn in result.turns] == [(0.5, None), (0.5, None)]
+    assert result.reward == 0.5
+
+
+async def test_a_steps_scalar_min_reward_gates_the_dataset_reward_key(tmp_path, monkeypatch):
+    """#5641: under `reward_key` the file has no `reward` key, so a scalar `min_reward` that kept gating `reward` would
+    read negative infinity and stop every episode after its first turn."""
+
+    async def turns_run(root: Path, first_turn: dict[str, float]) -> list[str]:
+        (root / "datasets" / "ds").mkdir(parents=True)
+        (root / "datasets" / "ds" / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+        steps = '[[steps]]\nname = "plan"\nmin_reward = 0.5\n[[steps]]\nname = "build"\n'
+        server, task, sandbox, _ = multi_turn_server(root, monkeypatch, steps, {"plan": "P", "build": "B"})
+        rewards_per_turn(server, sandbox, [json.dumps(first_turn), json.dumps(first_turn)], name="reward.json")
+        result = (await server.run_request(request_for(task))).result
+        return [turn.name for turn in result.turns]
+
+    assert await turns_run(tmp_path / "pass", {"accuracy": 0.0, "overall": 0.9}) == ["plan", "build"]
+    assert await turns_run(tmp_path / "fail", {"accuracy": 1.0, "overall": 0.1}) == ["plan"]
+
+
 def solution_uploads(sandbox: FakeSandbox) -> list[dict]:
     return [c for c in sandbox.execs if "tar -xzf" in c["command"] and "-C /solution" in c["command"]]
 
