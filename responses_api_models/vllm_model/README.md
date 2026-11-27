@@ -143,6 +143,16 @@ Enable this at the beginning of a fresh capture lineage after checking that
 the model's Chat renderer treats these forms equivalently. Existing capture
 rows retain the fingerprints recorded when they were written.
 
+### Matching Hermes parallel tool IDs in legacy capture
+
+Set `match_hermes_parallel_tool_ids: true` alongside `match_chat_tool_reasoning: true` on a
+fresh legacy Chat capture lineage whose renderer omits tool-call IDs. This matches
+Hermes's exact deterministic aliases for a reasoning-bearing assistant turn
+with a complete parallel batch of `chatcmpl-tool-…` IDs. The echoed batch must bind every result to its own call
+in order. Tool names, argument order and values, and visible text still have to
+match. Model requests, replies, and terminal attribution retain their original IDs.
+Qualify the renderer and a parallel-tool replay before enabling this setting.
+
 ## Example run config
 
 VLLMModel connects NeMo Gym to a vLLM server that you start and manage yourself. Spin up a vLLM server in a separate terminal (see the [vLLM docs](https://docs.vllm.ai/)), then point NeMo Gym at it.

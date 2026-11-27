@@ -725,6 +725,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "whose renderer treats the two forms equivalently. Model requests and replies keep their wire format."
         ),
     )
+    match_hermes_parallel_tool_ids: bool = Field(
+        default=False,
+        description=(
+            "Match Hermes's deterministic vLLM tool ID aliases in legacy Chat capture. Enable only on an "
+            "ID-insensitive renderer after qualifying the tool-result bindings."
+        ),
+    )
     # Keep reconstructed assistant history byte-for-byte in ``content`` for
     # models whose validated direct-vLLM contract includes <think> tags.
     # Response parsing remains controlled independently by
@@ -926,6 +933,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "preserve_thinking_blocks requires use_completions_api=false: /v1/completions has no assistant "
                 "messages to carry the thinking blocks on"
             )
+        if self.match_hermes_parallel_tool_ids and not self.match_chat_tool_reasoning:
+            raise ValueError("match_hermes_parallel_tool_ids requires match_chat_tool_reasoning=true")
         if self.match_chat_tool_reasoning and (
             self.use_completions_api
             or self.is_responses_native
@@ -1081,6 +1090,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             self.config.match_chat_tool_reasoning
             and isinstance(body, NeMoGymChatCompletionCreateParamsNonStreaming)
             and not (body.metadata or {}).get("extra_body")
+        )
+        context.match_hermes_parallel_tool_ids = (
+            self.config.match_hermes_parallel_tool_ids
+            and context.match_chat_tool_reasoning
+            and context.parent_resolution_mode == "fingerprint"
         )
         if context.parent_resolution_mode != "source_history":
             return

@@ -8413,7 +8413,13 @@ class TestPrefixSupply:
     """
 
     @staticmethod
-    def _server(monkeypatch: MonkeyPatch, *, enabled: bool, match_chat_tool_reasoning: bool = False) -> VLLMModel:
+    def _server(
+        monkeypatch: MonkeyPatch,
+        *,
+        enabled: bool,
+        match_chat_tool_reasoning: bool = False,
+        match_hermes_parallel_tool_ids: bool = False,
+    ) -> VLLMModel:
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -8425,6 +8431,7 @@ class TestPrefixSupply:
             return_token_id_information=enabled,
             uses_reasoning_parser=match_chat_tool_reasoning,
             match_chat_tool_reasoning=match_chat_tool_reasoning,
+            match_hermes_parallel_tool_ids=match_hermes_parallel_tool_ids,
             supply_prefix_token_ids=enabled,
         )
         get_global_config_dict_mock = MagicMock(return_value={})
@@ -8480,6 +8487,29 @@ class TestPrefixSupply:
         try:
             server._validate_capture_request(body)
             assert context.match_chat_tool_reasoning is expected
+        finally:
+            reset_token_sink(token)
+
+    @mark.parametrize(
+        ("mode", "override", "expected"),
+        [("fingerprint", False, True), ("fingerprint", True, False), ("source_history", False, False)],
+    )
+    def test_hermes_parallel_tool_ids_are_opt_in_for_legacy_chat(
+        self, monkeypatch, tmp_path, mode, override, expected
+    ):
+        server = self._server(
+            monkeypatch, enabled=False, match_chat_tool_reasoning=True, match_hermes_parallel_tool_ids=True
+        )
+        context = self._armed("hermes-ids", tmp_path)
+        context.parent_resolution_mode = mode
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "Use tools"}],
+            metadata={"extra_body": '{"messages": []}'} if override else None,
+        )
+        token = set_token_sink(context)
+        try:
+            server._validate_capture_request(body)
+            assert context.match_hermes_parallel_tool_ids is expected
         finally:
             reset_token_sink(token)
 

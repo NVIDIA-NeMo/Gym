@@ -314,13 +314,21 @@ class LineageNode:
 
 
 def stamp_continuation(
-    entry: TokenEntry, request_items: list[dict], *, match_chat_tool_reasoning: bool = False
+    entry: TokenEntry,
+    request_items: list[dict],
+    *,
+    match_chat_tool_reasoning: bool = False,
+    match_hermes_parallel_tool_ids: bool = False,
 ) -> TokenEntry:
     """Add compact lookup metadata before the token entry is committed."""
     output_items = list(entry.output_items)
     if match_chat_tool_reasoning:
-        request_items = capture_chat_tool_turns(request_items)
-        output_items = capture_chat_tool_turns(output_items)
+        request_items = capture_chat_tool_turns(
+            request_items, match_hermes_parallel_tool_ids=match_hermes_parallel_tool_ids
+        )
+        output_items = capture_chat_tool_turns(
+            output_items, match_hermes_parallel_tool_ids=match_hermes_parallel_tool_ids, served_reply=True
+        )
     entry.continuation_fingerprint = assistant_fingerprint(list(request_items) + output_items)
     entry.continuation_context_len = len(request_items)
     entry.continuation_context_digest = conversation_digest(request_items)
