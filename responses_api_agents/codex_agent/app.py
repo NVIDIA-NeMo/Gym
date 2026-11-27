@@ -139,6 +139,14 @@ _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
 )
+# Codex 0.168.0 to 0.172.0 print this notice for the `multi_agent` key of the [features] table, which the default
+# `features` setting writes. The notice states that the key keeps its effect, so it is a warning. The comparison
+# is with the whole text: a notice with another text, such as one for an ignored key, stays an error.
+_MULTI_AGENT_DEPRECATION = (
+    "`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` "
+    "disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` "
+    "is enabled."
+)
 _ENDPOINT_ERROR_STATUSES = (429, 500, 502, 503, 504)
 # Transport and service failures of the model endpoint in Codex's explicit error events, matched
 # lowercased. A failed run whose terminal failure names one of these is retried instead of graded
@@ -1285,6 +1293,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             event.get("type") for _, event in events if event.get("type") in ("turn.completed", "turn.failed")
         ]
         parse_events = []
+        deprecation_warnings = []
         startup_warnings = []
         compaction_warnings = []
         started = False
@@ -1308,6 +1317,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             if event.get("type") == "item.completed" and item.get("type") == "error":
                 if message == _COMPACTION_ADVISORY:
                     compaction_warnings.append(message)
+                    continue
+                if not started and message == _MULTI_AGENT_DEPRECATION:
+                    deprecation_warnings.append(message)
                     continue
                 if (
                     not started
@@ -1342,7 +1354,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         terminal_error = None if output_limited else _terminal_model_error(events, cleanup, failure, errors)
         reported_model_error = terminal_error is not None
         if not ((successful_exit and not errors) or gradable_limit or reported_model_error):
-            errors = [*startup_warnings, *compaction_warnings, *errors]
+            errors = [*deprecation_warnings, *startup_warnings, *compaction_warnings, *errors]
+            deprecation_warnings = []
             startup_warnings = []
             compaction_warnings = []
         if errors and not output_limited:
@@ -1412,6 +1425,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable"),
+            *(ObservationGap(code="config_key_deprecated", detail=warning) for warning in deprecation_warnings),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
