@@ -307,3 +307,39 @@ def test_changed_renderer_does_not_confirm_prior_failure(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="Unconfirmed reference failure"):
             lazy_inputs.materialize_one(bad)
     assert not list((tmp_path / "cache").glob("*.rejected.json"))
+
+
+@pytest.mark.parametrize("execution_budget", [60, 61])
+def test_execution_timeout_replaces_on_first_observation(tmp_path, monkeypatch, execution_budget):
+    bad, _ = setup_rows(tmp_path)
+    bad["deepcad_lazy"]["config"]["reference_execution_timeout_s"] = execution_budget
+    calls = []
+
+    def run(argv, **kwargs):
+        record = json.loads(Path(argv[-2]).read_text())["record"]
+        calls.append(record["id"])
+        if record["id"] == "bad":
+            Path(argv[-1]).with_suffix(".rejected.json").write_text(
+                json.dumps(
+                    {
+                        "reason": "Reference program exceeded execution budget",
+                        "confirmation_key": "reference_execution_timeout",
+                    }
+                )
+            )
+            return SimpleNamespace(returncode=0)
+        return worker(argv, **kwargs)
+
+    monkeypatch.setattr(lazy_inputs.subprocess, "run", run)
+    rows = [{**deepcopy(bad), "_rowidx": i} for i in range(16)]
+    lazy_inputs.materialize_examples(rows)
+    again = lazy_inputs.materialize_one(bad)
+    assert calls == ["bad", "good"]
+    assert all(row["responses_create_params"] == again["responses_create_params"] for row in rows)
+    assert [row["_rowidx"] for row in rows] == list(range(16))
+    assert again["verifier_metadata"]["replaced_reference_asset_ids"] == ["bad"]
+    assert again["verifier_metadata"]["reference_replacement_reasons"][0]["type"] == "ReferenceRenderTimeout"
+    marker = next((tmp_path / "cache").glob("*.timeout-180.json"))
+    assert json.loads(marker.read_text())["status"] == "render_timeout_unverified"
+    assert not list((tmp_path / "cache").glob("*.rejected.json"))
+    assert not list((tmp_path / "cache").glob("*.failure.json"))

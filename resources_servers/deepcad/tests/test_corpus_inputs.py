@@ -119,3 +119,37 @@ def test_renderer_preserves_process_failure_confirmation_key(tmp_path):
         "reason": "process killed",
         "confirmation_key": "reference_signal:137",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "font_error",
+    [
+        "Fontconfig error: Cannot load default config file",
+        "Font_FontMgr, error: unable to find any font!",
+    ],
+)
+async def test_missing_font_infrastructure_does_not_reject_reference(reference, font_error):
+    root, record, config = reference
+    sandbox = AsyncMock()
+    trace = font_error + '\nTraceback:\n  File "model.py", line 73\nAttributeError: FontName'
+    sandbox.exec.side_effect = [SandboxExecResult("", "", 1), SandboxExecResult(trace, "", 0)]
+    context = MagicMock(__aenter__=AsyncMock(return_value=sandbox), __aexit__=AsyncMock(return_value=False))
+    with patch.object(corpus_inputs, "AsyncSandbox", return_value=context):
+        with pytest.raises(RuntimeError, match="font infrastructure unavailable"):
+            await corpus_inputs.build_reference(root, record, config, root)
+    assert not (root / record["reference_step"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_model_error_with_fonts_available_still_rejects_reference(reference):
+    root, record, config = reference
+    sandbox = AsyncMock()
+    trace = (
+        'Traceback:\n  File "model.py", line 73\nTypeError: Workplane.text() got an unexpected keyword argument cut'
+    )
+    sandbox.exec.side_effect = [SandboxExecResult("", "", 1), SandboxExecResult(trace, "", 0)]
+    context = MagicMock(__aenter__=AsyncMock(return_value=sandbox), __aexit__=AsyncMock(return_value=False))
+    with patch.object(corpus_inputs, "AsyncSandbox", return_value=context):
+        with pytest.raises(corpus_inputs.ReferenceRejected, match="unexpected keyword argument"):
+            await corpus_inputs.build_reference(root, record, config, root)

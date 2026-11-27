@@ -51,6 +51,13 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Rollout batch** | Multiple rollouts generated together (across tasks for throughput, or grouped on one task for methods like GRPO). |
 | **Rollout collection** | Running inference, tools, and verification at scale to produce scored rollouts. Start with the [Quickstart](/get-started/quickstart) or [Evaluate](/evaluation). |
 
+### CAD input preparation
+
+| Term | Definition | Not |
+| --- | --- | --- |
+| **Materialized CAD task** | An ordinary task row with prompt images already rendered and its verifier STEP included in a checked reference archive; it needs no input renderer during rollout. | rendered rollout, demonstration |
+| **Lazy render overrides** | Deployment settings applied to copies of selected CAD descriptors before input rendering, configured through `lazy_render_overrides`; the original descriptors and sampler settings stay unchanged. | sampler overrides |
+
 ### Environment
 
 | Term | Definition |

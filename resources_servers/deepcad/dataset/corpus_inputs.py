@@ -132,6 +132,11 @@ async def build_reference(root: Path, record: dict, config: dict, directory: Pat
             detail = (
                 f"Reference program failed for {record['asset_id']} (return_code={result.return_code}): {log.stdout}"
             )
+            if (
+                "Fontconfig error: Cannot load default config file" in detail
+                or "Font_FontMgr, error: unable to find any font!" in detail
+            ):
+                raise RuntimeError("Reference sandbox font infrastructure unavailable: " + detail)
             if result.return_code in (-signal.SIGSEGV, 128 + signal.SIGSEGV, -signal.SIGKILL, 128 + signal.SIGKILL):
                 raise ReferenceRejected(
                     "Reference sandbox crash or kill (cause unverified): " + detail,

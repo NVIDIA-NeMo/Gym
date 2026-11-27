@@ -172,10 +172,14 @@ Corpus reference programs require an explicit `reference_sandbox_image` and use
 `reference_sandbox_provider` (default: network-disabled Docker). Source and STEP
 checksums are checked before use. Reference operation hints use static source
 analysis, consistently with the operation bonus. Invalid or quarantined references
-can use bounded deterministic replacements from the pinned catalog; replacements
-must retain the selected source and reference operation coverage. A first renderer
-crash, timeout, or reference-process kill propagates as an outage. Quarantine needs
-two matching failures from fresh renderer attempts; success clears the pending
+can use bounded deterministic replacements from the pinned catalog. The default
+requires the selected source and all requested operations. Set
+`allow_partial_operation_replacements: true` to permit a same-source selected
+reference with the largest number of distinct matching operations after the
+exact-match candidates run out. The verifier metadata records missing operations
+in `reference_operation_fallback`. An execution timeout can trigger immediate
+bounded replacement. A render timeout, process crash or kill needs two matching
+observations from fresh renderer attempts before quarantine; success clears the pending
 observation. SIGKILL/exit 137 is a possible memory-limit kill, not proof of OOM.
 Repeated failures are an operational heuristic; after repairing a shared runtime,
 remove the affected cache's `.failure.json` and confirmed rejection/timeout markers
@@ -184,6 +188,104 @@ Provider errors and unclassified OCC/export errors still stop the batch. Investi
 the logged asset first; if it is deterministically bad, exclude it from the input
 manifest and replacement catalog, then restart with fresh dataloader state (the
 sampler rejects changed manifests when restoring an old state).
+
+### Warm a prefix of ordered draws
+
+Use the same sampler JSON and prompt batch size as the consumer. Export to a
+new directory. The example exports 1,601,024 lightweight descriptors and warms
+the first 1,024. The optional overrides JSON supplies deployment settings such as
+`cache_root`, `renderer_python`, and `allow_partial_operation_replacements`.
+
+```sh
+module=resources_servers.deepcad.dataset.sampled_lazy
+python -m "$module" export --manifest train.jsonl --sampler-config sampler.json --overrides render.json --batch-size 64 --count 1601024 --output ordered
+python -m "$module" warm --output ordered --start 0 --count 1024 --workers 8
+```
+
+Consume `ordered/draws.jsonl` in order with shuffling and runtime resampling
+disabled. Repeated draws are intentional. Exported rows enable
+`warm_start_cache`. Use a persistent cache directory shared by warmers and
+consumers, a filesystem supporting interprocess locks and atomic rename, and the
+same immutable catalog, dataset, and render environment in both. Entries use
+two-character shards, render scratch follows `TMPDIR`, and resolved replacements
+are pinned. Ordinary lazy manifests continue to use their existing cache layout.
+
+The warm command publishes `warm-0-1024-ready.json` after a fresh process
+reads every prompt and verifies its reference STEP checksum with rendering
+disabled. Repeat `verify --output ordered --start 0 --count 1024` for a fresh
+check. Later draws render on demand. Use a new cache directory when refreshing
+the catalog or retrying a pinned replacement after repairing the renderer.
+
+The export manifest also records sampler indices, source-code checksums, optional
+catalog and override checksums, and the seed. Warming rejects source changes after
+export. Each completed draw records prompt-cache, replacement and STEP checksums,
+whether its cache was already warm, and preparation time. An immutable
+`draw<start>-ready.json` receipt is published after the first draw passes a separate
+process's cache check, before the rest of the requested range finishes. A full
+0–1,023 warmup also publishes `warm1024-ready.json` for prefix consumers.
+
+### Prepare ordered rows for offline rendering
+
+Resolve a bounded range into ordinary Gym rows before evaluation or training.
+Export descriptors with the same Gym source version used for preparation. If the
+source checksums differ after an upgrade, regenerate the descriptor export using
+the same source manifest, sampler settings, batch size and deployment overrides;
+the existing cache keys and draw order can then be reused:
+
+```sh
+python -m "$module" prepare --output ordered --start 0 --count 1024 --destination prepared
+# After an existing warm --workers run, require cache hits without rendering:
+python -m "$module" prepare --output ordered --start 0 --count 1024 --destination prepared-cached --cache-only
+```
+
+Each destination must be new. Publication is atomic: a failed range leaves no
+partial destination. The bundle contains only `rows.jsonl` and `assets/`; the latter
+holds SHA-256-addressed, prefix-sharded image and reference STEP files plus
+`manifest.json` with row and asset hashes. Duplicate draws remain duplicate rows
+and share assets; render variants use their own image content hashes. Preparation
+uses the existing resolver and pinned replacements, preserving prompt text,
+request settings, routing, operations and replacement metadata. It changes only
+asset references in copies of resolved rows; cached images remain embedded.
+An unconfirmed reference failure stops preparation for diagnosis or a later retry.
+For bulk preparation, use the existing bounded `warm --workers` command first.
+This command supports the simple harness. It rejects the OpenCode harness and
+`target_images` workspace seeds, whose runtime requires embedded images.
+
+Consume `prepared/rows.jsonl` in order, with shuffling and runtime resampling
+disabled, using the existing dataset and processor. No NeMo-RL code change is
+needed. These rows have no `deepcad_lazy` field. Set the CAD resources server's
+`reference_root` to the absolute `prepared/assets` directory: `reference_step`
+is relative to that root. Image paths are absolute final paths supported by
+NeMo-RL media normalization. Publish at the persistent path visible to every
+worker and keep that path fixed; moving the bundle requires regenerating its
+image paths. The bundle no longer needs the rendering cache or source dataset.
+
+### Deployment overrides and staged catalogs
+
+The `resources_servers.deepcad.dataset.training` hook accepts optional
+`lazy_render_overrides` alongside `source_operation_sampling`:
+
+```yaml
+lazy_render_overrides:
+  renderer_python: /opt/cad/bin/python
+  cache_root: /scratch/cad-cache
+  reference_catalog: /scratch/cad-inputs/catalog.sqlite
+  reference_catalog_root: /scratch/cad-inputs
+```
+
+The overrides apply to a copy of each selected lazy descriptor; ordinary rows and
+the caller's descriptors stay unchanged. Supported fields also include
+`reference_sandbox_provider` and `allow_partial_operation_replacements`. With no
+overrides, existing hook behavior is unchanged. An explicit
+`reference_catalog_root` permits a staged catalog outside `dataset_root`, while
+still rejecting paths that escape that explicit root. The default catalog root
+remains `dataset_root`. Missing sandbox fonts propagate as infrastructure errors
+and do not quarantine valid reference programs.
+
+For a finite pool with all rendering completed before consumption, see
+[Offline materialized CAD tasks](dataset/materialized-inputs.md). That utility
+uses the same sampler and renderer to publish ordered JSONL rows and a checked
+STEP archive, with resumable CPU render chunks and atomic release publication.
 
 `prepare_opencode.py` accepts validated lazy rows without rendering. It marks the
 harness in their configuration; materialization then adds the workspace prompt and
