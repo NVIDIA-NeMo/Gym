@@ -18,7 +18,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agents.utils import sandbox_python
-from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
+from nemo_gym.agents.utils.sandbox_python import (
+    SandboxPlatform,
+    SandboxPythonRuntime,
+    UnsupportedSandboxPlatformError,
+    probe_sandbox_platform,
+)
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
@@ -111,8 +116,10 @@ async def test_probe_prefers_glibc_over_an_optional_musl_loader(getconf, ldd, mu
 async def test_the_probe_rejects_platforms_without_a_runtime(stdout: str, return_code: int, match: str) -> None:
     sandbox = _ProbedSandbox(SandboxExecResult(stdout=stdout, stderr="", return_code=return_code))
 
-    with pytest.raises(RuntimeError, match=match):
+    with pytest.raises(RuntimeError, match=match) as error:
         await probe_sandbox_platform(sandbox)
+    # Only a sandbox that answered is told apart as unsupported: callers may refuse it instead of retrying.
+    assert isinstance(error.value, UnsupportedSandboxPlatformError) is (return_code == 0)
 
 
 @pytest.mark.parametrize(

@@ -109,8 +109,20 @@ class SandboxPlatform:
         return f"{self.arch}-manylinux_2_{level}"
 
 
+class UnsupportedSandboxPlatformError(RuntimeError):
+    """The sandbox answered the probe with a kernel or CPU no runtime is built for, which every attempt repeats."""
+
+    def __init__(self, system: str, machine: str) -> None:
+        super().__init__(f"No sandbox Python runtime is available for {system} on {machine}")
+        self.system, self.machine = system, machine
+
+
 async def probe_sandbox_platform(sandbox: AsyncSandbox) -> SandboxPlatform:
-    """Ask the sandbox for its kernel, machine and C library."""
+    """Ask the sandbox for its kernel, machine and C library.
+
+    Raises ``UnsupportedSandboxPlatformError`` when it answers with a kernel or CPU other than Linux on x86_64 or
+    aarch64, and a plain ``RuntimeError`` when the probe did not run or did not answer.
+    """
     result = await sandbox.exec(_PLATFORM_PROBE, cwd="/", timeout_s=30)
     lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if result.return_code != 0 or result.error_type is not None or len(lines) < 3:
@@ -120,7 +132,7 @@ async def probe_sandbox_platform(sandbox: AsyncSandbox) -> SandboxPlatform:
     system, machine, libc = lines[:3]
     arch = _MACHINES.get(machine)
     if system != "Linux" or arch is None:
-        raise RuntimeError(f"No sandbox Python runtime is available for {system} on {machine}")
+        raise UnsupportedSandboxPlatformError(system, machine)
     if libc == "musl":
         return SandboxPlatform(arch=arch, libc="musl")
     versions = re.findall(r"\b2\.(\d+)\b", libc)

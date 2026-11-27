@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from nemo_gym.agents import SandboxPlatform, download_pinned, sandbox_cache_dir
+from nemo_gym.agents import AgentSeedRejectedError, SandboxPlatform, download_pinned, sandbox_cache_dir
 from responses_api_agents.opencode_agent.runtime import OPENCODE_RELEASE_SHA256
 
 
@@ -65,11 +65,18 @@ def opencode_release_asset(platform: SandboxPlatform) -> str:
 
 
 async def opencode_executable(version: str, platform: SandboxPlatform) -> HostExecutable:
-    """The OpenCode ``version`` executable for ``platform``. Raises ``RuntimeError`` without a pinned SHA-256."""
+    """The OpenCode ``version`` executable for ``platform``.
+
+    Raises ``AgentSeedRejectedError`` when the release has no pinned SHA-256 for the platform's build, which every
+    attempt on its image would repeat, and ``RuntimeError`` when the download fails or does not match.
+    """
     asset = opencode_release_asset(platform)
     sha256 = OPENCODE_RELEASE_SHA256.get(version, {}).get(asset)
     if sha256 is None:
-        raise RuntimeError(f"No pinned SHA-256 for opencode-linux-{asset}.tar.gz {version}")
+        raise AgentSeedRejectedError(
+            f"sandbox_runtime_upload: OpenCode {version} has no pinned SHA-256 for opencode-linux-{asset}.tar.gz, "
+            "the build for this sandbox's platform"
+        )
     return await _executable(
         f"{_OPENCODE_DOWNLOADS}/v{version}/opencode-linux-{asset}.tar.gz",
         # Release assets carry no version in their name.

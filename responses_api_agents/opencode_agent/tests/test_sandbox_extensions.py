@@ -782,6 +782,50 @@ def test_a_failed_runtime_upload_stays_a_retryable_setup_error(setup, host, monk
     assert not active_sessions(agent)
 
 
+UPLOAD_REFUSALS = {
+    "another CPU": ("Linux\nriscv64\nglibc 2.35\n", "the sandbox is Linux on riscv64"),
+    "another kernel": ("Darwin\nPower Macintosh\nsh: ldd: not found\n", "the sandbox is Darwin on Power Macintosh"),
+    "no digest for the platform": (
+        "Linux\naarch64\nmusl\n",
+        f"OpenCode {OPENCODE_VERSION} has no pinned SHA-256 for opencode-linux-arm64-musl.tar.gz",
+    ),
+}
+
+
+@pytest.mark.parametrize(("probed", "reason"), UPLOAD_REFUSALS.values(), ids=UPLOAD_REFUSALS.keys())
+def test_runtime_upload_refuses_a_platform_without_an_opencode_build(setup, caplog, monkeypatch, probed, reason):
+    """The image decides these, so every attempt would repeat them: the seed is refused, not retried."""
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_upload = True
+    # A release pinned for one other platform, so nothing here can start a download.
+    monkeypatch.setitem(opencode_app.OPENCODE_RELEASE_SHA256, OPENCODE_VERSION, {"x64-baseline": PIN})
+
+    async def answered(command, **kwargs):
+        return result(stdout=probed)
+
+    intercept(sandbox, PLATFORM_PROBE, answered)
+    assert reason in refused(agent, caplog)
+    assert not any("uploaded-" in path for path in sandbox.files)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("probe", [result(-1, error_type="timeout"), result(1, stderr="uname: not found")])
+def test_runtime_upload_keeps_a_platform_probe_that_did_not_answer_retryable(setup, probe):
+    """A probe the provider could not run, or that failed, says nothing about the image: no refusal."""
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_upload = True
+
+    async def unanswered(command, **kwargs):
+        return probe
+
+    intercept(sandbox, PLATFORM_PROBE, unanswered)
+    response = seed_status(agent, raise_server_exceptions=False)
+    assert response.status_code == 500
+    sandbox.disconnect.assert_awaited_once()
+    assert not active_sessions(agent)
+
+
 @pytest.mark.parametrize("warm", [False, True], ids=["opencode", "ripgrep"])
 async def test_runtime_uploads_are_bounded_per_agent_server_process(setup, host, warm):
     agent, _ = setup

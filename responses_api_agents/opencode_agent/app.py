@@ -65,6 +65,7 @@ from nemo_gym.agents import (
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    UnsupportedSandboxPlatformError,
     abandon_launch,
     check_restored,
     exec_idempotent,
@@ -2221,9 +2222,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         Returns the two as pinned files, each with the SHA-256 this host computed, for the installer and
         ``_stage_executable`` to check, and the paths uploaded. OpenCode is the executable ``runtime`` already holds
         when that has the same bytes, and then it is not uploaded. ripgrep is None unless ``with_ripgrep`` asks for
-        it and its release has a build for the platform. Raises ``RuntimeError`` when the platform is unsupported or
-        a host download fails, and ``TimeoutError`` when the downloads and uploads, with the wait for an upload
-        slot, take longer than ``sandbox_install_timeout_seconds``.
+        it and its release has a build for the platform. Raises ``AgentSeedRejectedError`` when OpenCode has no
+        pinned build for the sandbox's platform, ``RuntimeError`` when the platform probe or a host download fails,
+        and ``TimeoutError`` when the downloads and uploads, with the wait for an upload slot, take longer than
+        ``sandbox_install_timeout_seconds``.
         """
         timeout = self.config.sandbox_install_timeout_seconds
         uploaded: list[str] = []
@@ -2237,7 +2239,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
         ripgrep = None
         async with asyncio.timeout(timeout):
-            platform = await probe_sandbox_platform(sandbox)
+            try:
+                platform = await probe_sandbox_platform(sandbox)
+            except UnsupportedSandboxPlatformError as error:
+                # The sandbox answered, and its image decides the answer: every attempt would repeat it. A probe
+                # that did not run or did not answer raises another error and stays a setup failure to retry.
+                raise AgentSeedRejectedError(
+                    "sandbox_runtime_upload: OpenCode has release builds for Linux on x86_64 and aarch64 only; "
+                    f"the sandbox is {error.system} on {error.machine}"
+                ) from error
             executable = await opencode_executable(self.config.opencode_version, platform)
             # A runtime an earlier session or the image left is reused only when it is this executable: one that
             # merely reports the same version is replaced.

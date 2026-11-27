@@ -490,7 +490,9 @@ bundle, GitHub access, root or package manager.
   the npm registry at every start unless `sandbox_plugin_dependencies_path` supplies them.
 - **Failures.** A host download that fails or does not match its SHA-256, a failed upload,
   a sandbox check that does not run and an uploaded file that fails its checks in the
-  sandbox are retryable setup errors.
+  sandbox are retryable setup errors. A sandbox that is not Linux on x86_64 or aarch64, or
+  a release without a pinned digest for the sandbox's build, refuses the seed (HTTP 422),
+  because every attempt on that image would end the same way.
   The platform probe, the host downloads and the uploads together are bounded by
   `sandbox_install_timeout_seconds`.
 

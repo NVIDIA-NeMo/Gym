@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.utils.sandbox_python import (
         SandboxPlatform,
         SandboxPythonRuntime,
+        UnsupportedSandboxPlatformError,
         download_pinned,
         probe_sandbox_platform,
         sandbox_cache_dir,
@@ -171,6 +172,7 @@ _PUBLIC_API = {
     "SandboxSession": "utils.sandbox_session",
     "SandboxSessionCheckpoint": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
+    "UnsupportedSandboxPlatformError": "utils.sandbox_python",
     "abandon_launch": "utils.supervisor_client",
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.agents import SandboxPlatform
+from nemo_gym.agents import AgentSeedRejectedError, SandboxPlatform
 from nemo_gym.agents.utils import sandbox_python
 from responses_api_agents.opencode_agent import host_runtime
 from responses_api_agents.opencode_agent.runtime import OPENCODE_RELEASE_SHA256, OPENCODE_VERSION
@@ -194,9 +194,14 @@ async def test_a_failed_download_is_not_cached(releases) -> None:
     assert (await host_runtime.opencode_executable(VERSION, platform)).path.read_bytes() == OPENCODE
 
 
-async def test_a_version_without_pinned_digests_is_not_downloaded(releases) -> None:
-    with pytest.raises(RuntimeError, match=r"No pinned SHA-256 for opencode-linux-x64-baseline.tar.gz 1\.2\.3"):
+async def test_a_release_without_a_pinned_digest_for_the_platform_refuses_the_seed(releases) -> None:
+    # Nothing a retry could change: the refusal is final, unlike a failed download.
+    with pytest.raises(AgentSeedRejectedError, match=r"OpenCode 1\.2\.3 has no pinned SHA-256 for opencode-linux-x64"):
         await host_runtime.opencode_executable("1.2.3", SandboxPlatform("x86_64", "gnu", 36))
+    # A release pinned for other platforms only.
+    del host_runtime.OPENCODE_RELEASE_SHA256[VERSION]["arm64-musl"]
+    with pytest.raises(AgentSeedRejectedError, match="no pinned SHA-256 for opencode-linux-arm64-musl.tar.gz"):
+        await host_runtime.opencode_executable(VERSION, SandboxPlatform("aarch64", "musl"))
     assert releases.urls == []
 
 
