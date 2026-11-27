@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import JUDGE_FAILED, SESSION_LOST, VERIFIER_ERROR
-from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSessionConflictError
 from resources_servers.swe_atlas_qa import app as module
 
@@ -58,8 +58,16 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> module.SWEAtlasQA
             (task_dir / "tests" / name).write_text("private-placeholder")
     provider = MagicMock()
     ids = count()
-    provider.create = AsyncMock(side_effect=lambda spec: SandboxHandle(f"box-{next(ids)}", "test", None))
-    provider.serialize_handle = AsyncMock(side_effect=lambda h: {"sandbox_id": h.sandbox_id})
+    provider.name = "test"
+    provider.handles = {}
+
+    def create(spec: SandboxSpec) -> SandboxHandle:
+        handle = SandboxHandle(f"box-{next(ids)}", "test", None)
+        provider.handles[handle.sandbox_id] = handle
+        return handle
+
+    provider.create = AsyncMock(side_effect=create)
+    provider.serialize_handle = AsyncMock(side_effect=lambda h, scope=None: {"sandbox_id": h.sandbox_id})
     provider.connect = AsyncMock()
     provider.exec = AsyncMock(return_value=SandboxExecResult("", "", 0))
     provider.upload_file = AsyncMock()
@@ -111,6 +119,11 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> module.SWEAtlasQA
     return module.SWEAtlasQAResourcesServer(config=config, server_client=client)
 
 
+def _task_handle(server: module.SWEAtlasQAResourcesServer, session_id: str = "session") -> SandboxHandle:
+    """The provider handle of a session's task sandbox, as the provider calls see it."""
+    return server._provider.handles[server._sessions[session_id][1].sandbox_id]
+
+
 def test_startup_validates_source_checkout(server) -> None:
     module.validate_source.assert_called_once_with(server.config.tasks_dir.parent.parent)
 
@@ -134,10 +147,30 @@ async def test_seed_uses_server_task_and_exposes_only_agent_access(server, body)
         "egress": [{"action": "allow", "target": "model.internal"}],
     }
     assert spec.env == spec.files == {}
-    assert seed.sandbox_descriptor == {"sandbox_id": "box-0"}
+    assert seed.sandbox_descriptor == {"sandbox_id": "box-0", "workdir": "/app"}
     exposed = repr((spec, seed.model_dump(), provider.exec.await_args_list))
     assert all(value not in exposed for value in (*PRIVATE_FILES, "dummy-judge-secret", "judge.internal"))
     provider.upload_file.assert_not_awaited()
+
+
+async def test_task_and_verifier_sandboxes_start_through_the_sandbox_api(server, body, monkeypatch) -> None:
+    started: list[str | None] = []
+    start = AsyncSandbox.start
+
+    async def record_start(sandbox: AsyncSandbox, *args, **kwargs) -> AsyncSandbox:
+        result = await start(sandbox, *args, **kwargs)
+        started.append(sandbox.sandbox_id)
+        return result
+
+    # AsyncSandbox.start is where Gym applies its own start-time behavior, such as telemetry and sandbox labels.
+    # A sandbox created by calling the provider directly skips all of it.
+    monkeypatch.setattr(AsyncSandbox, "start", record_start)
+    await server.seed_session(_request(), body)
+    await server.verify(_request(), body)
+
+    assert started == ["box-0", "box-1"]
+    assert server._provider.create.await_count == 2
+    assert not server._sandboxes
 
 
 @pytest.mark.parametrize(
@@ -152,7 +185,7 @@ async def test_verify_preserves_upstream_scores_and_stages_only_after_agent_clos
         reward=reward, num_scored=scored, num_unscored=4 - scored, num_passed=passed, agg_score=agg
     )
     await server.seed_session(_request(), body)
-    agent = server._sessions["session"][1]
+    agent = _task_handle(server)
     result = await server.verify(_request(), body)
     assert (result.reward, result.agg_score, result.num_rubrics, result.num_scored, result.num_passed) == (
         reward,
@@ -208,7 +241,7 @@ async def test_verify_masks_zero_scored_rubrics(server, body) -> None:
 async def test_missing_or_empty_answer_scores_zero_without_judge(server, body, answer) -> None:
     provider = server._provider
     await server.seed_session(_request(), body)
-    agent = server._sessions["session"][1]
+    agent = _task_handle(server)
     if answer is None:
         provider.exec.return_value = SandboxExecResult("", "", 1)
     else:
@@ -230,7 +263,7 @@ async def test_missing_or_empty_answer_scores_zero_without_judge(server, body, a
 async def test_answer_probe_failure_masks_sample(server, body, return_code, error_type) -> None:
     provider = server._provider
     await server.seed_session(_request(), body)
-    agent = server._sessions["session"][1]
+    agent = _task_handle(server)
     provider.exec.return_value = SandboxExecResult(None, "runtime failed", return_code, error_type=error_type)
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
@@ -252,7 +285,7 @@ async def test_verify_without_a_seeded_session_is_masked_as_lost(server, body) -
 
 async def test_task_mismatch_closes_without_collecting_or_grading(server, body) -> None:
     await server.seed_session(_request(), body)
-    agent = server._sessions["session"][1]
+    agent = _task_handle(server)
     result = await server.verify(_request(), body.model_copy(update={"task_id": OTHER_TASK}))
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
     server._provider.close.assert_awaited_once_with(agent)
@@ -321,7 +354,7 @@ async def test_lifespan_shutdown_closes_live_sessions_and_provider(server, body)
     app = server.setup_webserver()
     async with app.router.lifespan_context(app):
         await asyncio.gather(*(server.seed_session(_request(s), body) for s in ("one", "two")))
-        handles = [handle for _, handle in server._sessions.values()]
+        handles = [_task_handle(server, session_id) for session_id in server._sessions]
         server._provider.close.assert_not_awaited()
         server._provider.aclose.assert_not_awaited()
     assert server._provider.close.await_args_list == [call(handle) for handle in handles]
@@ -348,7 +381,7 @@ async def test_lifespan_shutdown_waits_for_all_deletions_after_failure(server, b
             pass
 
     await asyncio.gather(*(server.seed_session(_request(s), body) for s in ("one", "two")))
-    failed = server._sessions["one"][1]
+    failed = _task_handle(server, "one")
     provider.close.side_effect = close
     async with asyncio.timeout(2):
         pending = asyncio.create_task(shutdown())
@@ -372,7 +405,7 @@ async def test_parallel_cookie_sessions_keep_answers_and_cleanup_isolated(server
     requests = [_request("one"), _request("two")]
     bodies = [body, body.model_copy(update={"task_id": OTHER_TASK})]
     await asyncio.gather(*(server.seed_session(r, b) for r, b in zip(requests, bodies)))
-    agents = [server._sessions[s][1] for s in ("one", "two")]
+    agents = [_task_handle(server, s) for s in ("one", "two")]
     provider.answers.update({h.sandbox_id: s for h, s in zip(agents, ("first-placeholder", "second-placeholder"))})
     uploads = []
     task_files = {}
@@ -435,7 +468,7 @@ async def test_a_fence_expires_after_the_close_retry_window_and_locks_are_releas
     clock[0] += 0.001
     # Once the window passes, the ID is new again and the fences are gone rather than kept forever.
     seed = await server.seed_session(_request("first"), body)
-    assert seed.sandbox_descriptor == {"sandbox_id": "box-2"}
+    assert seed.sandbox_descriptor == {"sandbox_id": "box-2", "workdir": "/app"}
     assert len(server._fences) == 0
     assert not server._locks._locks
 
@@ -449,7 +482,10 @@ async def test_a_verify_fence_expires_after_the_close_retry_window(server, body,
         await server.seed_session(_request(), body)
     clock[0] += 0.001
     # box-0 was the task sandbox and box-1 the verifier, so the seed starts a new sandbox.
-    assert (await server.seed_session(_request(), body)).sandbox_descriptor == {"sandbox_id": "box-2"}
+    assert (await server.seed_session(_request(), body)).sandbox_descriptor == {
+        "sandbox_id": "box-2",
+        "workdir": "/app",
+    }
     assert not server._locks._locks
 
 
@@ -457,7 +493,7 @@ async def test_failed_verify_cleanup_keeps_the_session_refused_until_a_close_del
     server, body, clock
 ) -> None:
     await server.seed_session(_request(), body)
-    handle = server._sessions["session"][1]
+    handle = _task_handle(server)
     provider = server._provider
     provider.close.side_effect = [RuntimeError("close unavailable"), None]
     result = await server.verify(_request(), body)
@@ -482,12 +518,16 @@ async def test_failed_verify_cleanup_keeps_the_session_refused_until_a_close_del
     with pytest.raises(ValueError, match="closed"):
         await server.seed_session(_request(), body)
     clock[0] += 0.001
-    assert (await server.seed_session(_request(), body)).sandbox_descriptor == {"sandbox_id": "box-1"}
+    assert (await server.seed_session(_request(), body)).sandbox_descriptor == {
+        "sandbox_id": "box-1",
+        "workdir": "/app",
+    }
 
 
 async def test_a_seed_after_the_window_waits_for_verify_to_release_the_sandbox(server, body, clock) -> None:
     await server.seed_session(_request(), body)
-    handle = server._sessions["session"][1]
+    sandbox = server._sessions["session"][1]
+    handle = _task_handle(server)
     provider = server._provider
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -510,13 +550,13 @@ async def test_a_seed_after_the_window_waits_for_verify_to_release_the_sandbox(s
     # The seed neither starts a second sandbox nor is overwritten by verify's cleanup.
     assert isinstance(seeded, ValueError) and "closed" in str(seeded)
     provider.create.assert_awaited_once()
-    assert server._sandboxes == {handle.sandbox_id: handle}
-    assert server._cleanup_pending == {"session": handle}
+    assert server._sandboxes == {handle.sandbox_id: sandbox}
+    assert server._cleanup_pending == {"session": sandbox}
 
 
 async def test_a_close_during_verify_waits_and_retries_a_failed_delete(server, body) -> None:
     await server.seed_session(_request(), body)
-    handle = server._sessions["session"][1]
+    handle = _task_handle(server)
     provider = server._provider
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -555,7 +595,7 @@ async def test_close_rejects_conflicting_active_cookie(server, body) -> None:
 async def test_seed_lock_serializes_close_and_concurrent_seeds(server, body, follower) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def serialize(handle):
+    async def serialize(handle, scope=None):
         entered.set()
         await release.wait()
         return {"sandbox_id": handle.sandbox_id}
@@ -578,7 +618,7 @@ async def test_seed_lock_serializes_close_and_concurrent_seeds(server, body, fol
             release.set()
         first, second = await asyncio.gather(seed, pending, return_exceptions=True)
     server._provider.create.assert_awaited_once()
-    assert first.sandbox_descriptor == {"sandbox_id": "box-0"}
+    assert first.sandbox_descriptor == {"sandbox_id": "box-0", "workdir": "/app"}
     if follower == "close":
         assert second.resources_session_id == "session"
         server._provider.close.assert_awaited_once()
@@ -596,7 +636,8 @@ async def test_seed_lock_serializes_close_and_concurrent_seeds(server, body, fol
 @pytest.mark.parametrize("operation", ["verify", "explicit", "failed_cleanup"])
 async def test_cancellation_during_close_waits_and_preserves_cleanup_state(server, body, operation) -> None:
     await server.seed_session(_request(), body)
-    handle = server._sessions["session"][1]
+    sandbox = server._sessions["session"][1]
+    handle = _task_handle(server)
     entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def close(handle: SandboxHandle) -> None:
@@ -612,7 +653,7 @@ async def test_cancellation_during_close_waits_and_preserves_cleanup_state(serve
             request = ResourcesCloseSessionRequest(resources_session_id="session", episode_id={"rollout_id": "test"})
             action = server.close_resources_session(_request(), request)
         elif operation == "failed_cleanup":
-            action = server._close(handle)
+            action = server._close(sandbox)
         else:
             action = server.verify(_request(), body)
         pending = asyncio.create_task(action)
@@ -621,7 +662,7 @@ async def test_cancellation_during_close_waits_and_preserves_cleanup_state(serve
         try:
             await asyncio.sleep(0)
             assert not pending.done() and not finished.is_set()
-            assert server._sandboxes == {handle.sandbox_id: handle}
+            assert server._sandboxes == {handle.sandbox_id: sandbox}
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
@@ -629,7 +670,7 @@ async def test_cancellation_during_close_waits_and_preserves_cleanup_state(serve
     assert finished.is_set()
     server._provider.close.assert_awaited_once_with(handle)
     if operation == "failed_cleanup":
-        assert server._sandboxes == {handle.sandbox_id: handle}
+        assert server._sandboxes == {handle.sandbox_id: sandbox}
     else:
         assert not server._sessions and not server._sandboxes
         assert "session" in server._fences
@@ -639,19 +680,20 @@ async def test_cancellation_during_close_waits_and_preserves_cleanup_state(serve
 
 async def test_failed_close_retains_handle_for_retry(server, body) -> None:
     await server.seed_session(_request(), body)
-    handle = server._sessions["session"][1]
+    sandbox = server._sessions["session"][1]
+    handle = _task_handle(server)
     server._provider.close.side_effect = [RuntimeError("close unavailable"), None]
     with pytest.raises(RuntimeError, match="close unavailable"):
-        await server._close(handle)
-    assert server._sandboxes == {handle.sandbox_id: handle}
-    await server._close(handle)
+        await server._close(sandbox)
+    assert server._sandboxes == {handle.sandbox_id: sandbox}
+    await server._close(sandbox)
     assert not server._sandboxes
     assert server._provider.close.await_args_list == [call(handle), call(handle)]
 
 
 async def test_verify_delete_failure_allows_explicit_close_retry(server, body) -> None:
     await server.seed_session(_request(), body)
-    handle = server._sessions["session"][1]
+    handle = _task_handle(server)
     provider = server._provider
     provider.close.side_effect = [RuntimeError("close unavailable"), None]
     result = await server.verify(_request(), body)
