@@ -791,6 +791,11 @@ def counter_config(
     )
 
 
+def held_counts(counter: StatefulCounterResourcesServer) -> dict[str, int]:
+    """Each session's count that this counter server holds."""
+    return {session_id: state.count for session_id, state in counter._session_states.items()}
+
+
 def checkpointing_client() -> ServerClient:
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
@@ -899,9 +904,9 @@ async def test_a_restored_resources_session_serves_a_request_with_its_old_cookie
             for app in apps:
                 async with http(app) as worker:
                     # The restored attempt's prefix: a request with the cookie alone names no attempt.
-                    value = await worker.post(f"/ng-rollout/r{index}-a1/get_counter_value", cookies=cookie)
+                    value = await worker.post(f"/ng-rollout/r{index}-a1/get_counter_value", json={}, cookies=cookie)
                     counts.append(value.json()["count"])
-        held = [sorted(counter.session_id_to_counter.values()) for counter in counters]
+        held = [sorted(held_counts(counter).values()) for counter in counters]
 
     # Records name sessions by session ID only.
     assert len(exported) == 2 and all("owner" not in record for record in exported)
@@ -947,12 +952,14 @@ async def test_sessions_of_a_single_process_server_restore_onto_several_workers(
             for app in apps:
                 async with http(app) as worker:
                     await worker.post(f"{prefix}/increment_counter", json={"count": 1}, cookies=cookie)
-                    counts.append((await worker.post(f"{prefix}/get_counter_value", cookies=cookie)).json()["count"])
-        held = [sorted(counter.session_id_to_counter.values()) for counter in counters]
+                    counts.append(
+                        (await worker.post(f"{prefix}/get_counter_value", json={}, cookies=cookie)).json()["count"]
+                    )
+        held = [sorted(held_counts(counter).values()) for counter in counters]
         holders = {
             session_id: app.state.nemo_gym_routing_id
             for app, counter in zip(apps, counters)
-            for session_id in counter.session_id_to_counter
+            for session_id in held_counts(counter)
         }
         owners = {session_id: apps[0].state.nemo_gym_session_owners.owner(session_id) for session_id in holders}
 
@@ -1006,7 +1013,7 @@ async def test_after_a_restore_onto_several_workers_every_worker_refuses_the_rep
             for token in tokens
             for app in after.apps
         ]
-        held = sorted(value for counter in after.counters for value in counter.session_id_to_counter.values())
+        held = sorted(value for counter in after.counters for value in held_counts(counter).values())
         async with http(after.apps[2]) as late:
             reseeded = await late.post("/ng-rollout/r1-a1/seed_session", json={"initial_count": 0}, cookies=cookies[1])
         token = reseeded.json()["mcp"]["headers"][TOKEN_HEADER]
@@ -3301,18 +3308,18 @@ async def test_a_retired_session_s_cookie_is_refused_on_every_worker_until_forge
         async with http(holder) as worker:
             seeded = await worker.post("/ng-rollout/r/seed_session", json={"initial_count": 3})
         cookie = dict(seeded.cookies)
-        [session_id] = deployment.counters[0].session_id_to_counter
+        [session_id] = held_counts(deployment.counters[0])
         await deployment.coordinator.controller.retire(RetireRequest(**control(episode_ids=[{"rollout_id": "r"}])))
         # Well past the close retry window and the sweeps after it.
         await asyncio.sleep(0.6)
         owned_after_retire = session_owner(deployment._routing_dir, session_id)
         async with http(other) as worker:
             # A late request of the retired attempt that carries only the cookie lands on the other worker.
-            refused = await worker.post("/get_counter_value", cookies=cookie)
+            refused = await worker.post("/get_counter_value", json={}, cookies=cookie)
         await deployment.coordinator.controller.forget(ForgetRequest(**control(rollout_ids=["r"])))
         await asyncio.sleep(0.6)
         owned_after_forget = session_owner(deployment._routing_dir, session_id)
-        left = [dict(counter.session_id_to_counter) for counter in deployment.counters]
+        left = [held_counts(counter) for counter in deployment.counters]
 
     assert owned_after_retire == holder.state.nemo_gym_routing_id
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"

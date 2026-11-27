@@ -12,7 +12,7 @@ from uuid import uuid4
 from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
@@ -67,6 +67,9 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionState,
+    ResourcesToolSandboxConfig,
+    ResourcesToolSandboxes,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
@@ -144,6 +147,23 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
     skip_verification_reward: float | None = None
+    # Serve the Resources server's tools from a sandbox of each episode, which this server starts on
+    # sandbox_provider, and verify on the host (nemo_gym.server_runtime.resources_tool_sandbox).
+    resources_tool_sandbox: ResourcesToolSandboxConfig | None = None
+    sandbox_provider: str | dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _tool_sandbox_serves_direct_http(self) -> "SingleAgentTurnEnvironmentServerConfig":
+        if self.resources_tool_sandbox is None:
+            return self
+        if self.resources_tool_transports != ["direct_http"]:
+            raise ValueError(
+                "resources_tool_sandbox serves the tools over direct_http: set resources_tool_transports "
+                "to [direct_http]"
+            )
+        if self.sandbox_provider is None:
+            raise ValueError("resources_tool_sandbox needs a sandbox_provider to start the tool sandboxes on")
+        return self
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -154,9 +174,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     checkpoint_mode = "exported"
     applies_model_sampling = True
     response_model = SingleAgentTurnResponse
+    # The tool sandboxes start through self.sandboxes, which applies the block's network rule.
+    owned_sandbox_blocks = {"resources_tool_sandbox": "sandbox_provider"}
+    _tool_sandboxes: ResourcesToolSandboxes | None = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        if self.config.resources_tool_sandbox is not None:
+            self._tool_sandboxes = ResourcesToolSandboxes(
+                self.config.resources_tool_sandbox,
+                resources_server_name=self.config.resources_server.name,
+                global_config=self.server_client.global_config_dict,
+            )
         # Fail at startup, not on the first episode, when a tool server cannot serve its tools.
         for name in self.tool_server_names:
             self._check_tool_server(name, self.config.resources_server.name)
@@ -277,6 +306,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         resources_cleanup = cleanup.register_cleanup(
             "resources session", lambda: self._close_resources(request, handles)
         )
+        if self._tool_sandboxes is not None:
+            cleanup.register_cleanup("tool sandbox", lambda: self.sandboxes.stop(handles.resources_session_id))
         for name in handles.tool_sessions:
             cleanup.register_cleanup(
                 f"{name} tool session", lambda name=name: self._close_tool_session(request, handles, name)
@@ -477,10 +508,51 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         one that grants a tool server's MCP tools always does.
         """
         seed = await self._seed_resources(request, handles)
+        tool_sandbox = await self._start_tool_sandbox(request, handles)
         tool_accesses = await self._seed_tool_servers(request, handles)
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
-        await self._seed_agent(request, handles, seed, tool_accesses)
+        await self._seed_agent(request, handles, seed, tool_accesses, tool_sandbox=tool_sandbox)
         return registered
+
+    async def _start_tool_sandbox(
+        self, request: SingleAgentTurnRequest, handles: "SessionHandles"
+    ) -> DirectHTTPToolAccess | None:
+        """Start the episode's tool sandbox with the session's state; return the grant of its tools."""
+        if self._tool_sandboxes is None:
+            return None
+        # The tools' state lives in the sandbox, which no checkpoint captures: after a crash the episode starts over.
+        await self.checkpoint_restart(request)
+        try:
+            export = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/export_session_state",
+                json={},
+                cookies=handles.resources_cookies,
+            )
+            await raise_boundary_failure(export)
+            state = ResourcesSessionState.model_validate(await get_response_json(export)).state
+            endpoint = await self._tool_sandboxes.start(
+                self.sandboxes, session_id=handles.resources_session_id, state=state
+            )
+        except Exception as error:
+            raise dependency_failure(error, stage="seed") from error
+        return DirectHTTPToolAccess(
+            name=f"{self.config.resources_server.name}.direct_http",
+            required=True,
+            base_url=endpoint.endpoint,
+            headers=endpoint.headers,
+        )
+
+    async def _restore_tool_sandbox_state(self, handles: "SessionHandles") -> None:
+        """Install on the host the state the tools left in the episode's sandbox, and stop the sandbox."""
+        state = await self._tool_sandboxes.finish(self.sandboxes, session_id=handles.resources_session_id)
+        restore = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/restore_session_state",
+            json=ResourcesSessionState(state=state).model_dump(mode="json"),
+            cookies=handles.resources_cookies,
+        )
+        await raise_boundary_failure(restore)
 
     async def reseed_after_restore(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> None:
         """Seed both sessions again for a replacement attempt that continues a checkpoint before the agent closed.
@@ -598,10 +670,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         handles: "SessionHandles",
         seed: ResourcesSeedSessionResponse,
         tool_server_accesses: Sequence[ToolAccess] = (),
+        *,
+        tool_sandbox: DirectHTTPToolAccess | None = None,
     ) -> None:
         resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
-        if "direct_http" in self.config.resources_tool_transports:
+        if tool_sandbox is not None:
+            tool_accesses.append(tool_sandbox)
+        elif "direct_http" in self.config.resources_tool_transports:
             # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
             # so the grant carries this attempt's rollout prefix.
             # An agent that continues the session after a restore sends its calls under the replacement's prefix.
@@ -758,6 +834,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     ) -> SingleAgentTurnResult:
         verifier_invocations = None
         try:
+            if self._tool_sandboxes is not None:
+                await self._restore_tool_sandbox_state(handles)
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",

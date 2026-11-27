@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
+    from nemo_gym.server_runtime.resources_tool_sandbox import ResourcesToolSandboxConfig, ResourcesToolSandboxes
     from nemo_gym.server_runtime.sandbox_borrow import BorrowedSandbox, BorrowedSandboxError, borrow
     from nemo_gym.server_runtime.sandbox_lending import SHUTDOWN_STOP_CONCURRENCY, STOP_TIMEOUT_S, LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
@@ -152,6 +153,11 @@ if TYPE_CHECKING:
         MCPStreamableHTTPConnection,
         MCPToolAccess,
         ToolAccess,
+    )
+    from nemo_gym.server_runtime.toolset_resources_server import (
+        ResourcesSessionState,
+        ResourcesToolset,
+        ToolsetResourcesServer,
     )
     from nemo_gym.server_runtime.verifier_observability import (
         observe_llm_judge_grading,
@@ -222,6 +228,10 @@ _PUBLIC_API = {
     "ResourcesSessionFences": "base_resources_server",
     "ResourcesSessionLocks": "base_resources_server",
     "ResourcesSessionLostError": "base_resources_server",
+    "ResourcesSessionState": "toolset_resources_server",
+    "ResourcesToolSandboxConfig": "resources_tool_sandbox",
+    "ResourcesToolSandboxes": "resources_tool_sandbox",
+    "ResourcesToolset": "toolset_resources_server",
     "ResourcesVerification": "base_resources_server",
     "ResourcesVerifyRequest": "base_resources_server",
     "RestoreRequest": "_checkpoint.control",
@@ -254,6 +264,7 @@ _PUBLIC_API = {
     "ToolCallRecord": "episode_tools",
     "ToolResult": "episode_tools",
     "ToolSpec": "episode_tools",
+    "ToolsetResourcesServer": "toolset_resources_server",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
     "checkpoint_state_dir": "owned_sandboxes",

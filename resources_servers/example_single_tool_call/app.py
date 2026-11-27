@@ -15,7 +15,6 @@
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.core import EpisodeId, TaskId
@@ -32,7 +31,9 @@ from nemo_gym.server_runtime import (
     ResourcesSessionConflictError,
     ResourcesSessionFences,
     ResourcesSessionLocks,
-    SimpleResourcesServer,
+    ResourcesToolset,
+    ToolsetResourcesServer,
+    episode_tool,
     observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -63,9 +64,18 @@ class SimpleWeatherVerifier:
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
-class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
-    # Tool results depend only on the request, so a continuation needs no session state.
-    checkpoint_mode = "stateless"
+class SimpleWeatherTools(ResourcesToolset):
+    """The weather tool. Its result depends only on the request, so it keeps no state."""
+
+    @episode_tool
+    async def get_weather(self, arguments: GetWeatherRequest) -> GetWeatherResponse:
+        """Get the weather in a city."""
+        return GetWeatherResponse(city=arguments.city, weather_description=f"The weather in {arguments.city} is cold.")
+
+
+class SimpleWeatherResourcesServer(SimpleWeatherVerifier, ToolsetResourcesServer):
+    # No session_state_model: the tools keep no state, so the server is stateless.
+    toolset = SimpleWeatherTools
     config: SimpleWeatherResourcesServerConfig
     _episode_by_session: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
@@ -74,13 +84,6 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
-        app.post("/get_weather")(self.get_weather)
-
-        return app
 
     async def seed_session(
         self,
@@ -111,9 +114,6 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
             self._episode_by_session.pop(resources_session_id, None)
             self._fences.fence(resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
-
-    async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
-        return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is cold.")
 
 
 VERIFIER_FIXTURE = VerifierFixture(

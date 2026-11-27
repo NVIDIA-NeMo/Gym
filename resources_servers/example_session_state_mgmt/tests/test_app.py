@@ -18,57 +18,70 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,
+    StatefulCounterSeedSessionRequest,
 )
 
 
+def _server() -> StatefulCounterResourcesServer:
+    config = StatefulCounterResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+    return StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class StatelessCookieJar(CookieJar):
+    def extract_cookies(self, response: object, request: object) -> None:
+        # Sessions must come from explicit request cookies, not earlier responses.
+        pass
+
+
 class TestApp:
-    def test_sanity(self) -> None:
-        config = StatefulCounterResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-        )
-        server = StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    def test_each_session_counts_from_its_own_seed(self) -> None:
+        client = TestClient(_server().setup_webserver(), cookies=StatelessCookieJar())
 
-        app = server.setup_webserver()
+        first = client.post("/seed_session", json={"initial_count": 0}).cookies
+        assert client.post("/increment_counter", json={"count": 2}, cookies=first).json() == {"success": True}
+        assert client.post("/get_counter_value", json={}, cookies=first).json() == {"count": 2}
 
-        class StatelessCookieJar(CookieJar):
-            def extract_cookies(self, response: object, request: object) -> None:
-                # Sessions must come from explicit request cookies, not earlier responses.
-                pass
+        second = client.post("/seed_session", json={"initial_count": 4}).cookies
+        assert client.post("/increment_counter", json={"count": 3}, cookies=second).json() == {"success": True}
+        assert client.post("/get_counter_value", json={}, cookies=second).json() == {"count": 7}
+        assert client.post("/get_counter_value", json={}, cookies=first).json() == {"count": 2}
 
-        client = TestClient(app, cookies=StatelessCookieJar())
+        # A session that was never seeded holds no counter.
+        assert client.post("/get_counter_value", json={}).status_code == 404
 
-        # Check that we are at 0
-        response = client.post("/get_counter_value")
-        initial_request_cookies = response.cookies
-        assert response.json() == {"count": 0}
-        response = client.post("/increment_counter", json={"count": 2}, cookies=initial_request_cookies)
-        assert response.json() == {"success": True}
-        response = client.post("/get_counter_value", cookies=initial_request_cookies)
-        assert response.json() == {"count": 2}
+    def test_verify_reads_the_count_the_tools_left(self) -> None:
+        client = TestClient(_server().setup_webserver())
+        client.post("/seed_session", json={"initial_count": 3})
+        client.post("/increment_counter", json={"count": 4})
+        response = NeMoGymResponse(
+            id="response",
+            created_at=0,
+            model="model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        ).model_dump(mode="json")
 
-        # Start a new session i.e. don't pass cookies
-        response = client.post("/increment_counter", json={"count": 4})
-        assert response.json() == {"success": True}
-        response = client.post("/get_counter_value", cookies=response.cookies)
-        assert response.json() == {"count": 4}
-        response = client.post("/increment_counter", json={"count": 3}, cookies=response.cookies)
-        assert response.json() == {"success": True}
-        response = client.post("/get_counter_value", cookies=response.cookies)
-        assert response.json() == {"count": 7}
+        def reward(expected_count: int) -> float:
+            body = {
+                "responses_create_params": {"input": "count"},
+                "response": response,
+                "expected_count": expected_count,
+            }
+            return client.post("/verify", json=body).json()["reward"]
 
-        response = client.post("/get_counter_value", cookies=initial_request_cookies)
-        assert response.json() == {"count": 2}
+        assert reward(7) == 1.0
+        assert reward(3) == 0.0
 
     async def test_export_leaves_out_a_session_the_server_no_longer_holds(self) -> None:
-        config = StatefulCounterResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
-        server = StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-        server.session_id_to_counter["live"] = 3
+        server = _server()
+        await server.initialize_session_state("live", StatefulCounterSeedSessionRequest(initial_count=3))
 
         # Made-up state for the dropped session would restore a wrong counter.
         assert await server.export_session_states(["live", "dropped"], checkpoint_id="c") == {"live": {"count": 3}}
