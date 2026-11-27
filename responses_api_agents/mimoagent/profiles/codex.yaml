@@ -1,0 +1,8 @@
+agent:
+  type: codex
+  effort: high
+model:
+  model_name: gpt-5.5
+  model_kwargs:
+    base_url: ${OPENAI_BASE_URL:-https://api.openai.com}
+    api_key: ${OPENAI_API_KEY:-}

@@ -1,0 +1,13 @@
+agent:
+  type: dsh
+  version: 0.1.0-rc.6
+  install_env:
+    NODE_OPTIONS: --max-old-space-size=6144
+  effort: xhigh
+  context_limit: 1000000
+  output_limit: 65536
+model:
+  model_name: claude-opus-5
+  model_kwargs:
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}
