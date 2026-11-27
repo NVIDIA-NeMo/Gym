@@ -2603,6 +2603,17 @@ class TestRolloutReverificationRunFromConfig:
 
     # ------------------------------------------------------------------ helpers
 
+    async def test_refuses_fixed_repeat_aggregation_before_reverifying_adaptive_input(self, tmp_path):
+        from nemo_gym.rollouts.repeat_stopping import STOP_ON_SUCCESS_THRESHOLD_KEY
+
+        config = self._make_config(tmp_path)
+        Path(config.materialized_inputs_jsonl_fpath).write_bytes(
+            orjson.dumps({STOP_ON_SUCCESS_THRESHOLD_KEY: 1}) + b"\n"
+        )
+        with pytest.raises(ConfigError, match="adaptively sampled"):
+            await RolloutReverificationHelper().run_from_config(config)
+        assert not Path(config.output_jsonl_fpath).exists()
+
     def _make_config(
         self,
         tmp_path: Path,

@@ -30,6 +30,30 @@ After upgrading, aggregate those outputs again before comparing them. Use a new 
 reports, and compare using that same output path. Do not assume an older link-side metrics file is selected.
 </Note>
 
+## Stop independent repeats after a verified success
+
+For an evaluation that asks whether a task can be solved within a budget, add
+`+num_repeats=4 +stop_on_success_threshold=1.0` to the collection command. Gym runs up to four
+repeats per task and agent. It admits the next repeat after the previous outcome is saved. Different
+task/agent groups can run concurrently. A finite, unmasked verifier `reward` at or above the threshold
+stops later repeats in that group. Failures and unscored results leave the next repeat eligible.
+The materialized inputs retain the full budget, and the failure sidecar records intentionally skipped
+repeats so a resumed collection can honor the decision.
+
+Each entry in `_aggregate_metrics.json` identifies the reward threshold under `sampling_policy`.
+For each task, `group_level_metrics` shows the planned and performed rollout counts, the one-based
+`first_successful_repeat` within that agent's budget, and `skipped_after_success`. Performed rollouts
+count distinct repeats with a saved result or failure. A task is `solved` after an observed success,
+`budget_exhausted` if every repeat received a score below threshold, or `unresolved` if missing,
+failed or unscored repeats leave its result unknown. When every task has a known result,
+`adaptive_repeat/success_within_budget` is the fraction of planned tasks solved (0 to 1).
+
+Collection and `gym eval aggregate` use this task-level report for adaptive runs. Fixed-repeat
+means, pass@k estimators, and intermediate per-agent completion files require a different sampling
+protocol. To recompute the report, keep each original rollout file with its manifest, materialized
+inputs, and failure sidecar. Aggregate only runs with the same threshold. To reverify the
+observed answers from an adaptive run, pass `+disable_aggregation=true` to the reverification command.
+
 ## Explicit failure scoring
 
 Failures are excluded from scores by default. `count_failure_classes_as_zero` explicitly includes selected failures

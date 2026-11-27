@@ -25,7 +25,7 @@ import os
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from pathlib import Path
 from time import perf_counter
@@ -731,6 +731,10 @@ class RolloutStore:
 
     def inputs_for(self, results: list[dict]) -> list[dict]:
         return [self._state.expected[logical_rollout_id(result)] for result in results]
+
+    def planned_inputs(self) -> Iterator[dict]:
+        """Iterate the original materialized plan, including repeats with no selected outcome."""
+        return iter(self._state.expected.values())
 
     def failure_export_metrics(self) -> dict[str, int]:
         """Export saved failure totals with current outcome selection and retry budgets.
