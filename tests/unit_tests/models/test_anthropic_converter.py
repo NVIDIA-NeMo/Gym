@@ -193,6 +193,48 @@ class TestAnthropicRequestToResponses:
         )
         assert params.input[0].output == "a\nb"
 
+    def test_tool_search_result_names_the_loaded_tools(self) -> None:
+        """Claude Code's tool search answers with `tool_reference` blocks; every tool is already a function in the
+        converted request, so each reference becomes a note naming the tool."""
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": [
+                                    {"type": "tool_reference", "tool_name": "SendMessage"},
+                                    {"type": "tool_reference", "tool_name": "TaskStop"},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        assert params.input[0].output == "[tool loaded: SendMessage]\n[tool loaded: TaskStop]"
+
+    def test_tool_addition_names_the_added_tool(self) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Go on."},
+                            {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "ListAgents"}},
+                        ],
+                    }
+                ],
+            }
+        )
+        assert [part["text"] for part in params.input[0].content] == ["Go on.", "[tool loaded: ListAgents]"]
+
     def test_thinking_block_becomes_reasoning_item(self) -> None:
         params = _converter().anthropic_request_to_responses(
             {
