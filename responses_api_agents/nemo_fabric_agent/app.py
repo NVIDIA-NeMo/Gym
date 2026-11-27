@@ -806,14 +806,21 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
             agent_json = agent_response.model_dump(mode="json")
 
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump() | {"response": agent_json},
-                cookies=cookies,
-            )
-            await raise_for_status(verify_response)
-            verify_json = await get_response_json(verify_response)
+            if self.config.skip_verification:
+                verify_json = body.model_dump() | {
+                    "response": agent_json,
+                    "reward": float(self.config.skip_verification_reward),
+                    "verification_skipped": True,
+                }
+            else:
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=body.model_dump() | {"response": agent_json},
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
+                verify_json = await get_response_json(verify_response)
             fabric_output = _mapping(fabric_result.get("output"))
             finished_naturally = fabric_result.get("status") == "succeeded" and not fabric_output.get("failed", False)
             if finished_naturally and "completed" in fabric_output:
