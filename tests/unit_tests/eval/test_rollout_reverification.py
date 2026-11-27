@@ -2260,9 +2260,9 @@ class TestCallAggregateMetrics:
             {AGENT_REF_KEY_NAME: {"name": "agent_b"}, TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
         ]
         results = [
-            {"reward": 1.0, TASK_INDEX_KEY_NAME: 0},
-            {"reward": 0.5, TASK_INDEX_KEY_NAME: 1},
-            {"reward": 0.0, TASK_INDEX_KEY_NAME: 2},
+            {"reward": 1.0, TASK_INDEX_KEY_NAME: 0, "is_looping": True, "mask_sample": True},
+            {"reward": 0.5, TASK_INDEX_KEY_NAME: 1, "is_looping": False},
+            {"reward": 0.0, TASK_INDEX_KEY_NAME: 2, "is_looping": None},
         ]
 
         posted: list[tuple[str, list]] = []
@@ -2274,7 +2274,13 @@ class TestCallAggregateMetrics:
         mock_client = self._patch(monkeypatch, {"agent_a": "rs_a", "agent_b": "rs_b"})
         mock_client.post = capture_post
 
-        await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+        written = await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+        by_agent = {entry[AGENT_REF_KEY_NAME]["name"]: entry for entry in orjson.loads(written.read_bytes())}
+        for name in ("agent_metrics", "key_metrics"):
+            assert by_agent["agent_a"][name]["looping/rate"] == 0.5
+            assert by_agent["agent_a"][name]["looping/coverage"] == 1.0
+            assert by_agent["agent_b"][name]["looping/coverage"] == 0.0
+            assert "looping/rate" not in by_agent["agent_b"][name]
 
         assert len(posted) == 2
         by_server = {server: payload for server, payload in posted}
@@ -3241,8 +3247,11 @@ class TestRunFromConfigResumeFromCache:
             input=self._row("agent_a", 0),
             rollout={"response": {"output": []}, "ng_trajectory": trajectory, "ng_agent_observations": evidence},
         )
+        pair.rollout.update(is_looping=None, reasons=[])
         dispatched = []
-        self._patch(monkeypatch, [pair], dispatched)
+        self._patch(
+            monkeypatch, [pair], dispatched, result={"reward": 0.5, "is_looping": False, "reasons": ["replaced"]}
+        )
         options = {} if forward is None else {"forward_agent_evidence": forward}
         config = self._make_config(tmp_path, resume_from_cache=resume, **options)
         assert config.forward_agent_evidence is bool(forward)
@@ -3257,6 +3266,9 @@ class TestRunFromConfigResumeFromCache:
             assert "ng_agent_observations" not in payload
         assert pair.rollout["ng_trajectory"] == trajectory
         assert pair.rollout["ng_agent_observations"] == evidence
+        [saved] = self._read_jsonl(tmp_path / "output.jsonl")
+        assert saved["is_looping"] is None and saved["reasons"] == []
+        assert saved["reward"] == 0.5
 
     async def test_resume_preserves_prior_output_and_reruns_only_missing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

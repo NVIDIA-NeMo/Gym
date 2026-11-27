@@ -58,7 +58,8 @@ async def test_spawned_assessment_recovers_after_worker_crash():
         assessor.close()
 
 
-async def test_cancellation_reserves_capacity_until_submitted_work_finishes(monkeypatch):
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_interrupted_assessment_reserves_capacity_until_work_finishes(monkeypatch, cancel):
     import nemo_gym.rollouts.looping as module
 
     future = Future()
@@ -68,12 +69,16 @@ async def test_cancellation_reserves_capacity_until_submitted_work_finishes(monk
     monkeypatch.setattr(module, "ProcessPoolExecutor", Mock(return_value=pool))
     reader = Mock(wraps=module.collect_response_text)
     monkeypatch.setattr(module, "collect_response_text", reader)
-    assessor = LoopingAssessor()
+    assessor = LoopingAssessor(timeout_s=30 if cancel else 0)
     task = asyncio.create_task(assessor.assess({"output": []}))
     await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    if cancel:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        assert (await asyncio.wait_for(task, 5)).is_looping is None
+    assessor._timeout_s = 30
     second = asyncio.create_task(assessor.assess({"output": []}))
     await asyncio.sleep(0)
     assert reader.call_count == 1

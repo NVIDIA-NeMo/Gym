@@ -63,6 +63,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.metrics.looping import looping_metrics
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -1188,6 +1189,9 @@ async def _call_aggregate_metrics(
 
                 await raise_for_status(agg_response)
                 agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+                looping = looping_metrics(agent_result_list)
+                agg_result.agent_metrics.update(looping)
+                agg_result.key_metrics.update(looping)
         except TimeoutError as error:
             if not deadline.expired():
                 raise  # Not this limit: a transport error keeps its own type and message.
