@@ -1907,6 +1907,73 @@ def test_transcript_to_atif_groups_tool_calls_with_their_outputs_and_keeps_reaso
     assert AtifTrajectoryV1_7.model_validate_json(encoded) == trajectory
 
 
+def test_transcript_to_atif_reports_cached_input_tokens() -> None:
+    trajectory = _transcript(
+        [{"role": "user", "content": "hi"}],
+        [_assistant_message("m1", "ok")],
+        usage={
+            "input_tokens": 100,
+            "output_tokens": 5,
+            "total_tokens": 105,
+            "input_tokens_details": {"cached_tokens": 80},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+    )
+
+    assert trajectory.final_metrics.model_dump(exclude_none=True) == {
+        "total_prompt_tokens": 100,
+        "total_completion_tokens": 5,
+        "total_cached_tokens": 80,
+        "total_steps": 2,
+    }
+    encoded = json.loads(encode_atif_trajectory(trajectory))
+    assert encoded["final_metrics"]["total_cached_tokens"] == 80
+
+
+def test_transcript_to_atif_keeps_a_reported_zero_cached_count_apart_from_a_missing_one() -> None:
+    """A reported 0 means no prompt token came from the cache; a missing count means the model did not say."""
+    base_usage: dict[str, Any] = {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+    reported_zero = _transcript(
+        [{"role": "user", "content": "hi"}],
+        [_assistant_message("m1", "ok")],
+        usage={**base_usage, "input_tokens_details": {"cached_tokens": 0}},
+    )
+    not_reported = _transcript(
+        [{"role": "user", "content": "hi"}],
+        [_assistant_message("m1", "ok")],
+        usage={**base_usage, "input_tokens_details": {}},
+    )
+
+    assert reported_zero.final_metrics.total_cached_tokens == 0
+    assert json.loads(encode_atif_trajectory(reported_zero))["final_metrics"]["total_cached_tokens"] == 0
+    assert not_reported.final_metrics.total_cached_tokens is None
+    assert "total_cached_tokens" not in json.loads(encode_atif_trajectory(not_reported))["final_metrics"]
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        None,
+        {},
+        {"cached_tokens": None},
+        {"cached_tokens": -1},
+        {"cached_tokens": True},
+        {"cached_tokens": 101},
+        "80",
+    ],
+    ids=["no-details", "no-field", "null", "negative", "bool", "above-prompt", "not-a-mapping"],
+)
+def test_transcript_to_atif_leaves_out_unusable_cached_token_counts(details: Any) -> None:
+    usage: dict[str, Any] = {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+    if details is not None:
+        usage["input_tokens_details"] = details
+
+    trajectory = _transcript([{"role": "user", "content": "hi"}], [_assistant_message("m1", "ok")], usage=usage)
+
+    assert trajectory.final_metrics.total_cached_tokens is None
+    assert trajectory.final_metrics.total_prompt_tokens == 100
+
+
 def test_transcript_to_atif_terminus_user_turns_become_the_previous_steps_observation() -> None:
     """Terminus feeds the terminal back as user turns; ATIF has no later user turns, so they are observations."""
     trajectory = _transcript(

@@ -1363,6 +1363,16 @@ def transcript_to_atif(
             final_metrics.total_prompt_tokens = prompt
         if isinstance(completion, int) and not isinstance(completion, bool) and completion >= 0:
             final_metrics.total_completion_tokens = completion
+        details = usage.get("input_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, Mapping) else None
+        # Cached tokens are a subset of the prompt tokens; a count above the prompt is left out, not clamped.
+        if (
+            isinstance(cached, int)
+            and not isinstance(cached, bool)
+            and cached >= 0
+            and (final_metrics.total_prompt_tokens is None or cached <= final_metrics.total_prompt_tokens)
+        ):
+            final_metrics.total_cached_tokens = cached
     conversion: dict[str, Any] = {
         "profile": TRANSCRIPT_EXPORT_PROFILE,
         "status": "partial" if reasons else "complete",
