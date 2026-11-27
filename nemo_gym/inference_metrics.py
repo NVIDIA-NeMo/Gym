@@ -125,6 +125,9 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
     mooncake_endpoint: HttpUrl | None = Field(
         default=None, description="Single Mooncake master /metrics URL for storage usage and eviction metrics."
     )
+    mooncake_client_endpoints: dict[str, HttpUrl] = Field(
+        default_factory=dict, description="Per-store Mooncake /metrics URLs for histogram-free offload diagnostics."
+    )
     cache_inventory: bool = Field(default=False, description="Enable expensive debug cache inventory snapshots.")
     cache_inventory_interval_s: float = Field(default=10.0, ge=10, allow_inf_nan=False)
     cache_inventory_timeout_s: float = Field(default=10.0, gt=0, allow_inf_nan=False)
@@ -141,11 +144,17 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
 
     @model_validator(mode="after")
     def validate_enabled(self) -> "InferenceMetricsConfig":
-        if self.enabled and not (self.endpoints or self.router_endpoints or self.mooncake_endpoint):
+        if self.enabled and not (
+            self.endpoints or self.router_endpoints or self.mooncake_endpoint or self.mooncake_client_endpoints
+        ):
             raise ValueError("Enabled inference_metrics requires endpoints")
         if self.endpoints.keys() & self.router_endpoints.keys():
             raise ValueError("Replica and router endpoint names must be distinct")
-        names = [*self.endpoints, *self.router_endpoints]
+        names = [*self.endpoints, *self.router_endpoints, *self.mooncake_client_endpoints]
+        if len(names) != len(set(names)):
+            raise ValueError("Endpoint names must be distinct across engine, router, and Mooncake clients")
+        if set(self.mooncake_client_endpoints) & {"mooncake", "total", "stores_total", "stores_max"}:
+            raise ValueError("Mooncake client names must not use reserved aggregate names")
         if self.mooncake_endpoint is not None and "mooncake" in names:
             raise ValueError("Endpoint name 'mooncake' is reserved when mooncake_endpoint is configured")
         if any(not name or not all(c.isalnum() or c in "_-" for c in name) for name in names):
@@ -197,9 +206,19 @@ class InferenceMetricsCollector:
                     (family.type == "gauge" and sample.name in MOONCAKE_STORAGE_GAUGES | MOONCAKE_EVICTION_GAUGES)
                     or (family.type == "counter" and family.name.removesuffix("_total") in MOONCAKE_EVICTION_COUNTERS)
                     or (family.type == "histogram" and family.name in MOONCAKE_EVICTION_HISTOGRAMS)
+                    or (family.type in {"gauge", "counter"} and sample.name.startswith("master_offload_diagnostics_"))
+                )
+                is_mooncake_client = (
+                    replica in self.config.mooncake_client_endpoints
+                    and family.type in {"gauge", "counter"}
+                    and sample.name.startswith("mooncake_offload_")
                 )
                 if (
-                    (not sample.name.startswith(("vllm:", "sglang:", "vllm_router_")) and not is_mooncake_master)
+                    (
+                        not sample.name.startswith(("vllm:", "sglang:", "vllm_router_"))
+                        and not is_mooncake_master
+                        and not is_mooncake_client
+                    )
                     # Prometheus exposes creation timestamps as separate gauges.
                     or sample.name.endswith("_created")
                     or (self.config.metrics is not None and sample.name not in self.config.metrics)
@@ -211,6 +230,8 @@ class InferenceMetricsCollector:
                     # Master metrics are cluster totals; exclude per-segment duplicates.
                     namespace, name = "mooncake", sample.name.removeprefix("master_")
                     metric_replica = "total"
+                elif is_mooncake_client:
+                    namespace, name = "mooncake", sample.name.removeprefix("mooncake_")
                 elif sample.name.startswith("vllm_router_"):
                     namespace, name = "router", sample.name.removeprefix("vllm_router_")
                 else:
@@ -259,6 +280,7 @@ class InferenceMetricsCollector:
         if self.config.cache_inventory:
             self.cache_layouts[replica] = cache_layout
         self.add_derived_metrics(result, f"vllm/{replica}/")
+        self.add_offload_means(result)
         for metric in MOONCAKE_EVICTION_HISTOGRAMS:
             prefix = f"mooncake/total/{metric.removeprefix('master_')}"
             total = result.get(f"{prefix}_sum_per_second")
@@ -270,6 +292,19 @@ class InferenceMetricsCollector:
         if allocated is not None and allocated >= 0 and capacity is not None and capacity > 0:
             result["mooncake/total/kv_cache_usage_perc"] = allocated / capacity
         return result
+
+    @staticmethod
+    def add_offload_means(metrics: dict[str, float]) -> None:
+        """Compute interval mean durations from plain counters, without histograms."""
+        for key, duration in list(metrics.items()):
+            if not key.startswith("mooncake/") or not key.endswith("_duration_us_per_second"):
+                continue
+            if key.startswith("mooncake/stores_max/"):
+                continue  # Maxima of duration and operation rates may come from different stores.
+            base = key.removesuffix("_duration_us_per_second")
+            operations = metrics.get(f"{base}_operations_per_second")
+            if operations is not None and operations > 0:
+                metrics[f"{base}_mean_ms"] = duration / operations / 1000
 
     @staticmethod
     def add_derived_metrics(metrics: dict[str, float], prefix: str) -> None:
@@ -475,6 +510,7 @@ class InferenceMetricsCollector:
     async def _sample_loop(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             endpoints = [*self.config.endpoints.items(), *self.config.router_endpoints.items()]
+            endpoints.extend(self.config.mooncake_client_endpoints.items())
             if self.config.mooncake_endpoint is not None:
                 endpoints.append(("mooncake", self.config.mooncake_endpoint))
             snapshots = await asyncio.gather(
@@ -525,6 +561,24 @@ class InferenceMetricsCollector:
                     if name in {"prefix_cache_hit_rate", "cache_hit_rate"}:
                         aggregates[f"{namespace}/min/{metric}"] = min(values)
             self.add_derived_metrics(aggregates, "vllm/total/")
+            stores = [
+                {
+                    key.removeprefix(f"mooncake/{name}/"): value
+                    for key, value in (snapshot or {}).items()
+                    if key.startswith(f"mooncake/{name}/")
+                }
+                for (name, _), snapshot in zip(endpoints, snapshots)
+                if name in self.config.mooncake_client_endpoints
+            ]
+            shared = set.intersection(*(set(store) for store in stores)) if stores else set()
+            for metric in shared:
+                values = [store[metric] for store in stores]
+                aggregates[f"mooncake/stores_max/{metric}"] = max(values)
+                if metric.endswith(
+                    ("_total", "_per_second", "_bytes", "_objects", "_batches")
+                ) and not metric.endswith("_peak_bytes"):
+                    aggregates[f"mooncake/stores_total/{metric}"] = sum(values)
+            self.add_offload_means(aggregates)
             if aggregates:
                 export_metrics(aggregates)
             try:
@@ -549,6 +603,7 @@ async def collect_inference_metrics(config: InferenceMetricsConfig) -> AsyncIter
         f"Inference metrics collection enabled: {len(config.endpoints)} replicas, "
         f"{len(config.router_endpoints)} routers, "
         f"{int(config.mooncake_endpoint is not None)} Mooncake masters, "
+        f"{len(config.mooncake_client_endpoints)} Mooncake disk stores, "
         f"interval={config.interval_s:g}s, timeout={config.timeout_s:g}s, "
         f"exporters={exporter_names}",
         flush=True,

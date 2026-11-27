@@ -281,6 +281,28 @@ srun() {
                     else:
                         self.assertNotIn("mooncake_endpoint", metrics)
 
+    def test_mooncake_disk_metrics_include_headless_nodes(self) -> None:
+        for mode in ("independent", "coupled"):
+            with self.subTest(mode=mode), TemporaryDirectory() as directory:
+                command, _ = self.generate_commands(
+                    env={
+                        "VLLM_PD_DEPLOYMENT_MODE": mode,
+                        "ENABLE_MOONCAKE": "1",
+                        "ENABLE_MOONCAKE_DISK_OFFLOAD": "1",
+                        "MOONCAKE_SSD_PATH": "/ssd",
+                    }
+                )
+                start = 'read -r -a nodes <<< "$ALL_NODES"'
+                setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                path = Path(directory) / "metrics.yaml"
+                status, _, stderr = self.run_shell(setup, env={"inference_metrics_config": str(path)})
+                self.assertEqual(status, 0, stderr)
+                metrics = yaml.safe_load(path.read_text())["inference_metrics"]
+                self.assertEqual(
+                    metrics["mooncake_client_endpoints"],
+                    {f"ssd{i}": f"http://node{i}:9300/metrics" for i in range(8)},
+                )
+
     def test_mooncake_storage_modes_and_cleanup(self) -> None:
         """Execute generated setup with stub services; SSD work requires explicit opt-in."""
         cases = (
@@ -399,6 +421,8 @@ python3() {
                     cpu_bytes = int(env.get("MOONCAKE_CPU_CACHE_GIB", "600")) * 1024**3
                     self.assertIn(f"--global_segment_size={cpu_bytes}", owner)
                     self.assertIn("--host=127.0.0.1:50053", owner)
+                    self.assertIn("--enable_http_server=true", owner)
+                    self.assertIn("--http_port=9300", owner)
                     quota = int((Path(directory) / "disk-quota").read_text())
                     self.assertEqual(quota, int(env.get("MOONCAKE_DISK_QUOTA_GIB", "512")) * 1024**3)
                     self.assertFalse(Path((Path(directory) / "disk-dir").read_text().strip()).exists())

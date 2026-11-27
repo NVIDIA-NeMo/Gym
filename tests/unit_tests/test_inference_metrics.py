@@ -46,6 +46,90 @@ segment_total_capacity_bytes{segment="worker0"} 100
 """
 
 
+def offload_payload(duration: int, operations: int) -> str:
+    return f"""# TYPE mooncake_offload_write_duration_us_total counter
+mooncake_offload_write_duration_us_total {duration}
+# TYPE mooncake_offload_write_operations_total counter
+mooncake_offload_write_operations_total {operations}
+# TYPE mooncake_offload_read_buffer_in_use_bytes gauge
+mooncake_offload_read_buffer_in_use_bytes 1024
+# TYPE mooncake_ssd_write_latency_us histogram
+mooncake_ssd_write_latency_us_bucket{{le="+Inf"}} 99
+mooncake_ssd_write_latency_us_sum 123
+mooncake_ssd_write_latency_us_count 99
+"""
+
+
+def test_offload_clients_export_counters_and_gauges_without_histograms():
+    collector = InferenceMetricsCollector(config(mooncake_client_endpoints={"ssd0": "http://localhost:9300/metrics"}))
+    first = collector.parse("ssd0", offload_payload(1000, 1), 10)
+    assert first["mooncake/ssd0/offload_read_buffer_in_use_bytes"] == 1024
+    assert not any("latency_us" in key for key in first)
+    second = collector.parse("ssd0", offload_payload(7000, 3), 12)
+    assert second["mooncake/ssd0/offload_write_mean_ms"] == 3
+    assert second["mooncake/ssd0/offload_write_operations_per_second"] == 1
+    assert collector.parse("replica0", offload_payload(7000, 3), 12) == {}
+    reset = collector.parse("ssd0", offload_payload(200, 1), 14)
+    assert "mooncake/ssd0/offload_write_mean_ms" not in reset
+
+
+def test_master_offload_reference_metrics_and_age_gauges():
+    collector = InferenceMetricsCollector(config(mooncake_endpoint="http://localhost:9003/metrics"))
+    payload = """# TYPE master_offload_diagnostics_queued_oldest_age_seconds gauge
+master_offload_diagnostics_queued_oldest_age_seconds 12
+# TYPE master_offload_diagnostics_source_reference_duration_us_total counter
+master_offload_diagnostics_source_reference_duration_us_total 10000000
+# TYPE master_offload_diagnostics_source_reference_operations_total counter
+master_offload_diagnostics_source_reference_operations_total 5
+"""
+    first = collector.parse("mooncake", payload, 10)
+    assert first["mooncake/total/offload_diagnostics_queued_oldest_age_seconds"] == 12
+    second = collector.parse("mooncake", payload.replace("10000000", "16000000").replace("total 5", "total 7"), 12)
+    assert second["mooncake/total/offload_diagnostics_source_reference_mean_ms"] == 3000
+
+
+@pytest.mark.parametrize("name", ["replica0", "total", "stores_total", "stores_max", "mooncake", "bad/name"])
+def test_mooncake_client_endpoint_names(name):
+    with pytest.raises(ValidationError):
+        config(mooncake_client_endpoints={name: "http://localhost:9300/metrics"})
+
+
+def test_mooncake_clients_can_be_collected_without_engine_endpoints():
+    assert InferenceMetricsConfig(enabled=True, mooncake_client_endpoints={"ssd0": "http://localhost:9300/metrics"})
+
+
+@pytest.mark.parametrize("failed_store", [False, True])
+async def test_offload_store_aggregation_uses_weighted_means_and_omits_partial_totals(monkeypatch, failed_store):
+    cfg = InferenceMetricsConfig(
+        enabled=True,
+        mooncake_client_endpoints={"ssd0": "http://localhost:9300/metrics", "ssd1": "http://localhost:9301/metrics"},
+    )
+    collector = InferenceMetricsCollector(cfg)
+    stop = asyncio.Event()
+    published = []
+
+    async def scrape(name, url):
+        stop.set()
+        if name == "ssd1" and failed_store:
+            return None
+        prefix = f"mooncake/{name}/offload_write"
+        duration, operations = (6000, 2) if name == "ssd0" else (9000, 1)
+        return {
+            f"{prefix}_duration_us_per_second": duration,
+            f"{prefix}_operations_per_second": operations,
+            f"{prefix}_mean_ms": duration / operations / 1000,
+        }
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    monkeypatch.setattr(metrics_module, "export_metrics", published.append)
+    await collector.run(stop)
+    if failed_store:
+        assert not published
+    else:
+        assert published[-1]["mooncake/stores_total/offload_write_mean_ms"] == 5
+        assert published[-1]["mooncake/stores_max/offload_write_mean_ms"] == 9
+
+
 def config(**kwargs):
     return InferenceMetricsConfig(enabled=True, endpoints={"replica0": "http://localhost:8000/metrics"}, **kwargs)
 

@@ -296,6 +296,12 @@ read -r -a nodes <<< "\$ALL_NODES"
     printf '  router_endpoints:\n    main: "http://%s:$ROUTER_METRICS_PORT/metrics"\n' "\$ROUTER_NODE"
     if (( $ENABLE_MOONCAKE )); then
         printf '  mooncake_endpoint: "http://%s:9003/metrics"\n' "\${nodes[0]}"
+        if (( $ENABLE_MOONCAKE_DISK_OFFLOAD )); then
+            printf '  mooncake_client_endpoints:\n'
+            for node_index in "\${!nodes[@]}"; do
+                printf '    ssd%s: "http://%s:9300/metrics"\n' "\$node_index" "\${nodes[node_index]}"
+            done
+        fi
     fi
 } > "\$inference_metrics_config"
 gym_config_args+=(--config "\$inference_metrics_config")
@@ -798,6 +804,8 @@ DISK_CHECK
             --device_names=mlx5_0,mlx5_1,mlx5_3,mlx5_4 \\
             --global_segment_size=$((MOONCAKE_CPU_CACHE_GIB * 1024 * 1024 * 1024)) \\
             --enable_offload=true \\
+            --enable_http_server=true \\
+            --http_port=9300 \\
             --threads=4 \\
             --logtostderr &
         mooncake_owner_pid=\$!
