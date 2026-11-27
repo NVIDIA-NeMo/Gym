@@ -19,6 +19,7 @@ memory_mb = 65536
 timeout_sec = 3600
 
 [verifier]
+environment_mode = "separate"
 timeout_sec = 1200
 
 [verifier.env]
