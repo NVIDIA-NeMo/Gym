@@ -20,7 +20,7 @@ pi_agent:
       num_workers: 1
       concurrency: 512
       model: benchmark-model
-      pi_version: 0.85.1
+      pi_version: 1.5.2
       # The image lays out Node at /opt/node and Pi at /opt/pi, as install_pi_runtime.sh does under one directory.
       sandbox_runtime_dir: /opt
       timeout: 14400

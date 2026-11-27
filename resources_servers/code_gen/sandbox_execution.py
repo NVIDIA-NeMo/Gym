@@ -23,6 +23,7 @@ grading code used for every candidate; nothing else from this server is uploaded
 Candidate failures (wrong answer, timeout, crash) come back as normal harness results.
 """
 
+import dataclasses
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -39,16 +40,21 @@ from nemo_gym.verification import (
 
 _CODE_GEN_DIR = Path(__file__).parent
 _RUNNER = _CODE_GEN_DIR / "sandbox" / RUNNER_FILE
-# The grading harness, uploaded under the same relative paths so the runner can import it.
+# The grading harnesses, uploaded under the same relative paths so the runner can import them.
 _HARNESS_FILES = (
     "lcb_integration/__init__.py",
     "lcb_integration/correctness.py",
     "lcb_integration/testing_util.py",
+    "assertion_harness/__init__.py",
+    "assertion_harness/check.py",
+    "sandbox_limits.py",
 )
 DEFAULT_WORK_DIR = "/tmp/code_gen_verify"
 # Interpreter start-up, Manager start/stop and result serialization on top of the
 # harness's own global deadline.
 _EXEC_OVERHEAD_S = 60
+# Sandbox memory on top of a task's own limit, for the runner, the harness and the tests.
+_SANDBOX_MEMORY_HEADROOM_MIB = 2048
 
 
 class _RunnerResult(BaseModel):
@@ -56,15 +62,35 @@ class _RunnerResult(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-def exec_timeout_s(timeout: int, num_tests: int) -> float:
-    """The deadline ``check_correctness`` enforces on its child, plus runner overhead."""
-    return (timeout + 1) * num_tests + 5 + _EXEC_OVERHEAD_S
+def exec_timeout_s(timeout: float, num_tests: int, *, deadline_s: float | None = None) -> float:
+    """The deadline ``check_correctness`` enforces on its child (its own, or *deadline_s*), plus runner overhead."""
+    grading_deadline_s = deadline_s if deadline_s is not None else (timeout + 1) * num_tests + 5
+    return grading_deadline_s + _EXEC_OVERHEAD_S
+
+
+def task_deadline_s(time_limit_s: float, num_tests: int) -> float:
+    """The grading deadline for a task's own time limit: compilation, then every test case."""
+    return time_limit_s + (time_limit_s + 1) * num_tests + 5
+
+
+def _with_memory(config: SandboxVerificationConfig, memory_limit_mb: int) -> SandboxVerificationConfig:
+    needed = memory_limit_mb + _SANDBOX_MEMORY_HEADROOM_MIB
+    if (config.resources.memory_mib or 0) >= needed:
+        return config
+    return config.model_copy(update={"resources": dataclasses.replace(config.resources, memory_mib=needed)})
+
+
+def _runner_files() -> dict[str, str]:
+    return {
+        RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
+        **{name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+    }
 
 
 async def check_correctness_in_sandbox(
     sample: dict[str, str],
     generation: str,
-    timeout: int,
+    timeout: float,
     debug: bool,
     *,
     num_tests: int,
@@ -72,17 +98,59 @@ async def check_correctness_in_sandbox(
     config: SandboxVerificationConfig,
     metadata: Mapping[str, str],
     work_dir: str = DEFAULT_WORK_DIR,
+    memory_limit_mb: int | None = None,
+    deadline_s: float | None = None,
 ) -> tuple[list[bool | int], dict[str, Any] | None]:
-    """Sandboxed equivalent of ``check_correctness``; raises ``SandboxVerificationError`` on infra failure."""
+    """Sandboxed equivalent of ``check_correctness``; raises ``SandboxVerificationError`` on infra failure.
+
+    *memory_limit_mb* caps the task's memory; *deadline_s* replaces ``check_correctness``'s own deadline.
+    """
+    request: dict[str, Any] = {"sample": sample, "generation": generation, "timeout": timeout, "debug": debug}
+    if memory_limit_mb is not None:
+        request["memory_limit_mb"] = memory_limit_mb
+        config = _with_memory(config, memory_limit_mb)
+    if deadline_s is not None:
+        request["deadline_s"] = deadline_s
     parsed = await run_verification_sandbox(
         provider=provider,
         config=config,
-        files={
-            RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
-            **{name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+        files=_runner_files(),
+        request=request,
+        exec_timeout_s=exec_timeout_s(timeout, num_tests, deadline_s=deadline_s),
+        parse_result=_RunnerResult.model_validate_json,
+        metadata=metadata,
+        work_dir=work_dir,
+    )
+    return parsed.result, parsed.metadata
+
+
+async def check_assertions_in_sandbox(
+    generation: str,
+    tests: list[str],
+    *,
+    time_limit_s: float,
+    memory_limit_mb: int,
+    provider: Mapping[str, Any] | SandboxProvider,
+    config: SandboxVerificationConfig,
+    metadata: Mapping[str, str],
+    work_dir: str = DEFAULT_WORK_DIR,
+) -> tuple[list[bool | int], dict[str, Any] | None]:
+    """Sandboxed equivalent of ``check_assertions``; raises ``SandboxVerificationError`` on infra failure."""
+    # One time limit covers the candidate and all its tests; the 5 s slack matches check_correctness's.
+    deadline_s = time_limit_s + 5
+    parsed = await run_verification_sandbox(
+        provider=provider,
+        config=_with_memory(config, memory_limit_mb),
+        files=_runner_files(),
+        request={
+            "format": "assertions",
+            "generation": generation,
+            "tests": tests,
+            "time_limit_s": time_limit_s,
+            "memory_limit_mb": memory_limit_mb,
+            "deadline_s": deadline_s,
         },
-        request={"sample": sample, "generation": generation, "timeout": timeout, "debug": debug},
-        exec_timeout_s=exec_timeout_s(timeout, num_tests),
+        exec_timeout_s=exec_timeout_s(time_limit_s, len(tests), deadline_s=deadline_s),
         parse_result=_RunnerResult.model_validate_json,
         metadata=metadata,
         work_dir=work_dir,

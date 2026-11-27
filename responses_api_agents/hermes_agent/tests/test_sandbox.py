@@ -94,6 +94,14 @@ def state():
     )
 
 
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+async def test_gzip_helper_is_uploaded_only_when_enabled(state, gzip_enabled):
+    await state.stage_activation({"gzip_requests_enabled": gzip_enabled})
+
+    uploaded = {call.args[0].name for call in state.session.sandbox.upload.await_args_list}
+    assert ("request_gzip.py" in uploaded) is gzip_enabled
+
+
 def mock_json_download(sandbox, **kwargs):
     """Supply files through the real text utility's sandbox download boundary."""
     download = AsyncMock(**kwargs)
@@ -133,6 +141,25 @@ async def test_unbound_compatibility_run_fails_before_calling_resources(agent):
         )
     assert error.value.status_code == 422
     agent.server_client.post.assert_not_awaited()
+
+
+def test_gzip_rejects_local_execution_before_calling_resources(agent):
+    agent.config.gzip_requests_enabled = True
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert (
+            response.json()["detail"]
+            == "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert (
+            run.json()["detail"]
+            == "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+    agent.server_client.post.assert_not_called()
 
 
 async def test_unbound_direct_responses_remains_available(agent):
@@ -1216,6 +1243,24 @@ def test_agent_timeout_is_the_task_budget_capped_by_the_ceiling(agent, raw, expe
     body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata=metadata)
     assert agent.config.sandbox_runner_timeout_seconds == 21600
     assert agent._agent_timeout_sec(body) == expected
+
+
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+async def test_agent_passes_gzip_flag_to_sandbox_runner(agent, state, gzip_enabled):
+    agent.config.gzip_requests_enabled = gzip_enabled
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}}
+    )
+
+    await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        agent_session_id="session",
+        state=state,
+    )
+
+    state.execute.assert_awaited_once()
+    (payload,) = state.execute.await_args.args
+    assert payload["gzip_requests_enabled"] is gzip_enabled
 
 
 @pytest.mark.parametrize("budget", [None, "900.0"])

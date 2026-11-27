@@ -16,13 +16,15 @@
 This responses_api_models server is only used to proxy to an existing LocalVLLMModel server so we don't need to duplicate GPU resources.
 """
 
-from time import sleep
-from typing import List, Union
+import json
+from time import monotonic, sleep
+from typing import List, Optional, Union
 
 import requests
-from pydantic import Field
+from pydantic import Field, PositiveFloat
 
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.utils import get_within_deadline
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -35,29 +37,68 @@ class LocalVLLMModelProxyServerConfig(VLLMModelConfig):
 
     model_server: ModelServerRef
 
+    # Wait for the referenced LocalVLLMModel server at startup, and for its answer to the config request. None (default)
+    # waits without limit. A number of seconds makes startup fail with a TimeoutError if the server is not up by then.
+    model_server_wait_timeout_seconds: Optional[PositiveFloat] = None
+
 
 class LocalVLLMModelProxyServer(VLLMModel):
     config: LocalVLLMModelProxyServerConfig
+
+    @staticmethod
+    def _get_config_within(url: str, deadline: float, timeout_s: float) -> dict:
+        """GET the inner vLLM config, ending at the deadline however the peer sends the response."""
+        remaining = deadline - monotonic()
+        try:
+            if remaining <= 0:
+                raise TimeoutError
+            status, body = get_within_deadline(url, timeout_s=remaining)
+            if monotonic() >= deadline:  # A reply that completes after the deadline is not accepted.
+                raise TimeoutError
+        except TimeoutError:
+            raise TimeoutError(
+                f"The inner vLLM config of the model server was not received within {timeout_s} s"
+            ) from None
+        assert 200 <= status < 300
+        return json.loads(body)
 
     def setup_webserver(self):
         model_server_name = self.config.model_server.name
 
         print(f"Waiting for LocalVLLMModelServer `{model_server_name}` spinup")
 
-        while self.server_client.poll_for_status(model_server_name) != "success":
-            # Sleep for 10s by default
-            sleep(10)
+        timeout_s = self.config.model_server_wait_timeout_seconds
+        deadline = None if timeout_s is None else monotonic() + timeout_s
+        while True:
+            # Expiry is checked before every poll, so a server that comes up only after the deadline is not accepted.
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"LocalVLLMModelServer `{model_server_name}` was not up within {timeout_s} s")
+            status = self.server_client.poll_for_status(
+                model_server_name,
+                timeout_seconds=5 if remaining is None else min(5, remaining),
+                total_deadline=remaining is not None,  # Without a limit, the poll keeps its usual per-phase timeout.
+            )
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                # Also a poll that succeeded late: readiness after the deadline is not accepted.
+                raise TimeoutError(f"LocalVLLMModelServer `{model_server_name}` was not up within {timeout_s} s")
+            if status == "success":
+                break
+            # Sleep for 10s by default, or less when that would pass the deadline
+            sleep(10 if remaining is None else min(10, remaining))
 
         model_server_config_dict = get_first_server_config_dict(
             self.server_client.global_config_dict, model_server_name
         )
         model_server_base_url = self.server_client._build_server_base_url(model_server_config_dict)
-        response = requests.get(
-            f"{model_server_base_url}/get_inner_vllm_config",
-        )
-        assert response.ok
-
-        response_dict = response.json()
+        config_url = f"{model_server_base_url}/get_inner_vllm_config"
+        if deadline is None:
+            response = requests.get(config_url, timeout=None)
+            assert response.ok
+            response_dict = response.json()
+        else:
+            response_dict = self._get_config_within(config_url, deadline, timeout_s)
 
         self.config.base_url = response_dict["base_url"]
         self.config.api_key = response_dict["api_key"]

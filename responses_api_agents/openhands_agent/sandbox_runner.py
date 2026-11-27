@@ -65,7 +65,7 @@ def describe_error(error: BaseException) -> list[dict[str, object]]:
 def write_inputrc(state_dir: str) -> str:
     """Write a readline file that keeps the task's own settings and turns bracketed paste off.
 
-    OpenHands 1.59.0's subprocess terminal leaves the bracketed-paste escape codes that bash 5.1 and later
+    OpenHands 1.62.0's subprocess terminal leaves the bracketed-paste escape codes that bash 5.1 and later
     print around each command in the tool output the model reads.
     """
     lines = []

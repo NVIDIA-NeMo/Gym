@@ -1,8 +1,8 @@
 # Legal Agent Bench
 
 Harvey LAB legal-document tasks run through NeMo Gym's Harbor Environment Server.
-LAB Native is the default agent. The Environment Server runs its prepared tasks
-and verifier.
+LAB Native is the default agent; Hermes, Claude Code, and Codex use the same
+prepared tasks and verifier.
 
 See the [LAB evaluation guide](../../fern/versions/latest/pages/evaluation/legal-agent-bench.mdx)
 for preparation, judges, harness and sandbox selection, and score interpretation.

@@ -52,8 +52,9 @@ class TestCheckCorrectnessReap:
         second_join_timeout = process.join.call_args_list[1].kwargs.get("timeout")
         assert first_join_timeout is not None
         assert second_join_timeout is not None
-        assert result == [-1, -1]
-        assert metadata is None
+        assert result == [-3, -3]
+        assert metadata["error_code"] == -3
+        assert metadata["stage"] == "grading"
         manager.shutdown.assert_called_once()
 
     def test_manager_shutdown_runs_when_process_start_raises(self, patched_mp):
@@ -79,9 +80,8 @@ class TestCheckCorrectnessReap:
         manager.list.side_effect = _make_list
 
         def _start_side_effect() -> None:
-            assert len(captured_lists) >= 2
-            captured_lists[0].append([1, 1])
-            captured_lists[1].append({"ok": True})
+            assert len(captured_lists) == 1
+            captured_lists[0].append(([1, 1], {"ok": True}))
 
         process.start.side_effect = _start_side_effect
 

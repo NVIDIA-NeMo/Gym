@@ -827,6 +827,7 @@ async def _relaunch_after_a_stop(monkeypatch: pytest.MonkeyPatch, conversation: 
         interrupted_tool_calls=0,
         interrupted_tool_call_ids=[],
         reprompted_conversation=False,
+        adoption=None,
         session=session,
         persistent_directory="/s",
         runtime="/rt",
@@ -1249,7 +1250,7 @@ async def test_a_re_bind_into_a_sandbox_without_the_runtime_installs_it_from_the
             "/app",
             "/rt",
             None,
-            {"checkpointed": True, "ripgrep": ripgrep, "plugin_dependencies": dependencies},
+            {"checkpointed": True, "ripgrep": ripgrep, "plugin_dependencies": dependencies, "model_relay": False},
         )
     ]
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
@@ -1288,6 +1289,31 @@ async def test_a_re_bind_that_fails_releases_its_sandbox_connection(monkeypatch:
     # The seed that re-binds is retried: each attempt must not leave a connection behind.
     sandbox.disconnect.assert_awaited_once()
     assert state.session is None and state.restored == {"session": {}}
+
+
+@pytest.mark.parametrize(
+    "error", [asyncio.CancelledError(), ConnectionError("502 Bad Gateway")], ids=["cancel", "raise"]
+)
+async def test_a_re_bind_whose_restored_launch_check_did_not_finish_is_undone(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    sandbox = MagicMock(sandbox_id="fork")
+    sandbox.exec = AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0))
+    sandbox.disconnect = AsyncMock()
+    agent, state, body = _restored(monkeypatch, sandbox)
+    state.keeps_processes = True
+    saved = {"session": {"pause_seq": 1, "supervisor_identity": "1.2"}}
+    state.restored = dict(saved)
+    session = SimpleNamespace(root_dir="/sessions/s", session_dir="/sessions/s/launch-1", sandbox=sandbox)
+    monkeypatch.setattr(SandboxSession, "rebind", staticmethod(lambda *_, **__: session))
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.check_restored", AsyncMock(side_effect=error))
+
+    with pytest.raises(type(error)):
+        await agent._rebind_restored_agent_session_state(state, body)
+
+    # The retried seed must check the launch again: a session left re-bound would relaunch beside it.
+    assert state.session is None and state.adoption is None and state.restored == saved
+    sandbox.disconnect.assert_awaited_once()
 
 
 # -- the saved reply and the evidence of a finished session ------------------------------------------------------
@@ -1701,6 +1727,7 @@ def _agent_and_stopped_launch(**state: Any) -> tuple[OpenCodeAgent, SimpleNamesp
     values = {
         "launch_count": 1,
         "launch_records": [],
+        "adoption": None,
         "session": session,
         "request": SimpleNamespace(agent_session_id="a"),
         "prepare_launch": AsyncMock(side_effect=prepare_launch),

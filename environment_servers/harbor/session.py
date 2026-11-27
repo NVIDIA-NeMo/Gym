@@ -104,6 +104,8 @@ class HarborSession:
     # The harness is the Harbor oracle: the reference solution is placed at /solution for it, once at seed for a
     # single-turn task and before each turn of a multi-step task (``_seed_solution``, ``_place_turn_solution``).
     solution_for_oracle: bool = False
+    # Event-loop time at which the task's own deadline ends the episode; ``None`` when it is not enforced.
+    deadline: float | None = None
 
     def service(self, name: str | None) -> AsyncSandbox:
         """The sandbox of a Compose service; ``None`` or ``"main"`` is the agent's own."""

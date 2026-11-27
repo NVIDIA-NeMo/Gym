@@ -16,7 +16,10 @@
 """Prepare IFBench evaluation data for NeMo Gym.
 
 Downloads IFBench test data from AllenAI's GitHub and converts to Gym JSONL
-format compatible with the instruction_following resources server.
+format compatible with the ifbench resources server.
+
+Each output row carries ``task_id``, the source row's ``key``: a stable id that does not depend on row order, which
+Gym plans and selects tasks by. ``id`` stays the row's position, which the resources server's request requires.
 """
 
 import json
@@ -45,6 +48,7 @@ def prepare() -> Path:
             prompt = entry["prompt"]
             rows.append(
                 {
+                    "task_id": str(entry["key"]),
                     "id": idx,
                     "instruction_id_list": entry["instruction_id_list"],
                     "prompt": prompt,

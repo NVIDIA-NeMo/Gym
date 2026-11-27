@@ -93,6 +93,7 @@ class _FakeSubprocess:
     """Stands in for ``subprocess`` in the connection module: records every ssh call, starts nothing."""
 
     PIPE = subprocess.PIPE
+    TimeoutExpired = subprocess.TimeoutExpired
 
     def __init__(self, *, master_running: bool) -> None:
         self.calls: list[list[str]] = []
@@ -109,7 +110,7 @@ class _FakeSubprocess:
     def terminate(self) -> None:
         self.terminated = True
 
-    def wait(self) -> int:
+    def wait(self, timeout: float | None = None) -> int:
         return 0
 
     def run(self, command: list[str], **kwargs) -> subprocess.CompletedProcess:

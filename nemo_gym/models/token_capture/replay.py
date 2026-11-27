@@ -56,9 +56,9 @@ def replay_context(items: list[dict], *, render_digest: str | None = None) -> Re
             if role not in ("system", "developer", "user", "assistant", "tool", "envelope"):
                 raise ValueError("Unsupported replay message role")
             value.pop("type", None)
-        elif kind in ("reasoning", "function_call"):
+        elif kind in ("reasoning", "function_call", "custom_tool_call"):
             role = "assistant"
-        elif kind == "function_call_output":
+        elif kind in ("function_call_output", "custom_tool_call_output"):
             role = "tool"
         else:
             raise ValueError(f"Unsupported replay item kind: {kind}")

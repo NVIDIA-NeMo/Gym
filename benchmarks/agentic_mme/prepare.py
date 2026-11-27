@@ -33,6 +33,7 @@ REPO_ID = "Crystal1047/Agentic-MME"
 REVISION = "b9ea9d3f68ff896d83fec666b6143da594c054a8"  # pragma: allowlist secret
 MAX_PIXELS = 2048 * 2048
 MAX_BYTES = 15 * 1024 * 1024
+EXPECTED_TASKS = 418
 
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "agentic_mme_benchmark.jsonl"
@@ -230,11 +231,22 @@ def prepare() -> Path:
     root = dataset_root()
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
     files = sorted((root / "json").glob("*.json"))
+    if len(files) != EXPECTED_TASKS:
+        raise ValueError(f"expected {EXPECTED_TASKS} task files under {root / 'json'}, found {len(files)}")
+    # An existing output counts as prepared, so publish each file only after every task converts, and the main
+    # output last.
+    published = [
+        OPENCODE_OUTPUT_FPATH,
+        SERVER_TOOLS_OUTPUT_FPATH,
+        OPENCODE_SERVER_TOOLS_OUTPUT_FPATH,
+        OUTPUT_FPATH,
+    ]
+    partial = {fpath: fpath.with_suffix(".jsonl.partial") for fpath in published}
     with (
-        open(OUTPUT_FPATH, "w") as out,
-        open(OPENCODE_OUTPUT_FPATH, "w") as opencode_out,
-        open(SERVER_TOOLS_OUTPUT_FPATH, "w") as server_tools_out,
-        open(OPENCODE_SERVER_TOOLS_OUTPUT_FPATH, "w") as opencode_server_tools_out,
+        open(partial[OUTPUT_FPATH], "w") as out,
+        open(partial[OPENCODE_OUTPUT_FPATH], "w") as opencode_out,
+        open(partial[SERVER_TOOLS_OUTPUT_FPATH], "w") as server_tools_out,
+        open(partial[OPENCODE_SERVER_TOOLS_OUTPUT_FPATH], "w") as opencode_server_tools_out,
     ):
         for path in files:
             row = convert(json.loads(path.read_text()), root)
@@ -244,6 +256,8 @@ def prepare() -> Path:
             opencode_out.write(json.dumps(opencode) + "\n")
             server_tools_out.write(json.dumps(server_tools_row(row, opencode["image_files"])) + "\n")
             opencode_server_tools_out.write(json.dumps(opencode_server_tools_row(row, opencode["image_files"])) + "\n")
+    for fpath in published:
+        os.replace(partial[fpath], fpath)
     print(
         f"Wrote {len(files)} tasks to {OUTPUT_FPATH}, {OPENCODE_OUTPUT_FPATH}, {SERVER_TOOLS_OUTPUT_FPATH} and "
         f"{OPENCODE_SERVER_TOOLS_OUTPUT_FPATH}, images under {IMAGES_DIR}"
