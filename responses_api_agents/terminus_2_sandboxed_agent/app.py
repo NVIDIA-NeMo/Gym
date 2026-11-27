@@ -157,6 +157,22 @@ def _is_model_infrastructure_error(exc: BaseException) -> bool:
     return isinstance(exc, ClientError)
 
 
+def _is_context_overflow_error(exc: BaseException) -> bool:
+    """Whether the model server refused the prompt as too long for the context window.
+
+    With ``propagate_context_overflow_errors`` the model server answers an overflow with OpenAI's error envelope and
+    the code ``context_length_exceeded`` instead of an empty response.
+    """
+    if not isinstance(exc, ClientResponseError):
+        return False
+    body = getattr(exc, "response_content", None) or b""
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(error, dict) and error.get("code") == "context_length_exceeded"
+
+
 @dataclass
 class Terminus2SessionState(AgentSessionState):
     """A sandbox borrowed from the environment server for one episode.
@@ -420,6 +436,10 @@ class NeMoGymLLM(BaseLLM):
                 if _is_model_infrastructure_error(exc):
                     # The client has retried up to its bounds; this is the endpoint failing, not the model answering.
                     raise ModelUnreachableError(f"{type(exc).__name__}: {exc}") from exc
+                if _is_context_overflow_error(exc):
+                    # Harbor compacts the chat only on its own ContextLengthExceededError, as for an empty response.
+                    self._num_compactions += 1
+                    raise ContextLengthExceededError from exc
                 raise
 
         self._times_spent.append(perf_counter() - start_time)
