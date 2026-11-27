@@ -16,7 +16,7 @@
     - apt-get install -y --no-install-recommends ca-certificates git nodejs npm gh glab
     - git init ci-templates
     - git -C ci-templates remote add origin https://github.com/NVIDIA-NeMo/FW-CI-templates.git
-    - git -C ci-templates fetch --depth=1 origin a68e16c7f2f63f23029dae224c4b3068b8663b71
+    - git -C ci-templates fetch --depth=1 origin aadb2d08f06dee27deb1ab215d2d2aa2786315b2
     - git -C ci-templates checkout --detach FETCH_HEAD
     - npm ci --prefix ci-templates/.github/scripts/review-matcher --ignore-scripts --no-audit --no-fund
     - export GH_TOKEN="$GH_SSO_MANAGMENT_PAT"
