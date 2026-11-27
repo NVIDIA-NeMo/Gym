@@ -387,6 +387,26 @@ def test_a_saved_conversation_splits_at_the_item_a_compaction_kept_first() -> No
     assert second[0]["reasoning_content"] == "The test expects 4."
 
 
+def test_a_kept_reasoning_item_starts_its_segment_at_the_next_call() -> None:
+    # An agent that saves each reasoning part as its own item: the compaction keeps a reasoning item.
+    conversation = [
+        {"type": "message", "role": "user", "content": TASK},
+        _reasoning("prt_r1-reasoning", "Read the code first."),
+        *_call("prt_c1", "cat mathlib.py"),
+        _reasoning("prt_r2-reasoning", "The test expects 4."),
+        _reasoning("prt_r3-reasoning", "Edit the test."),
+        *_call("prt_c2", "sed -i 's/== 3/== 4/' tests/test_math.py"),
+    ]
+    compaction = COMPACTION | {"first_kept_item_id": "prt_r2-reasoning"}
+
+    first, second = _segments({"ng_agent_observations": _observations(_invocation(conversation), compaction)})
+
+    assert _item_ids(first) == ["prt_c1"]
+    assert _item_ids(second) == ["prt_c2"]
+    assert "The test expects 4." in second[0]["reasoning_content"]
+    assert "Edit the test." in second[0]["reasoning_content"]
+
+
 def test_the_root_invocation_is_judged_when_a_subagent_is_listed_first() -> None:
     subagent = [{"type": "message", "role": "user", "content": "Find the tests."}, _assistant("prt_s1", "Found.")]
     observations = _observations(

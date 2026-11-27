@@ -168,6 +168,29 @@ def root_conversation(row: dict[str, Any]) -> list[dict[str, Any]] | None:
     return None
 
 
+def segment_start_item_ids(
+    conversation: list[dict[str, Any]], first_kept_item_ids: tuple[str, ...]
+) -> tuple[str, ...]:
+    """The item each kept item's segment starts at: the kept item itself when it is a message or function call."""
+    ids = [item.get("id") if isinstance(item, dict) else None for item in conversation]
+    starts = []
+    for kept in first_kept_item_ids:
+        if kept not in ids:
+            continue
+        # The ATIF export keeps no id for reasoning, which joins the step of the next message or call: cut there.
+        start = next(
+            (
+                item["id"]
+                for item in conversation[ids.index(kept) :]
+                if isinstance(item, dict) and item.get("type") in ("message", "function_call") and item.get("id")
+            ),
+            None,
+        )
+        if start is not None:
+            starts.append(start)
+    return tuple(starts)
+
+
 def _source_rows(path: Path) -> Iterator[tuple[dict[str, Any], SourceRun]]:
     """Each row of a rollouts file with its location, read one at a time."""
     # A managed run selects each rollout's latest attempt, as reverify does, which need not be its last row in the file.
@@ -191,7 +214,10 @@ def load_source_runs(path: Path) -> dict[tuple[int, int], SourceRun]:
     for row, location in _source_rows(path):
         reward = _finite(row.get("reward"))
         task, rollout = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
-        if reward is None or row.get("mask_sample") or not isinstance(task, int) or not isinstance(rollout, int):
+        masked = row.get("mask_sample")
+        # Free this row before the next one is parsed, so one parsed row at a time is in memory.
+        del row
+        if reward is None or masked or not isinstance(task, int) or not isinstance(rollout, int):
             continue
         runs[(task, rollout)] = replace(location, reward=reward)
     return runs
@@ -207,7 +233,7 @@ def judged_transcript(
     """
     conversation = root_conversation(saved_row) if saved_row is not None else None
     if conversation is not None:
-        return conversation, [], compaction_first_kept_item_ids(saved_row)
+        return conversation, [], segment_start_item_ids(conversation, compaction_first_kept_item_ids(saved_row))
     request = body.responses_create_params.model_dump(mode="json")
     return request.get("input"), body.response.model_dump(mode="json").get("output"), ()
 

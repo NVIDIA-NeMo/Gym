@@ -95,8 +95,9 @@ a context compaction. This server does the same.
    (opencode, pi and openclaw report it). Those ids are the agent's, not the ids in `response.output`. So when the
    source row's `ng_agent_observations` holds a root `agent_invocation` (no `parent_invocation_id`) with a
    `conversation`, the server judges that conversation, which starts with the task prompt, and starts a new segment
-   at the ATIF step whose `source_item_id` is a kept item. Otherwise it judges `responses_create_params.input` and
-   `response.output` as one segment.
+   at the ATIF step whose `source_item_id` is a kept item. A kept reasoning item has no step of its own: it joins
+   the step of the next message or function call, so the segment starts there. Otherwise the server judges
+   `responses_create_params.input` and `response.output` as one segment.
    The server keeps only each source row's reward and byte location, and reads the one row again in `/verify`, so
    a rollouts file larger than memory works.
 2. The prompts: one per segment. Steps are numbered across the run (segment 2 goes on where segment 1 stopped), and
