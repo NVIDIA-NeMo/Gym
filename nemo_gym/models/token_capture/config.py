@@ -157,6 +157,10 @@ class TokenCaptureSettings(BaseModel):
     # Requires an RL worker that verifies tokenized prefix stability before splicing.
     # Keep disabled when serving with workers that only verify message boundaries.
     allow_system_suffix: bool = False
+    # Record each externally staged call's last served output item on its ledger row
+    # (``CallRecord.last_output_item``), so the framework can run its output detectors.
+    # source_history always records it; other modes keep model text out of the ledger by default.
+    record_last_output_item: bool = False
     # A custom sink normally needs a resolver over the same backend namespace.
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.
@@ -223,6 +227,8 @@ class TokenCaptureConfig(BaseModel):
             not block.external_staging or block.external_staging_backend not in ("vllm_worker", "dynamo_worker")
         ):
             raise ValueError("parent_resolution=source_history requires external vLLM or Dynamo staging")
+        if block.record_last_output_item and not block.external_staging:
+            raise ValueError("token_id_capture.record_last_output_item requires external_staging=true")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
         if block.external_staging and block.rebuild_response:
