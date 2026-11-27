@@ -158,7 +158,8 @@ COPY --chown=node:node <<'EOF' /app/package.json
 EOF
 
 # The committed lockfile (docker/<stack>/package-lock.json, named context `stack_lock`) pins every transitive
-# dependency; npm ci installs exactly that tree.
+# dependency; npm ci installs exactly that tree. Regenerate it after editing the manifest above with
+# docker/regen_locks.sh, which also checks the lock root still mirrors the manifest.
 COPY --chown=node:node --from=stack_lock package-lock.json /app/package-lock.json
 RUN npm ci --legacy-peer-deps --no-audit --no-fund --loglevel=error \
     && npm cache clean --force
