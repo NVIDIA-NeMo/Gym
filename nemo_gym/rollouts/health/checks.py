@@ -979,18 +979,28 @@ def _rollout_tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int
     """One finding per rollout, counting the tool outputs that open with a harness tool-failure marker.
 
     A marker counts only from a tool that returns it (``_TOOL_FAILURE_MARKERS``), and a call recorded as ``completed``
-    is not counted: a command that succeeded can print the same text, for example when it reads a log."""
-    failed = 0
+    is not counted: a command that succeeded can print the same text, for example when it reads a log.
+
+    A marker also counts only when no call to the same tools returned a non-empty output without it. OpenCode returns
+    ``ripgrep execution failed`` both when ripgrep cannot run and when a search names a path that does not exist, so a
+    search that returned results in the same rollout shows the tool works and the marked call was a bad path."""
+    marked: dict[str, int] = {}
+    worked: set[str] = set()
     for call in trajectory.get("tool_calls") or []:
-        if not isinstance(call, dict) or call.get("status") == "completed":
+        if not isinstance(call, dict):
             continue
+        tool_name = call.get("tool_name")
         text = _tool_output_text(call.get("output"))
         opening = text.lstrip().lower() if text is not None else ""
-        if any(
-            opening.startswith(marker) and call.get("tool_name") in tools
-            for marker, tools in _TOOL_FAILURE_MARKERS.items()
-        ):
-            failed += 1
+        for marker, tools in _TOOL_FAILURE_MARKERS.items():
+            if tool_name not in tools:
+                continue
+            if opening.startswith(marker):
+                if call.get("status") != "completed":
+                    marked[marker] = marked.get(marker, 0) + 1
+            elif opening:
+                worked.add(marker)
+    failed = sum(count for marker, count in marked.items() if marker not in worked)
     if not failed:
         return []
     return [
