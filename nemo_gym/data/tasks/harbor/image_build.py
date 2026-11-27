@@ -14,7 +14,7 @@ recorded image, with ``WORKDIR``, ``ENV`` and ``USER`` read from the image's rec
 in ``compose-images.json`` like any other pulled image.
 
 The hash and the image name are Harbor's (``nemo_gym.data.tasks.harbor.harbor_compat``, vendored from
-Harbor v0.22.0): the hash is Harbor's environment id of the folder and the image is ``hb__<hash>``, the
+Harbor v0.27.0): the hash is Harbor's environment id of the folder and the image is ``hb__<hash>``, the
 value Harbor exports to every Compose command as ``MAIN_IMAGE_NAME``, under the repository's registry
 path when one is named. Harbor's own build template sets no ``image`` (Compose then tags
 ``<session>-main``); Gym sets ``image: hb__<hash>`` so the result can be inspected, pushed and recorded,

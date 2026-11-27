@@ -213,11 +213,17 @@ def read_dataset_config(folder: Path) -> GymDatasetConfig:
 def _scale_environment(environment: HarborEnvironment, multiplier: float) -> HarborEnvironment:
     if multiplier == 1:
         return environment
-    update = {
+    update: dict[str, int | float] = {
         name: math.ceil(getattr(environment, name) * multiplier)
         for name in SCALED_RESOURCES
         if getattr(environment, name) is not None
     }
+    if isinstance(environment.cpus, float):
+        # A task that asks for part of a core is scaled as written: rounding 0.5 x 1.2 up would double it.
+        # Never rounded down to nothing: a task that asks for part of a core still asks for one.
+        scaled = round(environment.cpus * multiplier, 3) or environment.cpus * multiplier
+        # `model_copy` does not run the field's validator, so a whole product is made the integer here.
+        update["cpus"] = int(scaled) if scaled.is_integer() else scaled
     return environment.model_copy(update=update) if update else environment
 
 

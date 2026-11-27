@@ -1193,6 +1193,19 @@ class TestSeedWorkdirAndResources:
         task.config.environment.gpus = None
         task.config.environment.gpu_types = None
 
+    async def test_a_fraction_of_a_core_reaches_the_sandbox_and_hints_one_core(self, tmp_path, monkeypatch):
+        """`cpus = 0.5`, which Harbor's task format accepts: the sandbox is asked for half a core, and tools that size
+        themselves by the hints run on one."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML.replace("cpus = 1\n", "cpus = 0.5\n"))
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert task.config.environment.cpus == 0.5
+
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.cpu == 0.5
+        assert {name: spec.env[name] for name in CPU_CAP_ENV_VARS} == cpu_cap_env(1)
+
     async def test_cpu_hints_reach_every_sandbox_and_the_tasks_own_env_wins(self, tmp_path, monkeypatch):
         """A task with `cpus = 2`: agent, Compose `main` and verifier specs all carry the hints for their own limit."""
         toml = SEPARATE_TOML.replace("cpus = 2\n", "cpus = 3\n").replace(

@@ -91,22 +91,10 @@ UNMIRRORED_MODELS = {
 # and the failure is strict: once the mirror follows the field its case passes, which fails the run until the entry
 # is removed. The difference is pinned as well, so that a further change to the field in Harbor is not hidden.
 KNOWN_GAPS = {
-    "EnvironmentConfig.cpus in HarborEnvironment": (
-        ["Harbor accepts integer, number, the mirror integer"],
-        "Harbor accepts fractional `cpus` (since 0.25.0); the mirror reads an integer and refuses the task",
-    ),
     "MCPServerConfig.headers in HarborMCPServer": (
         ["not in the mirror"],
         "Harbor forwards `[[environment.mcp_servers]].headers` to the agent (since 0.25.0); the mirror ignores the "
         "key with an unknown-key warning",
-    ),
-}
-# Definitions `harbor_compat.py` copies that Harbor has changed since the copy was taken.
-KNOWN_VENDORED_GAPS = {
-    "environment_content_hash": (
-        "Harbor hashes files in chunks and widens the length prefix when a file is 4 GiB or larger (since 0.24.0); "
-        "the copy is Harbor 0.22.0's, which reads each file whole and raises OverflowError on such a file. Both "
-        "give the same hash for smaller files"
     ),
 }
 
@@ -291,9 +279,18 @@ def test_mirror_model_has_harbors_model_level_rules(harbor_name, mirror):
     assert rules[0] == rules[1]
 
 
-@pytest.mark.xfail(strict=True, reason=KNOWN_GAPS["EnvironmentConfig.cpus in HarborEnvironment"][1])
-def test_fractional_cpus_load():
-    assert HarborTaskConfig.model_validate({"environment": {"cpus": 0.5}}).environment.cpus == 0.5
+def test_cpus_load_as_a_whole_number_or_a_fraction():
+    half = HarborTaskConfig.model_validate({"environment": {"cpus": 0.5}}).environment.cpus
+    two = HarborTaskConfig.model_validate({"environment": {"cpus": 2}}).environment.cpus
+    assert (half, type(half), two, type(two)) == (0.5, float, 2, int)
+    # Harbor's `normalize_cpus`, which the schema does not carry: a whole number written as `2.0` is the integer,
+    # so the limit is written out as "2" wherever Harbor writes "2".
+    written_as_float = HarborTaskConfig.model_validate({"environment": {"cpus": 2.0}}).environment.cpus
+    assert (written_as_float, type(written_as_float)) == (2, int)
+    # Not a number, and not a finite one: refused, as Harbor refuses them.
+    for refused in ("many", float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="cpus"):
+            HarborTaskConfig.model_validate({"environment": {"cpus": refused}})
 
 
 @pytest.mark.xfail(strict=True, reason=KNOWN_GAPS["MCPServerConfig.headers in HarborMCPServer"][1])
@@ -303,15 +300,7 @@ def test_mcp_server_headers_are_read():
     assert HarborTaskConfig.model_validate(data).environment.mcp_servers[0].model_dump()["headers"] == {"X-Team": "a"}
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=KNOWN_VENDORED_GAPS[name]))
-        if name in KNOWN_VENDORED_GAPS
-        else name
-        for name in sorted(snapshot_script.VENDORED_DEFINITIONS)
-    ],
-)
+@pytest.mark.parametrize("name", sorted(snapshot_script.VENDORED_DEFINITIONS))
 def test_vendored_definition_is_harbors(name):
     """``harbor_compat.py`` promises Harbor's bodies unchanged, so that both name the same image for a task."""
     source = Path(harbor_compat.__file__).read_text()

@@ -3280,6 +3280,22 @@ class TestDatasetConfig:
             0,
         )
 
+    def test_defaults_scale_a_fraction_of_a_core_without_rounding_it_up(self, tmp_path):
+        """`cpus = 0.5` under `resource_multiplier = 1.2` is 0.6 of a core, not the whole core rounding up gives; a
+        product that is a whole number is the integer."""
+        folder = tmp_path / "ds"
+        task_toml = write_task(folder / "hello") / "task.toml"
+        assert "cpus = 1\n" in task_toml.read_text()
+        task_toml.write_text(task_toml.read_text().replace("cpus = 1\n", "cpus = 0.5\n"))
+        (folder / "dataset.toml").write_text("[gym.defaults]\nresource_multiplier = 1.2\n")
+        assert load_task(folder / "hello").config.environment.cpus == 0.6
+        (folder / "dataset.toml").write_text("[gym.defaults]\nresource_multiplier = 4.0\n")
+        doubled = load_task(folder / "hello").config.environment.cpus
+        assert (doubled, type(doubled)) == (2, int)
+        # A product below the precision kept is not rounded down to no CPU at all.
+        (folder / "dataset.toml").write_text("[gym.defaults]\nresource_multiplier = 0.0001\n")
+        assert 0 < load_task(folder / "hello").config.environment.cpus < 0.001
+
     def test_defaults_scale_a_steps_own_timeouts_once(self, tmp_path):
         """Review (round 32): the multiplier scaled the task's `[agent]` and `[verifier]` timeouts only, so a step
         with its own `timeout_sec` kept the unscaled value in the row's metadata, the turn's budgets and the

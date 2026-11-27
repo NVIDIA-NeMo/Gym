@@ -13,7 +13,7 @@ import re
 from pathlib import PurePosixPath
 from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 
 class HarborSettings(BaseModel):
@@ -117,7 +117,8 @@ class HarborEnvironment(HarborPhaseSettings):
     docker_image: str | None = None
     build_timeout_sec: float = Field(default=600, gt=0)
     os: Literal["linux", "windows"] = "linux"
-    cpus: int | None = None
+    # A fraction of a core (`0.5`) is a `float`; a whole number is an `int`, however it is written.
+    cpus: int | float | None = None
     memory_mb: int | None = None
     storage_mb: int | None = None
     gpus: int | None = None
@@ -128,6 +129,14 @@ class HarborEnvironment(HarborPhaseSettings):
     healthcheck: HarborHealthcheck | None = None
     workdir: str | None = None
     network_mode: Literal["public", "no-network", "allowlist"] = "public"
+
+    @field_validator("cpus")
+    @classmethod
+    def whole_cpus_are_integers(cls, value: int | float | None) -> int | float | None:
+        """``2.0`` is ``2``, as Harbor's ``normalize_cpus`` makes it, so both write the same limit out the same way.
+        A value that is not finite never reaches here: the model refuses it (``allow_inf_nan=False``), as Harbor
+        does."""
+        return int(value) if isinstance(value, float) and value.is_integer() else value
 
     @model_validator(mode="before")
     @classmethod

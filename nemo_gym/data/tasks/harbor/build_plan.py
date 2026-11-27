@@ -164,7 +164,7 @@ class BuildPlanEntry:
     context: Path
     tasks: tuple[str, ...]
     env: dict[str, str] = field(default_factory=dict)
-    cpus: int | None = None
+    cpus: int | float | None = None
     memory_mb: int | None = None
     service: str = MAIN_SERVICE
     build_context: Path | None = None
