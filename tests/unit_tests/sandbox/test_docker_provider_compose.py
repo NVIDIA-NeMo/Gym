@@ -213,6 +213,15 @@ def test_networking_works_on_the_bridge_and_named_networks(network):
     docker_provider.DockerProvider(create={"network": network}).validate_networking()
 
 
+@pytest.mark.parametrize("args", [["--network", "host"], ["--net=none"], ["--network=gym-net"]])
+def test_networking_is_refused_when_extra_run_args_pick_the_network(args):
+    """create.extra_run_args can put every container on a network that validate_networking never sees (main's
+    _picks_network), so Compose networking refuses them and points at create.network."""
+    provider = docker_provider.DockerProvider(create={"extra_run_args": args})
+    with pytest.raises(NotImplementedError, match="set create.network instead"):
+        provider.validate_networking()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("network", ["none", "host", "container:other"])
 async def test_networking_is_refused_where_a_container_has_no_address_of_its_own(monkeypatch, network):

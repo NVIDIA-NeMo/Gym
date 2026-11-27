@@ -1276,7 +1276,13 @@ class DockerProvider:
     def validate_networking(self) -> None:
         """Refuse a ``create.network`` that gives a sandbox no address of its own for its peers to reach: ``none``,
         ``host`` and ``container:<name>``. On the default bridge or a named network, sandboxes reach each other by IP.
+        A network picked in ``create.extra_run_args`` is refused too, since it is not checked: set ``create.network``.
         """
+        if _picks_network(self._create_config.extra_run_args):
+            raise NotImplementedError(
+                "Docker networking between sandboxes reads the network from create.network, and "
+                "create.extra_run_args pick one themselves; set create.network instead"
+            )
         network = self._create_config.network
         if network in _NETWORKS_WITHOUT_PEERS or (network or "").startswith("container:"):
             raise NotImplementedError(
