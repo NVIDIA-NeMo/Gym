@@ -21,7 +21,11 @@ via the resource server's requirements.txt).
 """
 
 import asyncio
+import hashlib
 import json
+import os
+import shutil
+import sqlite3
 import time
 from collections import Counter
 from pathlib import Path
@@ -34,16 +38,20 @@ from pydantic import ValidationError
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
+    VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_runtime import ReverifyMode
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.finance_agent_v2.app import (
     FinanceAgentV2ResourcesServer,
     FinanceAgentV2ResourcesServerConfig,
     FinanceAgentV2VerifyRequest,
     RubricJudgement,
     aggregate_rubric_scores,
+    stage_local_edgar_files,
 )
 from resources_servers.finance_agent_v2.cached_tools import (
     CachedParseHtmlPage,
@@ -51,6 +59,8 @@ from resources_servers.finance_agent_v2.cached_tools import (
 )
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
 from resources_servers.sec_local_index import local_edgar_search
+from resources_servers.sec_local_index.local_edgar_search import default_sidecar_path
+from resources_servers.sec_local_index.scripts.build_local_edgar_metadata import build as build_sidecar
 from resources_servers.sec_local_index.tests.index_fixtures import build_index
 
 
@@ -433,6 +443,245 @@ class TestEdgarSearchMode:
 
         with pytest.raises(ValidationError, match="no metadata sidecar"):
             _make_server(edgar_search_mode="local", local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
+
+
+# ============================================================================
+# local_edgar_stage_dir
+# ============================================================================
+
+
+def _source_index(tmp_path: Path) -> Path:
+    source = tmp_path / "shared"
+    source.mkdir()
+    return build_index(source / "index.sqlite")
+
+
+def _identity(path: Path) -> tuple[int, int]:
+    """A staged file is never rewritten, so an unchanged identity means that the same copy is still in place."""
+    stat = path.stat()
+    return stat.st_ino, stat.st_mtime_ns
+
+
+def _per_source(stage: Path, index: Path) -> Path:
+    """The stage folder that stage_local_edgar_files keeps for one configured index path."""
+    return stage / hashlib.sha256(os.path.abspath(index).encode()).hexdigest()[:16]
+
+
+def _rewrite_header(index: Path, user_version: int) -> None:
+    """Change the index content in place without changing its size: the user version is a field in the header.
+
+    A real rebuild ends long after the previous one, so the modification time moves forward by one second.
+    """
+    connection = sqlite3.connect(index)
+    connection.execute(f"PRAGMA user_version = {user_version}")
+    connection.commit()
+    connection.close()
+    mtime_ns = index.stat().st_mtime_ns + 10**9
+    os.utime(index, ns=(mtime_ns, mtime_ns))
+
+
+class TestLocalEdgarStaging:
+    def test_the_server_reads_the_staged_copy(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+
+        server = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
+        )
+
+        staged = server._local_edgar.index_path
+        assert staged.parent.parent == _per_source(stage, index)
+        assert staged.name == "index.sqlite"
+        assert staged.read_bytes() == index.read_bytes()
+
+    def test_without_a_stage_dir_the_index_is_read_in_place(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+
+        server = _make_server(edgar_search_mode="local", local_edgar_index_path=str(index))
+
+        assert server._local_edgar.index_path == index
+
+    def test_the_default_sidecar_is_staged_beside_the_index(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        build_sidecar(index, default_sidecar_path(index))
+        stage = tmp_path / "node_local"
+
+        server = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
+        )
+
+        assert server._local_edgar.metadata_path == server._local_edgar.index_path.parent / "index.sqlite.metadata"
+
+    def test_a_configured_sidecar_is_staged_and_returned(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        sidecar = tmp_path / "shared" / "custom.metadata"
+        build_sidecar(index, sidecar)
+        stage = tmp_path / "node_local"
+
+        staged_index, staged_sidecar = stage_local_edgar_files(str(index), str(sidecar), str(stage))
+
+        assert Path(staged_index).parent.parent == _per_source(stage, index)
+        assert staged_sidecar == str(Path(staged_index).parent / "custom.metadata")
+        assert Path(staged_sidecar).read_bytes() == sidecar.read_bytes()
+
+    def test_an_unchanged_source_is_copied_once(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        first, _ = stage_local_edgar_files(str(index), None, str(stage))
+        first_identity = _identity(Path(first))
+
+        second, _ = stage_local_edgar_files(str(index), None, str(stage))
+
+        assert second == first
+        assert _identity(Path(second)) == first_identity
+
+    def test_a_changed_source_is_staged_beside_the_copy_in_use(self, tmp_path) -> None:
+        """Same size is not enough: an index rebuilt in place keeps its size. The copy in use must not change."""
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        first, _ = stage_local_edgar_files(str(index), None, str(stage))
+        first_bytes, first_identity = Path(first).read_bytes(), _identity(Path(first))
+        _rewrite_header(index, user_version=7)
+
+        second, _ = stage_local_edgar_files(str(index), None, str(stage))
+
+        assert Path(second).parent != Path(first).parent
+        assert Path(second).read_bytes() == index.read_bytes() != first_bytes
+        # This process still holds the first generation, so it stays as it was.
+        assert _identity(Path(first)) == first_identity
+        assert Path(first).read_bytes() == first_bytes
+
+    def test_a_changed_sidecar_is_staged_with_its_index_in_a_new_generation(self, tmp_path) -> None:
+        """The index and the sidecar of one generation always come from the same source version."""
+        index = _source_index(tmp_path)
+        sidecar = tmp_path / "shared" / "custom.metadata"
+        build_sidecar(index, sidecar)
+        stage = tmp_path / "node_local"
+        first_index, first_sidecar = stage_local_edgar_files(str(index), str(sidecar), str(stage))
+        first_sidecar_bytes = Path(first_sidecar).read_bytes()
+        build_sidecar(index, sidecar)
+        mtime_ns = sidecar.stat().st_mtime_ns + 10**9
+        os.utime(sidecar, ns=(mtime_ns, mtime_ns))
+
+        second_index, second_sidecar = stage_local_edgar_files(str(index), str(sidecar), str(stage))
+
+        assert Path(second_index).parent == Path(second_sidecar).parent != Path(first_index).parent
+        assert Path(second_index).read_bytes() == index.read_bytes()
+        assert Path(second_sidecar).read_bytes() == sidecar.read_bytes()
+        assert Path(first_sidecar).read_bytes() == first_sidecar_bytes
+
+    def test_a_replacement_with_equal_size_and_modification_time_is_staged_again(self, tmp_path) -> None:
+        """A copy is not reused for a different file that only matches the size and modification time."""
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        first, _ = stage_local_edgar_files(str(index), None, str(stage))
+        replacement = build_index(tmp_path / "replacement.sqlite")
+        _rewrite_header(replacement, user_version=7)
+        os.utime(replacement, ns=(index.stat().st_atime_ns, index.stat().st_mtime_ns))
+        os.replace(replacement, index)
+
+        second, _ = stage_local_edgar_files(str(index), None, str(stage))
+
+        assert second != first
+        assert Path(second).read_bytes() == index.read_bytes()
+
+    def test_a_reader_keeps_its_corpus_after_another_server_stages_a_new_version(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        server_a = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
+        )
+        corpus_a = index.read_bytes()
+        _rewrite_header(index, user_version=7)
+
+        server_b = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
+        )
+
+        assert server_a._local_edgar.index_path.read_bytes() == corpus_a
+        assert server_b._local_edgar.index_path.read_bytes() == index.read_bytes() != corpus_a
+
+    def test_a_later_start_removes_only_the_generations_that_no_process_reads(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        in_use, _ = stage_local_edgar_files(str(index), None, str(stage))
+        unused = _per_source(stage, index) / "0123456789abcdef"
+        unused.mkdir()
+        (unused / "index.sqlite").write_bytes(b"an old version that no server reads")
+        leftover = _per_source(stage, index) / "fedcba9876543210.partial"
+        leftover.mkdir()
+        _rewrite_header(index, user_version=7)
+
+        current, _ = stage_local_edgar_files(str(index), None, str(stage))
+
+        assert Path(in_use).is_file()
+        assert Path(current).is_file()
+        assert not unused.exists()
+        assert not leftover.exists()
+
+    def test_a_failed_copy_leaves_no_partial_folder(self, tmp_path, monkeypatch) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+
+        def fail_copy(source, target) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("shutil.copy2", fail_copy)
+        with pytest.raises(OSError, match="No space left on device"):
+            stage_local_edgar_files(str(index), None, str(stage))
+
+        assert sorted(p.name for p in _per_source(stage, index).iterdir()) == [".stage.lock"]
+
+    def test_a_source_that_changes_during_the_copy_fails_the_start(self, tmp_path, monkeypatch) -> None:
+        """A copy of a source rewritten mid-copy can mix two versions, so it is never renamed into place."""
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        copy2 = shutil.copy2
+
+        def copy_then_rebuild(source, target) -> None:
+            copy2(source, target)
+            _rewrite_header(index, user_version=7)
+
+        monkeypatch.setattr("shutil.copy2", copy_then_rebuild)
+        with pytest.raises(RuntimeError, match="changed while it was copied"):
+            stage_local_edgar_files(str(index), None, str(stage))
+
+        assert sorted(p.name for p in _per_source(stage, index).iterdir()) == [".stage.lock"]
+
+    @pytest.mark.parametrize("same_size_and_mtime", [True, False])
+    def test_sources_with_the_same_file_name_are_staged_apart(self, tmp_path, same_size_and_mtime) -> None:
+        """Each source keeps its own copy, with equal or different size and modification time."""
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        a = _source_index(tmp_path / "a")
+        b = _source_index(tmp_path / "b")
+        if same_size_and_mtime:
+            _rewrite_header(b, user_version=7)
+            os.utime(b, ns=(a.stat().st_atime_ns, a.stat().st_mtime_ns))
+        else:
+            with open(b, "ab") as handle:
+                handle.write(b"\0" * 4096)
+        stage = tmp_path / "node_local"
+
+        staged_a, _ = stage_local_edgar_files(str(a), None, str(stage))
+        staged_b, _ = stage_local_edgar_files(str(b), None, str(stage))
+
+        assert staged_a != staged_b
+        assert a.read_bytes() != b.read_bytes()
+        assert Path(staged_a).read_bytes() == a.read_bytes()
+        assert Path(staged_b).read_bytes() == b.read_bytes()
+
+    def test_a_missing_index_fails_naming_the_source(self, tmp_path) -> None:
+        missing = tmp_path / "shared" / "index.sqlite"
+
+        with pytest.raises(FileNotFoundError, match="Local EDGAR index not found: .*shared/index.sqlite"):
+            stage_local_edgar_files(str(missing), None, str(tmp_path / "node_local"))
+
+    def test_a_missing_configured_sidecar_fails_naming_the_source(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+
+        with pytest.raises(FileNotFoundError, match="metadata sidecar not found: .*shared/absent.metadata"):
+            stage_local_edgar_files(str(index), str(tmp_path / "shared" / "absent.metadata"), str(tmp_path / "stage"))
 
 
 # ============================================================================
@@ -949,27 +1198,46 @@ class TestVerifyRubricJudge:
 
     @pytest.mark.asyncio
     async def test_exhausted_attempts_leave_criterion_unresolved(self, no_sleep) -> None:
-        """Never reaching 3 verdicts is a judge failure, not a miss: score stays
-        null and judge_error is set so the row can be filtered out rather than
-        read as a genuine zero."""
+        """Never reaching 3 verdicts is a judge failure, not a miss: the judge
+        answered every time without a verdict, so verify raises a JudgeError
+        for judge_failsafe to mask, rather than scoring the row."""
         server, stub = _rubric_server({_C1: [1, 1] + ["garbage"] * 20, _C2: [1, 1, 1]})
-        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+        with pytest.raises(JudgeError) as raised:
+            await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
 
         assert stub.calls[_C1] == 10  # judge_max_attempts, then gives up
-        by_criterion = {j.criteria: j for j in res.rubric_judgements}
-        assert by_criterion[_C1].score is None
-        assert by_criterion[_C1].votes == [1, 1]  # kept for debugging, not voted on
-        assert by_criterion[_C1].unanimous is None
-        assert by_criterion[_C1].error is not None
-        assert res.rubric_unresolved == 1
-        assert res.rubric_all_pass is False
-        # Weighed as a miss, so the resolved criterion still earns its half. The
-        # score is only meaningful once judge_error has been used to filter the row.
-        assert res.reward == 0.5
-        assert res.judge_error is not None and "unresolved" in res.judge_error
+        assert "1/2 criteria unresolved" in str(raised.value)
+        assert "no integer 0/1 score" in str(raised.value)
 
     @pytest.mark.asyncio
-    async def test_unresolved_dealbreaker_zeroes_the_reward(self, no_sleep) -> None:
+    @pytest.mark.parametrize(
+        "replies, cause",
+        [
+            # judge transport down
+            ([RuntimeError("connection reset")] * 20, "judge call failed: RuntimeError: connection reset"),
+            ([TimeoutError()] * 20, "judge call failed: TimeoutError"),
+            # judge output cut at its own max_output_tokens
+            ([_Starved()] * 20, "judge reply incomplete (incomplete_details.reason=max_output_tokens)"),
+        ],
+    )
+    async def test_judge_outage_is_a_judge_failure(self, no_sleep, replies, cause) -> None:
+        server, _ = _rubric_server({_C1: replies, _C2: [1, 1, 1]})
+        with pytest.raises(JudgeError) as raised:
+            await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert f"1/2 criteria unresolved (e.g. {cause}" in str(raised.value)
+
+    @pytest.mark.asyncio
+    async def test_judge_reply_truncated_mid_verdict_is_unparseable(self, no_sleep) -> None:
+        """A partial reply cut at the judge's token limit carries no verdict."""
+        server, _ = _rubric_server({_C1: ['{"extracted_evidence": "x", "score": 1'] * 20})
+        with pytest.raises(JudgeError) as raised:
+            await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        assert "1/1 criteria unresolved (e.g. judge reply had no integer 0/1 score)" in str(raised.value)
+
+    @pytest.mark.asyncio
+    async def test_unresolved_dealbreaker_is_masked_not_zeroed(self, no_sleep) -> None:
         rubric = json.dumps(
             [
                 {"criteria": _C1, "modifiers": {"category": "must_pass"}},
@@ -977,11 +1245,31 @@ class TestVerifyRubricJudge:
             ]
         )
         server, _ = _rubric_server({_C1: ["garbage"] * 20, _C2: [1, 1, 1]})
-        res = await server.verify(_mock_request(), _submitted_request(rubric))
+        with pytest.raises(JudgeError):
+            await server.verify(_mock_request(), _submitted_request(rubric))
 
-        assert res.reward == 0.0
-        assert res.rubric_dealbreakers_failed == 1
-        assert res.judge_error is not None
+    @pytest.mark.asyncio
+    async def test_judge_failsafe_masks_an_unresolved_row(self, no_sleep) -> None:
+        """The served verify (wrapped in judge_failsafe) returns the row masked, out of training."""
+        server, _ = _rubric_server({_C1: [RuntimeError("judge down")] * 20})
+        wrapped = judge_failsafe(server.verify)
+        res = await wrapped(request=_mock_request(), body=_submitted_request(_rubric(_C1)))
+
+        row = json.loads(res.body)
+        assert row["mask_sample"] is True
+        assert row["failure_kind"] == JUDGE_FAILED
+        assert row["reward"] == 0.0
+        assert "criteria unresolved" in row["failure_reason"]
+
+    @pytest.mark.asyncio
+    async def test_judged_failure_is_trained_not_masked(self, no_sleep) -> None:
+        """A criterion the judge resolved as not met is the model's miss: scored, never masked."""
+        server, _ = _rubric_server({_C1: [0, 0, 0], _C2: [1, 1, 1]})
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert res.reward == 0.5
+        assert res.mask_sample is False
+        assert res.judge_error is None
 
     @pytest.mark.asyncio
     async def test_evidence_and_reason_recorded_per_vote(self) -> None:
@@ -1021,6 +1309,7 @@ class TestVerifyRubricJudge:
 
         assert res.reward == 0.0
         assert res.judge_error is None  # a real failure, not a judge problem
+        assert res.mask_sample is False  # the model's fault, so it is trained
         assert res.rubric_judgements is None
         assert sum(stub.calls.values()) == 0
         # Scored zero rather than left unset, so every mean sees this rollout the
@@ -1070,6 +1359,7 @@ class TestVerifyRubricJudge:
 
         assert res.reward == 0.0
         assert res.judge_error is None
+        assert res.mask_sample is False
         assert res.rubric_partial_credit == 0.0
         assert res.rubric_total == 0
         assert sum(stub.calls.values()) == 0
@@ -1093,6 +1383,9 @@ class TestVerifyRubricJudge:
 
         assert res.reward == 0.0
         assert res.judge_error is not None
+        # Missing task data is not the model's fault.
+        assert res.mask_sample is True
+        assert res.failure_kind == VERIFIER_ERROR
         assert sum(stub.calls.values()) == 0
 
     @pytest.mark.asyncio
@@ -1103,6 +1396,8 @@ class TestVerifyRubricJudge:
         assert res.reward == 0.0
         assert res.rubric_total == 1
         assert res.judge_error is not None
+        assert res.mask_sample is True
+        assert res.failure_kind == VERIFIER_ERROR
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("concurrency", [1, 2, 4])
@@ -1284,9 +1579,8 @@ class TestAggregateMetrics:
         assert key["mean/rubric_fraction"] == 0.75
         assert key["mean/rubric_partial_credit"] == 0.5
         assert "std/reward" not in key
-        # A run whose judge failed must not read as a low score.
-        assert key["rubric/criteria_unresolved"] == 2
-        assert key["rubric/rollouts_with_judge_error"] == 1
+        assert "rubric/criteria_unresolved" not in key
+        assert "rubric/rollouts_with_judge_error" not in key
         # Dealbreakers explain most of the gap between weighted and gated scores.
         assert key["rubric/dealbreakers_failed"] == 4
         assert "rubric/parse_failures" not in key

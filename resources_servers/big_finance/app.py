@@ -12,6 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# ScratchDirPythonExecTool.run is adapted from PythonExecTool.run in big_finance_harness/tools/python_exec.py of
+# https://github.com/wowowoxuan1994/big-finance-benchmark at commit dffb39459dbfc96a7b38d179fec420900d616a69
+# (Apache-2.0).
 """BigFinanceBench tools and verifier for NeMo Gym.
 
 The five tools come from a commit-pinned, tools-only BigFinanceBench package.
@@ -25,6 +29,8 @@ import asyncio
 import json
 import logging
 import os
+import sys
+import tempfile
 from typing import Any, ClassVar, Literal, Optional
 
 from big_finance_harness.tools import (
@@ -33,6 +39,7 @@ from big_finance_harness.tools import (
     ToolError,
     WebSearchTool,
 )
+from big_finance_harness.tools.python_exec import MAX_OUTPUT_CHARS as PYTHON_EXEC_MAX_OUTPUT_CHARS
 from fastapi import Body, FastAPI
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -63,6 +70,49 @@ from resources_servers.big_finance.sec_cache import CachedEdgarSearchTool, Cache
 
 
 logger = logging.getLogger(__name__)
+
+
+class ScratchDirPythonExecTool(PythonExecTool):
+    """PythonExecTool whose code runs in a fresh temporary directory, removed after each call.
+
+    Upstream starts the interpreter in the server's working directory, which is this checkout, so any file the policy's
+    code writes lands in the Gym tree (on shared storage in training). Same interpreter, flags, timeout and output as
+    big-finance-harness@dffb394's PythonExecTool.run.
+    """
+
+    async def run(self, args: dict[str, Any]) -> str:
+        code = args.get("code", "")
+        if not code.strip():
+            raise ToolError("code is required and must be non-empty")
+
+        with tempfile.TemporaryDirectory(prefix="big_finance_python_exec_", ignore_cleanup_errors=True) as workdir:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-c",
+                code,
+                cwd=workdir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=self.timeout_s)
+            except asyncio.TimeoutError:
+                raise ToolError(f"python_exec timed out after {self.timeout_s}s") from None
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+
+        stdout = stdout_b.decode("utf-8", errors="replace")[:PYTHON_EXEC_MAX_OUTPUT_CHARS]
+        stderr = stderr_b.decode("utf-8", errors="replace")[:PYTHON_EXEC_MAX_OUTPUT_CHARS]
+        parts: list[str] = [f"exit_code: {proc.returncode}"]
+        if stdout:
+            parts.append(f"stdout:\n{stdout}")
+        if stderr:
+            parts.append(f"stderr:\n{stderr}")
+        return "\n\n".join(parts)
+
 
 _MAX_TRACE_CHARS = 150_000
 _TOOL_RESULT_CAP = 4_000
@@ -516,7 +566,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
             "web_search": web_search,
             "edgar_search": edgar_search,
             "fetch_url": fetch_url,
-            "python_exec": PythonExecTool(timeout_s=self.config.python_exec_timeout_s),
+            "python_exec": ScratchDirPythonExecTool(timeout_s=self.config.python_exec_timeout_s),
             "final_answer": FinalAnswerTool(),
         }
 

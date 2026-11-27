@@ -39,6 +39,23 @@ can route around it.
 | `local` | Local SQLite index | Cache, then the filing corpus, then sec.gov | `local_edgar_index_path`; `sec_dump_path` for corpus reads |
 | `live` | sec-api.io | Cache, then sec.gov | `sec_api_key` |
 
+With `local_edgar_stage_dir` set (off by default), the server copies the local
+index and its metadata sidecar into that node-local folder at startup and reads
+the copy. Use it when the index is on shared storage. Each source index gets its
+own subfolder of that folder, so two indexes with the same file name do not
+overwrite each other. Each version of the source gets its own generation folder
+in that subfolder, and a staged copy never changes while a server reads it. A
+copy whose inode, size, modification time and change time match the source is
+reused, so only the first server on a node copies it. A later start removes the
+versions that no running server reads.
+
+Put the stage folder on a node-local disk. On NFS or Lustre, file locks can cover
+only one node, so a start on one node can remove the copy that another node
+reads. A start removes old versions of the same index path only. Copies for
+other index paths, and files that earlier versions of this code left directly in
+the stage folder or in a source subfolder, stay until you delete them. Delete
+the stage folder only when no server on the node is running.
+
 The benchmark config sets `live`. Asking for `local` without an index fails at
 startup. The
 mode in use, and in local mode the date range the index covers, is logged at
@@ -375,15 +392,18 @@ unweighted dataset scores as a plain pass fraction.
 | `rubric_all_pass` | `true` only when every criterion resolved and passed — Vals's All-Pass |
 | `rubric_fraction` | criteria passed / total, unweighted |
 | `rubric_dealbreakers_failed` / `rubric_dealbreakers_total` | how many `must_pass` criteria there were, and how many failed |
-| `rubric_unresolved` | criteria that never got enough parsable verdicts |
+| `rubric_unresolved` | criteria that never got enough parsable verdicts (always 0 on a scored row) |
 | `rubric_judgements[]` | per-criterion votes, evidence, weights used, and sampled failed replies |
-| `judge_error` | set when scoring could not complete — **filter these out rather than reading them as zeros** |
+| `judge_error` | set only on a row masked as `verifier_error` (no rubric, or no judge configured). A `judge_failed` row has no `judge_error`: its cause is in `failure_reason` |
 
-A criterion the judge never resolved is a judge failure, not a miss, so it scores
-`null` rather than `0` and flags the row via `judge_error`. It still weighs as
-not-passed, because treating an absent verdict as a pass would inflate exactly the
-runs whose judging broke. A row with no rubric at all scores 0 with `judge_error`
-set, so the agent and tools can be validated before labels exist.
+A criterion the judge never resolved (failed calls, no parseable verdict, or a
+reply cut at the judge's own output limit) is a judge failure, not a miss. The
+whole row is then masked (`mask_sample: true`, `failure_kind: judge_failed`), so
+it leaves training and the score means and lands in the failures sidecar. A row
+with no rubric at all, or a server with no judge configured, is masked with
+`failure_kind: verifier_error` and `judge_error` set, so the agent and tools can
+still be validated before labels exist. A rollout with no submission scores 0,
+unmasked, even when the agent stopped on a failed policy call or an aborted tool.
 
 The agent records why its loop ended in `response.metadata.stop_reason`
 (`done_tool`, `max_turns`, `max_time`, `max_output_tokens`, `error`). Under

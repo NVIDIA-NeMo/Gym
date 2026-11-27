@@ -18,6 +18,7 @@ frontier_finance_resources_server:
       edgar_search_mode: ${oc.select:edgar_search_mode,live}
       local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
       local_edgar_metadata_path: ${oc.select:local_edgar_metadata_path,null}
+      local_edgar_stage_dir: ${oc.select:local_edgar_stage_dir,null}
       sec_dump_path: ${oc.select:sec_dump_path,null}
       price_history_mode: ${oc.select:price_history_mode,live}
       local_pricing_dir: ${oc.select:local_pricing_dir,null}

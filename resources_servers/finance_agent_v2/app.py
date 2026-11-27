@@ -37,10 +37,14 @@ Tools implement ``async execute(args, state, logger)`` and share a per-session
 """
 
 import asyncio
+import fcntl
+import hashlib
 import json
 import logging
 import os
+import shutil
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence, Union
 
@@ -64,6 +68,7 @@ from starlette.requests import Request
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -79,6 +84,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError
 from resources_servers.finance_agent_v2.frontier_finance_grading import (
     FrontierFinanceGrader,
     FrontierFinanceGraderConfig,
@@ -90,7 +96,7 @@ from resources_servers.finance_agent_v2.frontier_finance_grading import (
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
 from resources_servers.finance_agent_v2.task_data import AsOfDateField, FrontierFinanceTaskFields
 from resources_servers.sec_local_index.cache import ToolCache
-from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
+from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch, default_sidecar_path
 
 
 # Support both package import (tests: resources_servers.finance_agent_v2.app) and flat
@@ -110,6 +116,91 @@ except ImportError:  # pragma: no cover - exercised only under flat entrypoint e
     )
 
 logger = logging.getLogger(__name__)
+
+
+# Shared locks on the staged generation folders that this process reads. They stay open for the life of the process,
+# so no stager removes a generation while this server can still open a connection to it. The lock is on the folder
+# itself, so no file inside it can be removed and recreated under a live lock, and systemd-tmpfiles skips it.
+_STAGED_GENERATIONS_IN_USE: list[int] = []
+
+
+def _stage_fingerprint(path: Path) -> str:
+    """Identity of a source file version: a rebuild, a replacement or an in-place rewrite changes at least one part."""
+    stat = path.stat()
+    return f"{path.name}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+
+
+def _stage_generation(sources: list[Path]) -> str:
+    return hashlib.sha256("|".join(_stage_fingerprint(s) for s in sources).encode()).hexdigest()[:16]
+
+
+def stage_local_edgar_files(index_path: str, metadata_path: str | None, stage_dir: str) -> tuple[str, str | None]:
+    """Copy the local EDGAR index and its metadata sidecar into a generation folder under stage_dir; return its paths.
+
+    A runtime SQLite database should not be read in place on shared storage, so the server reads a node-local copy.
+    Each source index gets its own subfolder of stage_dir, named by a hash of its absolute path, so two indexes with
+    the same file name never overwrite each other's copy. In that subfolder, each version of the index and sidecar
+    gets its own generation folder, named by a hash of their inode, size, modification time and change time. A
+    generation folder never changes after it is staged: a new version goes into a new folder, through a ``.partial``
+    folder and a rename, under a lock on the subfolder, so concurrent server processes on a node copy it once. A
+    server that reads a generation holds a shared lock on it for its whole life. A later start removes the
+    generations that no process holds. The index (and a configured sidecar) must exist.
+    """
+    index = Path(index_path)
+    if not index.is_file():
+        raise FileNotFoundError(f"Local EDGAR index not found: {index}")
+    sidecar = Path(metadata_path) if metadata_path else default_sidecar_path(index)
+    if metadata_path and not sidecar.is_file():
+        raise FileNotFoundError(f"Local EDGAR metadata sidecar not found: {sidecar}")
+    sources = [source for source in (index, sidecar) if source.is_file()]
+    source_dir = Path(stage_dir) / hashlib.sha256(os.path.abspath(index_path).encode()).hexdigest()[:16]
+    source_dir.mkdir(parents=True, exist_ok=True)
+    with open(source_dir / ".stage.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        generation = _stage_generation(sources)
+        stage = source_dir / generation
+        if not stage.is_dir():
+            partial = source_dir / f"{generation}.partial"
+            shutil.rmtree(partial, ignore_errors=True)
+            partial.mkdir()
+            try:
+                for source in sources:
+                    started = time.monotonic()
+                    shutil.copy2(source, partial / source.name)
+                    logger.info(
+                        "edgar_search: staged %s to %s in %.0f s",
+                        source,
+                        stage / source.name,
+                        time.monotonic() - started,
+                    )
+                if _stage_generation(sources) != generation:
+                    raise RuntimeError(
+                        f"Local EDGAR index or its sidecar changed while it was copied; start again: {index}"
+                    )
+                os.replace(partial, stage)
+            finally:
+                shutil.rmtree(partial, ignore_errors=True)
+        in_use = os.open(stage, os.O_RDONLY | os.O_DIRECTORY)
+        fcntl.flock(in_use, fcntl.LOCK_SH)
+        _STAGED_GENERATIONS_IN_USE.append(in_use)
+        for old in source_dir.iterdir():
+            if old == stage or not old.is_dir():
+                continue
+            if old.name.endswith(".partial"):
+                shutil.rmtree(old, ignore_errors=True)
+                continue
+            old_fd = os.open(old, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                try:
+                    fcntl.flock(old_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue  # a running server still reads this generation
+                shutil.rmtree(old, ignore_errors=True)
+                logger.info("edgar_search: removed unused staged generation %s", old)
+            finally:
+                os.close(old_fd)
+    return str(stage / index.name), (str(stage / sidecar.name) if metadata_path else None)
+
 
 # Ceiling on the escalated judge output budget (see _judge_attempt). A correct judge
 # never reaches it: gpt-5.2 answers this prompt in ~200 output tokens at effort=high.
@@ -147,6 +238,14 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         description="Metadata sidecar for the local index, built by "
         "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path "
         "plus '.metadata' when that file exists. Searches are far slower without it.",
+    )
+    local_edgar_stage_dir: str | None = Field(
+        default=None,
+        description="Node-local directory to copy the local index (and its metadata sidecar) into once at "
+        "startup; the server then reads the copy. Each source index gets its own subfolder of this directory, and "
+        "each version of it its own generation folder in that subfolder. For an index on shared storage, where a "
+        "runtime database should not be read in place. Must be on a node-local disk: on NFS or Lustre, file locks "
+        "can cover only one node. Copies for other index paths are never removed automatically.",
     )
     sec_dump_path: Optional[str] = Field(
         default=None,
@@ -315,8 +414,7 @@ class RubricJudgement(BaseModel):
     """Per-criterion verdict plus everything needed to audit it.
 
     ``score`` is None when the judge never produced enough parsable verdicts. That is
-    a judge failure, not a "not met": reward drops to 0.0 but ``judge_error`` is set
-    so those rows stay filterable.
+    a judge failure, not a "not met": verify() masks the row instead of scoring it.
     """
 
     criteria: str
@@ -361,8 +459,8 @@ def aggregate_rubric_scores(judgements: Sequence[RubricJudgement]) -> Dict[str, 
 
     Partial Credit is the severity-weighted pass fraction, forced to 0.0 when any
     ``must_pass`` criterion failed. Only an affirmative pass counts, so an unresolved
-    criterion weighs as a miss and gates like one; verify() flags those rows with
-    ``judge_error`` rather than dropping them, which would inflate broken runs.
+    criterion weighs as a miss and gates like one here; verify() never returns such a
+    score, it masks the row as a judge failure.
 
     Kept module-level and free of server state so stored verdicts can be rescored
     offline through this exact code rather than a second implementation that drifts.
@@ -433,8 +531,8 @@ class FinanceAgentV2VerifyResponse(BaseVerifyResponse):
     rubric_weight_passed: Optional[float] = None
     rubric_dealbreakers_total: Optional[int] = None
     rubric_dealbreakers_failed: Optional[int] = None
-    # Set when scoring could not complete (no rubric, or an unresolved criterion), so
-    # a judge failure is filterable rather than read as a genuine miss.
+    # Set when scoring could not complete (no rubric, no judge); such rows are also
+    # masked, so they never read as a genuine miss.
     judge_error: Optional[str] = None
 
 
@@ -516,14 +614,19 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                     "edgar_search_mode is 'local' but local_edgar_index_path is not set. Local mode serves "
                     "edgar_search entirely from that index; without it every search would fail mid-rollout."
                 )
+            index_path, metadata_path = self.config.local_edgar_index_path, self.config.local_edgar_metadata_path
+            if self.config.local_edgar_stage_dir:
+                index_path, metadata_path = stage_local_edgar_files(
+                    index_path, metadata_path, self.config.local_edgar_stage_dir
+                )
             self._local_edgar = LocalEdgarSearch(
-                self.config.local_edgar_index_path,
+                index_path,
                 max_end_date=MAX_END_DATE,
-                metadata_path=self.config.local_edgar_metadata_path,
+                metadata_path=metadata_path,
             )
             logger.info(
                 "edgar_search: local mode, index %s (coverage %s)",
-                self.config.local_edgar_index_path,
+                index_path,
                 self._local_edgar.coverage,
             )
         elif not self.config.sec_api_key:
@@ -1165,10 +1268,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         """Score the agent's answer against the dataset's rubric criteria.
 
         Each criterion is judged independently by majority vote, then aggregated into
-        Partial Credit, which becomes the reward. An unresolved criterion counts as
-        not passed and gates like one, but also sets ``judge_error`` so a judge outage
-        never reads as a model failure. With ``frontier_finance_grader`` set, the
-        FrontierFinance grader scores ``rubrics`` instead.
+        Partial Credit, which becomes the reward. A criterion the judge never resolved
+        (call failures, no parseable verdict, or a reply cut at its token limit) raises
+        JudgeError, so judge_failsafe masks the row: a judge outage is not the model's
+        fault. A rollout with no submission scores 0, unmasked, even when the agent
+        stopped on a failed policy call or an aborted tool. With ``frontier_finance_grader``
+        set, the FrontierFinance grader scores ``rubrics`` instead.
         """
         session_id = request.session.get(SESSION_ID_KEY)
         tool_usage = self._tool_usage(session_id) if session_id else {}
@@ -1217,19 +1322,31 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 rubric_total=len(criteria),
             )
 
+        if len(generated_answer) > 50_000:
+            generated_answer = generated_answer[:50_000] + "\n[answer truncated]"
+
+        # Missing task data or judge configuration is not the model's fault: mask.
         if not criteria:
+            reason = "no usable rubric criteria — unlabeled dry run, not scorable"
             return FinanceAgentV2VerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
-                judge_error="no usable rubric criteria — unlabeled dry run, not scorable",
+                judge_error=reason,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
             )
 
         if not self.config.judge_model_server:
+            reason = "no judge_model_server configured — cannot score the rubric"
             return FinanceAgentV2VerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 rubric_total=len(criteria),
-                judge_error="no judge_model_server configured — cannot score the rubric",
+                judge_error=reason,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
             )
 
         # Criteria are independent; a question is ~9 criteria x 3-10 calls, so judge
@@ -1242,20 +1359,19 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
 
         judgements = await asyncio.gather(*(judge_one(c) for c in criteria))
 
+        # An unresolved criterion is a judge failure, so the row has no valid reward.
+        # judge_failsafe masks it as judge_failed; the message keeps the first cause.
+        unresolved = [j for j in judgements if j.score is None]
+        if unresolved:
+            logger.error("Unresolved criteria, failed judge replies: %s", [j.failed_reply_samples for j in unresolved])
+            raise JudgeError(f"{len(unresolved)}/{len(judgements)} criteria unresolved (e.g. {unresolved[0].error})")
+
         scores = aggregate_rubric_scores(judgements)
 
-        judge_error = None
-        if scores["rubric_unresolved"]:
-            first = next(j for j in judgements if j.score is None)
-            judge_error = (
-                f"{scores['rubric_unresolved']}/{scores['rubric_total']} criteria unresolved (e.g. {first.error})"
-            )
-
         logger.info(
-            "Rubric verdict: %d/%d passed, %d unresolved, %d/%d dealbreakers failed, partial_credit=%.3f",
+            "Rubric verdict: %d/%d passed, %d/%d dealbreakers failed, partial_credit=%.3f",
             scores["rubric_passed"],
             scores["rubric_total"],
-            scores["rubric_unresolved"],
             scores["rubric_dealbreakers_failed"],
             scores["rubric_dealbreakers_total"],
             scores["rubric_partial_credit"],
@@ -1266,7 +1382,6 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             reward=scores["rubric_partial_credit"],
             rubric_judgements=list(judgements),
             **scores,
-            judge_error=judge_error,
         )
 
     # ------------------------------------------------------------------
@@ -1376,18 +1491,15 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         return {name: value for name, value in self.compute_metrics(tasks).items() if name.startswith("mean/")}
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Headline metrics: the usual mean/* plus judge-health counters.
+        """Headline metrics: the usual mean/* plus the submission and dealbreaker counters.
 
-        The counters are promoted deliberately — a run whose judge failed on a
-        third of its criteria should not be read as a low score, and that is only
-        obvious if the failure count sits next to the score.
+        A judge failure does not reach these metrics: verify() masks the row, so it
+        leaves the score, and Gym reports it as a masked failure.
         """
         if self._frontier_finance_grader is not None:
             return frontier_finance_key_metrics(agent_metrics)
         key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
         for k in (
-            "rubric/criteria_unresolved",
-            "rubric/rollouts_with_judge_error",
             "rubric/rollouts_without_submission",
             "rubric/dealbreakers_failed",
         ):
