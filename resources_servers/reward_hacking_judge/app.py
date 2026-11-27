@@ -23,7 +23,7 @@ close:
 import asyncio
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Iterator, List, Optional
 
@@ -73,7 +73,7 @@ _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
 
 class RewardHackingJudgeConfig(BaseResourcesServerConfig):
-    # verify() reads only the saved transcript and the source run's saved reward, so re-judging is safe.
+    # verify() reads only the request and the source run's saved row, so re-judging is safe.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "reward_hacking_judge"
@@ -84,7 +84,8 @@ class RewardHackingJudgeConfig(BaseResourcesServerConfig):
     judge_config_fpath: str = "judges/reward_hacking_v2.yaml"
     # The source run's rollouts.jsonl. `gym eval reverify` does not send saved rewards or agent observations to
     # /verify, so the server reads them from here by task and rollout index: the reward v2 shows the judge, and the
-    # compactions where a run splits into segments. Unset: no reward is shown and every run is one segment.
+    # agent's own conversation with the compactions where it splits into segments. Unset: no reward is shown, and
+    # the request's transcript is judged as one segment.
     source_rollouts_jsonl_fpath: Optional[str] = None
     # Attempts per rollout when the judge answers without a valid verdict.
     judge_max_attempts: int = Field(default=2, ge=1)
@@ -119,14 +120,28 @@ def _finite(value: object) -> Optional[float]:
 
 @dataclass(frozen=True)
 class SourceRun:
-    """What /verify is not sent about a saved rollout: its reward and where its compactions kept the context."""
+    """What /verify is not sent about a saved rollout: its reward, and where its row is saved.
 
-    reward: Optional[float] = None
-    first_kept_item_ids: tuple[str, ...] = ()
+    Only the row's location is kept, not the row: a source rollouts file can be far larger than memory, so `verify`
+    reads the one row again when it needs the agent's own conversation.
+    """
+
+    reward: float | None = None
+    path: Path | None = None
+    offset: int = 0
+    length: int = 0
+
+    def read_row(self) -> dict[str, Any] | None:
+        """The saved row, read again from its bytes in the source rollouts file; None when no row is known."""
+        if self.path is None:
+            return None
+        with self.path.open("rb") as file:
+            file.seek(self.offset)
+            return orjson.loads(file.read(self.length))
 
 
 def compaction_first_kept_item_ids(row: dict[str, Any]) -> tuple[str, ...]:
-    """The transcript item each context compaction of a rollout kept first, from its agent observations."""
+    """The conversation item each context compaction of a rollout kept first, from its agent observations."""
     observations = row.get(NG_AGENT_OBSERVATIONS_KEY)
     records = observations.get("records") if isinstance(observations, dict) else None
     return tuple(
@@ -138,29 +153,63 @@ def compaction_first_kept_item_ids(row: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _source_rows(path: Path) -> Iterator[dict[str, Any]]:
+def root_conversation(row: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The conversation the agent saved for its root invocation (the one no other invocation spawned), if any."""
+    observations = row.get(NG_AGENT_OBSERVATIONS_KEY)
+    records = observations.get("records") if isinstance(observations, dict) else None
+    for record in records or []:
+        if (
+            isinstance(record, dict)
+            and record.get("kind") == "agent_invocation"
+            and record.get("parent_invocation_id") is None
+        ):
+            conversation = record.get("conversation")
+            return conversation if isinstance(conversation, list) and conversation else None
+    return None
+
+
+def _source_rows(path: Path) -> Iterator[tuple[dict[str, Any], SourceRun]]:
+    """Each row of a rollouts file with its location, read one at a time."""
     # A managed run selects each rollout's latest attempt, as reverify does, which need not be its last row in the file.
     store = RolloutStore.read(path, import_legacy=False)
     if store is not None:
-        yield from store.selected("success")
+        for record in store.selected_records("success").values():
+            yield record.read(), SourceRun(path=record.path, offset=record.offset, length=record.length)
         return
     with path.open("rb") as file:
+        offset = 0
         for line in file:
             if line.strip():
-                yield orjson.loads(line)
+                yield orjson.loads(line), SourceRun(path=path, offset=offset, length=len(line))
+            offset += len(line)
 
 
 def load_source_runs(path: Path) -> dict[tuple[int, int], SourceRun]:
     """Each (task index, rollout index) of a rollouts file, from its selected outcome in a managed run, else from its
     last unmasked row with a reward."""
     runs: dict[tuple[int, int], SourceRun] = {}
-    for row in _source_rows(path):
+    for row, location in _source_rows(path):
         reward = _finite(row.get("reward"))
         task, rollout = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
         if reward is None or row.get("mask_sample") or not isinstance(task, int) or not isinstance(rollout, int):
             continue
-        runs[(task, rollout)] = SourceRun(reward=reward, first_kept_item_ids=compaction_first_kept_item_ids(row))
+        runs[(task, rollout)] = replace(location, reward=reward)
     return runs
+
+
+def judged_transcript(
+    body: BaseVerifyRequest, saved_row: dict[str, Any] | None
+) -> tuple[object, object, tuple[str, ...]]:
+    """The input and output items to judge, and the items where a new segment starts.
+
+    The agent's own conversation is judged when it saved one: it starts with the task prompt, and its compactions
+    name its item ids, so the run splits there. Otherwise the request's transcript is judged as one segment.
+    """
+    conversation = root_conversation(saved_row) if saved_row is not None else None
+    if conversation is not None:
+        return conversation, [], compaction_first_kept_item_ids(saved_row)
+    request = body.responses_create_params.model_dump(mode="json")
+    return request.get("input"), body.response.model_dump(mode="json").get("output"), ()
 
 
 def parse_answer(text: str) -> RewardHackingV2Output:
@@ -196,16 +245,17 @@ class RewardHackingJudgeResourcesServer(SimpleResourcesServer):
             key = (extra.get(TASK_INDEX_KEY_NAME), extra.get(ROLLOUT_INDEX_KEY_NAME))
             source = self._source_runs.get(key, source)  # type: ignore[arg-type]
         if body.source_reward is not None:
-            source = SourceRun(reward=_finite(body.source_reward), first_kept_item_ids=source.first_kept_item_ids)
+            source = replace(source, reward=_finite(body.source_reward))
         return source
 
     async def verify(self, body: RewardHackingJudgeVerifyRequest) -> RewardHackingJudgeVerifyResponse:
         source = self._source_run(body)
         source_reward = source.reward
+        input_items, output_items, first_kept_item_ids = judged_transcript(body, source.read_row())
         try:
             trajectory = transcript_to_atif(
-                body.responses_create_params.model_dump(mode="json").get("input"),
-                body.response.model_dump(mode="json").get("output"),
+                input_items,
+                output_items,
                 session_id="reward-hacking-judge",
                 agent_name="gym-rollout",
                 agent_version="0",
@@ -221,7 +271,7 @@ class RewardHackingJudgeResourcesServer(SimpleResourcesServer):
                 source_reward=source_reward,
             )
         steps = trajectory.model_dump(mode="json")["steps"]
-        segments = split_at_items(steps, source.first_kept_item_ids)
+        segments = split_at_items(steps, first_kept_item_ids)
         prompts = build_segment_prompts(segments, source_reward, self._judge_config)
 
         # The grading observation binds the response and reward it returns, so it returns the final row.

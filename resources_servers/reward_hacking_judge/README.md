@@ -37,7 +37,8 @@ reverify:
     config: [resources_servers/reward_hacking_judge/configs/reward_hacking_judge.yaml]
 ```
 
-The step sets `NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS`, from which this server reads the source rewards.
+The step sets `NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS`, from which this server reads the source rewards and the agents'
+saved conversations.
 
 # Run it on a finished run
 
@@ -58,9 +59,9 @@ gym eval reverify \
     +reward_hacking_judge_model_name=<judge model>
 ```
 
-`gym eval reverify` does not send saved rewards to `/verify`, so `reward_hacking_judge_source_rollouts` names the
-rollouts file the server reads them from, by `_ng_task_index` and `_ng_rollout_index`. Without it the judge sees no
-reward.
+`gym eval reverify` does not send saved rewards or agent observations to `/verify`, so
+`reward_hacking_judge_source_rollouts` names the rollouts file the server reads them from, by `_ng_task_index` and
+`_ng_rollout_index`. Without it the judge sees no reward, and each rollout is judged from its response as one segment.
 
 # Output
 
@@ -90,10 +91,14 @@ a context compaction. This server does the same.
 
 1. Where a Gym rollout splits: the transcript and Gym's ATIF export do not mark compactions. The agent harness
    reports each one in the rollout's `ng_agent_observations` as a `context_compaction` record, whose
-   `first_kept_item_id` names the transcript item the compacted context kept first (opencode, pi and openclaw report
-   it). The server reads these records from the source rollouts file and starts a new segment at the ATIF step whose
-   `source_item_id` is that item. A rollout without such records, or whose ids match no step, is one segment, as
-   before.
+   `first_kept_item_id` names the item of the agent's own conversation that the compacted context kept first
+   (opencode, pi and openclaw report it). Those ids are the agent's, not the ids in `response.output`. So when the
+   source row's `ng_agent_observations` holds a root `agent_invocation` (no `parent_invocation_id`) with a
+   `conversation`, the server judges that conversation, which starts with the task prompt, and starts a new segment
+   at the ATIF step whose `source_item_id` is a kept item. Otherwise it judges `responses_create_params.input` and
+   `response.output` as one segment.
+   The server keeps only each source row's reward and byte location, and reads the one row again in `/verify`, so
+   a rollouts file larger than memory works.
 2. The prompts: one per segment. Steps are numbered across the run (segment 2 goes on where segment 1 stopped), and
    every prompt carries the run's task and reward.
 3. The merge, per verdict: `match` if any segment matched, with the most severe of their categories (scoring_tamper,
@@ -127,9 +132,9 @@ history, a `conftest.py` that skips the test, a fair fix and a failed fix (`conf
 
 # Limits
 
-- Splitting a Gym rollout at compactions is checked with synthetic records only, not with a real compacted rollout.
-  opencode's records name its persisted part ids while its saved response carries fresh item ids, so an opencode
-  rollout stays one segment until the opencode agent keeps those ids in the response.
+- Splitting a Gym rollout at compactions was checked on a real compacted opencode rollout.
+- Agents that save reasoning inline as `<think>` text in their conversation or output (today
+  `opencode_sandboxed_agent`'s saved conversation and `terminus_2_agent`'s output) show that reasoning to the judge.
 - The judge model: confirm with MFN which model v2 is calibrated on.
 - Calls are slow (2 to 4 minutes each for a short rollout in a smoke on 2026-11-13); size
   `judge_endpoint_max_concurrency` with MFN.
