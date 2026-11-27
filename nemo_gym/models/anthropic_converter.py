@@ -77,6 +77,9 @@ SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif",
 # Like LiteLLM, tunnel opaque Responses reasoning through Anthropic clients, but use a Gym-owned marker.
 _RESPONSES_REASONING_CARRIER_PREFIX = "nemo_gym_responses_reasoning:"
 
+# The event with which Anthropic's Messages API holds a stream open. It carries no part of the message.
+ANTHROPIC_PING_SSE = 'event: ping\ndata: {"type": "ping"}\n\n'
+
 
 class AnthropicConverter:
     ############################################################################
@@ -678,6 +681,10 @@ class AnthropicConverter:
         if block_type == "tool_use":
             return [{"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}))}]
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
+
+    def anthropic_error_to_sse(self, error_type: str, message: str) -> str:
+        """The ``error`` event with which a Messages stream ends when it cannot deliver its message."""
+        return self._sse_event("error", {"type": "error", "error": {"type": error_type, "message": message}})
 
     def _sse_event(self, event_type: str, data: Dict[str, Any]) -> str:
         return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"

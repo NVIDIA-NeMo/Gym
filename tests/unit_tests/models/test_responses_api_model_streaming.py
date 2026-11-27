@@ -44,6 +44,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningInputItemForTraining,
     NeMoGymResponseReasoningItemForTraining,
 )
+from nemo_gym.models.anthropic_converter import ANTHROPIC_PING_SSE
 from nemo_gym.models.base_responses_api_model import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -1651,6 +1652,7 @@ class TestResponsesStreamKeepalive:
         [
             ("/v1/responses", "responses", STREAM_BODY),
             ("/v1/chat/completions", "chat_completions", {"stream": True, "messages": []}),
+            ("/v1/messages", "responses", {"stream": True, "max_tokens": 8, "messages": []}),
         ],
     )
     @pytest.mark.parametrize("phase", ["first_interval", "before_first_chunk", "after_keepalive"])
@@ -1690,7 +1692,7 @@ class TestResponsesStreamKeepalive:
                 await asyncio.Event().wait()
             elif phase == "after_keepalive" and message["type"] == "http.response.body":
                 chunk = message.get("body", b"")
-                if chunk == SSE_KEEPALIVE or b"event: response.in_progress\n" in chunk:
+                if chunk in (SSE_KEEPALIVE, ANTHROPIC_PING_SSE.encode()) or b"event: response.in_progress\n" in chunk:
                     phase_reached.set()
 
         scope = {

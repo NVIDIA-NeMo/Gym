@@ -45,6 +45,7 @@ from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_co
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
+    _ANTHROPIC_PING,
     attach_capture_context,
     ledger_removal_refusal,
 )
@@ -1022,7 +1023,7 @@ class _CaptureMiddleware:
                 chunk = message.get("body", b"") or b""
                 if (
                     chunk
-                    and chunk != _SSE_KEEPALIVE
+                    and chunk not in (_SSE_KEEPALIVE, _ANTHROPIC_PING)
                     # Lifecycle events open a `stream_keepalive_s` stream long before the first output item.
                     and not is_responses_lifecycle_chunk(chunk)
                     and state["ttft_ms"] is None
