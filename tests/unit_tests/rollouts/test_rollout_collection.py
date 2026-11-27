@@ -4298,12 +4298,13 @@ class TestRolloutCollection:
         assert [row[TASK_INDEX_KEY_NAME] for row in rows] == [1, 2]
         assert all(row["reward"] == 0.0 for row in rows)
 
-        # Only identity travels; dataset fields are added later, and only those real rows carry.
+        # Dataset fields are added later; synthetic rows stay marked for exclusion.
         assert rows[0] == {
             TASK_INDEX_KEY_NAME: 1,
             ROLLOUT_INDEX_KEY_NAME: 0,
             "agent_ref": {"name": "my_agent"},
             "reward": 0.0,
+            NG_NO_PERSIST_KEY: True,
         }
 
         assert _missing_rollout_rows_counted_as_zero([tmp_path / "absent.jsonl"], [], set()) == []
