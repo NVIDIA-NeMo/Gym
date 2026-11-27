@@ -53,7 +53,7 @@ def test_invalid_worker_count_is_rejected(workers, tmp_path):
         prepare.prepare(output_fpath=tmp_path / "output.jsonl", num_workers=workers)
 
 
-def test_worker_tokenizer_errors_reach_caller(monkeypatch, tmp_path):
+def test_tokenizer_errors_reach_caller(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "load_dataset", lambda *args, **kwargs: source_rows())
     with pytest.raises((ValueError, OSError)):
         prepare.prepare("/missing-mrcr-tokenizer", output_fpath=tmp_path / "out.jsonl", num_workers=2)
@@ -79,3 +79,25 @@ def test_outer_daemon_worker_preserves_serial_output(monkeypatch, tmp_path, toke
             process.terminate()
             process.join()
     assert output.read_bytes() == serial.read_bytes()
+
+
+def test_tokenizer_loads_in_the_caller_before_workers_start(monkeypatch, tmp_path, tokenizer_path):
+    # Workers then find a remote-code tokenizer already in the shared modules cache instead of all copying it.
+    events = []
+    build_token_counter = prepare._build_token_counter
+    spawn = get_context("spawn")
+
+    def build(name):
+        events.append("tokenizer")
+        return build_token_counter(name)
+
+    class Context:
+        def Pool(self, *args, **kwargs):
+            events.append("pool")
+            return spawn.Pool(*args, **kwargs)
+
+    monkeypatch.setattr(prepare, "load_dataset", lambda *args, **kwargs: source_rows())
+    monkeypatch.setattr(prepare, "_build_token_counter", build)
+    monkeypatch.setattr(prepare, "get_context", lambda method: Context())
+    prepare.prepare(tokenizer_path, None, tmp_path / "out.jsonl", num_workers=2)
+    assert events == ["tokenizer", "pool"]
