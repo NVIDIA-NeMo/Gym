@@ -27,7 +27,7 @@ import responses_api_agents.remote_agent.app as remote_agent_app
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ResourcesServerRef
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, RequestFailureLog
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 from nemo_gym.telemetry import connection_pool
@@ -557,8 +557,11 @@ class TestRemoteFailuresBecomeSentinelRows:
 
     async def test_connect_exhaustion_after_bounded_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
         connect_error = ClientConnectorError(MagicMock(), OSError("connection refused"))
-        client, server_client, result = await self._run(monkeypatch, AsyncMock(side_effect=connect_error))
+        with RequestFailureLog.capture() as log:
+            client, server_client, result = await self._run(monkeypatch, AsyncMock(side_effect=connect_error))
         assert client.request.call_count == 3
+        # Each try after the first is a transport resend; the last failure starts none.
+        assert log.transport_resends == 2
         assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
         assert "Is your service running at http://localhost:9000?" in result["error"]
         # verify is never reached on a failed loop
@@ -568,8 +571,10 @@ class TestRemoteFailuresBecomeSentinelRows:
         request_mock = AsyncMock(
             side_effect=[ServerDisconnectedError(), FakeRemoteResponse(200, orjson.dumps(_MINIMAL_TRAJECTORY))]
         )
-        client, _, result = await self._run(monkeypatch, request_mock)
+        with RequestFailureLog.capture() as log:
+            client, _, result = await self._run(monkeypatch, request_mock)
         assert client.request.call_count == 2
+        assert log.transport_resends == 1
         assert NG_FAILURE_CLASS_KEY not in result
 
     async def test_http_500_with_body_excerpt(self, monkeypatch: pytest.MonkeyPatch) -> None:

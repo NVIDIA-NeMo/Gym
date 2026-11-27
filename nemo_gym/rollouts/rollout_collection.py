@@ -121,7 +121,12 @@ from nemo_gym.core.failure_kinds import (
     quota_reset_text,
 )
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
-from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.failure_transport import (
+    FailureHeader,
+    FailureReportRow,
+    RequestFailureLog,
+    observe_transport_resend,
+)
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
@@ -146,8 +151,10 @@ from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
 from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf
 from nemo_gym.rollouts.rollout_records import (
+    NG_TRANSPORT_RESENDS_KEY,
     RUN_ID_KEY,
     RolloutRecord,
+    _transport_resends,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
@@ -899,6 +906,8 @@ class _CompletedRollout:
     failure_report: Optional[FailureReport] = None
     # A failed `/run` with route_failures_to_sidecar off: the writer keeps evidence of it, then raises this error.
     run_error: Optional[BaseException] = None
+    # Transport resends of this `/run`, in the driver and the Gym servers below it; None if it was never dispatched.
+    transport_resends: Optional[int] = None
 
 
 def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
@@ -1157,6 +1166,10 @@ def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, An
         # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
         # which resume reads to order dispatch.
         result[ELAPSED_S_KEY] = completed.elapsed_s
+    if completed.transport_resends is not None:
+        # A lower bound: resends a Gym server makes after answering, or by a server without the resend header, are not
+        # seen. Absent for a row that was never dispatched.
+        result[NG_TRANSPORT_RESENDS_KEY] = completed.transport_resends
 
     result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
     result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1268,6 +1281,8 @@ def _shard_record(
         for key in _SHARD_IDENTITY_KEYS:
             if key in row:
                 record.setdefault(key, row[key])
+        if completed.transport_resends is not None:
+            record[NG_TRANSPORT_RESENDS_KEY] = completed.transport_resends
         record[RUN_ID_KEY] = run_id
         return record
     if _materialized_taskset(row) is not None and _is_episode_response(result):
@@ -3433,8 +3448,9 @@ def _failure_export_metrics(
     landed: set,
     *,
     histories: Sequence[RolloutStore] = (),
+    rows: Optional[Mapping[Path, Iterable[Mapping[str, Any]]]] = None,
 ) -> Dict[str, int]:
-    """Failure and retry counts for exporters, read from the failures sidecars.
+    """Failure, retry and transport resend counts for exporters, read from the failures sidecars.
 
     The sidecars hold every failed attempt of the run, across resumes, so these are run totals rather
     than one job's. ``identity`` keys a sidecar row the way ``landed`` keys the rollouts that have a row.
@@ -3445,11 +3461,15 @@ def _failure_export_metrics(
     current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
     left out when the rollouts were collected with different caps. A ``record_omitted_rollouts`` row is no failed
     attempt; an interrupted one is still the rollout's latest execution, so an older failure's class is not counted.
+    ``transport/resends`` and ``transport/attempts_counted`` add up the counts that the sidecars and ``rows`` (the
+    shards' own rows, by shard) carry, one per saved attempt, as ``RolloutStore.failure_export_metrics`` does for a
+    shard with attempt history; both are left out when no row carries one. Runs number their tasks from 0, so an
+    attempt belongs to its row's run, or to its shard for a row without a run id.
     """
     if histories:
         parts = [history.failure_export_metrics() for history in histories]
         if failures_fpaths:
-            parts.append(_failure_export_metrics(failures_fpaths, identity, landed))
+            parts.append(_failure_export_metrics(failures_fpaths, identity, landed, rows=rows))
         merged: Counter[str] = Counter()
         for part in parts:
             merged.update({key: value for key, value in part.items() if key != "retries/max_attempts"})
@@ -3463,6 +3483,15 @@ def _failure_export_metrics(
     latest_failure: Dict[Any, Dict[str, Any]] = {}
     # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
     failed: Counter = Counter()
+    # By saved attempt. A failed /run kept as evidence counts only for an attempt no other row saved.
+    resends: Dict[Any, Optional[int]] = {}
+    evidence_resends: Dict[Any, Optional[int]] = {}
+
+    def saved_attempt(row: Mapping[str, Any], failures_fpath: Path) -> tuple:
+        run_id = row.get(RUN_ID_KEY)
+        scope = run_id if isinstance(run_id, str) else failures_fpath
+        return scope, identity(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0)
+
     for fpath in failures_fpaths:
         if not fpath.exists():
             continue
@@ -3472,8 +3501,11 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
+                attempt = saved_attempt(row, fpath)
                 if is_non_superseding_rollout_row(row):
+                    evidence_resends[attempt] = _transport_resends(row)
                     continue
+                resends[attempt] = _transport_resends(row)
                 latest[identity(row)] = row
                 if is_omitted_rollout_row(row):
                     continue
@@ -3488,6 +3520,10 @@ def _failure_export_metrics(
         if key not in landed and not is_omitted_rollout_row(row)
     )
     recorded_caps = set(caps.values()) or {current_cap}
+    for shard, shard_rows in (rows or {}).items():
+        for row in shard_rows:
+            resends[saved_attempt(row, failures_path_for(shard))] = _transport_resends(row)
+    counted = [count for count in {**evidence_resends, **resends}.values() if count is not None]
     return {
         "retries/attempts": sum(attempts.values()),
         # A rollout that landed after n failed attempts was dispatched n + 1 times.
@@ -3495,6 +3531,7 @@ def _failure_export_metrics(
         "retries/at_cap": sum(1 for key, n in attempts.items() if key not in landed and n >= caps[key]),
         **({"retries/max_attempts": recorded_caps.pop()} if len(recorded_caps) == 1 else {}),
         **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
+        **({"transport/resends": sum(counted), "transport/attempts_counted": len(counted)} if counted else {}),
     }
 
 
@@ -5069,7 +5106,15 @@ executions → not run again (left to recovery)
                 if no_persist:
                     # A returned suppression without a failure is an intentional
                     # omission. Known kill-shaped failures were converted above.
-                    store.record_omission(row, str(result.get("error") or "Producer requested no result persistence"))
+                    store.record_omission(
+                        row
+                        | (
+                            {NG_TRANSPORT_RESENDS_KEY: result[NG_TRANSPORT_RESENDS_KEY]}
+                            if NG_TRANSPORT_RESENDS_KEY in result
+                            else {}
+                        ),
+                        str(result.get("error") or "Producer requested no result persistence"),
+                    )
                     settle_rollout(row, row)
                     _record_rollout_outcome(metric_result, "omitted", dispatch_name)
                     if batch_tracker is not None:
@@ -6232,6 +6277,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 attempt_errors: list[Exception] = []
                 succeeded = False
                 dispatch_span_context = None
+                transport_log: Optional[RequestFailureLog] = None
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
                     dispatch_span = (
@@ -6239,7 +6285,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
                         else nullcontext()
                     )
-                    with dispatch_span as dispatch_span_context:
+                    # The transport resends of this /run: the driver's own, and those every Gym server below reports.
+                    with dispatch_span as dispatch_span_context, RequestFailureLog.operation() as transport_log:
                         connect_deadline = time.monotonic() + (_connect_grace_s or 0.0)
                         while True:
                             try:
@@ -6270,6 +6317,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                                 ):
                                     raise
                                 await asyncio.sleep(0.5)
+                                # A new post() starts its own attempt count, so this resend is counted here.
+                                observe_transport_resend()
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)
@@ -6304,6 +6353,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
+                        transport_resends=None if transport_log is None else transport_log.transport_resends,
                         failure_report=FailureHeader.decode(getattr(res, "headers", None)),
                     )
                 except Exception as e:
@@ -6362,6 +6412,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
+                        transport_resends=None if transport_log is None else transport_log.transport_resends,
                         failure_report=_collection_failure_report(
                             e,
                             failure_row[NG_FAILURE_CLASS_KEY],
@@ -7000,6 +7051,7 @@ class RolloutAggregationHelper(BaseModel):
         health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
         legacy_results: List[Dict] = []
+        legacy_results_by_shard: Dict[Path, List[Dict]] = {}
         history_results: Dict[str, List[Dict]] = {}
         shard_keys: Dict[str, set] = {}
         run_ids: set[str] = set()
@@ -7028,6 +7080,7 @@ class RolloutAggregationHelper(BaseModel):
                 continue
             legacy_paths.append(shard)
             keys = shard_keys[str(shard)] = set()
+            shard_results = legacy_results_by_shard[shard] = []
             digest = hashlib.sha256()
             with open(shard_path, "rb") as f:
                 for line_no, line in enumerate(f, 1):
@@ -7039,6 +7092,7 @@ class RolloutAggregationHelper(BaseModel):
                     keys.add((result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)))
                     results.append(result)
                     legacy_results.append(result)
+                    shard_results.append(result)
                 shard_digests[shard_path] = (f.tell(), digest.hexdigest())
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
@@ -7290,6 +7344,7 @@ class RolloutAggregationHelper(BaseModel):
                 lambda row: _identity_key(row, group),
                 {_identity_key(r, group) for r in results} if failures_fpaths else set(),
                 histories=histories,
+                rows=legacy_results_by_shard,
             )
             metrics = {
                 **failure_metrics,

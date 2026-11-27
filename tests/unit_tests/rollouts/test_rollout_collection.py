@@ -4785,7 +4785,7 @@ class TestRolloutCollection:
         )
         await RolloutCollectionHelper().run_from_config(config)
 
-        assert {k: v for k, v in exported.items() if k.startswith(("coverage/", "retries/"))} == {
+        assert {k: v for k, v in exported.items() if k.startswith(("coverage/", "retries/", "transport/"))} == {
             "coverage/expected": 3,
             "coverage/scored": 2,
             "coverage/missing": 0,
@@ -4807,6 +4807,8 @@ class TestRolloutCollection:
             "retries/rollouts_retried": 2,
             "retries/at_cap": 1,
             "retries/max_attempts": 3,
+            "transport/resends": 0,
+            "transport/attempts_counted": 3,
         }
 
     async def test_coverage_is_exported_when_aggregation_is_skipped(
@@ -14995,6 +14997,43 @@ class TestFailureExportMetrics:
     def test_no_sidecar_rows_export_no_class(self, tmp_path: Path) -> None:
         assert self._counts(tmp_path, [], set()) == {}
 
+    def test_transport_resends_count_once_per_saved_attempt(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import (
+            NG_OMITTED_ROLLOUT_KEY,
+            NG_TRANSPORT_RESENDS_KEY,
+            NG_UNROUTED_RUN_ERROR_KEY,
+        )
+
+        def attempt(task: int, index: int, resends: int, **fields) -> dict:
+            return {
+                TASK_INDEX_KEY_NAME: task,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: index,
+                NG_TRANSPORT_RESENDS_KEY: resends,
+                **fields,
+            }
+
+        evidence = {NG_OMITTED_ROLLOUT_KEY: True, NG_UNROUTED_RUN_ERROR_KEY: True}
+        sidecar = tmp_path / "rollouts_failures.jsonl"
+        sidecar.write_bytes(
+            b"".join(
+                orjson.dumps(row) + b"\n"
+                for row in (
+                    attempt(0, 0, 1, **{NG_FAILURE_CLASS_KEY: "agent_run_error"}),
+                    # Kept as evidence for an attempt another row saved: that row's count stands.
+                    attempt(0, 0, 5, **evidence),
+                    # Kept as evidence for an attempt nothing else saved: counted.
+                    attempt(1, 0, 3, **evidence),
+                )
+            )
+        )
+        identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+        metrics = _failure_export_metrics(
+            [sidecar], identity, {(0, 0)}, rows={tmp_path / "rollouts.jsonl": [attempt(0, 1, 2, reward=1.0)]}
+        )
+
+        assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (6, 3)
+
 
 class TestRecordedAttemptCap:
     """Review finding 4338960587 (follow-up to #4852): at_cap uses the cap the run collected with."""
@@ -16772,6 +16811,35 @@ class TestRunRecordWriter:
         assert [call["model_call_id"] for call in record["ng_trajectory"]["model_calls"]] == ["c1"]
         assert record["ng_agent_observations"]["source"] == "agent"
         assert record["_ng_failure_record"]["failure"]["failure_reason"] == "tool crashed"
+
+    async def test_a_recorded_omission_keeps_the_transport_resends_of_its_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.core.failure_transport import observe_transport_resend
+        from nemo_gym.rollouts.rollout_collection import NG_TRANSPORT_RESENDS_KEY
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+
+        async def post(*args, **kwargs):
+            for _ in range(2):
+                observe_transport_resend()
+            return FakeResponse(200, {NG_NO_PERSIST_KEY: True, "error": "nothing to score"})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        run_dir = tmp_path / "run"
+        received: list[tuple[str, dict]] = []
+        for completion in RolloutCollectionHelper().run_examples(
+            [failing_row()],
+            record_output_dir=run_dir,
+            record_shard="s",
+            record_omitted_rollouts=True,
+            record_sink=lambda kind, record: received.append((kind, record)),
+        ):
+            await completion
+
+        [(kind, record)] = received
+        assert kind == "omitted" and record[NG_TRANSPORT_RESENDS_KEY] == 2
+        metrics = RolloutStore.read(run_dir / "rollouts-s.jsonl").failure_export_metrics()
+        assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (2, 1)
 
     def test_a_sink_without_a_shard_is_refused(self) -> None:
         with pytest.raises(ValueError, match="record_sink .* needs record_output_dir"):

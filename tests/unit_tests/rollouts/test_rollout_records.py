@@ -746,6 +746,90 @@ async def test_aggregation_records_the_run_summary_for_otel_with_or_without_a_tr
     assert exported == ([summary] if tracker else [])
 
 
+async def test_aggregating_shards_without_attempt_history_adds_up_their_transport_resends(tmp_path, monkeypatch):
+    import nemo_gym.rollouts.rollout_collection as collection
+
+    output = tmp_path / "merged-earlier.jsonl"
+    output.write_bytes(
+        orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "_ng_transport_resends": 2})
+        + b"\n"
+        # A row from a Gym version that did not record resends adds nothing.
+        + orjson.dumps({"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 1.0})
+        + b"\n"
+    )
+    collection.failures_path_for(output).write_bytes(
+        orjson.dumps(
+            {
+                "_ng_task_index": 2,
+                "_ng_rollout_index": 0,
+                "_ng_failure_class": "agent_run_error",
+                "_ng_transport_resends": 4,
+            }
+        )
+        + b"\n"
+    )
+
+    async def aggregate(*args, raise_on_error=True):
+        return None
+
+    recorded = []
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    monkeypatch.setattr(collection, "get_exporters", lambda: False)
+    monkeypatch.setattr(collection, "is_metrics_exporter_active", lambda: True)
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append(summary))
+    await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=str(output), output_jsonl_fpath=str(tmp_path / "merged.jsonl"), disable_health_check=True
+        )
+    )
+    [summary] = recorded
+    assert (summary["transport/resends"], summary["transport/attempts_counted"]) == (6, 2)
+
+
+@pytest.mark.parametrize("second_count", [5, None])
+@pytest.mark.parametrize("layout", ["one merged file", "two shards without run ids"])
+async def test_aggregation_keeps_the_transport_resends_of_runs_with_the_same_indices_apart(
+    tmp_path, monkeypatch, layout, second_count
+):
+    import nemo_gym.rollouts.rollout_collection as collection
+
+    # Two runs on one environment server, each numbering its tasks from 0.
+    first = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "_ng_transport_resends": 3}
+    second = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 0.0}
+    if second_count is not None:
+        second["_ng_transport_resends"] = second_count
+    if layout == "one merged file":
+        inputs = tmp_path / "merged-earlier.jsonl"
+        inputs.write_bytes(
+            orjson.dumps(first | {"_ng_run_id": "run-a"})
+            + b"\n"
+            + orjson.dumps(second | {"_ng_run_id": "run-b"})
+            + b"\n"
+        )
+        input_glob = str(inputs)
+    else:
+        (tmp_path / "shard-a.jsonl").write_bytes(orjson.dumps(first) + b"\n")
+        (tmp_path / "shard-b.jsonl").write_bytes(orjson.dumps(second) + b"\n")
+        input_glob = str(tmp_path / "shard-*.jsonl")
+
+    async def aggregate(*args, raise_on_error=True):
+        return None
+
+    recorded = []
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    monkeypatch.setattr(collection, "get_exporters", lambda: False)
+    monkeypatch.setattr(collection, "is_metrics_exporter_active", lambda: True)
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append(summary))
+    await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=input_glob, output_jsonl_fpath=str(tmp_path / "out" / "merged.jsonl"), disable_health_check=True
+        )
+    )
+    [summary] = recorded
+    expected = (8, 2) if second_count is not None else (3, 1)
+    assert (summary["transport/resends"], summary["transport/attempts_counted"]) == expected
+
+
 @pytest.mark.parametrize("merge_shards", [False, True])
 async def test_legacy_repeated_explicit_ids_remain_aggregatable(tmp_path, monkeypatch, merge_shards):
     import nemo_gym.rollouts.rollout_collection as collection

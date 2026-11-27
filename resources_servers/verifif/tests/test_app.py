@@ -139,6 +139,25 @@ class TestTuringVIFApp:
         with pytest.raises(JudgeError, match="judge timeout"):
             asyncio.run(server.verify(request))
 
+    @pytest.mark.parametrize("judge_server_name", ["judge_model", None])
+    def test_a_judge_from_the_server_registry_reports_its_resends_without_the_internal_retry_policy(
+        self, monkeypatch: pytest.MonkeyPatch, judge_server_name
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.client.server_client.get_server_url", lambda name: f"http://{name}:8000")
+        config = TuringVIFResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            judge_server_name=judge_server_name,
+            judge_base_url="https://judge.example/v1",
+        )
+        server = TuringVIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        client = server._get_judge_client()
+        assert client.base_url == ("http://judge_model:8000/v1" if judge_server_name else "https://judge.example/v1")
+        assert client.gym_server is bool(judge_server_name)
+        assert client.internal is False
+
     def test_validator_imports(self) -> None:
         """Test that VIF validators can be imported."""
         from resources_servers.verifif.vif_validators.data_loader import (

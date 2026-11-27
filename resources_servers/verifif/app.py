@@ -346,6 +346,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             self._judge_client = NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=api_key,
+                gym_server=bool(self.config.judge_server_name),
             )
         return self._judge_client
 

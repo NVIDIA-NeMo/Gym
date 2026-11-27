@@ -1159,6 +1159,8 @@ class TestHarnessOutcomes:
         assert client.max_connection_retries == app_module.MODEL_CONNECTION_RETRIES == 20
         assert client.max_http_attempts == app_module.MODEL_HTTP_ATTEMPTS == 20
         assert client.max_num_tries is None
+        # The model server is a Gym server: the resends it reports join the rollout's count.
+        assert client.gym_server is True
 
     @pytest.mark.asyncio
     async def test_refused_connections_surface_within_the_bound_not_as_a_timeout(self, monkeypatch):
