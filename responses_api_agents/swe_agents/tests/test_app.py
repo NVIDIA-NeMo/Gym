@@ -47,6 +47,7 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperInstanceConfig,
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
+    _compute_mask_sample,
     runner_ray_remote,
     update_metrics,
 )
@@ -384,7 +385,60 @@ class TestUpdateMetrics:
             result = json.loads(fpath.read_text())
             assert result == {"a": 1, "d": 5}
             assert "b" not in result
-            assert "c" not in result
+
+
+class TestComputeMaskSample:
+    """[CUSTOM-SWE-LOST-TRAJECTORY-MASK / CUSTOM-SWE-MASK-SAMPLE] Direct, fixture-free
+    coverage of the masking decision itself -- _inner_responses needs a real Ray remote
+    call, apptainer command, and OpenHands trajectory to exercise end-to-end, so the
+    4-condition OR is extracted into _compute_mask_sample specifically to make this
+    testable in isolation.
+    """
+
+    def _clean(self, **overrides) -> bool:
+        defaults = dict(
+            resolved_now=False,
+            agent_error_kind=None,
+            eval_timed_out=False,
+            agent_timed_out=False,
+            lost_trajectory=False,
+        )
+        defaults.update(overrides)
+        return _compute_mask_sample(**defaults)
+
+    def test_clean_run_not_masked(self) -> None:
+        assert self._clean() is False
+
+    def test_resolved_via_max_iteration_is_masked(self) -> None:
+        assert self._clean(resolved_now=True, agent_error_kind="max_iteration") is True
+
+    def test_resolved_via_context_window_is_masked(self) -> None:
+        assert self._clean(resolved_now=True, agent_error_kind="context_window") is True
+
+    def test_unresolved_with_max_iteration_not_masked(self) -> None:
+        # Condition 1 requires BOTH resolved_now and the error kind -- an unresolved
+        # (failed) run that merely hit max-iteration isn't "accidental reward", it's a
+        # real failure, scored (correctly) as reward=0 without masking.
+        assert self._clean(resolved_now=False, agent_error_kind="max_iteration") is False
+
+    def test_other_error_kind_not_masked(self) -> None:
+        assert self._clean(resolved_now=True, agent_error_kind="stuck_in_loop") is False
+
+    def test_eval_timed_out_is_masked(self) -> None:
+        assert self._clean(eval_timed_out=True) is True
+
+    def test_agent_timed_out_is_masked(self) -> None:
+        assert self._clean(agent_timed_out=True) is True
+
+    def test_lost_trajectory_is_masked(self) -> None:
+        # The exact bug this item fixes: an agent subprocess crash that produces zero
+        # messages, previously scored as a legitimate reward-0 sample instead of excluded.
+        assert self._clean(lost_trajectory=True) is True
+
+    def test_lost_trajectory_masked_even_if_resolved(self) -> None:
+        # Shouldn't happen in practice (an empty trajectory can't resolve), but the OR
+        # must not accidentally become conditional on resolved_now being False.
+        assert self._clean(resolved_now=True, lost_trajectory=True) is True
 
 
 ########################################

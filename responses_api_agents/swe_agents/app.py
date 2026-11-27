@@ -308,9 +308,6 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
 
-    # GRPO related fields
-    mask_sample: bool = False
-
     @property
     def instance_id(self) -> str:
         return self.problem_info["instance_id"]
@@ -327,6 +324,13 @@ class SWEBenchMetrics(BaseModel):
     agent_error_kind: Optional[str] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
+    # [CUSTOM-SWE-MASK-SAMPLE 2026-11-27] Previously computed as `params.mask_sample`
+    # (SWEBenchWrapperInstanceConfig) only -- that field was never part of SWEBenchMetrics
+    # or SWEBenchVerifyResponse, so it could never actually reach the HTTP response body;
+    # confirmed by exhaustive search that nothing downstream (Gym, finer-flows, or NeMo-RL)
+    # ever read it. Moved here so it round-trips through metrics_fpath (update_metrics /
+    # model_validate_json) into the real response -- see run()'s **metrics.model_dump().
+    mask_sample: Optional[bool] = None
 
     # Profiling time metrics to report
     ray_queue_time: Optional[float] = None
@@ -1729,6 +1733,39 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
         json.dump(existing_dict | update_dict, f)
 
 
+def _compute_mask_sample(
+    resolved_now: bool,
+    agent_error_kind: Optional[str],
+    eval_timed_out: bool,
+    agent_timed_out: bool,
+    lost_trajectory: bool,
+) -> bool:
+    """Decide whether to mask this sample from the GRPO gradient.
+
+    1) Patch passed eval but agent did not actually submit (hit max-turns or blew the
+       context window) -- the reward is accidental.
+    2) Final eval step timed out -- reward is unreliable.
+    3) Agent itself timed out (wall-clock) -- mask regardless of resolved.
+    4) [CUSTOM-SWE-LOST-TRAJECTORY-MASK 2026-11-27] No trajectory was recovered at all
+       (chat_completions_trajectory empty -- see get_openhands_trajectory_from_completions's
+       own fail-open "no completions file" paths, e.g. the agent subprocess crashed before
+       writing anything). This is NOT a wall-clock timeout (agent_timed_out only fires if
+       openhands_run_time >= swebench_agent_timeout) and not necessarily a context-window/
+       max-iteration error either -- any other crash reaches here with reward=0 and zero
+       turns, previously scored as a legitimate reward-0 sample instead of excluded.
+
+    Extracted as a standalone, fixture-free function so it's directly unit-testable --
+    _inner_responses itself needs a real Ray remote call, apptainer command, and OpenHands
+    trajectory to exercise end-to-end.
+    """
+    return (
+        (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
+        or eval_timed_out
+        or agent_timed_out
+        or lost_trajectory
+    )
+
+
 # _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
 
 
@@ -3052,23 +3089,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         else:
             metrics_to_update["resolved"] = False
 
-        # Decide whether to mask this sample from the GRPO gradient.
-        # 1) Patch passed eval but agent did not actually submit (hit max-turns
-        #    or blew the context window) — the reward is accidental.
-        # 2) Final eval step timed out — reward is unreliable.
-        # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
-        persisted_metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
-        resolved_now = metrics_to_update.get("resolved", False)
-        agent_error_kind = persisted_metrics.agent_error_kind
-        eval_timed_out = bool(persisted_metrics.eval_timed_out)
-        agent_timed_out = bool(persisted_metrics.agent_timed_out)
-        if (
-            (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
-            or eval_timed_out
-            or agent_timed_out
-        ):
-            params.mask_sample = True
-
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools = self.get_openhands_trajectory_from_completions(
             trajectories_dir, params.instance_id
@@ -3081,6 +3101,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             chat_completions_trajectory
         )
         input_items, output_items = split_responses_input_output_items(responses_items)
+
+        # Decide whether to mask this sample from the GRPO gradient.
+        persisted_metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
+        metrics_to_update["mask_sample"] = _compute_mask_sample(
+            resolved_now=metrics_to_update.get("resolved", False),
+            agent_error_kind=persisted_metrics.agent_error_kind,
+            eval_timed_out=bool(persisted_metrics.eval_timed_out),
+            agent_timed_out=bool(persisted_metrics.agent_timed_out),
+            lost_trajectory=len(output_items) == 0,
+        )
 
         update_metrics(params.metrics_fpath, metrics_to_update)
 
