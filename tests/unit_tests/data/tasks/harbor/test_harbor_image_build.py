@@ -1460,6 +1460,7 @@ class TestSandboxProviderAtPrepare:
         provider_file = tmp_path / "docker.yaml"
         provider_file.write_text("sandbox:\n  docker:\n    create: {use_init: true}\n")
         monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: provider_file)
+        monkeypatch.setattr("nemo_gym.data.tasks.harbor.settings.resolve_sandbox_config", lambda name: provider_file)
         assert sandbox_provider_from_overrides([], "docker") == "docker"
         # A ++ override on the command line is part of the picture too.
         assert sandbox_provider_from_overrides(["++sandbox.opensandbox.connection.domain=x"], None) == "opensandbox"
@@ -1476,16 +1477,37 @@ class TestSandboxProviderAtPrepare:
             raise harbor_cli.HubError("stop here")
 
         monkeypatch.setattr(cli_eval, "prepare_target", fake_prepare)
-        monkeypatch.setattr(cli_eval, "build_options_from_overrides", lambda overrides: build_options.BuildOptions())
-        monkeypatch.setattr(cli_eval, "sandbox_provider_from_overrides", lambda overrides, sandbox: f"p:{sandbox}")
-        monkeypatch.setattr(cli_eval, "gpu_sandbox_provider_from_overrides", lambda overrides, sandbox: f"g:{sandbox}")
-        monkeypatch.setattr(cli_eval, "compose_platform_from_overrides", lambda overrides: "linux/arm64")
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.build_options_from_overrides",
+            lambda overrides: build_options.BuildOptions(),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.sandbox_provider_from_overrides",
+            lambda overrides, sandbox: f"p:{sandbox}",
+        )
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.gpu_sandbox_provider_from_overrides",
+            lambda overrides, sandbox: f"g:{sandbox}",
+        )
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.compose_platform_from_overrides", lambda overrides: "linux/arm64"
+        )
         # The M22 readers of the same blocks are stubbed too: the sandbox file this test names does not exist.
-        monkeypatch.setattr(cli_eval, "volume_sources_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(cli_eval, "gpu_volume_sources_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(cli_eval, "shared_storage_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(cli_eval, "gpu_shared_storage_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(cli_eval, "registry_credentials_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.volume_sources_from_overrides", lambda overrides, sandbox: None
+        )
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.gpu_volume_sources_from_overrides", lambda overrides, sandbox: None
+        )
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.shared_storage_from_overrides", lambda overrides, sandbox: None
+        )
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.gpu_shared_storage_from_overrides", lambda overrides, sandbox: None
+        )
+        monkeypatch.setattr(
+            "nemo_gym.data.tasks.harbor.settings.registry_credentials_from_overrides", lambda overrides, sandbox: None
+        )
         # The rows file is scoped to the agent, so the stub has to name one.
         monkeypatch.setattr(
             cli_eval, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)

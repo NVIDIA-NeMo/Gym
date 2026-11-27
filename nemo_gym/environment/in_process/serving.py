@@ -15,8 +15,11 @@ from nemo_gym.config.global_config import (
     HEAD_SERVER_KEY_NAME,
     GlobalConfigDictParserConfig,
 )
+from nemo_gym.data.tasks.harbor.prepare import HarborBenchmark
 from nemo_gym.environment.assets import asset_config_path
+from nemo_gym.environment.in_process.harbor import require_run_files, resolve_harbor_benchmark
 from nemo_gym.environment.in_process.overrides import _checked_overrides
+from nemo_gym.environment.in_process.planning import PlannedBenchmark
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
     ServerSpinupTimeoutError,
     ServerStartFailedError,
@@ -33,6 +36,7 @@ def serve_benchmark(
     model_type: str = "openai_model",
     overrides: Optional[Mapping[str, Any]] = None,
     registry_port: Optional[int] = None,
+    planned: Optional[PlannedBenchmark] = None,
 ) -> Iterator[BaseServerConfig]:
     """Start the benchmark's servers, and stop them on exit. Yields the registry server a `TaskRunner` talks to.
 
@@ -44,11 +48,20 @@ def serve_benchmark(
     server's port, so a caller that serves from another process can know the address before the servers start;
     Gym chooses the port when it is None.
 
+    A Harbor-backed benchmark (its config sets `harbor_target`) is served from the configuration `plan_benchmark`
+    wrote for it, so `planned` is required and must have been planned in this process's file system: the Harbor
+    environment server and the agent start from it, as under `gym eval run --benchmark NAME`.
+
     Returns once every server is ready; raises `ConfigError` if a server or a model endpoint is not, or if
     `registry_port` is in use. Like `gym env start`, it sets this process's Gym configuration, so serve one
     benchmark per process.
     """
-    config_paths = [asset_config_path("benchmark", benchmark), asset_config_path("model-type", model_type)]
+    harbor = resolve_harbor_benchmark(benchmark)
+    if harbor is None:
+        benchmark_paths = [asset_config_path("benchmark", benchmark)]
+    else:
+        benchmark_paths = _harbor_config_paths(benchmark, harbor, planned)
+    config_paths = [*benchmark_paths, asset_config_path("model-type", model_type)]
     initial = OmegaConf.merge({"config_paths": config_paths}, _checked_overrides(overrides))
     if registry_port is not None:
         if not 0 < registry_port < 65536:
@@ -73,3 +86,17 @@ def serve_benchmark(
         yield registry_server
     finally:
         supervisor.shutdown()
+
+
+def _harbor_config_paths(benchmark: str, harbor: HarborBenchmark, planned: Optional[PlannedBenchmark]) -> list[str]:
+    if planned is None or planned.harbor is None:
+        raise ConfigError(
+            f"Benchmark {benchmark!r} runs the Harbor target {harbor.target!r}: serve it with the "
+            "PlannedBenchmark that plan_benchmark returned for it"
+        )
+    if planned.harbor.target != harbor.target:
+        raise ConfigError(
+            f"The plan is for Harbor target {planned.harbor.target!r}, but {benchmark!r} runs {harbor.target!r}"
+        )
+    require_run_files(planned.harbor)
+    return list(planned.harbor.config_paths)

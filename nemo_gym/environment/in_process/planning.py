@@ -19,11 +19,20 @@ from nemo_gym.config.global_config import (
     scoped_global_config_dict,
 )
 from nemo_gym.data.task_selection import row_task_id
+from nemo_gym.data.tasks.harbor.prepare import HarborBenchmark
 from nemo_gym.environment.assets import asset_config_path
-from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config, read_jsonl_rows
+from nemo_gym.environment.benchmark_preparation import (
+    PrepareBenchmarkConfig,
+    gym_relative_path,
+    plan_for_config,
+    read_jsonl_rows,
+)
+from nemo_gym.environment.in_process.harbor import HarborRun, prepare_harbor_run, resolve_harbor_benchmark
 from nemo_gym.environment.in_process.overrides import _checked_overrides
-from nemo_gym.eval.eval_plan import EvalPlan
+from nemo_gym.eval.eval_plan import EvalPlan, PlanBenchmark, PlanGym, build_eval_plan
+from nemo_gym.package_info import __version__
 from nemo_gym.utils.decorators import experimental
+from nemo_gym.utils.gym_commit import installed_gym_commit
 
 
 @dataclass(frozen=True)
@@ -32,6 +41,7 @@ class PlannedBenchmark:
 
     plan: EvalPlan
     rows: list[dict[str, Any]]
+    harbor: Optional[HarborRun] = None
 
     def task_ids(self) -> list[str]:
         return [task.task_id.task_id for task in self.plan.tasks]
@@ -47,14 +57,20 @@ class PlannedBenchmark:
 
     def to_json(self) -> str:
         """The planned benchmark as JSON text, for handing it to another process; `from_json` reads it back."""
-        return json.dumps(
-            {"plan": self.plan.model_dump(mode="json", by_alias=True), "rows": self.rows}, allow_nan=False
-        )
+        saved: dict[str, Any] = {"plan": self.plan.model_dump(mode="json", by_alias=True), "rows": self.rows}
+        if self.harbor is not None:
+            saved["harbor"] = self.harbor.to_dict()
+        return json.dumps(saved, allow_nan=False)
 
     @classmethod
     def from_json(cls, text: str) -> "PlannedBenchmark":
         saved = json.loads(text)
-        return cls(plan=EvalPlan.model_validate(saved["plan"]), rows=saved["rows"])
+        harbor = saved.get("harbor")
+        return cls(
+            plan=EvalPlan.model_validate(saved["plan"]),
+            rows=saved["rows"],
+            harbor=None if harbor is None else HarborRun.from_dict(harbor),
+        )
 
 
 @experimental(once=True)
@@ -64,6 +80,7 @@ def plan_benchmark(
     task_ids: Optional[Sequence[str]] = None,
     overrides: Optional[Mapping[str, Any]] = None,
     work_dir: Optional[Path] = None,
+    sandbox: Optional[str] = None,
 ) -> PlannedBenchmark:
     """Resolve the benchmark `NAME[/FLAVOR]`, prepare its data, build its plan and collate its rows.
 
@@ -73,7 +90,19 @@ def plan_benchmark(
 
     The caller's command line and active exporters are left alone. The benchmark's prepare script sees
     `overrides` as its Gym configuration, which is this process's configuration only while it runs.
+
+    A benchmark whose config sets `harbor_target` (a Harbor-backed benchmark) is prepared as
+    `gym eval run --benchmark NAME` prepares it: `task_ids` select tasks of the target by exact id, `sandbox` names
+    the sandbox provider as `--sandbox` does, and the rows are the target's materialized tasks. The files the servers
+    start from are written to `work_dir`, which is then required and must outlive `serve_benchmark`. The plan lists
+    each task once, whatever `num_repeats` the benchmark sets. `PlannedBenchmark.harbor` records the dataset, the
+    images and the configuration files.
     """
+    harbor = resolve_harbor_benchmark(benchmark)
+    if harbor is not None:
+        return _plan_harbor_benchmark(benchmark, harbor, task_ids, overrides, work_dir, sandbox)
+    if sandbox is not None:
+        raise ConfigError(f"sandbox applies to a Harbor-backed benchmark; {benchmark!r} is not one")
     global_config_dict = _benchmark_config(asset_config_path("benchmark", benchmark), overrides)
     with ignoring_command_line(), scoped_global_config_dict(global_config_dict):
         plan = plan_for_config(global_config_dict, PrepareBenchmarkConfig.model_validate(global_config_dict), task_ids)
@@ -85,6 +114,33 @@ def plan_benchmark(
     if task_ids is not None:
         rows = [row for row in rows if row_task_id(row) in set(task_ids)]
     return PlannedBenchmark(plan=plan, rows=rows)
+
+
+def _plan_harbor_benchmark(
+    benchmark: str,
+    harbor: HarborBenchmark,
+    task_ids: Optional[Sequence[str]],
+    overrides: Optional[Mapping[str, Any]],
+    work_dir: Optional[Path],
+    sandbox: Optional[str],
+) -> PlannedBenchmark:
+    if work_dir is None:
+        raise ConfigError(
+            f"Benchmark {benchmark!r} runs the Harbor target {harbor.target!r}: pass work_dir, which holds the "
+            "configuration the servers start from and must outlive serve_benchmark"
+        )
+    with ignoring_command_line():
+        prepared = prepare_harbor_run(
+            harbor, task_ids=task_ids, overrides=_checked_overrides(overrides), sandbox=sandbox, work_dir=work_dir
+        )
+        plan = build_eval_plan(
+            prepared.rows,
+            benchmark=PlanBenchmark(name=benchmark, config_paths=[gym_relative_path(str(harbor.config_path))]),
+            taskset=prepared.taskset,
+            gym=PlanGym(version=__version__, commit=installed_gym_commit()),
+            selected_task_ids=task_ids,
+        )
+    return PlannedBenchmark(plan=plan, rows=prepared.rows, harbor=prepared.run)
 
 
 def _benchmark_config(config_path: str, overrides: Optional[Mapping[str, Any]]) -> DictConfig:

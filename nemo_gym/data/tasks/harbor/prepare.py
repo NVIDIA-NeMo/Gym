@@ -1132,6 +1132,8 @@ def build_run(
 ) -> tuple[Path, list[str]]:
     """Write ``run_config.yaml`` and return it with the Hydra overrides for collection.
 
+    The files and their order are :func:`write_run_configs`'; this adds the command-line overrides and the split.
+
     The dataset's ``[gym]`` table sets the run's defaults: the split the collector runs is the entry's
     ``type`` (``+split=`` on the command line still wins), and the run config's top-level ``num_repeats``
     is ``[gym.defaults].num_repeats``, below every config file and command-line override, so
@@ -1148,8 +1150,31 @@ def build_run(
     always admitted (``prepare_target`` checks no agent for it), so its run config carries the entry without
     the list: the list speaks of model harnesses, and the guard would otherwise refuse the validation run.
     """
-    refuse_example_dataset(prepared.dataset)
+    config_path, config_paths = write_run_configs(prepared, agent, sandbox=sandbox)
     split = prepared.dataset.effective_type
+    # Later config files win: explicit user overlays must follow component/provider defaults.
+    tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
+    # The output root was read above (`output_root_from_overrides`); it is not a run setting.
+    tokens += [
+        token
+        for token in overrides
+        if not token.startswith("+agent_name=") and token.lstrip("+").partition("=")[0] != HARBOR_OUTPUT_ROOT_KEY
+    ]
+    if not _has_override(tokens, "split"):
+        tokens.append(f"+split={split}")
+    return config_path, tokens
+
+
+def write_run_configs(
+    prepared: PreparedTaskset, agent: AgentSelection, *, sandbox: str | None
+) -> tuple[Path, list[Path]]:
+    """Write the run config (and the benchmark settings file, when the agent has some) of a prepared taskset.
+
+    Returns the run config's path and the configuration files that start the run, in the order they merge: the
+    run config, the agent's config, the Harbor environment server's, the sandbox provider's when ``sandbox`` is
+    given, and the benchmark settings. Later files win. See :func:`build_run` for what the run config holds.
+    """
+    refuse_example_dataset(prepared.dataset)
     dataset = prepared.dataset
     if agent.impl_name == ORACLE_AGENT and dataset.allowed_agents is not None:
         dataset = dataset.model_copy(update={"allowed_agents": None})
@@ -1184,17 +1209,7 @@ def build_run(
         settings_path = prepared.output_dir / f"benchmark_settings_{agent.instance_name}.yaml"
         settings_path.write_text(yaml.safe_dump(agent.benchmark_settings, sort_keys=False))
         config_paths.append(settings_path.resolve())
-    # Later config files win: explicit user overlays must follow component/provider defaults.
-    tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
-    # The output root was read above (`output_root_from_overrides`); it is not a run setting.
-    tokens += [
-        token
-        for token in overrides
-        if not token.startswith("+agent_name=") and token.lstrip("+").partition("=")[0] != HARBOR_OUTPUT_ROOT_KEY
-    ]
-    if not _has_override(tokens, "split"):
-        tokens.append(f"+split={split}")
-    return config_path, tokens
+    return config_path, config_paths
 
 
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.

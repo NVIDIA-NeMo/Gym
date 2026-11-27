@@ -22,6 +22,7 @@ from nemo_gym.environment.in_process import (
     plan_benchmark,
     planning,
     serve_benchmark,
+    serving,
     task_runner,
 )
 from nemo_gym.environment.in_process import overrides as override_checks
@@ -33,6 +34,13 @@ from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTim
 
 
 HEAD = BaseServerConfig(host="127.0.0.1", port=4242)
+
+
+@pytest.fixture(autouse=True)
+def benchmarks_compose_their_own_servers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests name benchmark config files that do not exist; Harbor-backed ones are in test_in_process_harbor."""
+    monkeypatch.setattr(planning, "resolve_harbor_benchmark", lambda benchmark: None)
+    monkeypatch.setattr(serving, "resolve_harbor_benchmark", lambda benchmark: None)
 
 
 def _row(task_id: str, prompt: str = "solve it") -> dict:
