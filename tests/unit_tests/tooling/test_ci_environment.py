@@ -43,6 +43,7 @@ UV_PIN_SOURCES = {
     ".github/workflows/component-locks.yml": rf"astral\.sh/uv/{_V}/install\.sh",
     ".github/workflows/unit-tests.yml": rf"astral\.sh/uv/{_V}/install\.sh",
     ".github/workflows/full-test-suite.yml": rf"astral\.sh/uv/{_V}/install\.sh",
+    ".github/workflows/harbor-task-format-drift.yml": rf"astral\.sh/uv/{_V}/install\.sh",
 }
 [UV_PIN] = set(
     re.findall(UV_PIN_SOURCES["docker/Dockerfile"], (REPO_ROOT / "docker" / "Dockerfile").read_text(), re.M)

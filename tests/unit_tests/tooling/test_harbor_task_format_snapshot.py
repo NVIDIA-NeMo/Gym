@@ -23,9 +23,13 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 
-SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "harbor_task_format_snapshot.py"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SCRIPT = REPO_ROOT / "scripts" / "harbor_task_format_snapshot.py"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "harbor-task-format-drift.yml"
+CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 _spec = importlib.util.spec_from_file_location("harbor_task_format_snapshot", SCRIPT)
 snapshot_script = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(snapshot_script)
@@ -233,3 +237,33 @@ def test_a_checkout_without_git_history_or_a_vendored_definition_is_refused_by_n
     shutil.copytree(write_checkout(tmp_path / "other"), export, ignore=shutil.ignore_patterns(".git"))
     with pytest.raises(SystemExit, match="must be a git checkout of Harbor"):
         snapshot_script.read_snapshot(export)
+
+
+def test_scheduled_workflow_checks_harbors_default_branch_and_alerts_like_the_nightly_run():
+    # PyYAML reads the `on` key as True.
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    assert set(workflow[True]) == {"schedule", "workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read"}
+
+    steps = workflow["jobs"]["harbor-task-format"]["steps"]
+    (harbor,) = (step for step in steps if step.get("with", {}).get("repository"))
+    # No `ref`: Harbor's default branch, where a change of format lands first.
+    assert harbor["with"] == {
+        "repository": "harbor-framework/harbor",
+        "path": "harbor-upstream",
+        "persist-credentials": False,
+    }
+    # The job runs Harbor's code, so it holds no token and no secret, and cannot run for long.
+    assert all(step["with"]["persist-credentials"] is False for step in steps if "checkout" in step.get("uses", ""))
+    assert "secrets." not in json.dumps(workflow["jobs"]["harbor-task-format"])
+    assert workflow["jobs"]["harbor-task-format"]["timeout-minutes"] <= 15
+    # Gym's locked dependencies and nothing else, so only a change in Harbor can turn the run red.
+    assert f"uv run --locked --managed-python python scripts/{SCRIPT.name} harbor-upstream --check" in steps[-1]["run"]
+
+    # A scheduled run has no author to see it fail: it alerts the same way the nightly run does.
+    notify = workflow["jobs"]["notify-failure"]
+    nightly = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]["notify-failure"]
+    assert notify["needs"] == ["harbor-task-format"]
+    assert notify["steps"] == nightly["steps"]
+    assert (notify["environment"], notify["permissions"]) == (nightly["environment"], nightly["permissions"])
+    assert "failure()" in notify["if"] and "inputs.send_notification" in notify["if"]
