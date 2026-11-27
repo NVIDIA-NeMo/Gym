@@ -158,6 +158,25 @@ def test_strip_hosted_only_tool_fields_pops_strict() -> None:
     VLLMModel._strip_hosted_only_tool_fields({})
 
 
+def test_tokenize_chat_body_omits_null_message_fields() -> None:
+    """A tool-call-only assistant turn reaches /tokenize without `content`, not with `content: None`."""
+    tool_call = {"id": "c1", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+    body = VLLMModel._get_tokenize_chat_body(
+        {
+            "model": "m",
+            "temperature": 0.5,
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            ],
+        }
+    )
+    assert body == {
+        "model": "m",
+        "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "tool_calls": [tool_call]}],
+    }
+
+
 def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: MonkeyPatch) -> None:
     server = TestApp()._setup_server(monkeypatch)
     body_dict = {
