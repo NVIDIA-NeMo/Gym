@@ -34,11 +34,11 @@ session (`fern/versions/latest/pages/data/task-folders/multi-step-tasks.mdx`):
   Prepare also builds each task's `user-server` sidecar beside `main`, as it builds every Compose service with a
   `build:` section: two images per task context. Builds need buildah or podman and a `builds.repository` for
   OpenSandbox.
-- `task_mcp_grants: required`: the agent is granted the task's `user-server` MCP server on every turn.
 - `compose_variables`: the sidecar's `${LITELLM_*}` and `${SIM_USER_MODEL}` point at the `user_model` Gym model
   server, under the episode's rollout prefix, so provider keys stay on the Gym host.
 - `default_episode_timeout_seconds`: Atlas tasks budget about 26,000 s across their turns and verifiers.
 
-Compose groups need OpenSandbox with `networking.enabled: true` (see `fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`). Native Codex sessions
-must accept MCP tool grants; without that, `task_mcp_grants: required` fails each seed with Codex's refusal. The
+Compose groups need OpenSandbox with `networking.enabled: true` (see `fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`). The server
+grants the task's `user-server` MCP server to the agent on every turn as a required tool grant, so the harness must
+accept MCP tool grants, as Codex sessions do; one that cannot fails each seed with its own refusal. The
 published runs use GPT-5.5 (high) as the simulated user; scores are comparable only with the same user model.

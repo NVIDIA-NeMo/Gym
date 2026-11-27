@@ -705,12 +705,21 @@ def _native_config() -> Terminus2AgentConfig:
     )
 
 
-def _seed_body(*, session="ag-1", rollout="r1", with_sandbox=True) -> dict:
+def _mcp_grant(name: str, *, required: bool) -> dict:
+    return {
+        "kind": "mcp",
+        "name": name,
+        "required": required,
+        "connection": {"transport": "streamable_http", "url": f"http://{name}:8000/mcp"},
+    }
+
+
+def _seed_body(*, session="ag-1", rollout="r1", with_sandbox=True, tool_accesses=()) -> dict:
     body = {
         "agent_session_id": session,
         "episode_id": {"rollout_id": rollout, "attempt": 0},
         "task_id": {"taskset": "tb", "task_id": "path-tracing"},
-        "tool_accesses": [],
+        "tool_accesses": list(tool_accesses),
     }
     if with_sandbox:
         body["sandbox_access"] = {
@@ -907,6 +916,30 @@ class TestNativeSessions:
     def test_seed_requires_sandbox_access(self, monkeypatch):
         _, client, _, _ = self._client(monkeypatch)
         assert client.post("/v1/agent_sessions", json=_seed_body(with_sandbox=False)).status_code == 422
+
+    def test_seed_refuses_a_required_tool_grant_it_cannot_use(self, monkeypatch, caplog):
+        """Terminus 2 drives only its terminal. The Harbor environment server grants a task's MCP servers as
+        required, so a seed that took them would run the task without its tools: it is refused, terminally, before
+        the sandbox is touched, naming every required grant."""
+        agent, client, _, connect = self._client(monkeypatch)
+        grants = [
+            _mcp_grant("web", required=False),
+            _mcp_grant("b-server", required=True),
+            _mcp_grant("a-server", required=True),
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
+            response = client.post("/v1/agent_sessions", json=_seed_body(tool_accesses=grants))
+
+        detail = (
+            "Terminus 2 sessions drive only their terminal and cannot use required tool grants: a-server, b-server"
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == detail
+        # Logged as an agent seed rejection, which only AgentSeedRejectedError is.
+        assert f"Refused agent session seed ag-1: {detail}" in caplog.text
+        connect.assert_not_awaited()
+        assert "ag-1" not in agent._session_records
 
     def test_responses_uses_the_session_sandbox(self, monkeypatch):
         from unittest.mock import AsyncMock

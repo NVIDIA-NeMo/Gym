@@ -624,7 +624,7 @@ def test_required_grants_outside_task_json_are_refused(monkeypatch, tmp_path, re
 
 @pytest.mark.parametrize("configured", [True, False])
 def test_a_required_grant_of_a_task_json_mcp_server_is_served(monkeypatch, tmp_path, configured):
-    """Harbor's task_mcp_grants: required grants the task's MCP servers, which mini-SWE starts from task.json."""
+    """Harbor grants the task's MCP servers as required; mini-SWE starts them itself from task.json."""
     agent, client, sandbox, provider, connect = make_agent(tmp_path, monkeypatch)
     body = seed_body()
     body["tool_accesses"] = [grant(TASK_CONTEXT["mcp_servers"][0]["name"], kind="mcp", required=True)]
