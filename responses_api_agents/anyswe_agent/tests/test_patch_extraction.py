@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import AnySweAgent, AnySweInstanceConfig
 from responses_api_agents.anyswe_agent.tests.test_app import _config
@@ -99,5 +101,70 @@ class TestPatchExtraction:
             resolved = asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_r2e_patch(params, diff))
 
         assert resolved == (True, None)
-        assert uploads == {"/root/patch.diff": diff}
-        assert all("/root/patch.diff" not in files for files in spec_files)
+        assert uploads == {"/sandbox/patch.diff": diff}
+        assert all("/sandbox/patch.diff" not in files for files in spec_files)
+
+    @pytest.mark.parametrize("dataset_name", ["R2E-Gym", "SWE-bench"])
+    def test_grader_keeps_its_files_in_the_per_instance_sandbox_dir(self, tmp_path: Path, dataset_name: str) -> None:
+        # /tmp and /root may be bound from the host (Apptainer), so concurrent graders would share them.
+        spec_files: list[dict] = []
+        uploads: list[str] = []
+        commands: list[str] = []
+
+        class _FakeSandbox:
+            def __init__(self, provider, spec) -> None:
+                spec_files.append(dict(spec.files))
+
+            async def start(self) -> None:
+                pass
+
+            async def stop(self) -> None:
+                pass
+
+            async def upload(self, local: Path, remote: str) -> None:
+                uploads.append(remote)
+
+            async def exec(self, command: str, **kwargs):
+                commands.append(command)
+                return SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+
+        params = AnySweInstanceConfig(
+            **_config().model_dump(),
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://policy:8000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+            problem_info={
+                "instance_id": "pkg__repo-1",
+                "dataset_name": dataset_name,
+                "instance_dict": json.dumps({"FAIL_TO_PASS": ["t"]}),
+            },
+            body={"input": "fix it", "model": "policy"},
+            persistent_dir=tmp_path,
+            metrics_fpath=tmp_path / "metrics.json",
+            container="registry.example.com/r2e:pkg__repo-1",
+        )
+
+        # Exercise both real grader paths without installing SWE-bench or starting a container.
+        harness_modules = {
+            "swebench.harness.test_spec.test_spec": SimpleNamespace(
+                make_test_spec=lambda *args, **kwargs: SimpleNamespace(eval_script="echo grading\n")
+            ),
+            "swebench.harness.grading": SimpleNamespace(
+                get_eval_report=lambda *args, **kwargs: {"pkg__repo-1": {"resolved": False}}
+            ),
+        }
+        with (
+            patch("responses_api_agents.anyswe_agent.app.AsyncSandbox", _FakeSandbox),
+            patch.dict("sys.modules", harness_modules),
+        ):
+            asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_sandbox_patch(params, b"diff\n"))
+
+        (files,) = spec_files
+        assert list(files) == ["/sandbox/anyswe_eval.sh"]
+        script = files["/sandbox/anyswe_eval.sh"]
+        assert script.startswith("mkdir -p /sandbox/tmp && export TMPDIR=/sandbox/tmp\n")
+        assert "git apply --verbose /sandbox/patch.diff" in script and "/root/patch.diff" not in script
+        assert uploads == ["/sandbox/patch.diff"]
+        assert commands == ["bash /sandbox/anyswe_eval.sh"]
