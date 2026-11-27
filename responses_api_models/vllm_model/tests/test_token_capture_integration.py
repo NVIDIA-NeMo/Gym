@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -33,6 +34,7 @@ from nemo_gym.models.token_capture import (
 from nemo_gym.models.token_capture.harness_notes.opencode import OPENCODE_MAX_STEPS_PROMPT
 from nemo_gym.models.token_capture.staging import CaptureAdmission, RolloutTokenCapture, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+from responses_api_models.vllm_model.tests.test_app import COLLABORATION_TOOLS
 
 
 def _model(client: NeMoGymAsyncOpenAI, **config_overrides: Any) -> VLLMModel:
@@ -636,6 +638,192 @@ def _simulate_two_workers(
             version=snapshot["version"],
         )
     )
+
+
+def _text_message(role: str, text: str) -> dict[str, Any]:
+    """Return a message of ``role`` that holds ``text`` in one ``input_text`` part."""
+    return {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}
+
+
+def _agent_message(author: str, recipient: str, message_type: str, payload: str) -> dict[str, Any]:
+    """Return a message between two Codex agents as the CLI sends it in a parent's or a subagent's request."""
+    text = f"Message Type: {message_type}\nTask name: {recipient}\nSender: {author}\nPayload:\n{payload}"
+    return {
+        "type": "agent_message",
+        "author": author,
+        "recipient": recipient,
+        "content": [{"type": "input_text", "text": text}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("renders_anew", "kept_wait"),
+    [(False, True), (False, False), (True, True)],
+    ids=["answer-after-the-wait", "answer-after-a-discarded-response", "engine-renders-every-request-anew"],
+)
+def test_subagent_rollout_delivers_the_parent_chain_or_is_masked(
+    tmp_path, renders_anew: bool, kept_wait: bool
+) -> None:
+    """A Codex rollout with one subagent delivers the parent's chain of calls, under two conditions.
+
+    By default the subagent's first request holds its parent's conversation, so its call continues the parent's
+    call that spawned it, here the parent's first call, and forms a branch. The parent's chain continues across
+    the request that carries the subagent's answer. When the answer arrives while Codex reads a parent response,
+    Codex discards the tool call of that response and keeps its reasoning, and the next request continues the
+    call before it.
+
+    The build delivers the parent's chain when the verified response names its last call and the engine's prompt
+    for each call starts with the tokens of the call it continues. The first two cases use an engine that
+    extends the supplied prefix. The third uses an engine that renders every request anew and leaves out the
+    reasoning of the assistant turns before the last user message. The answer is such a user message, so the
+    prompt of the request that carries it does not start with the parent's tokens, and the rollout is masked.
+    """
+    rollout_id = "subagent-rollout"
+    replies: list[dict[str, Any]] = []
+    requests: list[dict[str, Any]] = []
+    rendered: dict[tuple, int] = {}
+
+    def turn_token(message: dict[str, Any], with_reasoning: bool) -> int:
+        """Return the one token that stands for a chat message, which differs with and without its reasoning."""
+        content = message.get("content")
+        text = content if isinstance(content, str) else "".join(part["text"] for part in content or [])
+        calls = tuple(call["function"]["name"] for call in message.get("tool_calls") or [])
+        reasoning = message.get("reasoning_content") if with_reasoning else None
+        return rendered.setdefault((message["role"], text, calls, reasoning), 100 + len(rendered))
+
+    def render(messages: list[dict[str, Any]]) -> list[int]:
+        last_user = max(index for index, message in enumerate(messages) if message["role"] == "user")
+        return [turn_token(message, index > last_user) for index, message in enumerate(messages)]
+
+    async def create_chat_completion(**kwargs):
+        requests.append(kwargs)
+        number = len(requests)
+        reply = replies[number - 1]
+        if renders_anew:
+            prompt, generated = render(kwargs["messages"]), [turn_token(reply, True)]
+        else:
+            # Call N extends the supplied prefix by the prompt token 10 * N and generates 10 * N + 1.
+            prompt, generated = [*(kwargs.get("required_prefix_token_ids") or []), 10 * number], [10 * number + 1]
+        completion = _completion(prompt, generated, "")
+        completion["choices"][0]["message"] = reply
+        return completion
+
+    backend = MagicMock(spec=NeMoGymAsyncOpenAI)
+    backend.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
+    backend.create_tokenize = AsyncMock()
+    model = _model(
+        backend,
+        uses_reasoning_parser=True,
+        uses_interleaved_reasoning=True,
+        supply_prefix_token_ids=not renders_anew,
+    )
+    client = TestClient(model.setup_webserver())
+
+    def reply(reasoning: str, content: str | None = None, tool: str | None = None) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant", "content": content, "reasoning_content": reasoning}
+        if tool:
+            function = {"name": f"collaboration__{tool}", "arguments": "{}"}
+            message["tool_calls"] = [{"id": f"call_{tool}", "type": "function", "function": function}]
+        return message
+
+    def serve(call_id: str, input_items: list[dict], message: dict[str, Any]) -> dict[str, Any]:
+        """Serve one streaming request of the rollout and return the response that the stream ends with."""
+        replies.append(message)
+        context = CaptureContext(
+            capture_key=rollout_id,
+            model_call_id=call_id,
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=FileLineageStore(tmp_path),
+        )
+        token = set_token_sink(context)
+        try:
+            body = {"stream": True, "input": input_items, "tools": [COLLABORATION_TOOLS]}
+            response = client.post("/v1/responses", json=body)
+        finally:
+            reset_token_sink(token)
+        assert response.status_code == 200, response.text
+        events = [
+            json.loads(line[len("data: ") :]) for line in response.text.splitlines() if line.startswith("data: ")
+        ]
+        assert events[-1]["type"] == "response.completed", events[-1]
+        return events[-1]["response"]
+
+    def echoed(response: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the reasoning item and the function call of a response with the fields that Codex sends back."""
+        reasoning, call = response["output"]
+        return [
+            {"type": "reasoning", "id": reasoning["id"], "summary": reasoning["summary"]},
+            {key: call[key] for key in ("type", "id", "status", "namespace", "name", "arguments", "call_id")},
+        ]
+
+    def output(call_id: str, text: str) -> dict[str, Any]:
+        return {"type": "function_call_output", "call_id": call_id, "output": text}
+
+    start = [_text_message("developer", "You are Codex."), _text_message("user", "Check the result with a subagent.")]
+    spawn = echoed(serve("parent-1", start, reply("I delegate the check.", tool="spawn_agent")))
+    thread = [*start, *spawn, output("call_spawn_agent", '{"task_name":"/root/check"}')]
+    wait = echoed(serve("parent-2", thread, reply("I wait for the subagent.", tool="wait_agent")))
+    subagent = [
+        *start,
+        *spawn,
+        output("call_spawn_agent", "aborted"),
+        _text_message("developer", "You are now a newly spawned child agent."),
+        _agent_message("/root", "/root/check", "NEW_TASK", "Check the result."),
+    ]
+    serve("subagent-1", subagent, reply("I check the result.", content="The result holds."))
+    answer = _agent_message("/root/check", "/root", "FINAL_ANSWER", "The result holds.")
+    if kept_wait:
+        thread = [*thread, *wait, output("call_wait_agent", '{"message":"Wait completed.","timed_out":false}'), answer]
+    else:
+        thread = [*thread, wait[0], answer]
+    final = serve(
+        "parent-3", thread, reply("The subagent has answered.", content="The result holds, says the subagent.")
+    )
+
+    # The engine reads the task and the answer as the last message of the request that carries them.
+    last_messages = [request["messages"][-1] for request in requests[2:]]
+    assert [message["role"] for message in last_messages] == ["user", "user"]
+    assert [message["content"][0]["text"].split("\n")[0] for message in last_messages] == [
+        "Message Type: NEW_TASK",
+        "Message Type: FINAL_ANSWER",
+    ]
+    # The reasoning that Codex keeps of a discarded response is an assistant turn before the answer.
+    assert [message["role"] for message in requests[3]["messages"][-3:]] == (
+        ["assistant", "tool", "user"] if kept_wait else ["tool", "assistant", "user"]
+    )
+
+    # At request time each call names the call it continues.
+    entries = {entry.model_call_id: entry for entry in TokenCaptureStore(tmp_path).read_entries(rollout_id)}
+    assert {call_id: entry.parent_call_id for call_id, entry in entries.items()} == {
+        "parent-1": None,
+        "parent-2": "parent-1",
+        "subagent-1": "parent-1",
+        "parent-3": "parent-2" if kept_wait else "parent-1",
+    }
+    assert all(entry.parent_resolution == ParentResolutionStatus.RESOLVED for entry in list(entries.values())[1:])
+
+    built = asyncio.run(trajectories_from_source(rollout_id, TokenCaptureStore(tmp_path), verified_response=final))
+    if renders_anew:
+        # Neither the subagent's prompt nor the prompt with the answer starts with the tokens of its parent call.
+        assert built["metrics"]["parent_link_failures"] == {"parent_digest_mismatch": 2}
+        assert built["metrics"]["terminal_attribution"]["chain"] == "broken"
+        assert built["mask_sample"] is True
+        return
+
+    # The subagent's request branches off after the parent's first call, and the request with the answer extends
+    # the parent's last kept call.
+    prefixes = [request.get("required_prefix_token_ids") or [] for request in requests]
+    assert prefixes == [[], [10, 11], [10, 11], [10, 11, 20, 21] if kept_wait else [10, 11]]
+    assert built["mask_sample"] is False
+    assert built["metrics"]["terminal_attribution"]["chain"] == "delivered"
+    assert built["metrics"]["chains"] == (2 if kept_wait else 3)
+    delivered = [item.get("generation_token_ids") for item in built["rebuilt_response"]["output"]]
+    assert [tokens for tokens in delivered if tokens] == ([[11], [21], [41]] if kept_wait else [[11], [41]])
+    assert built["metrics"]["delivered_fraction"] == (0.75 if kept_wait else 0.5)
+
+    # Without the verified response nothing names the parent's chain among the branches, so the rollout is masked.
+    unattributed = asyncio.run(trajectories_from_source(rollout_id, TokenCaptureStore(tmp_path)))
+    assert unattributed["mask_sample"] is True
 
 
 def test_local_store_capture_supply_and_rebuild_one_safe_trajectory(tmp_path) -> None:
