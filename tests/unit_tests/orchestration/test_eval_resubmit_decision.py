@@ -41,6 +41,7 @@ from nemo_gym.eval.recovery.gate import (
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.capabilities import Resubmittable
 from tests.helpers.recovery_evidence import (
     HEALTH_UNKNOWN,
     INFRA,
@@ -59,7 +60,7 @@ from tests.helpers.recovery_evidence import (
 # The saved answer a judge failure keeps beside its row; re-verification re-judges it.
 
 
-class FakeExecutor:
+class FakeExecutor(Resubmittable):
     """Records every dispatch; ``supports_reverify`` stands for an executor with a saved-answer re-judgment path."""
 
     name = "fake"

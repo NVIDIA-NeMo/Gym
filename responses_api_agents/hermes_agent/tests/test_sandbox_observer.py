@@ -131,10 +131,44 @@ def test_export_keeps_history_and_output_across_multiple_compactions():
     assert result["messages"] == compacted_again
 
 
+def test_export_keeps_turns_after_hermes_merges_the_summary_into_the_next_message():
+    summary = {"role": "assistant", "content": "[CONTEXT COMPACTION] summary"}
+    tail_call = {"role": "assistant", "content": "", "tool_calls": [{"id": "call-2"}]}
+    tail = [tail_call, {"role": "tool", "tool_call_id": "call-2", "content": "two"}]
+    restated = {"role": "user", "content": "[STILL IN PROGRESS] request"}
+
+    class MergingAgent(_Agent):
+        def _compress_context(self, messages, *args, **kwargs):
+            self.context_compressor.compression_count += 1
+            return [messages[0], summary, *tail, restated], "system"
+
+    agent = MergingAgent()
+    observer = SandboxHermesObserver().instrument(agent)
+    original = [
+        {"role": "user", "content": "request"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "one"},
+        *tail,
+    ]
+    agent._compress_context(original, "system")
+    added = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-3"}]},
+        {"role": "tool", "tool_call_id": "call-3", "content": "three"},
+        {"role": "assistant", "content": "done"},
+    ]
+    # Hermes folds the summary into the assistant message that follows it, one message fewer than it returned.
+    merged = [original[0], {**tail_call, "content": summary["content"]}, tail[1], restated, *added]
+    result = {"messages": merged, "completed": True}
+    assert observer.restore_messages(result)["messages"] == original + added
+
+
 @pytest.mark.parametrize("usage", [True, False])
 def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
-    import agent.context_compressor as compressor
+    from types import SimpleNamespace
+
     from openai.types.chat import ChatCompletion
+
+    from responses_api_agents.hermes_agent.sandbox_observer import _install_summary_capture
 
     response = ChatCompletion.model_validate(
         {
@@ -160,7 +194,8 @@ def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
             else None,
         }
     )
-    monkeypatch.setattr(compressor, "call_llm", lambda **kwargs: response)
+    compressor = SimpleNamespace(call_llm=lambda **kwargs: response)
+    _install_summary_capture(compressor)
 
     class SummarizingAgent(_Agent):
         session_prompt_tokens = 100
@@ -188,3 +223,19 @@ def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
     assert observations["invocations"][0]["model_response_ids"] == ["summary-response"]
     assert observations["compactions"][0]["model_calls"] == [{"response_id": "summary-response"}]
     assert observations["compactions"][0]["summary"] == "Preserve progress."
+
+
+def test_worker_attributes_child_and_executor_interval_to_hermes_tool_call_id():
+    agent = _Agent()
+    agent._invoke_tool = lambda *_: agent._active_children.append(_Agent())
+    observer = SandboxHermesObserver().instrument(agent)
+    agent.tool_start_callback("d1", "delegate_task", {"goal": "inspect"})
+    agent._invoke_tool("delegate_task", {"goal": "inspect"}, "task-id", "d1")
+    before_callback = observer.finish({"completed": True}, None)["tools"][0].copy()
+    agent.tool_complete_callback("d1", "delegate_task", {}, "done")
+    observation = observer.finish({"completed": True}, None)
+    assert observation["invocations"][1]["spawned_by_tool_call_id"] == "d1"
+    tool = observation["tools"][0]
+    assert tool["timing_source"] == "executor"
+    assert tool["completed_at"] == before_callback["completed_at"] and tool["duration_ms"] >= 0
+    assert tool["status"] == "completed"

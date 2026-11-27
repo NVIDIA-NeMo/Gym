@@ -37,6 +37,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
+from nemo_gym.config import model_call_sampling_config
 from nemo_gym.core import (
     MODEL_SAMPLING_HEADER,
     MODEL_SAMPLING_NULL,
@@ -54,7 +55,6 @@ from nemo_gym.core import (
     current_rollout_id,
     current_session_key,
     failure_report_for,
-    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -63,6 +63,7 @@ from nemo_gym.models import (
     ChatCompletionsConverter,
     ExternalCaptureHandler,
     SimpleResponsesAPIModel,
+    ToolParameterType,
     add_dynamo_gym_extras,
     context_overflow_error_fields,
     is_propagated_refusal,
@@ -438,6 +439,9 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
                 continue
         else:
             context[field] = value
+    identity = request.scope.get("state", {}).get("nemo_gym_model_call_identity")
+    if isinstance(identity, dict):
+        context.update({key: identity[key] for key in ("rollout_id", "model_call_id")})
     return context
 
 
@@ -758,6 +762,22 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "sent as `high`. Requires `is_responses_native: false`."
         ),
     )
+    tool_parameter_types: Dict[str, Dict[str, ToolParameterType]] = Field(
+        default_factory=dict,
+        description=(
+            "The JSON type of tool parameters, by tool name and then parameter name, for example "
+            "`{exec_command: {yield_time_ms: integer, tty: boolean}}`. The engine's tool parser types a "
+            "parameter from the schema that the request declares, so every parameter of a tool that the "
+            "request did not declare comes back as a string. A harness that runs such a call all the same "
+            "(the Codex CLI answers a direct `exec_command` or `write_stdin` in a code-mode session, which "
+            "declares only `exec` and `wait`) then refuses a string where it expects a number or a boolean. "
+            "The Chat-to-Responses conversion gives the parameters listed here their type back: a string "
+            "that spells a whole number of at most 18 digits becomes an `integer`, and `true` or `false` "
+            "in any letter case becomes a `boolean`. Whitespace and quote characters around the value are "
+            "ignored. Every other value, and every tool and parameter not listed, is returned as the engine "
+            "sent it. Empty by default, which converts nothing. Requires `is_responses_native: false`."
+        ),
+    )
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
@@ -918,6 +938,16 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "native Responses route forwards requests without the Responses-to-Chat conversion that "
                 "implements the bridge, and vLLM's native route renders function tools only, so a custom "
                 "tool would be accepted but never shown to the model."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_tool_parameter_types(self) -> "VLLMModelConfig":
+        if self.tool_parameter_types and self.is_responses_native:
+            raise ValueError(
+                "tool_parameter_types is not supported with is_responses_native=true: the native Responses "
+                "route forwards the engine's response without the Chat-to-Responses conversion that converts "
+                "the parameters, so the setting would have no effect."
             )
         return self
 
@@ -1236,6 +1266,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             preserve_thinking_blocks=self.config.preserve_thinking_blocks,
             custom_tool_strategy=self.config.custom_tool_strategy,
             inline_tool_output_images=self.config.inline_tool_output_images,
+            tool_parameter_types=self.config.tool_parameter_types,
         )
 
     def model_post_init(self, context):
@@ -1836,8 +1867,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata.pop("audio_path", None)
         elif metadata.get("audio_paths"):
             paths = metadata["audio_paths"]
-            if not isinstance(paths, list):
-                raise ValueError(f"metadata.audio_paths must be a list, got {type(paths).__name__}.")
+            if isinstance(paths, str):
+                try:
+                    paths = json.loads(paths)
+                except json.JSONDecodeError as error:
+                    raise ValueError("metadata.audio_paths must be a list or JSON-encoded list of paths") from error
+            if not isinstance(paths, list) or not paths or any(not isinstance(p, str) or not p for p in paths):
+                raise ValueError("metadata.audio_paths must be a nonempty list of path strings")
             audio_urls.extend(self._resolve_audio_path_to_url(p) for p in paths)
             metadata.pop("audio_paths", None)
         elif "audio_ref" in metadata:

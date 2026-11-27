@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,8 @@ from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxSpec,
 )
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from responses_api_agents.harness_agent import app
 from responses_api_agents.harness_agent.app import (
     _RUN_CONTEXT,
     HarnessAgent,
@@ -107,6 +110,21 @@ def _make_agent(**cfg_kwargs) -> HarnessAgent:
         patch.object(HarnessAgent, "_build_gym_tar", return_value=None),
     ):
         return HarnessAgent(config=_config(**cfg_kwargs), server_client=server_client)
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(caplog, monkeypatch, worker):
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            _make_agent()
+
+    warnings = [record.getMessage() for record in caplog.records if record.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in ("harness_agent", "legacy /run", "claude_code_agent", "swe_atlas_qa", "harness_agent/README.md"):
+        assert phrase in app.DEPRECATION_WARNING
 
 
 def test_config_defaults():
@@ -342,6 +360,56 @@ async def test_pre_provision_failure_closes_resource_sandbox(exception_type):
         await agent.run(MagicMock(cookies={}), body)
     agent._provider.connect.assert_awaited_once_with({"sandbox_id": "box-1"})
     agent._provider.close.assert_awaited_once_with(handle)
+
+
+@pytest.mark.parametrize("named", [True, False])
+async def test_failed_run_closes_the_session_the_seed_names(named):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={"session": "s"}))
+    agent._provider.connect = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.close = AsyncMock()
+    seed = {"sandbox_handle": "box-1"} | ({"resources_session_id": "sess-1"} if named else {})
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+    )
+    with (
+        patch.object(HarnessAgent, "responses", new=AsyncMock(side_effect=RuntimeError("agent failed"))),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch("responses_api_agents.harness_agent.app.get_response_json", new=AsyncMock(return_value=seed)),
+        pytest.raises(RuntimeError, match="agent failed"),
+    ):
+        await agent.run(MagicMock(cookies={}), body)
+    closes = [c for c in agent.server_client.post.await_args_list if c.kwargs["url_path"] == "/close_session"]
+    if named:
+        (close,) = closes
+        assert close.kwargs["json"]["resources_session_id"] == "sess-1"
+        assert close.kwargs["cookies"] == {"session": "s"}
+    else:
+        assert closes == []
+
+
+async def test_a_close_that_never_answers_does_not_hide_the_run_error():
+    agent = _make_agent()
+    seed_resp = MagicMock(cookies={"session": "s"})
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/close_session":
+            await asyncio.Event().wait()
+        return seed_resp
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    agent._provider.connect = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.close = AsyncMock()
+    seed = {"sandbox_handle": "box-1", "resources_session_id": "sess-1"}
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    with (
+        patch("responses_api_agents.harness_agent.app.CLOSE_SESSION_TIMEOUT_S", 0.05),
+        patch.object(HarnessAgent, "responses", new=AsyncMock(side_effect=RuntimeError("agent failed"))),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch("responses_api_agents.harness_agent.app.get_response_json", new=AsyncMock(return_value=seed)),
+        pytest.raises(RuntimeError, match="agent failed"),
+    ):
+        await asyncio.wait_for(agent.run(MagicMock(cookies={}), body), timeout=5)
 
 
 async def test_response_serialization_failure_closes_resource_sandbox():
@@ -618,22 +686,31 @@ def test_gym_tar_built_on_init():
         assert agent._gym_tar == "/tmp/fake.tar.gz"
 
 
-def test_runner_marker_survives_redirected_stdout(tmp_path):
+@pytest.mark.parametrize("capture", [False, True])
+def test_runner_marker_survives_redirected_stdout(tmp_path, capture):
     root = Path(__file__).resolve().parents[3]
     mount = tmp_path / "gym_mount"
     mount.mkdir()
+    expected_block = {"enabled": True, "all_agents": True} if capture else None
     (mount / "nemo_gym").symlink_to(root / "nemo_gym", target_is_directory=True)
     (mount / "stub_agent.py").write_text(
         "import io, sys\nfrom types import SimpleNamespace\n"
         "Config = SimpleNamespace\n"
         "class Agent:\n"
-        "    def __init__(self, **kwargs): pass\n"
+        "    def __init__(self, **kwargs):\n"
+        "        block = kwargs['server_client'].global_config_dict.get('token_id_capture')\n"
+        f"        assert block == {expected_block!r}\n"
         "    async def responses(self, request, params):\n"
         "        sys.stdout = io.StringIO()\n"
         "        return SimpleNamespace(model_dump_json=lambda: '{}')\n"
     )
     for name, body in {
-        "runner_config.json": {"agent_module": "stub_agent", "agent_class": "Agent", "agent_config_class": "Config"},
+        "runner_config.json": {
+            "agent_module": "stub_agent",
+            "agent_class": "Agent",
+            "agent_config_class": "Config",
+            "token_id_capture": capture,
+        },
         "agent_config.json": {},
         "request.json": {"input": "hello"},
     }.items():
@@ -646,15 +723,21 @@ def test_runner_marker_survives_redirected_stdout(tmp_path):
     assert json.loads((tmp_path / "response.json").read_text()) == {}
 
 
-def test_runner_config_carries_agent_symbols():
+@pytest.mark.parametrize("capture", [False, True])
+def test_runner_config_carries_agent_symbols(capture):
     agent = _make_agent(
         agent="opencode",
         sandbox_python="/deps/bin/python3",
     )
+    agent.server_client.global_config_dict = {
+        "token_id_capture": {"enabled": capture, "all_agents": True, "control_auth_token": "not-for-the-runner"}
+    }
     script, runner_config, cmd = agent._runner()
     assert runner_config["agent_module"] == "responses_api_agents.opencode_agent.app"
     assert runner_config["agent_class"] == "OpenCodeAgent"
     assert runner_config["agent_config_class"] == "OpenCodeAgentConfig"
+    assert runner_config["token_id_capture"] is capture
+    assert "not-for-the-runner" not in json.dumps(runner_config)
     assert "runner_config.json" in script
     compile(script, "<agent_runner>", "exec")
     assert cmd == "/deps/bin/python3 runner.py"

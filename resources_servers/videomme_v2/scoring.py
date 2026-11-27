@@ -4,9 +4,6 @@
 """Re-exports of the shared answer parsing and fixed-cohort accuracy (video_mcqa)."""
 
 from resources_servers.video_mcqa.scoring import (
-    EXECUTION_FAILURE_METADATA_KEY as EXECUTION_FAILURE_METADATA_KEY,
-)
-from resources_servers.video_mcqa.scoring import (
     AccuracySummary as AccuracySummary,
 )
 from resources_servers.video_mcqa.scoring import (

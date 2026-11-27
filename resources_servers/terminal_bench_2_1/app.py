@@ -363,8 +363,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     async def _stop_session_sandbox(self, session_id: str) -> None:
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
-            async with asyncio.timeout(self.config.session_close_timeout_seconds):
-                await sandbox.stop()
+            await sandbox.stop(timeout_s=self.config.session_close_timeout_seconds)
             # Keep ownership when stop fails so close can retry.
             self._session_id_to_sandbox.pop(session_id, None)
 
@@ -673,8 +672,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 return await self._verify_sandbox(eval_sandbox, body, golden_patch_output=golden_patch_output)
             finally:
                 try:
-                    async with asyncio.timeout(self.config.session_close_timeout_seconds):
-                        await eval_sandbox.stop()
+                    await eval_sandbox.stop(timeout_s=self.config.session_close_timeout_seconds)
                 except Exception:
                     LOG.exception("Failed to stop Terminal-Bench golden-patch sandbox")
         return await self._verify_sandbox(self._session_id_to_sandbox[request.session[SESSION_ID_KEY]], body)

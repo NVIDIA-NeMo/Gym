@@ -14,6 +14,11 @@ class TaskData(BaseModel):
         description="Problem statement (LaTeX/markdown); fills the policy prompt and the judge prompt's {problem}.",
         json_schema_extra={"consumed_by": ["prompt", "verify"]},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     problem_idx: Optional[str] = Field(
         default=None,
         description="Stable problem identifier (e.g. 'G50').",

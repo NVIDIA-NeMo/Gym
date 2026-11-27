@@ -644,7 +644,7 @@ async def test_checkpoint_is_retrieved_before_session_files_and_handle_are_relea
         s.files.clear()
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
-    async def disconnect() -> None:
+    async def disconnect(**_) -> None:
         assert events == ["checkpoint", "remove"]
         events.append("disconnect")
 

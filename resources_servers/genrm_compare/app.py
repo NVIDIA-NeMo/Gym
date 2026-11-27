@@ -40,7 +40,7 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from functools import lru_cache
 from math import isfinite
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
 import orjson
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
@@ -96,6 +96,8 @@ ComparisonResult = Tuple[
     float,
 ]
 VerifyResult = Dict[str, Any]
+ConversationContent = str | List[Dict[str, Any]]
+LengthPenaltyCoefficients = Tuple[float, float]  # Answer, reasoning.
 
 
 def _output_budget_exhausted(raw_response: Any) -> bool:
@@ -175,7 +177,7 @@ class _CohortState:
     group_attempt: int = 0
     # Scoring inputs shared by every member, kept from the first arrival until the cohort finishes.
     # The prompt digest and cohort key cover all of them, so later members cannot disagree.
-    conversation_history: List[Dict[str, str]] = field(default_factory=list)
+    conversation_history: List[Dict[str, ConversationContent]] = field(default_factory=list)
     principle: Optional[str] = None
     expected_rubric_ids: Optional[Tuple[int, ...]] = None
     baseline_response: Optional[str] = None
@@ -261,6 +263,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         max_terminal_cohorts: Count limit applied separately to results and finished-group attempt records
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
+        default_rubric_ids: Expected IDs for the judge's built-in rubric when use_principle is false.
     """
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
@@ -300,6 +303,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         "when responding to the user prompt."
     )
 
+    default_rubric_ids: Optional[Tuple[int, ...]] = Field(default=None, min_length=1)
+
     # Aggregator settings (only "simple_tiebreaker" is currently implemented)
     aggregator_method: str = "simple_tiebreaker"
     score_source: Literal["overall", "rubric_mean"] = "overall"
@@ -323,6 +328,11 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     genrm_parse_retries: int = 3
     genrm_parse_retry_sleep_s: float = 0.2
 
+    @field_validator("default_rubric_ids")
+    @classmethod
+    def _canonicalize_default_rubric_ids(cls, value: Optional[Tuple[int, ...]]) -> Optional[Tuple[int, ...]]:
+        return tuple(sorted(set(value))) if value is not None else None
+
     @model_validator(mode="after")
     def _validate_cohort_workers(self):
         if (self.comparison_mode == "fixed_baseline" or self.num_rollouts_per_prompt > 1) and (
@@ -344,6 +354,12 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     group_attempt: int = Field(default=0, alias=GROUP_ATTEMPT_KEY_NAME, ge=0)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
+    group_answer_length_penalty_coeff: Optional[float] = Field(
+        default=None, ge=0, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )
+    group_reasoning_length_penalty_coeff: Optional[float] = Field(
+        default=None, ge=0, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )
 
     @field_validator("expected_rubric_ids")
     @classmethod
@@ -381,6 +397,8 @@ class GenRMCompareVerifyResponse(BaseVerifyResponse):
     reward_overall_score_raw: float
     reward_overall_score: float
     reward_length_adjustment: float
+    group_answer_length_penalty_coeff: Optional[float] = Field(default=None, exclude_if=lambda value: value is None)
+    group_reasoning_length_penalty_coeff: Optional[float] = Field(default=None, exclude_if=lambda value: value is None)
     genrm_parse_failure_rate_per_group: float = 0.0
     genrm_rubric_parse_failure_rate_per_group: float = 0.0
     genrm_input_tokens_per_comparison_mean: Optional[float] = None
@@ -410,7 +428,7 @@ class GenRMCompareResponse(BaseModel):
     metrics: Optional[Dict[str, float]] = None  # Aggregation metrics
 
 
-def _input_to_conversation_history(input_messages: Any) -> List[Dict[str, str]]:
+def _input_to_conversation_history(input_messages: Any) -> List[Dict[str, ConversationContent]]:
     """Convert Response API input messages to conversation_history list of {role, content}."""
     if isinstance(input_messages, str):
         return [{"role": "user", "content": input_messages}]
@@ -419,14 +437,24 @@ def _input_to_conversation_history(input_messages: Any) -> List[Dict[str, str]]:
         item = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
         if not isinstance(item, dict) or item.get("type", "message") != "message":
             continue
+        role = item.get("role", "user")
         content = item.get("content") or ""
         if isinstance(content, list):
-            content = "".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict) and part.get("type") in ("input_text", "output_text")
-            )
-        out.append({"role": item.get("role", "user"), "content": str(content)})
+            parts = [part for part in content if isinstance(part, dict)]
+            # Chat Completions judges accept image and video parts on user turns.
+            if role == "user" and any(part.get("type") in ("input_image", "input_video") for part in parts):
+                content = [
+                    {"type": "input_text", "text": part.get("text", "")} if part["type"] == "output_text" else part
+                    for part in parts
+                    if part.get("type") in ("input_text", "output_text", "input_image", "input_video")
+                ]
+            else:
+                content = "".join(
+                    part.get("text", "") for part in parts if part.get("type") in ("input_text", "output_text")
+                )
+        else:
+            content = str(content)
+        out.append({"role": role, "content": content})
     return out
 
 
@@ -481,16 +509,39 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         task.add_done_callback(self._cohort_tasks.discard)
         return task
 
+    def _length_penalty_coefficients(
+        self, body: Optional[GenRMCompareVerifyRequest] = None
+    ) -> LengthPenaltyCoefficients:
+        answer = self.config.group_answer_length_penalty_coeff
+        reasoning = self.config.group_reasoning_length_penalty_coeff
+        if body is not None:
+            if body.group_answer_length_penalty_coeff is not None:
+                answer = body.group_answer_length_penalty_coeff
+            if body.group_reasoning_length_penalty_coeff is not None:
+                reasoning = body.group_reasoning_length_penalty_coeff
+        # Adding 0.0 makes -0.0 and 0.0 format identically in the cohort digest.
+        return answer + 0.0, reasoning + 0.0
+
     async def verify(self, request: Request, body: GenRMCompareVerifyRequest) -> GenRMCompareVerifyResponse:
         """Verify one logical rollout slot as part of a prompt cohort."""
         session_id = request.session.get(SESSION_ID_KEY)
         if self._closed:
             raise HTTPException(status_code=503, detail="GenRM server is shutting down")
         cfg = self.config
+        if not cfg.use_principle and cfg.default_rubric_ids is not None:
+            # Use the same rubric for cohort identity and verdict parsing.
+            body = body.model_copy(update={"principle": None, "expected_rubric_ids": cfg.default_rubric_ids})
         principle = body.principle
         if cfg.score_source == "rubric_mean" and not body.expected_rubric_ids:
             raise ValueError("score_source=rubric_mean requires expected_rubric_ids")
-        # A singleton has no peer unless fixed-baseline mode supplies one.
+        has_length_override = (
+            body.group_answer_length_penalty_coeff is not None or body.group_reasoning_length_penalty_coeff is not None
+        )
+        # Fixed baselines can supply a comparison, but are excluded from length adjustments.
+        if has_length_override and cfg.num_rollouts_per_prompt <= 1:
+            raise HTTPException(
+                status_code=422, detail="Length coefficient overrides require at least two trainable rollouts"
+            )
         if cfg.comparison_mode == "rollout_cohort" and cfg.num_rollouts_per_prompt <= 1:
             return self._verify_response(
                 body,
@@ -503,6 +554,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 },
             )
 
+        length_coefficients = self._length_penalty_coefficients(body)
         self._validate_logical_coordinates(body)
         input_messages = getattr(body.responses_create_params, "input", None) or []
         baseline_response = None
@@ -529,6 +581,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             rubric_contract = ",".join(map(str, body.expected_rubric_ids))
             prompt_key = f"{prompt_key}:rubrics:{rubric_contract}"
             prompt_digest = f"{prompt_digest}:rubrics:{rubric_contract}"
+        if length_coefficients != self._length_penalty_coefficients():
+            # Default-equivalent requests keep the digest of saved static cohorts.
+            prompt_digest = f"{prompt_digest}:length_coefficients:{length_coefficients[0]}:{length_coefficients[1]}"
         rollout_index = body.rollout_index
         assert rollout_index is not None  # Validated above; keeps the type narrow below.
         response_digest = self._response_digest(body.response)
@@ -544,7 +599,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if cohort.prompt_digest != prompt_digest:
                 raise HTTPException(
                     status_code=409,
-                    detail=(f"GenRM cohort {prompt_key!r} received inconsistent prompt or principle content"),
+                    detail=(
+                        f"GenRM cohort {prompt_key!r} received inconsistent prompt, principle or length coefficients"
+                    ),
                 )
             if cohort.phase == "failed":
                 self._raise_cohort_failure(body, cohort)
@@ -561,9 +618,26 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                             f"rollout_index={rollout_index}"
                         ),
                     )
+                saved_result = cohort.results[rollout_index] if cohort.phase == "completed" else None
+                if (
+                    saved_result is not None
+                    and has_length_override
+                    and length_coefficients
+                    != (
+                        saved_result.get("group_answer_length_penalty_coeff"),
+                        saved_result.get("group_reasoning_length_penalty_coeff"),
+                    )
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Saved GenRM result did not record applied length coefficients matching this request. "
+                            "Replay without overrides or use a fresh group."
+                        ),
+                    )
                 self._remember_member(cohort, rollout_index, session_id)
-                if cohort.phase == "completed":
-                    return self._verify_response(body, cohort.results[rollout_index], cohort.failure_report)
+                if saved_result is not None:
+                    return self._verify_response(body, saved_result, cohort.failure_report)
                 member.waiters.append(future)
             else:
                 if cohort.phase != "collecting":
@@ -611,7 +685,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     cohort.collection_timeout_task = None
                 members = dict(cohort.members)
                 cohort.evaluation_task = self._own_task(
-                    self._evaluate_verify_cohort(prompt_key, cohort, members),
+                    self._evaluate_verify_cohort(prompt_key, cohort, members, length_coefficients),
                     name=f"genrm-cohort-evaluation-{cohort_identity}",
                 )
 
@@ -659,6 +733,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             log.add(failure_report)
         # Read the text fields in place; dumping the response would copy its training arrays.
         reasoning_text, answer_text = extract_from_response_obj(body.response)
+        if body.group_answer_length_penalty_coeff is None and body.group_reasoning_length_penalty_coeff is None:
+            result = result.copy()
+            result.pop("group_answer_length_penalty_coeff", None)
+            result.pop("group_reasoning_length_penalty_coeff", None)
         return GenRMCompareVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
@@ -710,7 +788,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             ):
                 raise HTTPException(
                     status_code=409,
-                    detail=(f"GenRM group {body.group_id!r} received inconsistent prompt or principle content"),
+                    detail=(
+                        f"GenRM group {body.group_id!r} received inconsistent prompt or principle content, "
+                        "or length coefficients"
+                    ),
                 )
             if watermark is not None and body.group_attempt < watermark.latest_attempt:
                 raise HTTPException(
@@ -861,6 +942,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         prompt_key: str,
         cohort: _CohortState,
         members: Dict[int, _CohortMember],
+        length_coefficients: LengthPenaltyCoefficients,
     ) -> None:
         """Own the shared report without inheriting any member's rollout, capture or checkpoint context."""
         with RequestFailureLog.capture() as failure_log:
@@ -868,7 +950,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             # this cohort-owned log under the same outcome lock; only report data enters checkpoints.
             cohort.failure_log = failure_log
             try:
-                await self._evaluate_verify_cohort_observed(prompt_key, cohort, members, failure_log)
+                await self._evaluate_verify_cohort_observed(
+                    prompt_key, cohort, members, failure_log, length_coefficients
+                )
             finally:
                 cohort.failure_log = None
 
@@ -878,6 +962,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort: _CohortState,
         members: Dict[int, _CohortMember],
         failure_log: RequestFailureLog,
+        length_coefficients: LengthPenaltyCoefficients,
     ) -> None:
         """Evaluate exactly one immutable snapshot and publish its outcomes and report together."""
         try:
@@ -901,6 +986,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         cohort.principle,
                         prompt_key,
                         cohort.expected_rubric_ids,
+                        length_coefficients=length_coefficients,
                     )
                 else:
                     raw_results, metadata = await self._collect_comparisons(
@@ -909,7 +995,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         principle=cohort.principle,
                         expected_rubric_ids=cohort.expected_rubric_ids,
                     )
-                    compare_result = self._aggregate_results(response_objs, raw_results, metadata)
+                    compare_result = self._aggregate_results(
+                        response_objs, raw_results, metadata, length_coefficients=length_coefficients
+                    )
             (
                 rewards,
                 raw_scores,
@@ -932,6 +1020,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     "reward_overall_score_raw": overall_raw[position],
                     "reward_overall_score": overall_adjusted[position],
                     "reward_length_adjustment": length_adjustments[position],
+                    "group_answer_length_penalty_coeff": length_coefficients[0],
+                    "group_reasoning_length_penalty_coeff": length_coefficients[1],
                     **metrics,
                 }
                 for position, index in enumerate(sorted_indices)
@@ -1438,8 +1528,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         raw_results: List[ComparisonResult],
         metadata: List[Tuple[int, int, int]],
         trainable_count: Optional[int] = None,
+        *,
+        length_coefficients: Optional[LengthPenaltyCoefficients] = None,
     ) -> tuple:
         cfg = self.config
+        answer_coeff, reasoning_coeff = (
+            length_coefficients if length_coefficients is not None else self._length_penalty_coefficients()
+        )
         # Train on the configured score source while retaining overall scores as diagnostics.
         comparisons = [result[:3] for result in raw_results]
         overall_comparisons = [result[3:6] for result in raw_results]
@@ -1459,8 +1554,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 reasoning_bonus=cfg.reasoning_bonus if adjust else 0.0,
                 answer_bonus=cfg.answer_bonus if adjust else 0.0,
                 top_percentile=cfg.top_percentile,
-                group_reasoning_length_penalty_coeff=(cfg.group_reasoning_length_penalty_coeff if adjust else 0.0),
-                group_answer_length_penalty_coeff=(cfg.group_answer_length_penalty_coeff if adjust else 0.0),
+                group_reasoning_length_penalty_coeff=reasoning_coeff if adjust else 0.0,
+                group_answer_length_penalty_coeff=answer_coeff if adjust else 0.0,
                 group_style_penalty_coeff=cfg.group_style_penalty_coeff if adjust else 0.0,
                 adjustment_count=count,
             )
@@ -1532,7 +1627,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     async def _collect_comparisons(
         self,
-        conversation_history: List[Dict[str, str]],
+        conversation_history: Sequence[Mapping[str, ConversationContent]],
         response_objs: List[Dict[str, Any]],
         principle: Optional[str] = None,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
@@ -1566,7 +1661,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     async def _run_compare(
         self,
-        conversation_history: List[Dict[str, str]],
+        conversation_history: Sequence[Mapping[str, ConversationContent]],
         response_objs: List[Dict[str, Any]],
         principle: Optional[str] = None,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
@@ -1589,12 +1684,14 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     async def _run_fixed_baseline_compare(
         self,
-        conversation_history: List[Dict[str, str]],
+        conversation_history: Sequence[Mapping[str, ConversationContent]],
         response_objs: List[Dict[str, Any]],
         baseline_response: str,
         principle: Optional[str],
         prompt_key: str,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
+        *,
+        length_coefficients: Optional[LengthPenaltyCoefficients] = None,
     ) -> tuple:
         cfg = self.config
         baseline_index = len(response_objs)
@@ -1643,7 +1740,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             await asyncio.gather(*tasks, return_exceptions=True)
         # The appended baseline is diagnostic only; adjustments apply to the trainable prefix.
         return self._aggregate_results(
-            response_objs + [baseline_obj], raw_results, metadata, trainable_count=len(response_objs)
+            response_objs + [baseline_obj],
+            raw_results,
+            metadata,
+            trainable_count=len(response_objs),
+            length_coefficients=length_coefficients,
         )
 
     async def compare(self, body: GenRMCompareRequest) -> GenRMCompareResponse:
@@ -1665,7 +1766,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 conversation_history,
                 response_objs,
                 principle=body.principle,
-                expected_rubric_ids=body.expected_rubric_ids,
+                expected_rubric_ids=(
+                    body.expected_rubric_ids
+                    if cfg.use_principle
+                    else cfg.default_rubric_ids or body.expected_rubric_ids
+                ),
             )
         except JUDGE_FAILURES as error:
             if not is_judge_failure(error):
@@ -1692,7 +1797,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     async def _run_single_comparison(
         self,
-        conversation_history: List[Dict[str, str]],
+        conversation_history: Sequence[Mapping[str, ConversationContent]],
         response_obj_1: Dict[str, Any],
         response_obj_2: Dict[str, Any],
         pair_idx: Tuple[int, int] = (0, 0),

@@ -1,8 +1,9 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/ether0/data/example.jsonl",
+    "jsonl_fpath": "environments/ether0/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
@@ -16,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 52.6,
-        "Min": 46.0,
-        "Max": 75.0,
+        "Average": 114.6,
+        "Min": 108.0,
+        "Max": 137.0,
         "Standard deviation": 12.64
     },
     "Number of turns": {

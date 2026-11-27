@@ -16,6 +16,9 @@ from typing import Optional
 
 RUNTIME_ADMISSION_POLICY_ID = "osworld-runtime-admission-v1"
 LEGACY_RUNTIME_ADMISSION_POLICY_ID = "legacy-mask-sample-v1"
+# The adapter's context budget ended the rollout. Like the step horizon this
+# is the policy's own end, so the evaluated trajectory stays trainable.
+CONTEXT_LIMIT_STOP_REASON = "context_limit_reached"
 
 
 @dataclass(frozen=True)
@@ -28,12 +31,16 @@ class RolloutOutcomeFacts:
     environment_done: bool = False
     horizon_reached: bool = False
     policy_stop_reason: Optional[str] = None
+    # Opt-in admission rule: mask every rollout that ended without DONE/FAIL
+    # or environment termination.
+    mask_unterminated: bool = False
 
     def __post_init__(self) -> None:
         for name in (
             "evaluation_completed",
             "environment_done",
             "horizon_reached",
+            "mask_unterminated",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be boolean")
@@ -114,6 +121,15 @@ def classify_rollout_outcome(facts: RolloutOutcomeFacts) -> RolloutOutcome:
             evaluation_completed=True,
             runtime_eligible=False,
             runtime_admission_reason="rollout_state_incomplete",
+        )
+
+    if facts.mask_unterminated and facts.terminal_action is None and not facts.environment_done:
+        return RolloutOutcome(
+            termination_reason=termination_reason,
+            horizon_reached=facts.horizon_reached,
+            evaluation_completed=True,
+            runtime_eligible=False,
+            runtime_admission_reason="unterminated_masked",
         )
 
     return RolloutOutcome(

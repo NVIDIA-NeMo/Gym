@@ -4,7 +4,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 
 import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.client.server_client import ServerClient
@@ -12,7 +11,13 @@ from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.core.test_streamed_failure_reports import FINAL, RECOVERED, _LateChat, _LateResponses
+from tests.unit_tests.core.test_streamed_failure_reports import (
+    FINAL,
+    RECOVERED,
+    _keepalive_client,
+    _LateChat,
+    _LateResponses,
+)
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
 
 
@@ -37,7 +42,7 @@ async def test_actual_stream_capture_survives_collection_and_store(tmp_path, mon
     object.__setattr__(server, "fail", fail)
     app = server.setup_webserver()
     server.setup_exception_middleware(app)
-    model_http = TestClient(app)
+    model_http = _keepalive_client(server, app)
     calls = []
 
     async def dispatch(*args, **kwargs):

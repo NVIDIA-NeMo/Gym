@@ -51,6 +51,29 @@ def _result(task_idx: int, rollout_idx: int, reward: float = 1.0, total_tokens: 
 
 
 class TestRewardProfile:
+    @pytest.mark.parametrize("values", [[-1.0e308, 1.0e308], [0.0, 1.0, float("inf")]])
+    def test_histogram_skips_nonfinite_ranges(self, values: list[float], caplog) -> None:
+        pytest.importorskip("wandb")
+        data = pd.Series(values, name="reward")
+        original = data.copy()
+
+        with caplog.at_level("WARNING", logger="nemo_gym.metrics.reward_profile"):
+            assert RewardProfiler().histogram(data) is None
+
+        assert any("Skipping histogram for column 'reward'" in record.message for record in caplog.records)
+        pd.testing.assert_series_equal(data, original)
+
+    def test_profile_from_data_survives_near_equal_repeat_rewards(self) -> None:
+        pytest.importorskip("wandb")
+        rewards = [0.32926325483301333, 0.32926325483301333, 0.3292632548330132]
+        rows = [_row(0, index) for index in range(3)]
+        results = [_result(0, index, reward=reward) for index, reward in enumerate(rewards)]
+
+        group_metrics, agent_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+
+        assert len(group_metrics) == 1
+        assert agent_metrics[0]["mean/reward"] == pytest.approx(sum(rewards) / 3)
+
     def test_histogram_adjacent_floats(self) -> None:
         pytest.importorskip("wandb")
         data = pd.Series([1.0, np.nextafter(1.0, 2.0), float("nan")])

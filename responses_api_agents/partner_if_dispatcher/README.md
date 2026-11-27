@@ -2,10 +2,12 @@
 
 Routes each episode of a mixed-harness benchmark to the environment server configured
 for its `verifier_metadata.partner_if.task_id`, then returns that environment's
-receipt. Its one change to the receipt adds any tool execution in the reply's
-trajectory that the episode's agent observations lack, since rollout collection
-builds the trajectory's tool calls from those observations. Sessions, execution and
-grading stay in the routed environments.
+receipt. It adds missing tool observations from ordinary replies so rollout collection
+can reconstruct the trajectory. For the host-configured recorded-context Gymnasium
+route, it validates and lifts the terminal Resources report into the collector row;
+this retains terminal tool outputs, combined parent/Explore usage and shared grades.
+It does not treat policy-supplied fields as a grading report. Sessions, execution and
+grading stay in the routed components.
 All of the benchmark's rows come back through this agent, and its `/aggregate_metrics`
 is proxied to the configured `resources_server`, so one aggregate covers every
 environment.

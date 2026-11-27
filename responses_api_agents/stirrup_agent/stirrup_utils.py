@@ -159,7 +159,7 @@ def convert_stirrup_history_to_output_items(
     """Convert Stirrup message history into NeMoGym input/output items, as JSON objects.
 
     Returns ``(input_items, output_items)`` where *input_items* are
-    system/user messages and *output_items* are assistant messages +
+    system/user messages and *output_items* are assistant reasoning, messages +
     tool calls/results.
     """
     input_items: list = []
@@ -228,6 +228,18 @@ def convert_stirrup_history_to_output_items(
                 input_items.append({"role": "user", "content": content_text, "type": "message"})
 
             elif isinstance(msg, AssistantMessage):
+                # A server that returns reasoning in its own field (openai_model) leaves it in msg.reasoning, which the
+                # text below does not carry; keep it as a reasoning item ahead of the turn it led to. A model without
+                # reasoning, or one that writes it inline as <think> in the content (vllm_model), adds nothing here.
+                if msg.reasoning is not None and msg.reasoning.content:
+                    output_items.append(
+                        {
+                            "id": f"rs-{uuid.uuid4().hex[:8]}",
+                            "summary": [{"type": "summary_text", "text": msg.reasoning.content}],
+                            "type": "reasoning",
+                        }
+                    )
+
                 content_text = msg.content if isinstance(msg.content, str) else ""
                 if content_text:
                     output_items.append(

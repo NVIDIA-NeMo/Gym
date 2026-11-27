@@ -21,7 +21,7 @@ import pytest
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from scripts.harness_conformance import episode
-from scripts.harness_conformance.provider import OpenClawProbe
+from scripts.harness_conformance.probes import OpenClawProbe
 from scripts.harness_conformance.runner import run_process
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
@@ -73,7 +73,8 @@ def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None
         expected = {"reset": "Connection error.", "stream-reset": "terminated", "idle": "LLM idle timeout"}
         assert expected[case] in response["error"]["message"]
         requests = json.loads((output / "fault-requests.json").read_text())
-        assert len(requests) == {"reset": 3, "stream-reset": 1, "idle": 2}[case]
+        # The adapter's session settings allow two same-model retries of each transport failure.
+        assert len(requests) == 3
     assert not (output / "rollouts.jsonl").read_text().strip()
     (failure,) = [json.loads(line) for line in (output / "rollouts_failures.jsonl").read_text().splitlines()]
     assert failure["_ng_failure_class"] == "environment_server_failed"
@@ -96,7 +97,10 @@ async def run_case(case: str, output: Path) -> None:
         async def model(self, request: Request) -> JSONResponse:
             body = await request.json()
             message = CONTEXT_ERROR if case == "context-http" else "controlled model failure"
-            payload = {"error": {"message": message, "type": "invalid_request_error"}}
+            # Typed as Gym's model server types upstream failures. OpenClaw 2026.11.5 does not retry a 5xx whose
+            # body says invalid_request_error: it reads it as a malformed request.
+            error_type = "server_error" if status >= 500 else "invalid_request_error"
+            payload = {"error": {"message": message, "type": error_type}}
             self.attempts.append({"request": body, "response": payload, "status_code": status})
             self.save()
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})
@@ -177,7 +181,7 @@ async def run_case(case: str, output: Path) -> None:
 
     with (
         patch.object(episode, "SCENARIOS", (scenario,)),
-        patch.object(episode, "OpenClawProbe", ErrorProbe),
+        patch("scripts.harness_conformance.probes.OpenClawProbe", ErrorProbe),
         patch.object(episode, "_config", config),
         patch.object(Scenario, "task", task),
         patch.object(OpenClawAgent, "_collect_sandbox_response", collect),

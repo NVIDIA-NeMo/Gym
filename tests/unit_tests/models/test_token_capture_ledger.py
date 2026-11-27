@@ -55,6 +55,10 @@ from nemo_gym.models.token_capture.staging.records import (
 )
 
 
+# An unnamed agent on a model server without a configured name: the lineage scope of these tests' calls.
+UNNAMED_IDENTITY = CallIdentity()
+
+
 USER_1 = {"role": "user", "content": "solve the task"}
 ASSISTANT_1 = {"role": "assistant", "content": "first answer"}
 USER_2 = {"role": "user", "content": "tool result"}
@@ -340,24 +344,26 @@ async def test_failure_rows_poison_and_never_resolve(store):
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [failure.reason for failure in manifest.failures] == ["worker_capture_failed"]
     # The committed parent still resolves; the failure row is invisible to lineage.
-    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match
     assert match is not None and match.model_call_id == "c1"
-    assert await store.has_rows("r1")
+    assert await store.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
 async def test_has_rows_is_false_for_untouched_rollout(store):
-    assert not await store.has_rows("r-none")
+    assert not await store.has_rows("r-none", identity=UNNAMED_IDENTITY)
     assert RolloutManifest.model_validate(await store.manifest("r-none")).records == []
 
 
-async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
+async def _admit(store, request_items, rollout_id="r1", model_call_id="c2", identity=None):
     context = CaptureContext(
         capture_key=rollout_id,
         model_call_id=model_call_id,
         token_sink=None,
         lineage_store=store,
         external_staging=True,
+        agent_instance=identity.agent_instance if identity is not None else None,
+        model_ref=identity.model_ref if identity is not None else None,
     )
     token = set_token_sink(context)
     try:
@@ -600,9 +606,9 @@ async def test_a_staged_row_the_manifest_rejects_fails_under_the_identity_on_the
 @pytest.mark.asyncio
 async def test_commit_ordering_parent_resolvable_only_after_record(store):
     # Before the ledger row exists, the follow-up cannot resolve a parent.
-    assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
+    assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match is None
     await _record_call_1(store)
-    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match
     assert match is not None
     # Custody rows resolve token-free: continuity rides the chain hash.
     assert list(match.cumulative_token_ids) == []
@@ -618,7 +624,7 @@ async def test_file_store_cross_handle_visibility(tmp_path):
     await writer.record_failure("r1", "c9", "worker_capture_failed")
     manifest = RolloutManifest.model_validate(await reader.manifest("r1"))
     assert len(manifest.records) == 1 and len(manifest.failures) == 1
-    assert await reader.has_rows("r1")
+    assert await reader.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -638,7 +644,7 @@ async def test_file_store_requires_current_fingerprint_version(tmp_path, version
     path.write_text(json.dumps(row) + "\n")
 
     reader = FileLineageStore(tmp_path)
-    resolution = await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])
+    resolution = await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)
     context = await _admit(reader, [USER_1, ASSISTANT_1, USER_2])
     if version == FINGERPRINT_VERSION:
         assert resolution.status == ParentResolutionStatus.RESOLVED
@@ -658,10 +664,10 @@ async def test_file_store_ignores_old_version_when_current_match_is_appended(tmp
     reader = FileLineageStore(tmp_path)
     old_record = _call_record("old").model_copy(update={"fingerprint_version": FINGERPRINT_VERSION - 1})
     await writer.record(_commit(old_record, [USER_1], [ASSISTANT_1]))
-    assert (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
+    assert (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match is None
 
     await _record_call_1(writer)
-    match = (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+    match = (await reader.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match
     assert match is not None and match.model_call_id == "c1"
     assert match.staging_chain == ("r1/c1",)
 
@@ -686,7 +692,7 @@ async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
     (tmp_path / "r1.lineage.jsonl").write_text(
         json.dumps(lineage_only_row, sort_keys=True, separators=(",", ":")) + "\n"
     )
-    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match
     assert match is not None and list(match.cumulative_token_ids) == TOKENS_1
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert manifest.records == [] and manifest.failures == []
@@ -740,7 +746,7 @@ async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_
     path = tmp_path / "r1.lineage.jsonl"
     path.write_text(json.dumps(legacy_row, sort_keys=True, separators=(",", ":")) + "\n")
 
-    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match
+    match = (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match
     assert match is None
 
     context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
@@ -792,11 +798,11 @@ async def test_retire_removes_ledgers_and_reports_absent_rollouts(store):
     assert result.absent == ["r-none"]
     for rollout_id in ("r1", "r2"):
         with pytest.raises(RolloutRetiredError):
-            await store.has_rows(rollout_id)
+            await store.has_rows(rollout_id, identity=UNNAMED_IDENTITY)
         with pytest.raises(RolloutRetiredError):
             await store.manifest(rollout_id)
     # The retired call can no longer anchor a continuation.
-    assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
+    assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2], identity=UNNAMED_IDENTITY)).match is None
 
 
 @pytest.mark.asyncio
@@ -819,10 +825,10 @@ async def test_retired_rollouts_discard_later_records_and_failures(store):
 
     for rollout_id in ("r1", "r-unstarted"):
         with pytest.raises(RolloutRetiredError):
-            await store.has_rows(rollout_id)
+            await store.has_rows(rollout_id, identity=UNNAMED_IDENTITY)
     # Other rollouts are unaffected.
     await _record_call_1(store, rollout_id="r2")
-    assert await store.has_rows("r2")
+    assert await store.has_rows("r2", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -843,7 +849,7 @@ async def test_delete_removes_a_live_ledger(store):
     await _record_call_1(store)
     result = RolloutRemoval.model_validate(await store.delete(["r1"]))
     assert result.removed == ["r1"]
-    assert not await store.has_rows("r1")
+    assert not await store.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -892,7 +898,7 @@ async def test_a_bare_rollout_id_string_is_rejected(store, method):
     await _record_call_1(store)
     with pytest.raises(TypeError, match="sequence of capture keys"):
         await getattr(store, method)("r1")
-    assert await store.has_rows("r1")
+    assert await store.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -902,7 +908,7 @@ async def test_file_store_rejects_the_whole_batch_on_an_invalid_rollout_id(tmp_p
     await _record_call_1(store)
     with pytest.raises(ValueError, match="Invalid rollout id"):
         await getattr(store, method)(["r1", "../escape"])
-    assert await store.has_rows("r1")
+    assert await store.has_rows("r1", identity=UNNAMED_IDENTITY)
     assert not (tmp_path / "r1.lineage.retired").exists()
 
 
@@ -1006,7 +1012,7 @@ async def test_a_call_on_a_retired_rollout_is_not_admitted_for_staging(store, re
 
     assert context.capture_admission is None
     with pytest.raises(RolloutRetiredError):
-        await store.has_rows("r1")
+        await store.has_rows("r1", identity=UNNAMED_IDENTITY)
 
 
 @pytest.mark.asyncio
@@ -1207,3 +1213,50 @@ async def test_checkpoint_export_keeps_the_identity_a_failure_inherits_from_its_
     # The intents stay with the old attempt, and the failures keep the identity they read from them.
     assert manifest.pending_call_ids == []
     assert identities(manifest) == expected
+
+
+# --- per agent instance and model server ---
+
+
+def _named(record: CallRecord, identity: CallIdentity) -> CallRecord:
+    return record.model_copy(
+        update={
+            "agent_instance": identity.agent_instance,
+            "agent_kind": identity.agent_kind,
+            "model_ref": identity.model_ref,
+        }
+    )
+
+
+async def _record_assistant_call(store) -> None:
+    await store.begin_call("r1", "c1", identity=ASSISTANT)
+    await store.record(_commit(_named(_call_record("c1"), ASSISTANT), [USER_1], [ASSISTANT_1]))
+
+
+async def test_a_judge_prompt_with_the_assistant_transcript_is_admitted_as_its_own_root(store):
+    await _record_assistant_call(store)
+
+    judge = await _admit(store, [USER_1, ASSISTANT_1, USER_2], model_call_id="j1", identity=JUDGE)
+    assistant = await _admit(store, [USER_1, ASSISTANT_1, USER_2], model_call_id="c2", identity=ASSISTANT)
+
+    assert judge.capture_admission.mode == "text" and judge.capture_admission.parent_call_id is None
+    assert assistant.capture_admission.mode == "token_in" and assistant.capture_admission.parent_call_id == "c1"
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
+
+
+async def test_a_continuation_on_another_model_server_is_admitted_as_a_root_with_its_reason(store):
+    await _record_assistant_call(store)
+    moved = CallIdentity(agent_instance="assistant", model_ref=ModelRef(name="model_server_b"))
+
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2], identity=moved)
+
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.root_reason == "model_server_changed"
+
+
+async def test_has_rows_counts_only_the_call_s_own_lineage_scope(store):
+    await _record_assistant_call(store)
+
+    assert await store.has_rows("r1", identity=ASSISTANT)
+    assert not await store.has_rows("r1", identity=JUDGE)

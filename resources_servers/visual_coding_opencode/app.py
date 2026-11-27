@@ -30,7 +30,7 @@ from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import EpisodeId, NeMoGymChatCompletion, TaskId
+from nemo_gym.core import EpisodeId, MediaFile, NeMoGymChatCompletion, TaskId, UnsupportedContentError
 from nemo_gym.sandbox import SandboxConfig
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -159,6 +159,10 @@ def parse_verdict(content: str) -> dict[str, Any]:
     return {"verdict": verdict, "reason": str(data.get("reason", ""))[:200]}
 
 
+# The most images a row can lend as files.
+MAX_INPUT_IMAGES = 8
+
+
 class VisualCodingOpenCodeSandboxConfig(SandboxConfig):
     # An OCI image built from sandbox_image/Dockerfile: OpenCode, Python 3 and the image toolkit.
     image: Optional[str] = None
@@ -174,6 +178,8 @@ class VisualCodingOpenCodeConfig(BaseResourcesServerConfig):
     sandbox_workdir: str = "/workspace"
     # model_only: the lent sandbox reaches only sandbox_model_server's host. inherit keeps the provider's network.
     sandbox_network_access: Literal["inherit", "model_only"] = "inherit"
+    # The largest decoded image a row's input_images may carry into the lent sandbox.
+    max_input_image_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
     sandbox_model_server: Optional[ModelServerRef] = None
     # The judge's model server picks the judge model (openai_model's openai_model), so this server names none.
     judge_model_server: ModelServerRef
@@ -245,6 +251,30 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan
         return app
 
+    def _input_image_files(self, task_data: dict[str, Any]) -> dict[str, bytes]:
+        """The row's ``input_images`` data URLs as files in the lent sandbox: ``<workdir>/input-<i>.<ext>``.
+
+        A harness that cannot take an image in its prompt, or whose Python shell needs the pixels, reads these files.
+        """
+        urls = task_data.get("input_images") or []
+        if not isinstance(urls, list) or len(urls) > MAX_INPUT_IMAGES:
+            raise ResourcesSeedRejectedError(f"input_images must be a list of at most {MAX_INPUT_IMAGES} data URLs")
+        files: dict[str, bytes] = {}
+        for index, url in enumerate(urls):
+            if not isinstance(url, str):
+                raise ResourcesSeedRejectedError(f"input_images[{index}] must be a base64 data URL")
+            # Check the encoded length first, so an oversized payload is refused before it is decoded.
+            if len(url.partition(",")[2]) > 4 * ((self.config.max_input_image_bytes + 2) // 3):
+                raise ResourcesSeedRejectedError(f"input_images[{index}] exceeds max_input_image_bytes")
+            try:
+                image = MediaFile.from_data_uri(url)
+            except UnsupportedContentError as error:
+                raise ResourcesSeedRejectedError(f"input_images[{index}]: {error}") from error
+            if len(image.data) > self.config.max_input_image_bytes:
+                raise ResourcesSeedRejectedError(f"input_images[{index}] exceeds max_input_image_bytes")
+            files[f"{self.config.sandbox_workdir}/input-{index}.{image.extension}"] = image.data
+        return files
+
     async def seed_session(
         self,
         request: Request,
@@ -269,8 +299,9 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
             seeded = self._sessions.get(session_id)
             if seeded is not None and seeded != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            files = self._input_image_files(body.task_data)
             # A repeated seed gets the sandbox it already has.
-            sandbox_access = await self._lent_sandboxes.lend(session_id, body.task_id)
+            sandbox_access = await self._lent_sandboxes.lend(session_id, body.task_id, files=files)
             self._sessions[session_id] = (body.episode_id, body.task_id)
             request.session[SESSION_ID_KEY] = session_id
             return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=sandbox_access)

@@ -30,7 +30,12 @@ from nemo_gym.rollouts.rollout_records import (
     materialized_path_for,
     read_records,
 )
-from nemo_gym.rollouts.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for
+from nemo_gym.rollouts.rollout_recovery import (
+    RunManifest,
+    atomic_write_json,
+    config_identity_path_for,
+    manifest_path_for,
+)
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.utils.path_utils import failures_path_for, rerun_masked_journal_path_for
 
@@ -51,6 +56,16 @@ def prepared_run(tmp_path):
 
 def snapshot(output):
     return {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()}
+
+
+def test_reservations_do_not_rewrite_the_configuration_identity(prepared_run):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        identity = config_identity_path_for(manifest_path_for(output))
+        saved = identity.stat().st_ino
+        store.record_dispatches(store.pending(3))
+        assert identity.stat().st_ino == saved
+    assert RunManifest.model_validate_json(manifest_path_for(output).read_bytes()).next_attempt == {"0-0": 1, "1-0": 1}
 
 
 def test_invalid_outcomes_are_rejected_before_appending_bytes(prepared_run):

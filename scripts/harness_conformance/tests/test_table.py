@@ -209,3 +209,21 @@ def test_cli_refuses_modules_from_another_checkout(tmp_path, monkeypatch, capsys
     assert table.main(["--commit", COMMIT, "--output", str(tmp_path / "out")]) == 2
     assert "another checkout" in capsys.readouterr().err
     assert not (tmp_path / "out").exists()
+
+
+def test_declared_unsupported_scenario_needs_no_runtime_artifact(generation, monkeypatch):
+    _, page, _, kwargs = generation
+    original_run = table.run_suite
+
+    def probes(**args):
+        summary, code = original_run(**args)
+        scenario = summary["harnesses"]["pi"]["scenarios"][-1]
+        scenario["unsupported_reason"] = "Fixture declaration"
+        scenario["checks"] = [{"id": "scenario.supported", "kind": "behavioral", "tier": "P1", "status": "fail"}]
+        (args["output"] / "pi" / scenario["scenario"] / "runtime.json").unlink()
+        return summary, code
+
+    monkeypatch.setattr(table, "run_suite", probes)
+    table.regenerate(**kwargs)
+    assert "✗ (P1:✗) — not run: declared unsupported" in page.read_text()
+    assert f"0/{len(table.SCENARIOS)}</Badge>" in page.read_text()

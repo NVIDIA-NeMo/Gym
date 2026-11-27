@@ -2312,3 +2312,26 @@ def test_jobs_that_record_at_once_write_each_row_once(tmp_path):
         ("150", 0),
     ]
     assert not (tmp_path / JOB_ALLOCATIONS_LOCK_NAME).exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "driver, exit_code, notice",
+    [
+        pytest.param(_FINISHES_THE_RUN, 0, "the run is complete", id="run-complete"),
+        pytest.param(
+            f"( exit {NO_ELIGIBLE_RETRY_EXIT} )",
+            NO_ELIGIBLE_RETRY_EXIT,
+            "no task is eligible for another attempt",
+            id="nothing-eligible-for-retry",
+        ),
+    ],
+)
+def test_the_cancel_notice_says_why_the_chain_ended(tmp_path, monkeypatch, driver, exit_code, notice):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", driver=driver, sentinel_id="998")
+
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    assert f"Cancelled this chain's queued sentinel 998: {notice}." in result.stdout
+    assert f"Cancelled this chain's queued follow-up 999: {notice}." in result.stdout
+    assert ("the run is complete" in result.stdout) == (exit_code == 0)

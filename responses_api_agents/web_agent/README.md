@@ -65,3 +65,25 @@ evidence, closes the browser, and then calls the external WebVoyager judge.
 Transient judge failures can therefore be retried without replaying live-site
 actions. Every seeded rollout returns its artifact session ID; finalized video
 references are returned when recording is enabled.
+
+### Nano Omni step budget
+
+`nano_omni_stop_at_step_budget` defaults to `false` and applies only to
+`nano_omni_toolcall`. Enable it in a separately named Nano Omni experiment,
+such as a VisualWebArena profile that measures this early stop protocol. Keep
+the standard WebArena, WebVoyager, and VisualWebArena profiles at the default
+when collecting reference protocol scores.
+
+With the option enabled, requests in the final two step slots set
+`enable_thinking=false` in `chat_template_kwargs`. This control requires a
+model backend that honors template metadata, such as the vLLM chat path. With
+at least two steps, the penultimate observation asks the model to call
+`terminate(status="failure", answer="")`. With one step, only the template
+setting applies. The stop is a prompt, and the agent processes the model's
+actual actions and runs normal evaluation on the resulting state.
+
+Following the stop prompt uses a step that would otherwise be available for
+browser actions and may leave the last step unused. The reference harness
+allows the full step budget with its configured thinking settings. Record
+the option, budget, and backend when reporting scores, and compare runs
+collected with the same protocol.

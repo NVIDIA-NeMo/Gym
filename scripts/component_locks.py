@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Check or regenerate every managed dependency lock and its shared uv policy."""
+"""Check, regenerate, or upgrade every managed dependency lock and its shared uv policy."""
 
 from __future__ import annotations
 
@@ -97,8 +97,11 @@ def synchronize_policy(project: Path) -> None:
     path.write_text(tomlkit.dumps(metadata))
 
 
-def check_project(project: Path, *, update: bool) -> tuple[Path, int, str]:
-    """Run uv for one project and retain every failure's diagnostics."""
+def check_project(project: Path, *, update: bool, upgrade: bool = False) -> tuple[Path, int, str]:
+    """Run uv for one project and retain every failure's diagnostics.
+
+    ``upgrade`` re-resolves every package to its newest allowed version instead of keeping the locked ones.
+    """
     if not (project / "pyproject.toml").is_file():
         return project, 1, "Missing pyproject.toml"
     if project != ROOT and uses_shared_policy(project):
@@ -118,7 +121,9 @@ def check_project(project: Path, *, update: bool) -> tuple[Path, int, str]:
             ):
                 return project, 1, "Shared uv policy differs; run scripts/component_locks.py --update"
     command = ["uv", "lock", "--project", str(project)]
-    if not update:
+    if upgrade:
+        command.append("--upgrade")
+    elif not update:
         command.append("--check")
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return project, result.returncode, result.stdout
@@ -128,14 +133,20 @@ def main() -> None:
     """Check every lock by default, or explicitly regenerate locks and policy."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--update", action="store_true", help="Copy shared policy and regenerate all locks")
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="Like --update, but move every locked package to its newest allowed version",
+    )
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be positive")
+    update = args.update or args.upgrade
     projects = managed_projects()
     failures = []
     with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        results = executor.map(lambda project: check_project(project, update=args.update), projects)
+        results = executor.map(lambda project: check_project(project, update=update, upgrade=args.upgrade), projects)
         for project, code, output in results:
             relative = project.relative_to(ROOT).as_posix()
             print(f"{'FAIL' if code else 'PASS'} {relative}", flush=True)

@@ -1,0 +1,32 @@
+name: mm_lifelong_v1_1_agentic
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: MM-Lifelong v1.1 open-ended questions about a recorded day, week and month, answered by OpenCode in a
+  sandbox whose image holds the split's original videos, with frame-sampling video tools; graded 0-5 against frozen
+  rubrics by the dataset's grader.
+modality: video
+licensing: MIT
+authors:
+- Guo Chen
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: video_qa_rubric
+agent_server: opencode_agent
+datasets:
+- name: mm_lifelong_v1_1_agentic
+  type: benchmark
+  jsonl_fpath: benchmarks/mm_lifelong_v1_1_agentic/data/mm_lifelong_v1_1_agentic_benchmark.jsonl
+  prepare_script: benchmarks/mm_lifelong_v1_1_agentic/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

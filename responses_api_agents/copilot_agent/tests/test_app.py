@@ -454,7 +454,7 @@ def test_text_parts_and_timeout_metadata_are_accepted(setup):
 
 def test_session_runs_copilot_in_borrowed_sandbox(setup):
     agent, sandbox = setup
-    sandbox.disconnect.side_effect = lambda: setattr(sandbox, "sandbox_id", None)
+    sandbox.disconnect.side_effect = lambda **_: setattr(sandbox, "sandbox_id", None)
     result, closed = run_session(agent)
     assert result.status_code == 200, result.text
     body = result.json()
@@ -952,7 +952,7 @@ def test_changed_activation_is_rejected_and_identical_retry_joins(setup):
 
 def test_owned_sandbox_is_created_and_stopped(setup):
     agent, sandbox = setup
-    sandbox.stop.side_effect = lambda: setattr(sandbox, "sandbox_id", None)
+    sandbox.stop.side_effect = lambda **_: setattr(sandbox, "sandbox_id", None)
     agent.config.sandbox_provider = "sandbox"
     sandbox.start = AsyncMock()
     module = "responses_api_agents.copilot_agent.app"

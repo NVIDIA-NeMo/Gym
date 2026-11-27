@@ -19,6 +19,7 @@ accounting of a chain's allocations, including requeued ones.
 import os
 from pathlib import Path
 
+from nemo_gym.core.failure_kinds import JUDGE_FAILED
 from nemo_gym.eval.recovery.decision import (
     ALLOCATION_ENDED_STATES,
     IdentityState,
@@ -36,6 +37,7 @@ from nemo_gym.eval.recovery.markers import (
     ACCOUNTED_WALLTIME_PREFIX,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
+    DRIVER_FAILURE_NAME,
     PROVISIONAL_MARKER_PREFIX,
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
@@ -86,8 +88,26 @@ def continuation_admission(
         )
         collected = CollectedEvidence.model_validate_json(raw.stdout)
         if not collected.managed_store:
-            print(f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from")
-            return "stop"
+            driver = _rollout_collection_driver(job)
+            marker = job / f"{DRIVER_FAILURE_NAME}.{previous_job_id}"
+            if not (
+                previous_state == "FAILED"
+                and driver == "benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection"
+                and previous_job_id.isdecimal()
+                and marker.is_file()
+                and marker.read_text().strip() == JUDGE_FAILED
+                and (job / "artifacts" / "rollouts_materialized_inputs.jsonl").is_file()
+            ):
+                print(
+                    f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from"
+                )
+                return "stop"
+            if collected.walltime_state != "ok":
+                print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
+                return "stop"
+            # This allocation deferred a journaled answer and the driver revalidates it on resume.
+            print(f"{CONTINUATION_REASON_PREFIX}rollout_collection_driver {driver} resumes from its own journal")
+            return "retry"
         collected = select_managed_evidence(collected, job)
         # The marker holds this allocation's own provisional line until it queues its follow-up. It says nothing about
         # the run: quoted into a stop, it would read as this allocation dying before its guard, so its sentinel would
@@ -99,10 +119,11 @@ def continuation_admission(
             print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
             return "stop"
         collected.accounted_walltime_s = collected.walltime_used_s
-        # A completed outcome plus untouched pending inputs establishes planned segment work. Actual failed
-        # attempts still consume infra retries, even if the driver happened to exit 75. A missing output,
-        # reservation, judge answer or unowned selected cause is rejected by the ordinary decision below.
-        # A scheduler allocation timeout continues untouched work, but never a failed agent attempt.
+        # A completed outcome plus untouched pending inputs establishes planned segment work. The decision below
+        # makes it a free segment only while never-started rows remain: retryable rows ride along and each spends its
+        # own attempt cap, whatever exit code the driver used. With no untouched row left, failed attempts still
+        # consume infra retries. A missing output, reservation, judge answer or unowned selected cause is rejected by
+        # the ordinary decision below.
         segment = previous_state == "TIMEOUT"
         if previous_state == "FAILED" and exit_code == "75:0" and collected.managed_selection is not None:
             from nemo_gym.rollouts import RolloutStore
@@ -154,10 +175,22 @@ def continuation_admission(
         print(CONTINUATION_REASON_PREFIX + decision.reason)
         if decision.action != RecoveryAction.RESUBMIT:
             return "stop"
-        return "segment" if segment and not decision.counts.get(IdentityState.RETRYABLE) else "retry"
+        return "segment" if segment and decision.counts.get(IdentityState.MISSING) else "retry"
     except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"{CONTINUATION_REASON_PREFIX}saved recovery evidence is unreadable: {type(error).__name__}: {error}")
         return "stop"
+
+
+def _rollout_collection_driver(job: Path) -> str | None:
+    """The custom ``rollout_collection_driver`` the run's saved config names, or None."""
+    import yaml
+
+    try:
+        config = yaml.safe_load((job / "artifacts" / "rollouts_resolved_config.yaml").read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    driver = config.get("rollout_collection_driver") if isinstance(config, dict) else None
+    return driver if isinstance(driver, str) and driver and "${" not in driver else None
 
 
 def _requeue_continuation(job: Path, max_retries: int, max_walltime_s: float | None) -> str:

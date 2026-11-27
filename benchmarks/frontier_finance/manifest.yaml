@@ -1,0 +1,30 @@
+name: frontier_finance
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: FrontierFinance investor-research queries on the Finance Agent v2 tools, scored by the official
+  three-judge rubric panel.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- ushnish-de
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: finance_agent_v2
+agent_server: finance_agent
+datasets:
+- name: frontier_finance
+  type: benchmark
+  jsonl_fpath: benchmarks/frontier_finance/data/frontier_finance_220q.jsonl
+  prepare_script: benchmarks/frontier_finance/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

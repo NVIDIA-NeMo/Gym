@@ -50,12 +50,19 @@ class ToolSpec(BaseModel):
 
 
 class ToolResult(BaseModel):
-    """What one tool call returns to the agent. ``is_error`` marks an error the agent should see and handle."""
+    """What one tool call returns to the agent. ``is_error`` marks an error the agent should see and handle.
+
+    ``ends_activation`` asks the agent to end its activation after this call, as a protocol whose turn ends at a
+    submission needs. Over direct HTTP the reply carries ``END_ACTIVATION_HEADER``: ``simple_agent`` runs the rest of
+    the model response's tool calls and returns without calling the model again. Other agents, and every MCP agent,
+    because MCP has no field for it, call the model again.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     output: JsonValue
     is_error: bool = False
+    ends_activation: bool = False
 
 
 class ToolCallRecord(BaseModel):

@@ -434,6 +434,40 @@ def test_kubernetes_pvc_name_is_required():
 
 
 # ---------------------------------------------------------------------------
+# lustre_md_stats on Slurm compute
+# ---------------------------------------------------------------------------
+
+
+def test_lustre_md_stats_off_leaves_the_saved_config_as_before():
+    config = SubmitConfig.model_validate(_config())
+    assert config.compute["cluster"].lustre_md_stats is False
+    assert config.model_dump(mode="json")["compute"] == {
+        "cluster": {
+            "type": "slurm",
+            "account": "my-account",
+            "hostname": "foo",
+            "forward_env": [],
+            "walltime": None,
+            "node_pools": {},
+            "extra_args": {},
+        }
+    }
+
+
+def test_lustre_md_stats_on_is_saved_and_read_back():
+    compute = {"cluster": {**COMPUTE["cluster"], "lustre_md_stats": True}}
+    saved = SubmitConfig.model_validate(_config(compute=compute)).model_dump(mode="json")
+    assert saved["compute"]["cluster"]["lustre_md_stats"] is True
+    assert SubmitConfig.model_validate(saved).compute["cluster"].lustre_md_stats is True
+
+
+def test_lustre_md_stats_on_kubernetes_is_refused():
+    compute = {"cluster": {**COMPUTE_K8S["cluster"], "lustre_md_stats": True}}
+    with pytest.raises(ValidationError, match=r"kubernetes\.lustre_md_stats\n  Extra inputs are not permitted"):
+        SubmitConfig.model_validate(_config(compute=compute))
+
+
+# ---------------------------------------------------------------------------
 # resumable / ResumeConfig
 # ---------------------------------------------------------------------------
 

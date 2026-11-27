@@ -15,6 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     question: Optional[str] = Field(
         default=None,
         description="False statement shown to the policy and supplied to the judge.",

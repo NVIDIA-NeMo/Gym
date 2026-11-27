@@ -524,3 +524,40 @@ def test_initial_manifest_and_local_record_share_observed_environment(tmp_path, 
     assert record.environment.telemetry.enabled is False
     assert "test-private-value" not in observed[0].dumps()
     assert "WORKER_LOCAL" not in record.environment.model_dump_json()
+
+
+def test_a_task_target_reaches_the_kubernetes_run_with_a_run_directory_output_root(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
+
+    config = _submit_config(tmp_path, ["bench_a"])
+    compute = next(iter(config.compute.values()))
+    run_dir = tmp_path / "run"
+    benchmark = config.driver.benchmarks["bench_a"].model_copy(
+        update={
+            "target": "/data/tasks",
+            "agent": "opencode_agent",
+            "sandbox": "opensandbox",
+            "prepare": {"config_paths": ["adapter.yaml"]},
+        }
+    )
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        run_dir,
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    script = json.dumps(job["spec"]["template"]["spec"]["containers"][0])
+    prepare = script[script.index("gym eval prepare") :].split("\\n", 1)[0]
+    assert "adapter.yaml" in prepare
+    assert "/data/tasks" not in prepare and "--agent" not in prepare and "harbor_output_root" not in prepare
+    run = script[script.index("gym eval run") :]
+    assert run.index("/data/tasks") < run.index("+output_jsonl_fpath=")
+    assert "--agent" in run and "opencode_agent" in run and "--sandbox" in run
+    assert f"+harbor_output_root={run_dir}/artifacts/harbor" in run

@@ -66,6 +66,7 @@ def render_observation(
     visual_observation_text: str = "none",
     task_image_root: str | None = None,
     max_task_image_bytes: int = 25 * 1024 * 1024,
+    budget_stop: bool = False,
 ) -> NeMoGymEasyInputMessage:
     """Build one Nano-style visual computer-use turn.
 
@@ -83,6 +84,11 @@ def render_observation(
     if step_index > 0 and task.input_images:
         text_parts.append(TASK_INPUT_IMAGE_REDACTION_NOTICE)
     text_parts.append(f"You are currently on Step {step_index + 1}.")
+    if budget_stop:
+        text_parts.append(
+            "The task is reaching its step limit. End the interaction now with only a terminate tool call: "
+            'status="failure", answer="". Leave the answer empty because the step budget was exhausted.'
+        )
     tab_lines = [
         "Tab Context:",
         f"- current_tab_id: {observation.active_tab_index}",

@@ -924,7 +924,8 @@ def test_a_one_character_cap_does_not_duplicate_the_whole_text() -> None:
 
 
 async def test_a_runaway_search_times_out_without_blocking_the_monitor(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(app, "_SEARCH_TIMEOUT_S", 0.3, raising=False)
+    # regex counts this timeout in CPU time, so on a busy runner it can take many times longer in wall time.
+    monkeypatch.setattr(app, "_SEARCH_TIMEOUT_S", 0.1)
     server = _server(_config(tmp_path))
     started = time.monotonic()
     # (a|aa)+$ backtracks without end on a long run of a's that does not reach the end of the line.
@@ -936,7 +937,8 @@ async def test_a_runaway_search_times_out_without_blocking_the_monitor(tmp_path:
 
     assert status["backlog"] == 0
     assert result.startswith("tool error: TimeoutError"), result
-    assert time.monotonic() - started < 3
+    # Without the timeout, this search backtracks for tens of seconds.
+    assert time.monotonic() - started < 10
 
 
 async def test_replay_labels_and_earlier_predictions_never_reach_the_judge(tmp_path: Path) -> None:

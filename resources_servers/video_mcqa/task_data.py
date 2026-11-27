@@ -5,10 +5,11 @@
 Mirrors the wire: ``VideoMCQAVerifyRequest`` and ``VideoMMEV2VerifyRequest`` read ``task_id`` and ``setting``
 top-level and ``verifier_metadata`` as task.py's ``VerifierMetadata``, whose fields (``task_id`` aside, which both
 places carry) only that container holds. Agentic rows (``prepare.py --setting agentic``) also carry a
-``video_binding`` for a sandboxed video agent, which is not part of this package; its ``source`` is only a path
-here. ``annotation_warnings`` is preparation provenance (``duplicate_option_text``), outside model inputs.
-``VideoMCQATaskData`` is the shared shape that VideoMME-v2 uses; ``TaskData`` adds the four-choice, ungrouped rule
-the VideoMME-v1/LVBench verifier enforces.
+``video_binding``: the video that the resources server puts into each episode's sandbox. ``annotation_warnings`` is
+preparation provenance (``duplicate_option_text``), outside model inputs. ``VideoMCQATaskData`` is the shared shape
+that VideoMME-v2 uses; ``TaskData``, the rows of this server (a VideoMME-v1, LVBench or question-set cohort), has no
+VideoMME-v2 level or group. VideoMME-v1 and LVBench add their four choices. An agentic row whose videos are too
+large to upload for every episode names a ``preloaded_media`` instead: media its sandbox image already holds.
 """
 
 from pathlib import PurePosixPath
@@ -31,8 +32,12 @@ Text = Annotated[str, AfterValidator(_text)]
 NestedText = Annotated[Text, Field(json_schema_extra=_NESTED)]
 
 
-class VideoBinding(BaseModel):
-    """The source video a sandboxed video agent checks and copies into its sandbox."""
+class FileBinding(BaseModel):
+    """A host file the resources server checks and copies into the episode's sandbox (sandbox.py).
+
+    ``source`` is a host path (relative paths start at the Gym repository root), ``sandbox_path`` is relative to the
+    sandbox's media root, and ``sha256`` is the digest the copy in the sandbox must have.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -43,8 +48,44 @@ class VideoBinding(BaseModel):
     @model_validator(mode="after")
     def relative_path(self) -> Self:
         path = PurePosixPath(self.sandbox_path)
-        if path.is_absolute() or ".." in path.parts or any(char in self.sandbox_path for char in "\r\n"):
+        if (
+            not path.parts
+            or path.is_absolute()
+            or ".." in path.parts
+            or any(char in self.sandbox_path for char in "\r\n\\")
+        ):
             raise ValueError("sandbox video binding must be a safe workspace-relative path")
+        return self
+
+
+class VideoBinding(FileBinding):
+    """The source video the resources server checks and copies into the episode's sandbox (sandbox.py)."""
+
+
+class PreloadedMedia(BaseModel):
+    """Media that the sandbox image already holds, for videos too large to upload for every episode (sandbox.py).
+
+    ``image`` names the image in the resources server's ``sandbox_preloaded_images``, which maps it to an image
+    reference. ``catalog`` is the absolute sandbox path of the image's catalog: a JSON object whose ``videos`` list
+    gives each preloaded file's absolute ``path`` inside the sandbox's media root and its size in ``bytes``. The seed
+    checks that the catalog has ``catalog_sha256`` and every file it lists that size, and copies only ``files`` into
+    the sandbox: host files the model reads besides the media, such as a description of the videos.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: Text
+    catalog: Text
+    catalog_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    files: list[FileBinding] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def sandbox_paths(self) -> Self:
+        path = PurePosixPath(self.catalog)
+        if not path.is_absolute() or ".." in path.parts or any(char in self.catalog for char in "\r\n\\"):
+            raise ValueError("catalog must be an absolute sandbox path")
+        if len({file.sandbox_path for file in self.files}) != len(self.files):
+            raise ValueError("files must go to distinct sandbox paths")
         return self
 
 
@@ -57,6 +98,8 @@ class VideoMCQATaskData(BaseModel):
     setting: Literal["single_turn", "agentic"]
     expected_answer: str = Field(json_schema_extra=_NESTED)
     option_count: int = Field(ge=2, le=len(LABELS), json_schema_extra=_NESTED)
+    question: NestedText
+    options: list[Text] = Field(min_length=2, max_length=len(LABELS), json_schema_extra=_NESTED)
     dataset_source: NestedText
     dataset_revision: str = Field(pattern=r"^[0-9a-f]{40}$", json_schema_extra=_NESTED)
     video_id: NestedText
@@ -65,22 +108,25 @@ class VideoMCQATaskData(BaseModel):
     level: int | None = Field(default=None, ge=1, json_schema_extra=_NESTED)
     group_id: Text | None = Field(default=None, json_schema_extra=_NESTED)
     video_binding: VideoBinding | None = None
+    preloaded_media: PreloadedMedia | None = None
     annotation_warnings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def answer_and_binding(self) -> Self:
         if self.expected_answer not in tuple(LABELS[: self.option_count]):
             raise ValueError("expected_answer must be one available uppercase choice label")
-        if self.setting == "agentic" and self.video_binding is None:
-            raise ValueError("An agentic row needs the video_binding its agent reads")
+        if len(self.options) != self.option_count:
+            raise ValueError("options must hold one text per choice, in label order")
+        if self.setting == "agentic" and (self.video_binding is None) == (self.preloaded_media is None):
+            raise ValueError("An agentic row needs the video_binding or the preloaded_media its agent reads")
         return self
 
 
 class TaskData(VideoMCQATaskData):
-    """VideoMME-v1 and LVBench: four choices and no VideoMME-v2 level or group."""
+    """Rows of a VideoMME-v1, LVBench or question-set cohort: no VideoMME-v2 level or group."""
 
     @model_validator(mode="after")
-    def four_ungrouped_choices(self) -> Self:
-        if self.option_count != 4 or self.level is not None or self.group_id is not None:
-            raise ValueError("VideoMME-v1/LVBench require four choices and no v2 group or level")
+    def ungrouped(self) -> Self:
+        if self.level is not None or self.group_id is not None:
+            raise ValueError("VideoMME-v1/LVBench and question sets have no v2 group or level")
         return self
