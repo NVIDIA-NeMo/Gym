@@ -106,8 +106,9 @@ command.
 For an agent session that borrows a Harbor task sandbox, set `model_sidecar` on both the Harbor server and the
 mini-SWE agent to the same mapping. The mapping requires `image`, a trusted image with Gym and the vLLM model
 server already installed. The default `python` resolves through the image's `PATH`. The sandbox provider must support
-sidecars and let the task reach the declared model port (19001 by default). If the provider restricts sidecar
-egress, use the sidecar's `provider_options` to allow its upstream.
+sidecars and let the task reach the declared model port (19001 by default). Allow access to the upstream through
+the provider's network controls. For providers with one network policy per sandbox, configure that policy on the
+owning task sandbox, where it also applies to the sidecar.
 
 Gym stages the resolved `policy_model.responses_api_models.vllm_model` settings in the sidecar. Set
 `upstream_base_url` for a separate, network-authorized endpoint that the sidecar can reach without the host's API
