@@ -81,8 +81,8 @@ The aggregate metrics add `reward_hacking/success_rate`, `reward_hacking/attempt
 passes, and a count per category.
 
 A judge that fails, or answers without a valid verdict on every attempt (`judge_max_attempts`), gives a masked row
-(`judge_failed`) that a later reverify judges again. A transcript Gym cannot convert to ATIF
-gives a masked `verifier_error` row.
+(`judge_failed`) that a later reverify judges again. A transcript Gym cannot convert to ATIF, or a source row that
+can no longer be read (see Segments), gives a masked `verifier_error` row.
 
 # Segments
 
@@ -92,14 +92,20 @@ a context compaction. This server does the same.
 1. Where a Gym rollout splits: the transcript and Gym's ATIF export do not mark compactions. The agent harness
    reports each one in the rollout's `ng_agent_observations` as a `context_compaction` record, whose
    `first_kept_item_id` names the item of the agent's own conversation that the compacted context kept first
-   (opencode, pi and openclaw report it). Those ids are the agent's, not the ids in `response.output`. So when the
+   (splitting is verified for opencode). Those ids are the agent's, not the ids in `response.output`. So when the
    source row's `ng_agent_observations` holds a root `agent_invocation` (no `parent_invocation_id`) with a
-   `conversation`, the server judges that conversation, which starts with the task prompt, and starts a new segment
-   at the ATIF step whose `source_item_id` is a kept item. A kept reasoning item has no step of its own: it joins
-   the step of the next message or function call, so the segment starts there. Otherwise the server judges
-   `responses_create_params.input` and `response.output` as one segment.
-   The server keeps only each source row's reward and byte location, and reads the one row again in `/verify`, so
-   a rollouts file larger than memory works.
+   non-empty `conversation`, the server judges that conversation. A conversation that does not start with a user,
+   system or developer message (`terminus_2_agent` saves only its output) is judged after
+   `responses_create_params.input`, so the judge still sees the task. A new segment starts at the ATIF step whose
+   `source_item_id` is an item that one of that invocation's compactions kept first. Only function calls and
+   assistant messages give a step its id: a kept reasoning item joins the step of the next one, and a kept user
+   message becomes an observation of the step before it, so the segment starts at the next call or assistant
+   message. Without such a conversation, the server judges `responses_create_params.input` and `response.output`
+   as one segment. `verifiers_agent` saves only the prompt as its conversation, so its rollouts are judged without
+   the agent's actions.
+   The server keeps only each source row's reward and where it is saved, and reads the one row again in `/verify`,
+   so a rollouts file larger than memory works. A row that can no longer be read, or is no longer that rollout's
+   row, gives a masked `verifier_error` row.
 2. The prompts: one per segment. Steps are numbered across the run (segment 2 goes on where segment 1 stopped), and
    every prompt carries the run's task and reward.
 3. The merge, per verdict: `match` if any segment matched, with the most severe of their categories (scoring_tamper,
@@ -133,7 +139,6 @@ history, a `conftest.py` that skips the test, a fair fix and a failed fix (`conf
 
 # Limits
 
-- Splitting a Gym rollout at compactions was checked on a real compacted opencode rollout.
 - Agents that save reasoning inline as `<think>` text in their conversation or output (today
   `opencode_sandboxed_agent`'s saved conversation and `terminus_2_agent`'s output) show that reasoning to the judge.
 - The judge model: confirm with MFN which model v2 is calibrated on.
