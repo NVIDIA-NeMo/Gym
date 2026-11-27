@@ -784,6 +784,64 @@ def test_a_record_of_a_kind_no_checked_version_writes_is_skipped_and_named() -> 
     assert output.unknown_records == {"future_bookkeeping": 2}
 
 
+# Session files that Codex wrote in a task sandbox, with a hosted model, for one task: read two files, add their numbers
+# with python3, write the sum to a file and show it. Each is trimmed and redacted: Codex's own instructions, the
+# world-state snapshot, encrypted reasoning, the served model's name and response IDs are replaced; every record keeps
+# its kind and place, and the calls, results and messages are as Codex wrote them.
+FIXTURES = Path(__file__).parent / "fixtures"
+_FIXTURE_COMMANDS = [
+    "cat /workspace/data/a.txt",
+    "cat /workspace/data/b.txt",
+    "python3 -c 'print(1234 + 5678)'",
+    "printf '6912' > /workspace/answer.txt",
+    "cat /workspace/answer.txt",
+]
+_FIXTURE_RUNS = {
+    # version: (each command the model ran, in its order; the token_usage_record lines in the file)
+    "0.144.4": (_FIXTURE_COMMANDS, 0),
+    "0.154.0": (_FIXTURE_COMMANDS, 5),
+    "0.155.1": (_FIXTURE_COMMANDS, 5),
+}
+
+
+@pytest.mark.parametrize("version", sorted(_FIXTURE_RUNS))
+def test_a_session_file_of_a_pinned_codex_version_gives_the_models_calls(version) -> None:
+    transcript = (FIXTURES / f"codex_{version}_session.jsonl").read_text()
+    records = [json.loads(line) for line in transcript.splitlines()]
+    assert records[0]["payload"]["cli_version"] == version
+    commands, token_usage_records = _FIXTURE_RUNS[version]
+
+    output = parse_codex_output(transcript)
+
+    written = [
+        (record["payload"]["call_id"], record["payload"]["name"], record["payload"]["arguments"])
+        for record in records
+        if record["type"] == "response_item" and record["payload"]["type"] == "function_call"
+    ]
+    calls = [item for item in output.items if item.type == "function_call"]
+    assert [(call.call_id, call.name, call.arguments) for call in calls] == written
+    assert [json.loads(call.arguments)["cmd"] for call in calls] == commands
+    results = [item for item in output.items if item.type == "function_call_output"]
+    assert sorted(result.call_id for result in results) == sorted(call.call_id for call in calls)
+    assert all("Process exited with code 0" in result.output for result in results)
+    # Every record that is not a response item is left out and counted; none is of a kind the reader does not know.
+    assert output.skipped_records.get("token_usage_record", 0) == token_usage_records
+    assert sum(output.skipped_records.values()) == sum(
+        record["type"] not in ("session_meta", "response_item") for record in records
+    )
+    assert output.unknown_records == {}
+    trajectory = transcript_to_atif(
+        "task",
+        [item.model_dump(mode="json") for item in output.items],
+        session_id="rollout",
+        agent_name="codex_agent",
+        agent_version=version,
+    )
+    assert [call.tool_call_id for step in trajectory.steps for call in step.tool_calls or []] == [
+        call_id for call_id, _, _ in written
+    ]
+
+
 @pytest.mark.parametrize("search_id", [None, "", "  ", ["ws-1"], 7])
 def test_a_web_search_without_a_usable_id_is_given_one_the_export_accepts(search_id) -> None:
     transcript = _session({"type": "web_search_call", "id": search_id, "action": {"type": "search"}})
