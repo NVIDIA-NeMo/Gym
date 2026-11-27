@@ -152,6 +152,24 @@ class TestDefaultMessagesRoute:
         assert result.status_code == 200
         assert server.last_params.model_dump(exclude_unset=True).get("reasoning") == reasoning
 
+    def test_nonleading_system_message_becomes_user_message_when_configured(self) -> None:
+        body = {
+            "model": "synthetic",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}, {"role": "system", "content": "the environment"}],
+        }
+        client, server = _client(_BodyOnlyModel, anthropic_nonleading_system_note="An operator wrote:")
+        assert client.post("/v1/messages", json=body).status_code == 200
+        assert [item.role for item in server.last_params.input] == ["user", "user"]
+        assert [part["text"] for part in server.last_params.input[1].content] == [
+            "An operator wrote:",
+            "the environment",
+        ]
+
+        client, server = _client(_BodyOnlyModel)
+        assert client.post("/v1/messages", json=body).status_code == 200
+        assert [item.role for item in server.last_params.input] == ["user", "system"]
+
     def test_messages_route_registered_alongside_openai_routes(self) -> None:
         server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         paths = {route.path for route in server.setup_webserver().routes}

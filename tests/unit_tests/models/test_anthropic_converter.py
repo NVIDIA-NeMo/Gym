@@ -21,6 +21,7 @@ two directions against drift.
 """
 
 import json
+import re
 
 import pytest
 from anthropic.types import Message
@@ -124,6 +125,70 @@ class TestAnthropicRequestToResponses:
         assert params.input[0].role == "system"
         assert params.input[0].content == "stay terse"
         assert params.input[1].role == "user"
+
+    def test_nonleading_system_message_becomes_a_user_message_with_the_note(self) -> None:
+        body = {
+            "max_tokens": 10,
+            "messages": [
+                {"role": "system", "content": "stay terse"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "the environment"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call", "name": "run", "input": {}}]},
+                {"role": "system", "content": [{"type": "text", "text": "a reminder"}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call", "content": "done"}]},
+            ],
+        }
+        params = _converter().anthropic_request_to_responses(body, nonleading_system_note="An operator wrote:")
+        items = [item.model_dump(exclude_none=True) for item in params.input]
+
+        # The system message that opens the conversation keeps its role, and the two nonleading ones become user
+        # messages. The second of them follows the tool result that it preceded.
+        assert [(item.get("role"), item["type"]) for item in items] == [
+            ("system", "message"),
+            ("user", "message"),
+            ("user", "message"),
+            (None, "function_call"),
+            (None, "function_call_output"),
+            ("user", "message"),
+        ]
+        note = {"type": "input_text", "text": "An operator wrote:"}
+        assert items[2]["content"] == [note, {"type": "input_text", "text": "the environment"}]
+        assert items[5]["content"] == [note, {"type": "input_text", "text": "a reminder"}]
+        # Without the note every system message keeps its role and its place.
+        unchanged = _converter().anthropic_request_to_responses(body).input
+        assert [getattr(item, "role", None) for item in unchanged] == [
+            "system",
+            "user",
+            "system",
+            None,
+            "system",
+            None,
+        ]
+
+    @pytest.mark.parametrize(
+        ("first", "malformed"),
+        [
+            ("hi", {"role": "system", "content": None}),
+            ("hi", {"role": "system", "content": ["text"]}),
+            ("hi", {"role": "user", "content": ["text"]}),
+            ("hi", {"content": "no role"}),
+            # The conversion refuses the first message before it reaches the block that is no mapping.
+            ([{"type": "document"}], {"role": "user", "content": ["text"]}),
+        ],
+        ids=[
+            "no content",
+            "a system block that is no mapping",
+            "a user block that is no mapping",
+            "no role",
+            "a user block that is no mapping behind a refused block",
+        ],
+    )
+    def test_note_leaves_malformed_content_to_the_conversion(self, first: str | list, malformed: dict) -> None:
+        body = {"max_tokens": 10, "messages": [{"role": "user", "content": first}, malformed]}
+        with pytest.raises(Exception) as without_note:
+            _converter().anthropic_request_to_responses(body)
+        with pytest.raises(type(without_note.value), match=re.escape(str(without_note.value))):
+            _converter().anthropic_request_to_responses(body, nonleading_system_note="An operator wrote:")
 
     def test_user_text_and_image_blocks(self) -> None:
         params = _converter().anthropic_request_to_responses(

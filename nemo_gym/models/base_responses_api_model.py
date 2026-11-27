@@ -327,6 +327,16 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "refuse a level that it does not serve."
         ),
     )
+    anthropic_nonleading_system_note: str | None = Field(
+        default=None,
+        description=(
+            "Hand a nonleading `system` message of an Anthropic Messages request, which is one that follows a message "
+            "of another role, to the backend as a user message that begins with this text, in a text block of its "
+            "own. The Claude Code CLI describes its environment in such a message after the prompt, and a chat "
+            "template can refuse a system message that is not the first message. The system messages that open a "
+            "conversation keep their role. Unset by default, which passes every system message on with its role."
+        ),
+    )
     stream_keepalive_s: Optional[float] = Field(
         default=None,
         gt=0,
@@ -962,7 +972,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``stream_keepalive_s`` holds the event stream open while the call runs.
         """
         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(
-            body, forward_reasoning_effort=self.config.forward_anthropic_reasoning_effort
+            body,
+            forward_reasoning_effort=self.config.forward_anthropic_reasoning_effort,
+            nonleading_system_note=self.config.anthropic_nonleading_system_note,
         )
         if body.get("stream"):
             return await self._stream_messages(request, body, params)

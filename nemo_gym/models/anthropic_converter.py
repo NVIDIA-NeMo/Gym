@@ -314,20 +314,30 @@ class AnthropicConverter:
     # Ingress: Anthropic Messages request  ->  NeMo Gym Responses
     ############################################################################
     def anthropic_request_to_responses(
-        self, anthropic_body: MessageCreateParams, *, forward_reasoning_effort: bool = False
+        self,
+        anthropic_body: MessageCreateParams,
+        *,
+        forward_reasoning_effort: bool = False,
+        nonleading_system_note: str | None = None,
     ) -> NeMoGymResponseCreateParamsNonStreaming:
         """Inverse of ``responses_to_anthropic`` (the request direction).
 
         Parses an inbound Anthropic Messages request into Responses create params so it can be
         forwarded to a downstream Gym model server's ``/v1/responses``. With ``forward_reasoning_effort``,
         the effort of ``output_config`` becomes the Responses ``reasoning.effort``; without it, the effort
-        is dropped.
+        is dropped. With ``nonleading_system_note``, a ``system`` message that follows a message of another role
+        becomes a user message that begins with the note (``_nonleading_system_messages_as_user``).
 
         ``anthropic_body`` is hinted with the Anthropic SDK's native ``MessageCreateParams``
         (a TypedDict union, so it accepts ``stream: true``). It's a type hint only — at runtime
         the value is the raw request dict; we read fields defensively so the proxy stays
         permissive toward unknown / future-beta fields the Claude Code CLI may send.
         """
+        if nonleading_system_note is not None:
+            messages = self._nonleading_system_messages_as_user(
+                anthropic_body.get("messages", []), nonleading_system_note
+            )
+            anthropic_body = {**anthropic_body, "messages": messages}
         params: Dict[str, Any] = {"input": self._anthropic_messages_to_input_items(anthropic_body)}
 
         instructions = self._anthropic_system_to_instructions(anthropic_body.get("system"))
@@ -361,6 +371,37 @@ class AnthropicConverter:
         if isinstance(system, str):
             return system
         return "\n".join(block["text"] for block in system if block.get("type") == "text" and block.get("text"))
+
+    @staticmethod
+    def _nonleading_system_messages_as_user(messages: list[dict[str, Any]], note: str) -> list[dict[str, Any]]:
+        """Return ``messages`` with each ``system`` message after the first message of another role as a user message.
+
+        The user message begins with ``note`` as a text block of its own, followed by the blocks of the system
+        message. The system messages that open the conversation keep their role. A converted message that
+        precedes a user message of tool results is placed after it, so the results still follow their tool calls.
+        A message whose content is neither a string nor a list keeps its role, so the conversion of the messages
+        handles it as it does without a note.
+        """
+        converted: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+        leading = True
+        for message in messages:
+            role, content = message.get("role"), message.get("content", "")
+            if role == "system" and not leading and isinstance(content, (str, list)):
+                blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+                pending.append({"role": "user", "content": [{"type": "text", "text": note}, *blocks]})
+                continue
+            leading = leading and role == "system"
+            holds_tool_results = (
+                role == "user"
+                and isinstance(content, list)
+                and bool(content)
+                and isinstance(content[0], dict)
+                and content[0].get("type") == "tool_result"
+            )
+            converted += [message, *pending] if holds_tool_results else [*pending, message]
+            pending = []
+        return converted + pending
 
     def _anthropic_messages_to_input_items(self, anthropic_body: Dict[str, Any]) -> List[Any]:
         items: List[Any] = []
