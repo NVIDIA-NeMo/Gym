@@ -63,7 +63,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@b6b4df4160277e1048091f972eda0c51319bc845
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
 
   previous-tag:
     if: ${{ !inputs.gh-release-from-tag }}
@@ -182,7 +182,7 @@ jobs:
       && needs.release-workflow-tests.result == 'success'
     permissions:
       contents: read
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@b6b4df4160277e1048091f972eda0c51319bc845
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       python-package: nemo_gym
@@ -202,7 +202,7 @@ jobs:
       !cancelled() && !failure() && needs.bump.result == 'success'
     permissions:
       contents: read
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_test_wheel.yml@b6b4df4160277e1048091f972eda0c51319bc845
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_test_wheel.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
     with:
       python-package: nemo_gym
       packaging: uv
@@ -241,7 +241,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@b6b4df4160277e1048091f972eda0c51319bc845
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
     with:
       release-ref: ${{ inputs.release-ref || github.sha }}
       library-name: NeMo-Gym

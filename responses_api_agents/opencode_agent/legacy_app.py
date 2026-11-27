@@ -33,6 +33,10 @@ class OpenCodeLegacyAgent(OpenCodeAgent):
     async def run(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("OpenCode sandbox sessions must use EnvironmentServer /run")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(422, "Local OpenCode /run requires resources_server")
         participant = self.checkpoint_participant

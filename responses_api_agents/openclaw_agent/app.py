@@ -34,7 +34,7 @@ from uuid import uuid4
 
 import psutil
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -114,6 +114,7 @@ from responses_api_agents.openclaw_agent.observability import (
     reconcile_openclaw_calls,
 )
 from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK, OpenClawSandboxSession
+from responses_api_agents.openclaw_agent.sandbox_runtime import upload_openclaw_runtime, uploaded_runtime_dir
 from responses_api_agents.openclaw_agent.setup_openclaw import (
     DEFAULT_NODE_VERSION,
     ensure_openclaw,
@@ -688,9 +689,27 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
             "checks that it holds `openclaw_version` instead of installing one."
         ),
     )
+    sandbox_runtime_upload: bool = Field(
+        default=False,
+        description=(
+            "Prepare the runtime on the agent server host for the sandbox's platform and upload it, instead of "
+            "downloading it inside the sandbox. Installing then needs only `bash`, `tar` and `gzip` in the sandbox: "
+            "no network, no root and no package manager. The image must hold the shared libraries the official "
+            "Node.js build links to, such as `libstdc++.so.6`. Cannot be combined with `sandbox_runtime_dir`."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     # Per-request timeout of a sandbox session's MCP tool grants (OpenClaw's mcp.servers.<name>.timeout).
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _one_sandbox_runtime_source(self) -> "OpenClawAgentConfig":
+        if self.sandbox_runtime_upload and self.sandbox_runtime_dir:
+            raise ValueError(
+                "sandbox_runtime_upload uploads a runtime and sandbox_runtime_dir names one already in the sandbox; "
+                "set only one of them"
+            )
+        return self
 
     @property
     def command_parts(self) -> list[str]:
@@ -832,10 +851,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         directory = f"/tmp/nemo-gym-openclaw-sessions/{uuid4().hex}"
-        runtime = (
-            self.config.sandbox_runtime_dir
-            or f"/tmp/nemo-gym-openclaw-node-{DEFAULT_NODE_VERSION}-{self.config.openclaw_version}"
-        )
+        if self.config.sandbox_runtime_dir:
+            runtime = self.config.sandbox_runtime_dir
+        elif self.config.sandbox_runtime_upload:
+            runtime = uploaded_runtime_dir(self.config.openclaw_version)
+        else:
+            runtime = f"/tmp/nemo-gym-openclaw-node-{DEFAULT_NODE_VERSION}-{self.config.openclaw_version}"
         state = OpenClawSandboxSession(
             request=body,
             session=SandboxSession(
@@ -863,7 +884,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"stderr={(prepared.stderr or '')[-16000:]}; stdout={(prepared.stdout or '')[-16000:]}"
                 )
             prepared_directory = True
-            if self.config.sandbox_runtime_dir:
+            if self.config.sandbox_runtime_upload:
+                # Needs no network, root or package manager in the sandbox; a runtime already there is kept.
+                await upload_openclaw_runtime(
+                    sandbox,
+                    runtime_dir=runtime,
+                    openclaw_version=self.config.openclaw_version,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
+                )
+            if self.config.sandbox_runtime_dir or self.config.sandbox_runtime_upload:
                 # Probe the CLI with a private home, then verify the package version, its Node engine range and that
                 # the exec tool's compiled process helper loads.
                 node = shlex.quote(runtime + "/node/bin/node")

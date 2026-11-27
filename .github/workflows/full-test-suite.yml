@@ -477,7 +477,7 @@ jobs:
           fi
       - name: Notify Gym alerts channel
         if: steps.ref_check.outputs.allowed == 'true'
-        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@b6b4df4160277e1048091f972eda0c51319bc845
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@7c09a9e67a5cd4f2e73803114195d6705738d6c1
         with:
           needs-json: ${{ toJSON(needs) }}
           webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}

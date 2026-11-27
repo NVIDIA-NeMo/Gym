@@ -1134,6 +1134,29 @@ class TestAnthropicReasoningReplayRoute:
 
 
 class TestResponsesDispatchRoute:
+    @pytest.mark.parametrize(
+        "include_created, expected_types",
+        [
+            (True, ["response.created", "response.output_item.done", "response.completed"]),
+            (False, ["response.output_item.done", "response.completed"]),
+        ],
+    )
+    def test_created_snapshot_can_be_disabled_without_losing_output_or_usage(
+        self, include_created, expected_types
+    ) -> None:
+        client, server = _client(_EchoModel)
+        server.config.include_response_created = include_created
+
+        response = client.post("/v1/responses", json={"stream": True, "input": "task"})
+
+        assert response.status_code == 200
+        events = _sse_payloads(response.text)
+        assert [event["type"] for event in events] == expected_types
+        item = next(event["item"] for event in events if event["type"] == "response.output_item.done")
+        assert item["content"][0]["text"] == "hi"
+        assert events[-1]["response"]["output"] == [item]
+        assert events[-1]["response"]["usage"]["total_tokens"] == 10
+
     @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
     def test_streaming_message_keeps_id_annotations_and_phase(self, phase) -> None:
         client, server = _client(_EchoModel)
@@ -1464,6 +1487,19 @@ class TestResponsesStreamKeepalive:
     """``stream_keepalive_s`` holds a buffered Responses stream open while the backend computes."""
 
     STREAM_BODY = {"stream": True, "input": [{"role": "user", "content": "hi"}]}
+
+    def test_disabling_created_snapshot_preserves_minimal_keepalive(self) -> None:
+        client, server = _keepalive_client(_SlowEchoModel)
+        server.config.include_response_created = False
+
+        response = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert response.status_code == 200
+        events = _sse_payloads(response.text)
+        created = [event for event in events if event["type"] == "response.created"]
+        assert len(created) == 1
+        assert events[0]["type"] == "response.created"
+        assert events[-1]["type"] == "response.completed"
 
     def test_off_by_default(self) -> None:
         config = BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="")

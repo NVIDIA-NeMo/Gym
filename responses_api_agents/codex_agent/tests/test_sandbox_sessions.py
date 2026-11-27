@@ -245,6 +245,43 @@ def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
 
+def test_gzip_rejects_local_execution_before_calling_resources(setup):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = True
+    agent.config.resources_server = {"type": "resources_servers", "name": "resources"}
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert (
+            response.json()["detail"]
+            == "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert (
+            run.json()["detail"]
+            == "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+    agent.server_client.post.assert_not_called()
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+def test_gzip_helper_is_uploaded_only_when_enabled(setup, gzip_enabled):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = gzip_enabled
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        directory = sandbox.directory
+        assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
+        payload = json.loads(sandbox.files[f"{directory}/input.json"])
+        assert payload["gzip_requests_enabled"] is gzip_enabled
+
+
 def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
     agent, sandbox = setup
     with patch.object(agent, "_run_codex", AsyncMock(side_effect=AssertionError("host Codex must not run"))):
@@ -3675,6 +3712,13 @@ def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     bundle = closed["agent_observations"]
     invocation, tool = bundle["records"]
     assert invocation["conversation"][1]["call_id"] == tool["tool_call_id"] == "provider-call"
+    assert invocation["conversation"][2]["call_id"] == tool["tool_call_id"]
+    assert tool["native_tool_call_id"] == "provider-call"
+    # The agent session reports schema 2.0 transcript attempts owned by this run's instance and clock.
+    assert bundle["schema_version"] == "2.0"
+    assert invocation["agent_instance"] == tool["agent_instance"] and tool["agent_instance"].startswith("codex-agent:")
+    assert tool["timings"][0]["boundary"] == "transcript"
+    assert tool["timings"][0]["clock_domain"].startswith("codex-wall:")
     assert invocation["conversation"][1]["input" if custom else "arguments"] == (
         "*** Begin Patch\n*** End Patch" if custom else '{"cmd":"exit 7"}'
     )
@@ -3847,6 +3891,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
         assert invocation["status"] == "failed"
         assert observed_tool["status"] == "completed"
         assert invocation["conversation"][1]["call_id"] == observed_tool["tool_call_id"] == "provider-call"
+        assert observed_tool["native_tool_call_id"] == "provider-call"
         assert invocation["conversation"][2]["output"] == native_output
 
 

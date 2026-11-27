@@ -37,6 +37,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    REQUEST_GZIP_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -674,6 +675,7 @@ class PiMCPServerConfig(BaseModel):
 
 
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     # Only the direct /run compatibility path calls Resources. Sandbox sessions
     # receive SandboxAccess from EnvironmentServer instead.
     resources_server: Optional[ResourcesServerRef] = None
@@ -1116,6 +1118,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             extensions.append("prompt-cache-key.mjs")
         if self.config.log_requests:
             extensions.append("request-log.mjs")
+        if self.config.gzip_requests_enabled:
+            extensions.append("request_gzip_extension.mjs")
         return extensions
 
     def _sandbox_payload(
@@ -1260,6 +1264,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         extensions = self._sandbox_extensions(mcp=bool(mcp_servers))
         for extension in extensions:
             files[extension] = Path(__file__).with_name(extension)
+        if self.config.gzip_requests_enabled:
+            files["request_gzip.mjs"] = REQUEST_GZIP_SCRIPT
         payload = self._sandbox_payload(state, prompt=prompt, system=system, extensions=extensions)
         # Pi attaches `@file` arguments, media included, to the prompt it reads from stdin.
         # The paths depend only on the content, so the same task gives Pi the same prompt in every sandbox.
@@ -1695,6 +1701,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
     ) -> AgentEpisode:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1821,6 +1831,10 @@ class PiAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Pi sessions require EnvironmentServer /run")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

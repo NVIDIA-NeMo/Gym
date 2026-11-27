@@ -783,6 +783,7 @@ def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
 
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
@@ -938,6 +939,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     @property
     def command_parts(self) -> list[str]:
         return shlex.split(self.command)
+
+    @model_validator(mode="after")
+    def _validate_gzip_version(self) -> Self:
+        if self.gzip_requests_enabled and _is_opencode2(self.opencode_version):
+            raise ValueError(
+                "gzip_requests_enabled works only in OpenCode 1 agent sessions. OpenCode 2 is unsupported."
+            )
+        return self
 
 
 class OpenCodeAgentRunRequest(BaseRunRequest):
@@ -1324,6 +1333,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
     ) -> AgentEpisode:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -3209,6 +3222,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         config.setdefault("plugin", []).append(
             (Path(state.session.session_dir) / TASK_ENVIRONMENT_PLUGIN_FILE).as_uri()
         )
+        if self.config.gzip_requests_enabled:
+            config["plugin"].append((Path(state.session.session_dir) / "request_gzip_plugin.mjs").as_uri())
         if mcp_servers:
             config["plugin"].append((Path(state.session.session_dir) / REQUIRED_MCP_PLUGIN_FILE).as_uri())
         if self.config.output_token_policy == "remaining_context":
@@ -3246,6 +3261,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             }
         payload = {
             "instructions": system if self.config.system_prompt_mode == "append" else "",
+            "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
             "command": command,

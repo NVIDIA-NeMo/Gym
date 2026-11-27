@@ -54,7 +54,7 @@ flowchart LR
   Adapter --> Pools[Optional GitLab approval pools]
 ```
 
-The GitLab adapter will use [FW-CI-templates commit `b6b4df4160277e1048091f972eda0c51319bc845`](https://github.com/NVIDIA-NeMo/FW-CI-templates/commit/b6b4df4160277e1048091f972eda0c51319bc845).
+The GitLab adapter will use [FW-CI-templates commit `7c09a9e67a5cd4f2e73803114195d6705738d6c1`](https://github.com/NVIDIA-NeMo/FW-CI-templates/commit/7c09a9e67a5cd4f2e73803114195d6705738d6c1).
 The adapter will reconcile optional approval pools and leave reviewer selection to
 the MR participants. It will exclude the MR author, skip mapped users without
 active Developer-or-higher project membership and report them in `warnings`.

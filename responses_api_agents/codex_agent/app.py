@@ -634,6 +634,7 @@ _TOOL_HOST_DETAIL_CHARS = 4000
 
 
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).
@@ -1225,6 +1226,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "directory": state.session.session_dir,
             "command": command,
             "model_base_url": base_url,
+            "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "invocation_id": invocation_id,
             "timeout": timeout,
             "prompt": prompt,
@@ -1482,6 +1484,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 status=invocation_status,
                 error_type=invocation_error,
                 gaps=gaps,
+                # One Codex process writes this session's records on one sandbox clock.
+                clock_domain=f"codex-wall:{uuid4().hex}",
+                agent_instance=f"codex-agent:{uuid4().hex}",
+                observation_schema_version="2.0",
             )
             state.observations = associate_codex_compaction_calls(
                 state.observations, state.model_attempts or [], model_ref=self.config.model_server
@@ -1928,7 +1934,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
             observations = None
             if rollout_id is not None:
                 observations = read_codex_observations(
-                    codex_home, rollout_id, returncode=proc.returncode, timed_out=timed_out
+                    codex_home,
+                    rollout_id,
+                    returncode=proc.returncode,
+                    timed_out=timed_out,
+                    # This fresh CODEX_HOME is written by one local Codex process.
+                    clock_domain=f"codex-wall:{uuid4().hex}",
+                    agent_instance=f"codex-agent:{uuid4().hex}",
+                    observation_schema_version="2.0",
                 )
             return stdout.decode(errors="replace"), model, observations, timed_out
         finally:
@@ -2010,6 +2023,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -2112,6 +2129,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
             raise AgentSessionConflictError("Use the agent session responses and close routes")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:

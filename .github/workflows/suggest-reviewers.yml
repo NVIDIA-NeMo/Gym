@@ -46,7 +46,7 @@ permissions:
 
 jobs:
   suggest-reviewers:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@b6b4df4160277e1048091f972eda0c51319bc845
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
     with:
       pr_number: ${{ inputs.pr_number }}
       app-id: ${{ vars.GYM_PR_APP_ID }}
