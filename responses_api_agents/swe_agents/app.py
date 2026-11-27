@@ -2029,6 +2029,14 @@ class RunOpenHandsAgent(BaseModel):
             print(f"Eval command failed for {instance_id}: {e}", flush=True)
             metrics.final_eval_time += time.time()
             metrics.patch_exists = True
+            # [CUSTOM-SWE-SPINUP-METRIC-RESET 2026-11-27] This eval-exception path never
+            # reads final_eval_apptainer_spinup_timestamp_fpath to "close" the value (the
+            # eval container itself failed, so that file may never have been written) --
+            # without this reset, final_eval_apptainer_spinup_time stays at its initial
+            # -time.time() (a large negative number, e.g. ~-1.8e9) and gets persisted as if
+            # it were a real elapsed time. Mirrors the agent-command-failure branch above,
+            # which already does this correctly.
+            metrics.final_eval_apptainer_spinup_time = None
             # Detect wall-clock eval timeout: final_eval_time (elapsed since eval start)
             # reached or exceeded the configured swebench_tests_timeout.
             metrics.eval_timed_out = (
@@ -2102,6 +2110,9 @@ class RunOpenHandsAgent(BaseModel):
         except Exception as e:
             print(f"Golden-patch eval failed for {instance_id}: {e}", flush=True)
             metrics.final_eval_time += time.time()
+            # [CUSTOM-SWE-SPINUP-METRIC-RESET 2026-11-27] See the matching reset in
+            # process_single_datapoint's own eval-exception branch -- same bug, same fix.
+            metrics.final_eval_apptainer_spinup_time = None
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return None
 
