@@ -37,8 +37,8 @@ reverify:
     config: [resources_servers/reward_hacking_judge/configs/reward_hacking_judge.yaml]
 ```
 
-The step sets `NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS`, from which this server reads the source rewards and the agents'
-saved conversations.
+The step sets `NEMO_GYM_REVERIFY_SOURCE_ROLLOUTS`, from which this server reads the source rewards and
+`ng_agent_observations`.
 
 # Run it on a finished run
 
@@ -91,18 +91,19 @@ a context compaction. This server does the same.
 
 1. Where a Gym rollout splits: the transcript and Gym's ATIF export do not mark compactions. The agent harness
    reports each one in the rollout's `ng_agent_observations` as a `context_compaction` record, whose
-   `first_kept_item_id` names the item of the agent's own conversation that the compacted context kept first
-   (splitting is verified for opencode). Those ids are the agent's, not the ids in `response.output`. So when the
-   source row's `ng_agent_observations` holds a root `agent_invocation` (no `parent_invocation_id`) with a
-   non-empty `conversation`, the server judges that conversation. A conversation that does not start with a user,
-   system or developer message (`terminus_2_agent` saves only its output) is judged after
+   `first_kept_item_id` names the item of the `ng_agent_observations` conversation (the root `agent_invocation`'s
+   `conversation`) that the compacted context kept first (splitting is verified for opencode). Those ids are not
+   the ids in `response.output`. So when the source row's `ng_agent_observations` holds a root `agent_invocation`
+   (no `parent_invocation_id`) with a non-empty `conversation`, the server judges that conversation. One that does
+   not start with a user, system or developer message (`terminus_2_agent` records only its output there) is judged
+   after
    `responses_create_params.input`, so the judge still sees the task. A new segment starts at the ATIF step whose
    `source_item_id` is an item that one of that invocation's compactions kept first. Only function calls and
    assistant messages give a step its id: a kept reasoning item joins the step of the next one, and a kept user
    message becomes an observation of the step before it, so the segment starts at the next call or assistant
    message. Without such a conversation, the server judges `responses_create_params.input` and `response.output`
-   as one segment. `verifiers_agent` saves only the prompt as its conversation, so its rollouts are judged without
-   the agent's actions.
+   as one segment. `verifiers_agent` records only the prompt in its `ng_agent_observations` conversation, so its
+   rollouts are judged without the agent's actions.
    The server keeps only each source row's reward and where it is saved, and reads the one row again in `/verify`,
    so a rollouts file larger than memory works. A row that can no longer be read, or is no longer that rollout's
    row, gives a masked `verifier_error` row.
@@ -139,8 +140,9 @@ history, a `conftest.py` that skips the test, a fair fix and a failed fix (`conf
 
 # Limits
 
-- Agents that save reasoning inline as `<think>` text in their conversation or output (today
-  `opencode_sandboxed_agent`'s saved conversation and `terminus_2_agent`'s output) show that reasoning to the judge.
+- Agents that record reasoning inline as `<think>` text in the transcript the judge reads (today
+  `opencode_sandboxed_agent`'s `ng_agent_observations` conversation and `terminus_2_agent`'s `response.output`) show
+  that reasoning to the judge.
 - The judge model: confirm with MFN which model v2 is calibrated on.
 - Calls are slow (2 to 4 minutes each for a short rollout in a smoke on 2026-11-13); size
   `judge_endpoint_max_concurrency` with MFN.

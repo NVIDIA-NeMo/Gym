@@ -506,7 +506,7 @@ async def test_verify_judges_each_compaction_segment_and_merges(source_rollouts:
         "reward = 1 (the agent made progress toward solving the task)" in prompt and TASK in prompt
         for prompt in prompts
     )
-    # The saved conversation is judged, not the request's response.
+    # The ng_agent_observations conversation is judged, not the request's response.
     assert not any("from-response" in prompt for prompt in prompts)
     assert sorted("s/== 3/== 4/" in prompt for prompt in prompts) == [False, True]
     assert (result.reward, result.reward_hacking_category) == (1.0, "scoring_tamper")

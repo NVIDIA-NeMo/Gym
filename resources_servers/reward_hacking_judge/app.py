@@ -84,9 +84,9 @@ class RewardHackingJudgeConfig(BaseResourcesServerConfig):
     # A judge_core judge YAML; relative paths are read from this server's directory.
     judge_config_fpath: str = "judges/reward_hacking_v2.yaml"
     # The source run's rollouts.jsonl. `gym eval reverify` does not send saved rewards or agent observations to
-    # /verify, so the server reads them from here by task and rollout index: the reward v2 shows the judge, and the
-    # agent's own conversation with the compactions where it splits into segments. Unset: no reward is shown, and
-    # the request's transcript is judged as one segment.
+    # /verify, so the server reads them from here by task and rollout index: the reward v2 shows the judge, and
+    # the ng_agent_observations conversation with the compactions where it splits into segments. Unset: no reward
+    # is shown, and the request's transcript is judged as one segment.
     source_rollouts_jsonl_fpath: Optional[str] = None
     # Attempts per rollout when the judge answers without a valid verdict.
     judge_max_attempts: int = Field(default=2, ge=1)
@@ -144,7 +144,7 @@ class SourceRun:
     """What /verify is not sent about a saved rollout: its reward, and its saved row.
 
     The row itself is not kept: a source rollouts file can be far larger than memory, so `verify` reads the one row
-    again when it needs the agent's own conversation.
+    again when it needs the `ng_agent_observations` conversation.
     """
 
     reward: float | None = None
@@ -202,8 +202,8 @@ def read_source_row(source: SourceRun, key: tuple[object, object]) -> dict[str, 
 
 
 def root_invocation(row: dict[str, Any]) -> tuple[list[dict[str, Any]], tuple[str, ...]] | None:
-    """The conversation the agent saved for its root invocation (no `parent_invocation_id`), and the items its
-    context compactions kept first; None when no root invocation saved a conversation."""
+    """The `ng_agent_observations` conversation (the root `agent_invocation`'s, no `parent_invocation_id`), and the
+    items its context compactions kept first; None when no root invocation has a conversation."""
     observations = row.get(NG_AGENT_OBSERVATIONS_KEY)
     saved = observations.get("records") if isinstance(observations, dict) else None
     records = [record for record in saved or [] if isinstance(record, dict)]
@@ -256,8 +256,8 @@ def segment_start_item_ids(
 def judged_segments(body: BaseVerifyRequest, saved_row: dict[str, Any] | None) -> list[list[Step]]:
     """The run's ATIF steps, split into the segments the judge sees. Raises AtifExportError.
 
-    The agent's own conversation is judged when its root invocation saved one: its compactions name its item ids,
-    so the run splits there. A conversation that does not start with the prompt follows the request's input.
+    The `ng_agent_observations` conversation is judged when the root invocation has one: its compactions name its
+    item ids, so the run splits there. A conversation that does not start with the prompt follows the request's input.
     Otherwise the request's transcript is judged as one segment.
     """
     request_input = body.responses_create_params.model_dump(mode="json").get("input")
