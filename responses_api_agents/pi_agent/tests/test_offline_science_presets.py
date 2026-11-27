@@ -89,7 +89,7 @@ def test_preset_runs_pi_agent_sessions_through_single_agent_turn_legacy(
     ttl_s = agent_config.sandbox_config["ttl_s"]
     assert ttl_s >= agent_config.timeout + agent_config.sandbox_config["ready_timeout_s"]
     # The pinned Pi in the image, with no output cap on its requests.
-    assert agent_config.pi_version == "0.85.1"
+    assert agent_config.pi_version == "1.5.2"
     assert agent_config.output_token_policy == "remaining_context"
     # Only the server types a sandbox must reach take the host address, and the head server stays on loopback. The
     # judge stays there too, except in hle_search: Tavily is a Resources server, so every Resources server leaves.

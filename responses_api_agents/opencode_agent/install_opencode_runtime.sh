@@ -98,7 +98,7 @@ if [ -n "$source_binary" ]; then
   chmod 755 "$staged"
   # The probe must exit successfully as well as print the exact version.
   if ! actual=$("$staged" --version) || ! is_requested_version "$actual"; then
-    echo 'OpenCode executable version mismatch' >&2
+    echo "OpenCode executable version mismatch: requested $version, found ${actual:-no version}" >&2
     exit 1
   fi
   mv -f "$staged" "$runtime/opencode"

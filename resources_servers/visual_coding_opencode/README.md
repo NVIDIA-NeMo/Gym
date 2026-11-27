@@ -53,11 +53,32 @@ Server opens an agent session, sends the task and closes the session.
   `opencode_agent`, and the sandbox image ships only OpenCode. `configs/multiharness.yaml` adds Pi, Codex, Claude
   Code and OpenClaw (see "Other harnesses"), and their rows keep the same instruction.
 
+## Sandbox image
+
+Each task runs OpenCode in an OpenSandbox sandbox started from this image. Build it from `sandbox_image/` for the
+architecture of the OpenSandbox nodes, push it to a registry that the OpenSandbox server can pull from, and set
+`VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it:
+
+```bash
+docker build --platform linux/amd64 -t <registry>/visual-coding-opencode-sandbox:<tag> \
+    resources_servers/visual_coding_opencode/sandbox_image
+docker push <registry>/visual-coding-opencode-sandbox:<tag>
+export VISUAL_CODING_OPENCODE_SANDBOX_IMAGE=<registry>/visual-coding-opencode-sandbox:<tag>
+```
+
+The build context is `sandbox_image/`, not the repository root. The image holds the Python toolkit, OpenCode at
+`/opt/opencode/bin/opencode` and OpenCode's plugin dependencies, built from the lockfile in `sandbox_image/opencode/`.
+The sandbox can reach only the policy model server, so everything the agent runs must be in the image.
+
+The Dockerfile checks the SHA-256 of the OpenCode binary and of the plugin archive during the build, so a build that
+succeeds has the expected files. When you change the OpenCode version or the lockfile, update those digests in the
+Dockerfile.
+
 ## Run
 
 The config needs the following:
 
-1. Build the sandbox image from `sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. The
+1. Build the sandbox image (see "Sandbox image") and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. The
    image has the Python toolkit, OpenCode under `/opt/opencode/bin` and OpenCode's plugin dependencies, which the
    config pins by SHA-256. The plugin dependencies come from the lockfile in `sandbox_image/opencode/`, a copy of
    `benchmarks/agentic_if/opencode/`.

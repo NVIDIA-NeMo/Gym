@@ -72,6 +72,11 @@ gym env test +entrypoint=responses_api_models/agentic_if_text +should_validate_d
 
 ### Evidence-ID judge transport
 
+The opt-in `judge_evidence_transport: evidence_ids_or_quotes_v1` uses indexed evidence
+up to 527 response spans and exact quotes above that threshold. Both paths send
+the full answer. Each judge directory records the selection in
+`transport_selection.json` and uses a separate cache identity.
+
 The shipped profile selects `judge_evidence_transport: evidence_ids_v1`, following
 [bounded real-task validation](../../benchmarks/agentic_if_realworld/validation.md#bounded-evidence-id-validation).
 Judges select instruction IDs and exact response-span IDs instead of copying

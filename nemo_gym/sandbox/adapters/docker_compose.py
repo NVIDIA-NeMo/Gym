@@ -46,6 +46,7 @@ from nemo_gym.sandbox.observability import span_attributes
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     COMPOSE_SERVICE_OPTION_FIELDS,
+    PLACEMENT_GROUP_KEY,
     SupportsSandboxDetachedExec,
     SupportsSandboxEndpoint,
     SupportsSandboxNetwork,
@@ -83,12 +84,6 @@ def _merge_provider_options(*layers: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 merged[key] = list(value) if isinstance(value, tuple) else value
     return merged
-
-
-# Every sandbox of one Compose project carries this label with a shared placement group. Members
-# reach each other by pod IP and share storage, so a multi-cell front end (cell-router)
-# must place them together; it routes every create with the same value to one cell.
-PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
 
 
 def _seconds(value: str | int | float) -> float:

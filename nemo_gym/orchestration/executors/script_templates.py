@@ -254,8 +254,10 @@ EXPORT_STEP_MODULE = "nemo_gym.orchestration.export_step"
 EVAL_SUCCEEDED_MARKER_ENV = "GYM_EVAL_SUCCEEDED_MARKER"
 
 
-def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) -> str:
-    """Render the part of the driver script that runs `gym eval run`, then each export of its rollouts.
+def render_export_tail(
+    bench_dir: Path, exports: list[tuple[str, list[str]]], reverify_steps: list[tuple[str, str, str]] = ()
+) -> str:
+    """Render the part of the driver script that runs `gym eval run`, then its reverify steps and exports.
 
     `exports` pairs an exporter name with its shell-quoted override arguments for `EXPORT_STEP_MODULE`. The run is a child, not
     `exec`'d, so the script can go on to the exports; TERM, which is what the driver gets at the time limit, is
@@ -263,6 +265,11 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
     `<bench_dir>/eval.exit` and is the script's exit code: the exports are reported in their own result files
     and cannot change it. They run only after a successful run, so a partial run is never exported, and an
     export that already succeeded is not repeated (the export step decides that from its result file).
+
+    `reverify_steps` holds (step name, shell-quoted output path, `gym eval reverify` command) for each reverify
+    step. They run after a successful run and before the exports, so an export sees their output. A step whose
+    output exists resumes it, so a requeued job judges only what is left; a failed step is reported and does not
+    change the exit code.
     """
     bench = shlex.quote(str(bench_dir))
     lines = [
@@ -280,6 +287,11 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
         f'echo "$gym_run_rc" > {bench}/{EVAL_EXIT_FILENAME} || true',
         'if [ "$gym_run_rc" -eq 0 ]; then',
         f'    [ -z "${{{EVAL_SUCCEEDED_MARKER_ENV}:-}}" ] || : > "${EVAL_SUCCEEDED_MARKER_ENV}" || true',
+        *(
+            f"    if [ -e {output} ]; then {command} --resume; else {command}; fi"
+            f' || echo "Reverify step {name} failed; the run itself is unchanged." >&2'
+            for name, output, command in reverify_steps
+        ),
         *(
             f"    python3 -m {EXPORT_STEP_MODULE} {shlex.quote(name)} {' '.join(args)} || true"
             for name, args in exports
