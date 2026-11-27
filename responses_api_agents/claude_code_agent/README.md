@@ -343,7 +343,9 @@ Sandbox requests may set `metadata.agent_timeout_sec` to a positive number of
 seconds, encoded as a string. This bounds the activation's model and tool work,
 capped by the configured `timeout`; missing or invalid values use that ceiling.
 Other metadata keys are rejected with HTTP 422. Setup and cleanup keep their
-separate limits.
+separate limits. The response states the limit that the activation ran under as
+`metadata.agent_timeout_sec`, beside `harness_execution`, `claude_code_version` and,
+when the runner reported them, `harness_hostname` and `harness_pid`.
 
 The shared `SandboxSession` supervisor stops the harness before reading its
 dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,

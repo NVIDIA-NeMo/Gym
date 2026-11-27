@@ -32,7 +32,7 @@ from responses_api_agents.claude_code_agent.tests.test_sandbox import agent, res
 RESULT = json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": {"input_tokens": 1}})
 
 
-async def launch(monkeypatch, instance, prompt="Fix the code", result=RESULT):
+async def launch(monkeypatch, instance, prompt="Fix the code", result=RESULT, metadata=None, runtime_info=None):
     """Run one sandbox activation with a stubbed execution; return the runner input and response."""
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
@@ -43,10 +43,11 @@ async def launch(monkeypatch, instance, prompt="Fix the code", result=RESULT):
             cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
             artifacts=None,
         ),
+        runtime_info=runtime_info,
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(result))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
-    body = NeMoGymResponseCreateParamsNonStreaming(input=prompt)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=prompt, metadata=metadata)
     response = await instance._sandbox_response(state, body, prompt=prompt, system=None)
     return execute.await_args.args[0], response
 
@@ -149,8 +150,26 @@ async def test_turn_that_failed_otherwise_states_no_cause(monkeypatch, result):
     instance = agent(anthropic_base_url="https://model.example")
     _, response = await launch(monkeypatch, instance, result=result)
     assert response.status == "failed"
-    assert response.metadata is None and response.error is None
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata and response.error is None
     assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("requested", "enforced"), [(None, "7200.0"), ("90", "90.0"), ("86400", "7200.0")])
+async def test_response_states_the_enforced_timeout_the_version_and_the_runner(monkeypatch, requested, enforced):
+    instance = agent(anthropic_base_url="https://model.example", timeout=7200)
+    metadata = {"agent_timeout_sec": requested} if requested else None
+    runner = adapter.HarnessProcessInfo(hostname="worker", pid=7)
+
+    _, response = await launch(monkeypatch, instance, metadata=metadata, runtime_info=runner)
+
+    assert response.metadata == {
+        "harness_execution": "sandbox",
+        "harness_hostname": "worker",
+        "harness_pid": "7",
+        "claude_code_version": instance.config.claude_code_version,
+        "agent_timeout_sec": enforced,
+    }
 
 
 def run_runner(tmp_path, prompt=None):

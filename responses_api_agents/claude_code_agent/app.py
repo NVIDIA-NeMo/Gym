@@ -656,6 +656,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         *,
         status: str | None = None,
         error: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> NeMoGymResponse:
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -687,6 +688,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             **({"status": status} if status is not None else {}),
             error=error,
+            metadata=metadata,
             id=response_id,
             created_at=int(time()),
             model=model_name,
@@ -917,6 +919,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
         env.update(self._client_env())
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         artifacts = None
         failure = None
         try:
@@ -939,7 +942,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "skills_path": skills_path,
                         **({"prompt": prompt} if stdin else {}),
                     },
-                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                    timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as error:
@@ -980,6 +983,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         outcome = self.classify_outcome(run_metadata)
         model_request_failed = status == "failed" and outcome.failure_kind != "unknown"
+        runtime = state.runtime_info
         response = self._response_from_output(
             body,
             items,
@@ -992,6 +996,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             }
             if model_request_failed
             else None,
+            metadata={
+                "harness_execution": "sandbox",
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
+                **({"claude_code_version": version} if (version := self.config.claude_code_version) else {}),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+            },
         )
         if model_request_failed:
             # A turn that failed otherwise stays unclassified, which the Environment Server verifies.
