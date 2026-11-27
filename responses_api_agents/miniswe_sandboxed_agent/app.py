@@ -53,7 +53,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentObservationBundle
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker, monotonic_timeout
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
     HarnessOutcome,
@@ -80,7 +80,6 @@ DEPRECATION_WARNING = (
     "must stay on this adapter until their environment-server migration. "
     "See responses_api_agents/mini_swe_agent/README.md#agent-sessions."
 )
-from nemo_gym.utils import monotonic_timeout
 
 
 @cache

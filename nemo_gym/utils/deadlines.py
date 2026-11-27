@@ -22,8 +22,8 @@ def monotonic_timeout(deadline: float | None) -> asyncio.Timeout:
     """Return an ``asyncio`` timeout that expires at a ``time.monotonic()`` deadline.
 
     ``asyncio.timeout_at`` compares its deadline with ``loop.time()``, which is not always ``time.monotonic()``:
-    uvloop's clock also counts time the machine slept, so on macOS it can run days ahead and a monotonic deadline
-    passed to ``timeout_at`` expires at once. This converts the deadline to a remaining duration instead.
+    under uvloop on macOS, ``loop.time()`` can run days ahead of it, so a monotonic deadline passed to ``timeout_at``
+    expires at once. This converts the deadline to a remaining duration instead.
     ``None`` never expires.
     """
     return asyncio.timeout(None if deadline is None else deadline - monotonic())
