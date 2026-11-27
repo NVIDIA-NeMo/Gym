@@ -1,0 +1,37 @@
+# Single-turn LVBench (THUDM/LVBench, not LongVideoBench: 1,549 questions over 103 long videos): one policy call per
+# question with the video as a file:// input_video URL (frame sampling is chosen on the serving side, e.g. vLLM's
+# --allowed-local-media-path and --media-io-kwargs). The rows ask in the benchmark's letter wording, so a judge model
+# reads the chosen option (llm_extraction_v1).
+# Data: prepare.py downloads the authors' annotation (video_info.meta.jsonl of THUDM/LVBench at a pinned revision) and
+# binds each question to its video in lvbench_source_dir by the SHA-256 in that directory's FILES.sha256; rows point at
+# lvbench_video_url_dir (where the model server reads video/).
+config_paths:
+  - resources_servers/lvbench/configs/lvbench_single_turn_llm_extraction.yaml
+
+lvbench_source_dir: null
+lvbench_video_url_dir: null
+lvbench_cohort_manifest: benchmarks/lvbench/data/lvbench_cohort.json
+prepare_script_args:
+  source_dir: ${lvbench_source_dir}
+  video_url_dir: ${lvbench_video_url_dir}
+
+# The judge: gpt-6.1-sol at max reasoning effort; override the endpoint, key and model together.
+judge_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+judge_api_key: ${oc.env:JUDGE_API_KEY,${oc.env:INFERENCE_API_KEY,dummy}}
+judge_model_name: ${oc.env:JUDGE_MODEL,openai/openai/gpt-6.1-sol}
+lvbench:
+  resources_servers:
+    lvbench:
+      judge_chat_completion_create_params:
+        messages: []
+        reasoning_effort: max
+
+lvbench_single_turn:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: lvbench
+        type: benchmark
+        jsonl_fpath: benchmarks/lvbench/data/lvbench_benchmark.jsonl
+        prepare_script: benchmarks/lvbench/prepare.py
+        num_repeats: 1

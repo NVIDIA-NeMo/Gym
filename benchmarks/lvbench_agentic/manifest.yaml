@@ -1,0 +1,44 @@
+name: lvbench_agentic
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: LVBench (THUDM/LVBench, not LongVideoBench) answered by OpenCode in a sandbox that holds the video, with
+  frame-sampling video tools; a judge model reads the chosen option.
+modality: video
+licensing: CC-BY-NC-SA-4.0
+authors:
+- Guo Chen
+maintainers:
+- cg1177
+capabilities:
+- multimodal_input_understanding/temporal_media_understanding
+- tool_and_computer_use/multi_step_tool_use
+- retrieval_and_grounding/long_context_learning
+- reasoning/spatial_temporal_reasoning
+domains:
+- general
+primary_metric: mean/LVBench_agentic
+requirements:
+  gpu: false
+  network: allowlist
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: lvbench
+agent_server: opencode_agent
+datasets:
+- name: lvbench_agentic
+  type: benchmark
+  jsonl_fpath: benchmarks/lvbench_agentic/data/lvbench_agentic_benchmark.jsonl
+  prepare_script: benchmarks/lvbench_agentic/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

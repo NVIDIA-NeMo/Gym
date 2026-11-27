@@ -58,9 +58,13 @@ vLLM then chooses the frames. It samples 32 frames unless the server sets
 another count with `--media-io-kwargs`, for example
 `'{"video": {"fps": 2, "num_frames": 256}}'`.
 
-Gym has no preparation command for Video-MME v2 (`video_mcqa/prepare.py`
-covers VideoMME-v1 and LVBench). Build each row from the authors' annotation
-with `prepare_single_turn()`; `data/example.jsonl` shows the resulting shape:
+For the standard Video-MME v2 benchmarks, prepare rows and cohorts through
+`benchmarks/videomme_v2/prepare.py` (single-turn, see
+[benchmarks/videomme_v2/README.md](../../benchmarks/videomme_v2/README.md)) or
+`benchmarks/videomme_v2_agentic/prepare.py` (agentic, see
+[benchmarks/videomme_v2_agentic/README.md](../../benchmarks/videomme_v2_agentic/README.md)).
+For custom inputs outside those benchmarks, build rows directly with
+`prepare_single_turn()`; `data/example.jsonl` shows the resulting shape:
 
 ```python
 from resources_servers.video_mcqa.task import VideoQuestion, prepare_single_turn
