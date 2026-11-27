@@ -288,6 +288,15 @@ _OUTPUT_BUDGET_KEYS = (*_CHAT_BUDGET_KEYS, "max_output_tokens")
 _OUTPUT_BUDGET_KEY_BY_API = {"completions": "max_tokens", "responses": "max_output_tokens"}
 
 
+def turn_priority(messages: list[dict[str, Any]]) -> int:
+    """vLLM's request ``priority`` for a model call: minus the assistant messages in its history.
+
+    The first model call of a rollout gets 0 and each later one 1 less. vLLM's priority scheduler runs a smaller
+    value first and preempts it last, so the calls of rollouts already in flight go before the first calls of new ones.
+    """
+    return -sum(1 for message in messages if message.get("role") == "assistant")
+
+
 def _effective_budget_key(outbound: Dict[str, Any], keys: tuple[str, ...]) -> str | None:
     """The key of the output budget the engine applies to ``outbound``, or None when it carries none."""
     return next((key for key in keys if outbound.get(key) is not None), None)
@@ -828,6 +837,19 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    priority_by_turn: bool = Field(
+        default=False,
+        description=(
+            "Send every engine call vLLM's request `priority` set to minus the number of assistant messages in its "
+            "history: 0 for a rollout's first model call, -1 for its second, and so on. An engine started with "
+            "`--scheduling-policy priority` schedules a smaller priority first and preempts it last, so the later "
+            "model calls of rollouts already in flight run before the first model calls of new ones. Without that "
+            "policy the value does not change scheduling. A `priority` set in `extra_body` or `metadata.extra_body` "
+            "is kept. Applies to the chat and Responses routes and to `use_completions_api`; not supported with "
+            "`is_responses_native` or `dynamo_frontend`."
+        ),
+    )
+
     default_headers: Dict[str, str] = Field(default_factory=dict)
     session_key_headers: List[str] = Field(
         default_factory=list,
@@ -917,6 +939,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "preserve_thinking_blocks requires use_completions_api=false: /v1/completions has no assistant "
                 "messages to carry the thinking blocks on"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_priority_by_turn(self) -> "VLLMModelConfig":
+        if self.priority_by_turn and self.is_responses_native:
+            raise ValueError(
+                "priority_by_turn requires is_responses_native=false: the native Responses route forwards the "
+                "request without the chat messages the priority is counted from"
+            )
+        if self.priority_by_turn and self.dynamo_frontend:
+            raise ValueError(
+                "priority_by_turn is not supported with dynamo_frontend: NeMo RL's chat engine behind the Dynamo "
+                "frontend does not pass a request priority to the engine"
             )
         return self
 
@@ -1742,6 +1778,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = merge_chat_extra_body(body_dict, extra_body=extra_body)
+        if self.config.priority_by_turn:
+            body_dict.setdefault("priority", turn_priority(body_dict["messages"]))
 
         self._splice_audio_from_metadata(body_dict, metadata)
 
@@ -2741,6 +2779,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # A null request limit is unset; /v1/completions would turn it into its 16-token default.
                 out.pop("max_tokens", None)
             out = extra_body | out
+        if self.config.priority_by_turn:
+            out.setdefault("priority", turn_priority(chat_body_dict.get("messages") or []))
 
         if self.config.return_token_id_information:
             # Prefer vLLM's inline prompt and generation token IDs. Keep the
