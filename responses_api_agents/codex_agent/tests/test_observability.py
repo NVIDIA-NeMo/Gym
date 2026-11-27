@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.core import NeMoGymResponseOutputMessage
 from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
 from nemo_gym.trajectory import AgentInvocation, ToolCallObservation, transcript_to_atif
 from responses_api_agents.codex_agent.app import parse_exec_jsonl
@@ -708,6 +709,22 @@ def test_a_call_without_its_result_stays_open() -> None:
             _session({"type": "message", "role": "assistant", "content": [{"type": "input_image"}]}),
             "unsupported content part",
         ),
+        # With no content, a message whose ID is not text would read as a copied input message, which the export
+        # rejects; with content, as no output item at all.
+        (_session({"type": "message", "role": "assistant", "id": 7, "content": []}), "message record has an ID"),
+        (_session({"type": "message", "role": "assistant", "id": ["m"], "content": []}), "message record has an ID"),
+        (_session({"type": "message", "role": "assistant", "id": 0, "content": []}), "message record has an ID"),
+        (
+            _session(
+                {"type": "message", "role": "assistant", "id": 7, "content": [{"type": "output_text", "text": "a"}]}
+            ),
+            "message record has an ID",
+        ),
+        (_session({"type": "reasoning", "id": [], "summary": [{"text": "plan"}]}), "reasoning record has an ID"),
+        (
+            _session(_call("c1", "apply_patch", "p"), {**_result("c1", "ok", "custom_tool_call_output"), "id": 5}),
+            "custom_tool_call_output record has an ID",
+        ),
         (_session(_call("c1", "t", {})) + "\n" + _session(_call("c2", "t", {})), "several sessions"),
     ],
 )
@@ -842,6 +859,18 @@ def test_a_session_file_of_a_pinned_codex_version_gives_the_models_calls(version
     ]
 
 
+@pytest.mark.parametrize("content", [[], [{"type": "output_text", "text": "Done."}]], ids=["no-content", "text"])
+@pytest.mark.parametrize("fields", [{}, {"id": None}, {"id": ""}], ids=["absent", "null", "empty"])
+def test_an_assistant_message_without_an_id_is_given_one_the_export_accepts(fields, content) -> None:
+    transcript = _session(_user("task"), {"type": "message", "role": "assistant", "content": content, **fields})
+    [message] = parse_codex_output(transcript).items
+    assert isinstance(message, NeMoGymResponseOutputMessage) and message.id == "msg_0"
+    trajectory = transcript_to_atif(
+        "task", [message.model_dump(mode="json")], session_id="s", agent_name="codex_agent", agent_version="test"
+    )
+    assert trajectory.steps[-1].source == "agent"
+
+
 @pytest.mark.parametrize("search_id", [None, "", "  ", ["ws-1"], 7])
 def test_a_web_search_without_a_usable_id_is_given_one_the_export_accepts(search_id) -> None:
     transcript = _session({"type": "web_search_call", "id": search_id, "action": {"type": "search"}})
@@ -890,6 +919,8 @@ def test_a_record_of_any_shape_is_either_unavailable_or_output_the_export_accept
             {"type": "custom_tool_call", "id": "ctc-1", "call_id": "c2", "name": "apply_patch", "input": "patch"},
             _result("c2", [{"type": "input_text", "text": "ok"}], "custom_tool_call_output"),
             {"type": "web_search_call", "id": "ws-1", "action": {"type": "search"}},
+            # A message with no content: replacing its ID with another shape changes the kind the output model reads.
+            {"type": "message", "role": "assistant", "id": "msg-0", "content": []},
             {
                 "type": "message",
                 "role": "assistant",

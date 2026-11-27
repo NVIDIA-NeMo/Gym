@@ -62,6 +62,8 @@ model's own output departs from the strict profile.
   arrived, so a parallel pair that finishes out of order keeps both calls in the model's order.
 - A call without a result (the harness stopped while the tool ran) stays open and is listed in
   `extra.nemo_gym.conversion.open_tool_calls`.
+- A result with the status `incomplete` holds a tool's output so far, which the model never read (the harness stopped
+  while the tool ran). Its `extra.nemo_gym.status` is `incomplete`.
 - A custom (free-form) tool call, such as Codex's `apply_patch`, keeps its name and carries its text as the one argument,
   `input`; `extra.nemo_gym.item_type` is `custom_tool_call`.
 - A call with a namespace, such as an MCP tool, is named by its bare tool name. The namespace is in

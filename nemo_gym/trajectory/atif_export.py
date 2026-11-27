@@ -1218,7 +1218,8 @@ def transcript_to_atif(
     ``function_call_output`` for the same ``call_id``, item types ATIF has no place for).
 
     A custom (free-form) tool call exports under its name with its text as the one argument, ``input``, and a call
-    with a namespace (an MCP server's) under its bare name with the namespace in ``extra.nemo_gym.namespace``.
+    with a namespace (an MCP server's) under its bare name with the namespace in ``extra.nemo_gym.namespace``. A
+    result whose status is ``incomplete`` has ``extra.nemo_gym.status`` set to ``incomplete``.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise _path_error("session_id", "expected a non-empty string")
@@ -1336,11 +1337,15 @@ def transcript_to_atif(
             if step is None:
                 raise _path_error(path, f"function result {item.call_id!r} matches no pending call")
             results = list(step.observation.results) if step.observation is not None else []
+            # An incomplete result is a tool's output so far (it was stopped while it ran), not what the model read.
+            result_extra = ({"source_item_id": item.id} if item.id is not None else {}) | (
+                {"status": "incomplete"} if getattr(item, "status", None) == "incomplete" else {}
+            )
             results.append(
                 AtifObservationResult(
                     source_call_id=item.call_id,
                     content=_transcript_text(item.output, path=f"{path}.output"),
-                    extra={"nemo_gym": {"source_item_id": item.id}} if item.id is not None else None,
+                    extra={"nemo_gym": result_extra} if result_extra else None,
                 )
             )
             step.observation = AtifObservation(results=results)

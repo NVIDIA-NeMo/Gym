@@ -1998,6 +1998,26 @@ def test_transcript_to_atif_keeps_a_free_form_call_without_its_result_open() -> 
     assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == ["patch-1"]
 
 
+def test_transcript_to_atif_marks_a_result_the_tool_had_not_finished() -> None:
+    """A harness stopped while a command ran can give the call its output so far as an incomplete result. The model
+    never read it, so the export says so; a finished result has no such mark."""
+    trajectory = _transcript(
+        "Run the tests",
+        [
+            _function_call("call-1", "exec_command", {"cmd": "pytest -x"}),
+            _function_call("call-2", "exec_command", {"cmd": "ls"}),
+            {**_function_output("call-2", "README.md"), "id": "fco-2"},
+            {**_function_output("call-1", "collected 42 tests\n"), "status": "incomplete"},
+        ],
+    )
+    finished, partial = trajectory.steps[-1].observation.results
+    assert (partial.source_call_id, partial.content) == ("call-1", "collected 42 tests\n")
+    assert partial.extra == {"nemo_gym": {"status": "incomplete"}}
+    assert finished.extra == {"nemo_gym": {"source_item_id": "fco-2"}}
+    assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == []
+    assert AtifTrajectoryV1_7.model_validate_json(encode_atif_trajectory(trajectory)) == trajectory
+
+
 @pytest.mark.parametrize(
     ("output_items", "message"),
     [

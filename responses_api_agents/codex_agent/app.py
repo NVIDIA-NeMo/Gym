@@ -602,18 +602,24 @@ def _call_key(item: Any) -> Optional[tuple[str, ...]]:
     return None
 
 
-def _with_cli_results(output: list[Any], events: list[tuple[float, dict[str, Any]]]) -> tuple[list[Any], list[str]]:
+def _with_cli_results(output: list[Any], events: list[tuple[float, dict[str, Any]]]) -> tuple[list[Any], list[Any]]:
     """Add the CLI's result for each shell command or MCP call the session record has a call for but no result,
-    where the CLI events show that call finished. Returns the output and the IDs of the calls given a CLI result.
+    where the CLI events show that call finished, or show output of a command still running. Returns the output and
+    the results added.
 
     Codex starts each call while the model's response streams, and runs the calls of a batch at once where the tool
     allows it (a shell command; an MCP tool marked read-only or on a server configured for parallel calls), but it
     writes their results to the record only after the response ends, in call order. The CLI reports each tool when
     it ends. So a run stopped before a result was written can have it in the CLI events and not in the record.
-    A finished CLI item and a call are joined only when their :func:`_cli_result_key` is the same and no other call
-    or finished CLI item has it; display IDs are never matched to calls by position. The result is the CLI's (a
+    A CLI item and a call are joined only when their :func:`_cli_result_key` is the same and no other call or CLI
+    item, finished or not, has it; display IDs are never matched to calls by position. The result is the CLI's (a
     command's output, and its exit code when not 0; an MCP tool's text or error), not the text Codex would have
     given the model.
+
+    A command the CLI shows still running gets the output of its latest ``item.updated`` snapshot, as a result with
+    the status ``incomplete``; one that showed no output gets none. Codex 0.144.4, 0.154.0 and 0.155.1 send no such
+    snapshot (their only ``item.updated`` is the plan's), so with them a running command stays without a result.
+    They send none for an MCP call either, whose result arrives whole, so only a finished MCP call is joined.
 
     Other calls stay without a result: the CLI shows an ``apply_patch`` only as the paths it changed, which does not
     identify the call, and an ``update_plan`` without a result.
@@ -624,21 +630,40 @@ def _with_cli_results(output: list[Any], events: list[tuple[float, dict[str, Any
     ]
     if not unanswered:
         return output, []
-    finished: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-    for _, event in events:
-        item = event.get("item")
-        key = _cli_result_key(item) if event.get("type") == "item.completed" and isinstance(item, dict) else None
+    # Each CLI item by display ID: the item it completed with, or else the latest snapshot of it.
+    latest: dict[str | int, tuple[dict[str, Any], bool]] = {}
+    for index, (_, event) in enumerate(events):
+        kind, item = event.get("type"), event.get("item")
+        if kind not in ("item.started", "item.updated", "item.completed") or not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            if kind == "item.completed":
+                latest[index] = (item, True)  # A finished item without an ID stands alone.
+            continue
+        snapshot, finished = latest.get(item_id, ({}, False))
+        if not finished:
+            latest[item_id] = (item, True) if kind == "item.completed" else (snapshot | item, False)
+    cli_items: dict[tuple[str, ...], list[tuple[dict[str, Any], bool]]] = {}
+    for item, finished in latest.values():
+        key = _cli_result_key(item)
         if key is not None:
-            finished.setdefault(key, []).append(event)
+            cli_items.setdefault(key, []).append((item, finished))
     calls_per_key = Counter(_call_key(item) for item in output)
     results = []
     for call in unanswered:
         key = _call_key(call)
-        if key is None or calls_per_key[key] != 1 or len(finished.get(key, ())) != 1:
+        if key is None or calls_per_key[key] != 1 or len(cli_items.get(key, ())) != 1:
             continue
-        cli_items, _ = parse_exec_jsonl(json.dumps(finished[key][0]))
-        results.append(cli_items[-1].model_copy(update={"call_id": call.call_id}))
-    return [*output, *results], [result.call_id for result in results]
+        [(item, finished)] = cli_items[key]
+        # Only a command shows output before it ends; an MCP call's snapshot has none.
+        output_so_far = item.get("aggregated_output")
+        if not finished and not (isinstance(output_so_far, str) and output_so_far):
+            continue
+        cli_output, _ = parse_exec_jsonl(json.dumps({"type": "item.completed", "item": item}))
+        update = {"call_id": call.call_id} | ({} if finished else {"status": "incomplete"})
+        results.append(cli_output[-1].model_copy(update=update))
+    return [*output, *results], results
 
 
 def _is_error_event(event: dict[str, Any]) -> bool:
@@ -1442,7 +1467,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
         else:
             output, cli_results = _with_cli_results(session_output.items, events)
             if cli_results:
-                detail = "the session record has no result for " + ", ".join(cli_results)
+                # A partial result holds a running command's output so far, not a result the model received.
+                detail = "the session record has no result for " + ", ".join(
+                    f"{result.call_id} (partial)" if result.status == "incomplete" else result.call_id
+                    for result in cli_results
+                )
                 output_gaps.append(ObservationGap(code=_CLI_RESULT_GAP, detail=detail))
                 LOG.warning("Codex tool results are kept as the CLI events show them: %s", detail)
             if session_output.unknown_records:

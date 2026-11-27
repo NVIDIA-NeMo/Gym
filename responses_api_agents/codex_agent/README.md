@@ -322,8 +322,8 @@ Codex starts each call while the model's response streams and runs the calls of 
 allows it, but writes their results to the record only after the response ends, in call order; the CLI reports each
 tool when it ends. A run stopped before a result was written can therefore have it in the CLI events but not in the
 record. A call the record leaves without a result then takes the CLI's result for it (a command's output with its exit
-code when not 0, or an MCP tool's text or error) when both show the same call and no other call or finished CLI item
-matches it:
+code when not 0, or an MCP tool's text or error) when both show the same call and no other call or CLI item, finished
+or not, matches it:
 - an `exec_command` call whose `cmd` is the command the CLI shows finished;
 - an MCP call whose namespace is `mcp__<server>` and whose name and arguments are the tool and arguments the CLI
   shows, with each character of the server and tool names other than a letter, digit or `_` written as `_`, as Codex
@@ -332,6 +332,12 @@ matches it:
 Display IDs are never matched to calls by position. The observations carry a `tool_results_from_cli_events` gap
 naming those calls. An `apply_patch` or `update_plan` call stays without a result: the CLI shows the first only as the
 paths it changed, which does not identify the call, and the second without a result.
+
+A command the CLI shows still running, under the same rule, takes the output of the CLI's latest `item.updated` for it
+as a result with the status `incomplete`: the output so far, which the model never read. The gap marks its call
+`(partial)`, and the exported trajectory sets the result's `extra.nemo_gym.status` to `incomplete`. A command that showed
+no output stays without a result. Codex 0.144.4, 0.154.0 and 0.155.1 send `item.updated` only for the plan, not for a
+running command or MCP call, so with them a command that had not ended stays without a result, as does an MCP call.
 
 Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; the cumulative totals in Codex's session files supplement CLI totals when a failed turn omits them. A turn stopped at its output or wall-time limit reports unknown usage, because neither total covers every call: Codex records no usage for an output-limited response and writes a call's token count only after the call's tools finish. A run stopped before any model call reports zero. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.

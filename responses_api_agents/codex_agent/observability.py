@@ -19,6 +19,7 @@ from nemo_gym.core import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -668,6 +669,18 @@ def _tool_result_text(output: object, *, call_id: str) -> str:
     return "\n".join(parts)
 
 
+def _own_id(payload: dict[str, Any], fallback: str) -> str:
+    """The ID Codex wrote for an item, or ``fallback`` where it kept none. Codex writes an ID as text: any other value
+    could make the output model read the item as another kind (an assistant message with no content and a numeric ID
+    reads as a copied input message, which the export rejects), so it makes the record unavailable."""
+    item_id = payload.get("id")
+    if item_id is None or item_id == "":
+        return fallback
+    if not isinstance(item_id, str):
+        raise CodexOutputUnavailable(f"a {payload.get('type')} record has an ID that is not text")
+    return item_id
+
+
 def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[str, Any]]:
     """The Responses output items for one session ``response_item``; none for what is not model output.
 
@@ -685,7 +698,7 @@ def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[s
         message = {
             "type": "message",
             "role": "assistant",
-            "id": payload.get("id") or f"msg_{position}",
+            "id": _own_id(payload, f"msg_{position}"),
             "status": "completed",
             "content": content,
         }
@@ -706,7 +719,7 @@ def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[s
         ]
         if not summary and not content:
             return []
-        reasoning = {"type": "reasoning", "id": payload.get("id") or f"rs_{position}", "summary": summary}
+        reasoning = {"type": "reasoning", "id": _own_id(payload, f"rs_{position}"), "summary": summary}
         if content:
             reasoning["content"] = content
         return [reasoning]
@@ -729,7 +742,7 @@ def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[s
             "output": _tool_result_text(payload.get("output"), call_id=call_id),
         }
         if kind == "custom_tool_call_output":
-            result |= {"id": payload.get("id") or f"ctco_{call_id}", "status": "completed"}
+            result |= {"id": _own_id(payload, f"ctco_{call_id}"), "status": "completed"}
         return [result]
     if kind == "web_search_call":
         # Codex runs this search on the model's side and reports no result, so it is a call with an empty result.
@@ -839,14 +852,22 @@ def parse_codex_output(transcript: str | None) -> CodexSessionOutput:
 
     Raises :class:`CodexOutputUnavailable`, and nothing else, when the record is missing, holds no model output, cannot
     be read or has a shape this does not expect, holds a session other than the first or an item type with no mapping,
-    or has a call with a blank ID or name, a result with no open call or a call ID used twice: output built from it
-    would misstate the run, or fail the export that reads it. A call ID is not reused even after its result, because
-    the observations key each tool by it.
+    or has a call with a blank ID or name, a message, reasoning item or custom tool result whose ID is not text, a
+    result with no open call or a call ID used twice: output built from it would misstate the run, or fail the export
+    that reads it. A call ID is not reused even after its result, because the observations key each tool by it.
     """
     try:
         items, skipped = _session_items(transcript)
         return CodexSessionOutput(
-            items=[_OUTPUT_ITEM.validate_python(item) for item in items], skipped_records=dict(skipped)
+            # The output union reads a message it cannot place as an output message as a copied input message, which
+            # the export rejects, so an assistant message is checked against the output message itself.
+            items=[
+                NeMoGymResponseOutputMessage.model_validate(item)
+                if item["type"] == "message"
+                else _OUTPUT_ITEM.validate_python(item)
+                for item in items
+            ],
+            skipped_records=dict(skipped),
         )
     except ValidationError as exc:
         raise CodexOutputUnavailable(
