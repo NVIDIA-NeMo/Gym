@@ -833,8 +833,9 @@ def parse_codex_output(transcript: str | None) -> CodexSessionOutput:
     Only ``response_item`` records hold the model's items and the results Codex gave it. A record of any other kind
     is left out and counted (``skipped_records``), whether or not it is a kind the checked versions write
     (``unknown_records``): Codex adds such kinds between releases (four between 0.144.4 and 0.154.0), and rejecting
-    one would discard a record that is complete. A ``response_item`` is different: it is a model item or a tool result, so one
-    this cannot map, or a malformed one, makes the whole record unavailable rather than leave out a call or a result.
+    one would discard a record that is complete. A ``response_item`` is different: it is a model item or a tool
+    result, so one this cannot map, or a malformed one, makes the whole record unavailable rather than leave out a
+    call or a result.
 
     Raises :class:`CodexOutputUnavailable`, and nothing else, when the record is missing, holds no model output, cannot
     be read or has a shape this does not expect, holds a session other than the first or an item type with no mapping,

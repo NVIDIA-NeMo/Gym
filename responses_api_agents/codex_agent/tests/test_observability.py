@@ -784,10 +784,10 @@ def test_a_record_of_a_kind_no_checked_version_writes_is_skipped_and_named() -> 
     assert output.unknown_records == {"future_bookkeeping": 2}
 
 
-# Session files that Codex wrote in a task sandbox, with a hosted model, for one task: read two files, add their numbers
-# with python3, write the sum to a file and show it. Each is trimmed and redacted: Codex's own instructions, the
-# world-state snapshot, encrypted reasoning, the served model's name and response IDs are replaced; every record keeps
-# its kind and place, and the calls, results and messages are as Codex wrote them.
+# Session files that Codex wrote in a task sandbox, with a hosted model, for one task: read two files, add their
+# numbers with python3, write the sum to a file and show it. Each is trimmed and redacted: Codex's own instructions,
+# the world-state snapshot, encrypted reasoning, the served model's name and response IDs are replaced; every record
+# keeps its kind and place, and the calls, results and messages are as Codex wrote them.
 FIXTURES = Path(__file__).parent / "fixtures"
 _FIXTURE_COMMANDS = [
     "cat /workspace/data/a.txt",
