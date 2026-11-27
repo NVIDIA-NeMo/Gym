@@ -30,15 +30,12 @@ agent against it measures noise. ``apply_golden_patch.py`` runs it over the trai
 """
 
 import asyncio
-import sys
 from pathlib import Path
-from shlex import quote
 from time import time
-from traceback import format_exc
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
@@ -82,7 +79,12 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
-from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.repo_task_sessions import (
+    RepoTaskSessionFields,
+    RepoTaskSessionResourcesServer,
+    loaded_capture,
+    saved_capture,
+)
 
 
 # The image's default PATH points at the conda *base* interpreter (Python 3.11 without the repo's
@@ -96,7 +98,7 @@ TESTBED_ENV = {
 }
 
 
-class SWEGymResourcesServerConfig(BaseResourcesServerConfig):
+class SWEGymResourcesServerConfig(RepoTaskSessionFields, BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
@@ -167,13 +169,13 @@ class SWEGymVerifyResponse(BaseVerifyResponse):
     model_patch_sha256: str = ""
 
 
-class SWEGymResourcesServer(SandboxSessionResourcesServer):
+class SWEGymResourcesServer(RepoTaskSessionResourcesServer):
     config: SWEGymResourcesServerConfig
+    task_model: ClassVar[type[BaseModel]] = SWEGymInstanceRequest
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
-        self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
 
     def _inputs(self, body: SWEGymInstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
@@ -225,26 +227,16 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             resources=sandbox_resources,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        sandbox = AsyncSandbox(provider_config)
         if session_id is not None:
-            # Keep ownership even if start raises after the provider has allocated a sandbox.
-            self._session_id_to_sandbox[session_id] = sandbox
+            # On the provider every task sandbox shares, and registered for the session and its checkpoints before
+            # it starts, so ownership is kept even if start raises after the provider has allocated a sandbox.
+            sandbox = self.new_task_sandbox(session_id, spec)
+        else:
+            sandbox = AsyncSandbox(provider_config)
         if verifier_session_id is not None:
             self._verifier_sandboxes[verifier_session_id] = sandbox
         await sandbox.start(spec)
         return sandbox
-
-    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """Files ``workdir`` holds untracked before the agent touches it (excluded from its patch)."""
-        try:
-            result = await sandbox.exec(f"git -C {quote(workdir)} ls-files --others --exclude-standard")
-            if result.return_code != 0:
-                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
-                return frozenset()
-            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-        except Exception:
-            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
-            return frozenset()
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
         """Capture the patch while retaining ownership until the shared lifecycle stops the sandbox."""
@@ -293,7 +285,8 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
         # Own the sandbox before preparing it, so a failed seed can still stop it.
         self._session_id_to_sandbox[session_id] = sandbox
         if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, REPO_DIRECTORY, body.instance_id, "swe_gym")
+            required = self.config.anti_cheat_required
+            await apply_anti_cheat_setup(sandbox, REPO_DIRECTORY, body.instance_id, "swe_gym", required=required)
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, REPO_DIRECTORY, "swe_gym")
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
@@ -354,14 +347,20 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
 
-            async def capture_or_fallback() -> tuple[PatchCapture, str | None]:
+            async def capture_or_fallback() -> dict[str, JsonValue]:
+                # Every failure grades the empty patch here, so no capture is saved as incomplete.
                 try:
-                    return await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit), None
+                    capture = await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit)
+                    return saved_capture(capture, None, False)
                 except Exception as exc:
-                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
+                    error = f"Failed to extract model patch: {exc}"
+                    return saved_capture(PatchCapture.static("", mode, "none"), error, False)
 
             # The fallback is saved with the session too, so a retry after the task sandbox stopped grades it again.
-            capture, extraction_error = await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
+            # Saved as a JSON value, so a checkpoint can export it.
+            capture, extraction_error, _ = loaded_capture(
+                await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
+            )
             await self.stop_task_sandbox_after_capture(session_id)
         patch = capture.patch
 

@@ -18,6 +18,8 @@ These cover the parts that decide whether a task counts as resolved and what rea
 sandbox lifecycle itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -531,3 +533,21 @@ def test_build_payload_empty_patch_control_blanks_only_the_patch():
     assert control["patch"] == ""
     assert control["instance_id"] == "x__1"
     assert example["patch"] != ""  # the input row is left untouched
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order(tmp_path) -> None:
+    """Providers return a command's stdout and stderr apart: the script's redirect puts both on stdout, in order."""
+    header, found, _ = build_eval_script(_inputs()).partition("\nset +u")
+    assert found, "the eval script no longer begins its work with set +u; update this split"
+    # Only the redirect may run here: never the real script, which activates conda and resets the checkout.
+    assert [line for line in header.splitlines() if line and not line.startswith("#")] == ["exec 2>&1"]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=30,
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""

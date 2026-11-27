@@ -172,6 +172,9 @@ def build_eval_script(inputs: VerificationInputs) -> str:
         )
 
     return f"""#!/bin/bash
+# Test runners report on stderr as often as on stdout. One ordered stream keeps the graded region between the
+# markers whole on every provider: E2B returns a command's stdout and stderr apart.
+exec 2>&1
 set +u
 source /opt/miniconda3/bin/activate >/dev/null 2>&1 || exit {EXIT_NO_CONDA}
 conda activate {CONDA_ENV} >/dev/null 2>&1 || exit {EXIT_NO_CONDA}

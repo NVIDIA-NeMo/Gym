@@ -181,6 +181,9 @@ if ! git apply --whitespace=fix $EXCLUDES /tmp/nemo_gym_patch.diff; then
 fi"""
 
     return f"""#!/bin/bash
+# Test runners report on stderr as often as on stdout. One ordered stream keeps the graded region between the
+# markers whole on every provider: E2B returns a command's stdout and stderr apart.
+exec 2>&1
 cd {REPO_DIRECTORY} || exit {EXIT_NO_REPO}
 [ -d {HIDDEN_TESTS_DIR} ] && [ -f {RUNNER_PATH} ] || exit {EXIT_NO_TESTS}
 git config --global --add safe.directory {REPO_DIRECTORY} >/dev/null 2>&1

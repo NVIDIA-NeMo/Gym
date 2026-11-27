@@ -58,6 +58,12 @@ _RecordingAsyncSandbox.raise_on_start = False
 def make_server(monkeypatch):
     def make(*, enforce=True, provider="opensandbox", model_url="http://10.1.2.3:8000", sandbox_config=None):
         monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        # A session's sandbox is made on the provider the server's task sandboxes share; record its spec too.
+        monkeypatch.setattr(
+            app.SwemerOmlResourcesServer,
+            "new_task_sandbox",
+            lambda self, session_id, spec: _RecordingAsyncSandbox(None),
+        )
         monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
         monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {provider: {}})
         monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})

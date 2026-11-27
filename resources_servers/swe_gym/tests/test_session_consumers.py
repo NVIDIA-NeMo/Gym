@@ -28,6 +28,20 @@ def consumer(request, monkeypatch):
     return module, fixtures, server, sandboxes, create_sandbox
 
 
+def _task_sandbox_from_the_module(module, monkeypatch, server) -> None:
+    """Make the task sandbox with the module's ``AsyncSandbox`` too, as the grading sandbox is made.
+
+    The real ``new_task_sandbox`` makes it on the provider the task sandboxes share; this one registers it the same way.
+    """
+
+    def new_task_sandbox(self, session_id, spec):
+        sandbox = module.AsyncSandbox(None)
+        self._session_id_to_sandbox[session_id] = sandbox
+        return sandbox
+
+    monkeypatch.setattr(type(server), "new_task_sandbox", new_task_sandbox)
+
+
 def close_request(fixtures):
     seed = fixtures._seed()
     return ResourcesCloseSessionRequest(resources_session_id=seed.resources_session_id, episode_id=seed.episode_id)
@@ -138,6 +152,7 @@ def test_partial_task_start_remains_owned_when_cleanup_fails(consumer, monkeypat
     sandbox.stop = AsyncMock(side_effect=[RuntimeError("stop unavailable"), None])
     sandbox.exec = AsyncMock(return_value=SandboxExecResult(return_code=0, stdout="", stderr=""))
     monkeypatch.setattr(module, "AsyncSandbox", lambda config: sandbox)
+    _task_sandbox_from_the_module(module, monkeypatch, server)
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "resolve_provider_metadata", lambda *args: {})
@@ -210,6 +225,7 @@ def _use_real_create_sandbox(consumer, monkeypatch):
         return sandbox
 
     monkeypatch.setattr(module, "AsyncSandbox", make_sandbox)
+    _task_sandbox_from_the_module(module, monkeypatch, server)
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "resolve_provider_metadata", lambda *args: {})
