@@ -144,7 +144,7 @@ priority_by_turn: true
 | `/v1/responses` (converted to chat) | counted from the converted `messages` |
 | `use_completions_api: true` | counted from `messages` before they are rendered to `prompt` |
 
-A `priority` set in `extra_body` or a request's `metadata.extra_body` is sent unchanged. The flag is rejected with `is_responses_native: true` and with `dynamo_frontend: true`.
+A `priority` set in `extra_body` or a request's `metadata.extra_body` is sent unchanged. With `dynamo_frontend: true`, whose frontend refuses an unknown top-level field, the priority rides in the request's `nemo_rl:gym:` annotation. The flag is rejected with `is_responses_native: true`.
 
 ## Example run config
 

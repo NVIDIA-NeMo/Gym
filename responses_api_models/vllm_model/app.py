@@ -845,8 +845,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "`--scheduling-policy priority` schedules a smaller priority first and preempts it last, so the later "
             "model calls of rollouts already in flight run before the first model calls of new ones. Without that "
             "policy the value does not change scheduling. A `priority` set in `extra_body` or `metadata.extra_body` "
-            "is kept. Applies to the chat and Responses routes and to `use_completions_api`; not supported with "
-            "`is_responses_native` or `dynamo_frontend`."
+            "is kept. Applies to the chat and Responses routes and to `use_completions_api`, and with "
+            "`dynamo_frontend`, where the priority rides in the `nemo_rl:gym:` annotation; not supported with "
+            "`is_responses_native`."
         ),
     )
 
@@ -948,11 +949,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "priority_by_turn requires is_responses_native=false: the native Responses route forwards the "
                 "request without the chat messages the priority is counted from"
-            )
-        if self.priority_by_turn and self.dynamo_frontend:
-            raise ValueError(
-                "priority_by_turn is not supported with dynamo_frontend: NeMo RL's chat engine behind the Dynamo "
-                "frontend does not pass a request priority to the engine"
             )
         return self
 
@@ -1824,10 +1820,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         Every request carries the ``nemo_rl:gym:`` annotation. Without capture, it holds the last echoed
         turn's tokens as ``required_prefix_token_ids``, which NeMo RL's native server derives from the
         messages itself. A capture call resolves its prefix from staging, and the capture handler has
-        already added its ``ng_capture``. The echoed token fields, which the frontend also rejects, are
-        then stripped from the messages.
+        already added its ``ng_capture``. A request ``priority`` (``priority_by_turn``'s, or one set in
+        ``extra_body``) moves into the annotation too, and NeMo RL's chat engine hands it to the engine.
+        The echoed token fields, which the frontend also rejects, are then stripped from the messages.
         """
         extras = {}
+        if "priority" in body_dict:
+            extras["priority"] = body_dict.pop("priority")
         if self._external_capture_handler is None:
             for message_dict in reversed(body_dict.get("messages") or []):
                 if "prompt_token_ids" in message_dict:

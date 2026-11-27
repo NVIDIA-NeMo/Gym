@@ -186,7 +186,35 @@ def test_the_completions_body_counts_the_rendered_history(extra_body: dict[str, 
     assert body["priority"] == priority
 
 
-@mark.parametrize("setting", ["is_responses_native", "dynamo_frontend"])
-def test_priority_by_turn_is_refused_where_the_priority_is_not_counted_or_forwarded(setting: str) -> None:
-    with raises(ValueError, match=f"priority_by_turn .*{setting}"):
-        _config(priority_by_turn=True, **{setting: True})
+def test_priority_by_turn_is_refused_on_the_native_responses_route() -> None:
+    with raises(ValueError, match="priority_by_turn requires is_responses_native=false"):
+        _config(priority_by_turn=True, is_responses_native=True)
+
+
+def _dynamo_extras(sent: dict[str, Any]) -> dict[str, Any]:
+    (annotation,) = sent["nvext"]["annotations"]
+    assert annotation.startswith("nemo_rl:gym:")
+    return json.loads(annotation.removeprefix("nemo_rl:gym:"))
+
+
+@mark.parametrize("extra_body, priority", [(None, -2), ({"priority": 7}, 7)])
+def test_a_dynamo_frontend_call_carries_the_priority_in_its_annotation(
+    extra_body: dict[str, Any] | None, priority: int
+) -> None:
+    # The Dynamo frontend refuses a top-level priority; NeMo RL's chat engine reads it from the annotation.
+    client, sent = _server(priority_by_turn=True, dynamo_frontend=True, extra_body=extra_body)
+
+    response = client.post("/v1/chat/completions", json={"model": "dummy_model", "messages": _THIRD_TURN})
+
+    assert response.status_code == 200, response.text
+    assert "priority" not in sent
+    assert _dynamo_extras(sent) == {"priority": priority}
+
+
+def test_a_dynamo_frontend_call_without_a_priority_annotates_none() -> None:
+    client, sent = _server(dynamo_frontend=True)
+
+    response = client.post("/v1/chat/completions", json={"model": "dummy_model", "messages": _THIRD_TURN})
+
+    assert response.status_code == 200, response.text
+    assert _dynamo_extras(sent) == {}
