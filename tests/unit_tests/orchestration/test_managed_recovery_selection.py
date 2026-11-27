@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -225,6 +226,34 @@ def test_managed_selection_never_materializes_a_whole_rollout_file(tmp_path, mon
     selected = select_managed_evidence(raw, tmp_path)
     assert selected.managed_reader_error is None
     assert decide(selected).action.value == "noop"
+
+
+def _select_counting_resolves(job):
+    raw = collect_isolated(job)
+    calls = Counter()
+    resolve = type(job).resolve
+
+    def counting(path, *args, **kwargs):
+        calls[path.name] += 1
+        return resolve(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(type(job), "resolve", counting)
+        return select_managed_evidence(raw, job), calls
+
+
+def test_managed_selection_resolves_paths_per_file_not_per_record(tmp_path):
+    # Path.resolve walks the filesystem, so one call per selected record is slow for large runs on shared storage.
+    calls = {}
+    for n in (2, 12):
+        job = tmp_path / f"run-{n}"
+        save_store_run(job, "exhausted", n=n)
+        selected, calls[n] = _select_counting_resolves(job)
+        assert selected.managed_reader_error is None
+        assert decide(selected).counts == {"exhausted": 1, "scored": n - 1}
+        assert sorted(row["_line"] for row in selected.results) == list(range(n - 1))
+        assert [row["_line"] for row in selected.failures] == [2]
+    assert calls[2] == calls[12]
 
 
 @pytest.mark.parametrize("reader", ["managed", "collector"])

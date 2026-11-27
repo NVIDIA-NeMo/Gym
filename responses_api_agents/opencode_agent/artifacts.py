@@ -547,6 +547,24 @@ def _parse_opencode_session(
     )
 
 
+def last_assistant_message(db_path: Path) -> dict[str, Any]:
+    """The saved info of the root session's last assistant message, or ``{}`` without one.
+
+    It holds the error, finish reason and completion time OpenCode recorded for the run's last model step.
+    """
+    if not db_path.is_file():
+        return {}
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "select data from message where session_id in (select id from session where parent_id is null) "
+            "order by time_created desc, id desc"
+        ).fetchall()
+    finally:
+        con.close()
+    return next((info for (data,) in rows if (info := _load_json(data)).get("role") == "assistant"), {})
+
+
 def parse_opencode_session(
     db_path: Path, *, root_session_only: bool = False, gym_reasoning: bool = False
 ) -> tuple[list[Any], dict[str, int | None]]:

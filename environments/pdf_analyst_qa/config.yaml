@@ -10,7 +10,6 @@ absolute_ip_server_types:
 pdf_analyst_qa_document_image: ${oc.env:PDF_ANALYST_QA_DOCUMENT_IMAGE,null}
 pdf_analyst_qa_opencode_binary_sha256: ${oc.env:PDF_ANALYST_QA_OPENCODE_SHA256,null}
 pdf_analyst_qa_opencode_plugin_sha256: ${oc.env:PDF_ANALYST_QA_OPENCODE_PLUGIN_SHA256,null}
-pdf_analyst_qa_dataset_root: ???
 pdf_analyst_qa_document_prefix: ???
 pdf_analyst_qa_agent_timeout_s: 3000
 

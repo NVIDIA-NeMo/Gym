@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import tarfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -164,6 +165,68 @@ async def test_smoke_rollout_uses_prebuilt_runtime(monkeypatch, tmp_path: Path) 
         ),
     )
     assert result.output[0].content[0].text == "Say hello"
+
+
+def _hung_harness_agent(monkeypatch, tmp_path: Path, **overrides) -> HarnessExaSearchAgent:
+    """An agent whose harness command sleeps for 30 s, standing in for a harness that never returns."""
+    monkeypatch.setattr(
+        "responses_api_agents.harness_exa_search.app.resolve_agent",
+        lambda _: (
+            "responses_api_agents.harness_exa_search.tests.sample_harness",
+            "SampleHarness",
+            "SampleHarnessConfig",
+        ),
+    )
+    monkeypatch.setenv("MOCK_EXA_SEARCH_RESULT", "unused")
+    hung = tmp_path / "hung_python"
+    hung.write_text("#!/bin/sh\nexec sleep 30\n")
+    hung.chmod(0o755)
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"policy_model": {"responses_api_models": {"model": {}}}}
+    client._build_server_base_url.return_value = "http://model"
+    config = HarnessExaSearchConfig(
+        host="0.0.0.0",
+        port=0,
+        entrypoint="app.py",
+        name="test",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="verifier"),
+        agent="sample",
+        image="unused-by-local-provider",
+        python=str(hung),
+        sandbox_provider={"local": {}},
+        **overrides,
+    )
+    return HarnessExaSearchAgent(config=config, server_client=client)
+
+
+async def test_a_harness_that_outlasts_the_runner_timeout_fails_the_rollout(monkeypatch, tmp_path: Path) -> None:
+    agent = _hung_harness_agent(monkeypatch, tmp_path, runner_timeout_seconds=1)
+
+    started = time.monotonic()
+    with raises(RuntimeError, match="sandboxed harness failed"):
+        await agent.responses(
+            Request({"type": "http", "path": "/v1/responses", "path_params": {}, "headers": []}),
+            NeMoGymResponseCreateParamsNonStreaming(input=[], model="model"),
+        )
+
+    assert time.monotonic() - started < 15  # the harness sleeps for 30 s
+
+
+def test_the_runner_has_no_time_limit_unless_one_is_configured() -> None:
+    assert HarnessExaSearchConfig.model_fields["runner_timeout_seconds"].default is None
+    with raises(ValueError):
+        HarnessExaSearchConfig(
+            host="0.0.0.0",
+            port=0,
+            entrypoint="app.py",
+            name="test",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="verifier"),
+            agent="sample",
+            image="unused",
+            runner_timeout_seconds=0,
+        )
 
 
 def test_upstream_model_url_carries_the_rollout_prefix_and_the_current_span(monkeypatch) -> None:

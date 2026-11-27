@@ -411,6 +411,31 @@ def test_several_workers_are_refused_only_with_execution_sandboxes(make_server):
         base_server.refuse_unsupported_num_workers(server)
 
 
+def test_the_execution_sandbox_spec_takes_only_the_fields_a_sandbox_spec_has(make_server, monkeypatch):
+    # The sandbox config also carries the typed network rule's fields, which a SandboxSpec has none of.
+    specs = []
+    monkeypatch.setattr(
+        adapter, "AgenticExecutionSessions", lambda cfg, **kwargs: specs.append(kwargs["sandbox_spec"])
+    )
+    execution = {
+        "sandbox_provider": {"docker": {"create": {"network": "none"}}},
+        "sandbox_spec": {"image": "example/execution:test", "network": "inherit"},
+    }
+    server, _, _ = make_server(answer_source="finish_tool", agentic_execution=execution)
+
+    server._execution_sessions()
+    assert [spec.image for spec in specs] == ["example/execution:test"]
+    server, _, _ = make_server(
+        answer_source="finish_tool",
+        agentic_execution={
+            **execution,
+            "sandbox_spec": {"image": "example/execution:test", "network": "no_network"},
+        },
+    )
+    with pytest.raises(ValueError, match="does not apply a typed network rule"):
+        server._execution_sessions()
+
+
 @pytest.mark.parametrize("overrides", [{}, {"answer_source": "finish_tool"}], ids=["output_text", "finish_tool"])
 def test_sessions_without_execution_sandboxes_follow_the_resources_session_contract(make_server, overrides):
     _, app, fake = make_server(**overrides)
