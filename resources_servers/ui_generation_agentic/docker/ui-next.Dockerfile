@@ -20,6 +20,9 @@ WORKDIR /app
 RUN chown node:node /app
 USER node
 
+# overrides: motion-dom/motion-utils keep motion's internals in lockstep; sharp is pinned to 0.35.5 so the
+# copies colorthief and ndarray-pixels pull in (both still declare ^0.33) match next's. Drop it once they
+# require >=0.35, and move it with any next bump that wants a newer sharp.
 COPY --chown=node:node <<'EOF' /app/package.json
 {
   "name": "ui-next",
@@ -33,7 +36,7 @@ COPY --chown=node:node <<'EOF' /app/package.json
     "@dnd-kit/utilities": "3.2.2",
     "@emotion/react": "11.14.0",
     "@emotion/styled": "11.14.1",
-    "@faker-js/faker": "9.9.0",
+    "@faker-js/faker": "10.6.0",
     "@fontsource-variable/manrope": "5.2.8",
     "@fontsource-variable/montserrat": "5.2.8",
     "@fontsource/poppins": "5.2.7",
@@ -125,8 +128,8 @@ COPY --chown=node:node <<'EOF' /app/package.json
     "html2canvas": "1.4.1",
     "html2canvas-pro": "1.5.11",
     "jotai": "2.12.5",
-    "jspdf": "3.0.4",
-    "jspdf-autotable": "5.0.8",
+    "jspdf": "4.2.1",
+    "jspdf-autotable": "5.0.9",
     "jszip": "3.10.2",
     "leaflet": "1.9.4",
     "lodash": "4.18.1",
@@ -201,7 +204,7 @@ COPY --chown=node:node <<'EOF' /app/package.json
     "sonner": "2.0.8",
     "styled-components": "6.1.19",
     "sweetalert2": "11.22.5",
-    "swiper": "11.2.10",
+    "swiper": "14.4.0",
     "swr": "2.3.8",
     "tailwind-merge": "3.3.1",
     "tailwindcss": "3.4.19",
@@ -220,7 +223,8 @@ COPY --chown=node:node <<'EOF' /app/package.json
   },
   "overrides": {
     "motion-dom": "12.23.28",
-    "motion-utils": "12.23.28"
+    "motion-utils": "12.23.28",
+    "sharp": "0.35.5"
   }
 }
 EOF
