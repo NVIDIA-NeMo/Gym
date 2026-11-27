@@ -1,0 +1,42 @@
+# Agentic LVBench (THUDM/LVBench, not LongVideoBench: 1,549 questions over 103 long videos): OpenCode answers each
+# question in a sandbox that the lvbench resources server lends with the row's video, with the frame tools watch_video
+# and view_image (resources_servers/lvbench/configs/lvbench_agentic.yaml). The rows ask in the benchmark's letter
+# wording, so a judge model reads the chosen option (llm_extraction_v1).
+# Data: prepare.py downloads the authors' annotation (video_info.meta.jsonl of THUDM/LVBench at a pinned revision) and
+# binds each question to its video in lvbench_agentic_source_dir by the SHA-256 in that directory's FILES.sha256;
+# videos stay in its video/ (lvbench_agentic_video_dir, where this host reads them).
+# Needs the sandbox image built from resources_servers/video_mcqa/sandbox_image (VIDEO_MCQA_SANDBOX_IMAGE) and
+# OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY.
+config_paths:
+  - resources_servers/lvbench/configs/lvbench_agentic.yaml
+  - resources_servers/lvbench/configs/lvbench_agentic_llm_extraction.yaml
+
+lvbench_agentic_source_dir: null
+lvbench_agentic_video_dir: ${lvbench_agentic_source_dir}/video
+lvbench_agentic_cohort_manifest: benchmarks/lvbench_agentic/data/lvbench_agentic_cohort.json
+lvbench_agentic_video_roots:
+  - ${lvbench_agentic_video_dir}
+prepare_script_args:
+  source_dir: ${lvbench_agentic_source_dir}
+  video_dir: ${lvbench_agentic_video_dir}
+
+# The judge: gpt-6.1-sol at max reasoning effort; override the endpoint, key and model together.
+judge_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+judge_api_key: ${oc.env:JUDGE_API_KEY,${oc.env:INFERENCE_API_KEY,dummy}}
+judge_model_name: ${oc.env:JUDGE_MODEL,openai/openai/gpt-6.1-sol}
+lvbench_agentic:
+  resources_servers:
+    lvbench:
+      judge_chat_completion_create_params:
+        messages: []
+        reasoning_effort: max
+
+lvbench_agentic_opencode:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+      - name: lvbench_agentic
+        type: benchmark
+        jsonl_fpath: benchmarks/lvbench_agentic/data/lvbench_agentic_benchmark.jsonl
+        prepare_script: benchmarks/lvbench_agentic/prepare.py
+        num_repeats: 1

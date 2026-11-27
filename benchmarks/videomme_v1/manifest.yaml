@@ -1,0 +1,31 @@
+name: videomme_v1
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: Video-MME (w/o subtitles) single-turn video multiple-choice QA; each row sends the video as a file://
+  URL for the model server to sample frames, and a judge model reads the chosen option.
+modality: video
+licensing: unknown
+authors:
+- Guo Chen
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: videomme_v1
+agent_server: simple_agent
+datasets:
+- name: videomme_v1
+  type: benchmark
+  jsonl_fpath: benchmarks/videomme_v1/data/videomme_v1_benchmark.jsonl
+  prepare_script: benchmarks/videomme_v1/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active
