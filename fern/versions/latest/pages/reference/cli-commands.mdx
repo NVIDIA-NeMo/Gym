@@ -1369,25 +1369,24 @@ If a run was collected with `--disable-aggregation` it has no `*_aggregate_metri
 
 ### `gym eval compare-suite`
 
-Compare candidate and baseline runs across several benchmarks for each model, and across a declared set of model–benchmark pairs. This command normalizes selected metrics, weights benchmarks equally, and reports `delta = candidate - baseline` with unpaired Welch confidence intervals at a default confidence level of 90%.
+Compare candidate and baseline runs across several benchmarks for each model, and across a declared set of model–benchmark pairs. This command normalizes selected metrics, weights benchmarks equally, and reports `delta = candidate - baseline` with two-sided 95% Welch confidence intervals by default. Using one endpoint at this level gives 2.5% significance for a prespecified one-sided test.
 
 ```bash
 gym eval compare-suite \
     --suite suite.yaml \
-    --confidence-level 0.90 \
     --output-dir results/suite
 ```
 
 | Option | Description |
 | --- | --- |
 | `--suite PATH` | Required YAML defining metrics and a baseline/candidate pair per model and benchmark. Either side accepts one source mapping or a nonempty list of independent runs whose repeats are pooled. |
-| `--confidence-level FRACTION` | Two-sided confidence level, strictly between zero and one. Defaults to `0.90`. |
+| `--confidence-level FRACTION` | Two-sided confidence level, strictly between zero and one. Defaults to `0.95`. |
 | `--output-dir DIR`, `-o` | Report directory; defaults to the suite YAML's directory. |
 | `--report-format` | `md`, `json`, or `both` (default). |
 
 Run paths and optional agent or environment-server selectors come from the suite YAML. See [Compare Results](/main/evaluation/compare-results#compare-a-benchmark-suite) for a complete multi-model suite YAML, source options, theoretical metric bounds, normalization, equal weighting, statistical assumptions, and coverage/exclusion behavior.
 
-Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance. The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and defaults to 95% difference intervals.
+Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance.
 
 ### `gym eval plan-repeats`
 

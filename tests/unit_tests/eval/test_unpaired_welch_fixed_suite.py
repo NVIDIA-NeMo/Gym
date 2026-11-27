@@ -66,7 +66,7 @@ def test_two_benchmark_fixture_matches_hand_calculated_welch_contributions() -> 
     assert result.variance == pytest.approx(400 / 3)
     assert result.standard_error == pytest.approx(math.sqrt(400 / 3))
     assert result.degrees_of_freedom == pytest.approx(7.68)
-    assert (result.ci_low, result.ci_high) == pytest.approx((8.411227252222858, 51.58877274777714))
+    assert (result.ci_low, result.ci_high) == pytest.approx((3.1781966265752253, 56.82180337342477))
 
 
 def test_custom_weights_affect_means_linearly_and_variance_quadratically() -> None:
@@ -172,9 +172,9 @@ def test_constant_benchmark_keeps_its_weight_and_variable_benchmark_determines_u
 def test_raising_confidence_level_widens_interval_without_changing_estimate() -> None:
     cell = _cell([0, 20, 40], [20, 40, 60])
     default = aggregate_welch([cell])
-    wider = aggregate_welch([cell], confidence_level=0.95)
+    wider = aggregate_welch([cell], confidence_level=0.99)
 
-    assert default.confidence_level == 0.90
+    assert default.confidence_level == 0.95
     assert default.delta == wider.delta
     assert default.standard_error == wider.standard_error
     assert wider.ci_low < default.ci_low < default.ci_high < wider.ci_high

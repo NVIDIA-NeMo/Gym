@@ -37,7 +37,7 @@ class SuiteComparisonConfig(BaseNeMoGymCLIConfig):
 
     suite_fpath: str = Field(description="Suite YAML naming baseline and candidate runs per model and benchmark.")
     confidence_level: float = Field(
-        default=0.90, gt=0, lt=1, allow_inf_nan=False, description="Two-sided confidence level for delta intervals."
+        default=0.95, gt=0, lt=1, allow_inf_nan=False, description="Two-sided confidence level for delta intervals."
     )
     output_dirpath: str | None = Field(
         default=None, description="Report directory; defaults to the suite YAML's directory."

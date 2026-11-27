@@ -2337,7 +2337,7 @@ COMMANDS = {
             _value_flag(
                 "confidence-level",
                 "confidence_level",
-                "Confidence level as a fraction between 0 and 1 (default: 0.90).",
+                "Two-sided confidence level as a fraction between 0 and 1 (default: 0.95).",
             ),
             _value_flag(
                 "output-dir",

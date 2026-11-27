@@ -11,7 +11,7 @@ Before collecting an experiment, use [Plan Repeats](/main/evaluation/plan-repeat
 | Goal | Command | Confidence level |
 | --- | --- | --- |
 | Inspect one benchmark's metrics and task changes | `gym eval compare --baseline ... --candidates ...` | 95% by default; adjustable |
-| Aggregate selected benchmarks and models | `gym eval compare-suite --suite suite.yaml` | 90% by default; adjustable |
+| Aggregate selected benchmarks and models | `gym eval compare-suite --suite suite.yaml` | 95% by default; adjustable |
 
 ## Prepare Comparable Runs
 
@@ -210,11 +210,11 @@ gym eval compare-suite \
 # Recalculate the interval at a different confidence level using the same data.
 gym eval compare-suite \
     --suite suite.yaml \
-    --confidence-level 0.95 \
-    --output-dir results/suite-95
+    --confidence-level 0.90 \
+    --output-dir results/suite-90
 ```
 
-`--confidence-level` accepts a fraction strictly between zero and one; the default is `0.90`. The separate `gym eval compare` command defaults to 95% difference intervals. For `compare-suite`, sources and aggregate-entry selection come from the YAML. See the [CLI reference](/main/reference/cli-commands#gym-eval-compare-suite) for all command options.
+Both comparison commands default to a two-sided 95% delta interval. `--confidence-level` accepts a fraction strictly between zero and one. For `compare-suite`, sources and aggregate-entry selection come from the YAML. See the [CLI reference](/main/reference/cli-commands#gym-eval-compare-suite) for all command options.
 
 ### Source options
 
@@ -304,7 +304,7 @@ The numerical method, including normalization and metric averaging, is isolated 
 The interval quantifies repeat uncertainty for the fixed selected benchmarks, models, and task sets. It assumes independent repeats within each side, independent baseline/candidate collections, and independent cell estimates. It does not include uncertainty from sampling different benchmarks or models. Shared conditions or genuinely paired samples can require covariance terms beyond this method.
 </Note>
 
-A positive delta favors the candidate. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative deltas can cancel.
+A positive delta favors the candidate. Using the lower endpoint of the default two-sided 95% interval gives a one-sided test at 2.5% significance for a prespecified improvement or noninferiority claim. For the same test at 5% significance, set `--confidence-level 0.90` to use a two-sided 90% interval. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative deltas can cancel.
 
 Confidence intervals are not clipped to the score bounds. A constant-score cell retains its weight; when total empirical variance is zero, suite comparison reports the point estimate and zero SE with an unavailable interval and degrees of freedom.
 

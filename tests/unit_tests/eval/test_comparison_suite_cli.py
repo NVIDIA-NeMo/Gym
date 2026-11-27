@@ -194,7 +194,8 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
         assert statistics["delta"] == pytest.approx(statistics["candidate_mean"] - statistics["baseline_mean"])
         assert "gap" not in statistics
         assert all(key.isascii() for key in statistics)
-    assert result.confidence_level == 0.9
+    assert result.confidence_level == 0.95
+    assert result.overall.statistics.confidence_level == 0.95
     assert result.overall.weights == [0.5, 0.5]
     assert result.command.startswith("gym eval compare-suite ")
     assert "comparison_level" not in result.command
@@ -203,13 +204,13 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     markdown = (output / "suite_compare_report.md").read_text()
     assert markdown.startswith("# gym eval compare-suite\n")
     assert "sk-suite-example" not in markdown
-    assert "| Aggregate | Cells | Candidate | Baseline | Delta | 90% CI for delta |" in markdown
+    assert "| Aggregate | Cells | Candidate | Baseline | Delta | 95% CI for delta |" in markdown
     assert "| model-a | 2 | 65.00 | 50.00 | 15.00 |" in markdown
     assert "| Model | Benchmark | Status | Candidate repeats | Baseline repeats | Delta |" in markdown
     assert "| model-a | first | included | 4 | 3 | 20.00 |" in markdown
     assert "Delta = candidate − baseline; positive deltas favor the candidate." in markdown
     assert "gap" not in markdown.lower()
-    assert "95% CI for delta" not in markdown
+    assert "90% CI for delta" not in markdown
     assert "Planned coverage is unverified" in markdown
     assert existing.read_text() == "existing run report"
     stdout = capsys.readouterr().out
@@ -273,7 +274,18 @@ def test_markdown_uses_four_significant_digits_without_rounding_json(tmp_path: P
     suite.write_text(yaml.safe_dump(manifest, sort_keys=False))
     output = tmp_path / "reports"
     monkeypatch.setattr(
-        "sys.argv", ["gym", "eval", "compare-suite", "--suite", str(suite), "--output-dir", str(output)]
+        "sys.argv",
+        [
+            "gym",
+            "eval",
+            "compare-suite",
+            "--suite",
+            str(suite),
+            "--output-dir",
+            str(output),
+            "--confidence-level",
+            "0.90",
+        ],
     )
     main()
 

@@ -120,7 +120,7 @@ Other cases:
 - **One repeat per run.** There is no interval. One run's standard error is at most `sqrt(p * (1 - p) / n)` for n tasks at pass rate p, about 5 points for 100 tasks at p = 0.5. Collect 2 or more repeats per side before deciding.
 - **A published number.** The Gym run's standard error `se_a` is `se_across_repeats/mean/reward`. Estimate the reference's as `se_b = sd1 / sqrt(k_ref)`, where `sd1` is `std_across_repeats/mean/reward` of the Gym run and `k_ref` is the reference's repeat count (1 if unknown). Put both on the same scale. A gap under about `2 * sqrt(se_a^2 + se_b^2)` is within noise; check settings (step 3) whatever the size of the gap.
 - **Several runs of the same setup.** After 0.7.0, `--baseline-runs` and `--candidate-runs` pool independent runs into one sample. A resumed run, a copy or a re-aggregation of the same rollouts is not an independent run.
-- **Several benchmarks.** After 0.7.0, `gym eval compare-suite --suite <suite.yaml>` combines normalized benchmark scores per model, with a 90% interval by default.
+- **Several benchmarks.** After 0.7.0, `gym eval compare-suite --suite <suite.yaml>` combines normalized benchmark scores per model, with a two-sided 95% interval by default, matching `gym eval compare`. One endpoint gives 2.5% significance for a prespecified one-sided test.
 - **More repeats.** For a standard error s you need about `(sd1 / s)^2` repeats. To plan repeat counts for a future comparison, hand off to `nemo-gym-repeat-planning` in the Gym repo.
 
 ### 5. Find the tasks that changed or fail

@@ -148,7 +148,7 @@ def aggregate_welch(
     comparisons: Sequence[BenchmarkSamples],
     *,
     weights: Sequence[float] | None = None,
-    confidence_level: float = 0.90,
+    confidence_level: float = 0.95,
 ) -> WelchResult:
     """Estimate a weighted candidate-minus-baseline delta with Welch–Satterthwaite uncertainty.
 
