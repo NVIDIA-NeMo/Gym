@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 HEALTH_PATH = "/health"
 HEALTH_POLL_INTERVAL_S = 5.0
+# Default for --startup-timeout-s: how long each instance may take to answer /health.
 HEALTH_TIMEOUT_S = 900.0
 # Each replica only proxies to its own vLLM, which batches and queues itself. Ray Serve's
 # default of 5 in-flight requests per replica would cap every instance at 5 concurrent requests.
@@ -70,6 +71,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--served-model-name", default=None)
     parser.add_argument("--extra-args", default="", help="Raw extra flags appended verbatim to `vllm serve`.")
+    parser.add_argument(
+        "--startup-timeout-s",
+        type=float,
+        default=HEALTH_TIMEOUT_S,
+        help="Seconds each vLLM instance may take to answer /health before its replica fails.",
+    )
     return parser.parse_args(argv)
 
 
@@ -149,7 +156,9 @@ class VLLMInstance:
         trust_remote_code: bool,
         served_model_name: str | None = None,
         extra_args: str = "",
+        startup_timeout_s: float = HEALTH_TIMEOUT_S,
     ) -> None:
+        self._startup_timeout_s = startup_timeout_s
         port = free_local_port()
         self._base_url = f"http://localhost:{port}"
         cmd = build_instance_command(
@@ -164,7 +173,7 @@ class VLLMInstance:
 
     def _wait_until_healthy(self) -> None:
         # Blocking is deliberate: Serve won't route traffic to a replica until __init__ returns.
-        deadline = time.monotonic() + HEALTH_TIMEOUT_S
+        deadline = time.monotonic() + self._startup_timeout_s
         while True:
             if self._proc.poll() is not None:
                 raise RuntimeError(f"vLLM instance exited early with code {self._proc.returncode}")
@@ -176,7 +185,9 @@ class VLLMInstance:
             except (urllib.error.URLError, TimeoutError):
                 pass
             if time.monotonic() > deadline:
-                raise TimeoutError(f"vLLM instance ({self._base_url}) did not become healthy in time")
+                raise TimeoutError(
+                    f"vLLM instance ({self._base_url}) did not become healthy within {self._startup_timeout_s:g} s"
+                )
             time.sleep(HEALTH_POLL_INTERVAL_S)
 
     def check_health(self) -> None:
@@ -223,6 +234,7 @@ def main(argv: list[str] | None = None) -> None:
         trust_remote_code=args.trust_remote_code,
         served_model_name=args.served_model_name,
         extra_args=args.extra_args,
+        startup_timeout_s=args.startup_timeout_s,
     )
     serve.start(http_options={"host": "0.0.0.0", "port": args.port})
     serve.run(deployment)

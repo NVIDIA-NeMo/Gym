@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import socket
+import urllib.error
 from unittest.mock import call, patch
 
 import pytest
@@ -23,11 +24,14 @@ import pytest
 pytest.importorskip("ray")
 
 from nemo_gym.orchestration.ray_serve_gateway import (  # noqa: E402
+    HEALTH_TIMEOUT_S,
     MAX_ONGOING_REQUESTS_PER_INSTANCE,
     PROXY_TIMEOUT,
+    VLLMInstance,
     build_instance_command,
     deployment_options,
     free_local_port,
+    main,
     max_replicas_per_node,
     parse_args,
 )
@@ -92,6 +96,53 @@ def test_parse_args_missing_required_raises():
 def test_parse_args_accepts_gpus_per_node_for_caller_compatibility():
     args = parse_args(["--model", "org/model", "--port", "8000", "--gpus-per-node", "8"])
     assert args.gpus_per_node == 8
+
+
+def test_parse_args_startup_timeout_defaults_and_overrides():
+    assert parse_args(["--model", "/m", "--port", "8000"]).startup_timeout_s == HEALTH_TIMEOUT_S
+    assert parse_args(["--model", "/m", "--port", "8000", "--startup-timeout-s", "1800"]).startup_timeout_s == 1800.0
+
+
+# ---------------------------------------------------------------------------
+# VLLMInstance startup
+# ---------------------------------------------------------------------------
+
+
+def test_wait_until_healthy_fails_at_the_configured_startup_timeout():
+    instance = object.__new__(VLLMInstance.func_or_class)
+    instance._base_url = "http://localhost:1"
+    instance._startup_timeout_s = 1800.0
+    instance._proc = type("Proc", (), {"poll": lambda self: None})()
+    clock = iter([0.0, 1799.0, 1801.0])
+    with (
+        patch("nemo_gym.orchestration.ray_serve_gateway.time.monotonic", side_effect=lambda: next(clock)),
+        patch("nemo_gym.orchestration.ray_serve_gateway.time.sleep"),
+        patch(
+            "nemo_gym.orchestration.ray_serve_gateway.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("refused"),
+        ) as urlopen,
+    ):
+        with pytest.raises(TimeoutError, match="within 1800 s"):
+            instance._wait_until_healthy()
+    # Still polling past the old fixed 900 s deadline.
+    assert urlopen.call_count == 2
+
+
+def test_main_passes_the_startup_timeout_to_each_instance():
+    class Stop(Exception):
+        pass
+
+    gateway = "nemo_gym.orchestration.ray_serve_gateway"
+    with (
+        patch(f"{gateway}.ray.init"),
+        patch(f"{gateway}.serve.start"),
+        patch(f"{gateway}.serve.run"),
+        patch(f"{gateway}.VLLMInstance.options") as options,
+        patch(f"{gateway}.time.sleep", side_effect=Stop),
+    ):
+        with pytest.raises(Stop):
+            main(["--model", "/m", "--port", "8000", "--startup-timeout-s", "1800"])
+    assert options.return_value.bind.call_args.kwargs["startup_timeout_s"] == 1800.0
 
 
 # ---------------------------------------------------------------------------

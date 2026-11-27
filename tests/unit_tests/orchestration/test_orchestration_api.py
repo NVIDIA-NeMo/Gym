@@ -330,6 +330,14 @@ def test_use_ray_serve_defaults_to_false():
     assert config.services["svc"].use_ray_serve is False
 
 
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_ray_serve_startup_timeout_must_be_positive_and_finite(timeout):
+    with pytest.raises(ValidationError, match="ray_serve_startup_timeout_seconds"):
+        SubmitConfig.model_validate(
+            _config(services={"svc": {**SERVICE, "ray_serve_startup_timeout_seconds": timeout}})
+        )
+
+
 def test_use_ray_serve_opt_in_single_node_multi_instance_accepted():
     service = {**SERVICE, "number_of_instances": 4, "use_ray_serve": True}
     config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))

@@ -192,6 +192,9 @@ class VllmServiceConfig(BaseModelServiceConfig):
     trust_remote_code: bool = False
     number_of_instances: int = 1
     use_ray_serve: bool = False
+    # Seconds each Ray Serve gateway instance may take to answer /health before its replica fails.
+    # Keep health_check.timeout_seconds at least this long, or the job script stops waiting first.
+    ray_serve_startup_timeout_seconds: float = Field(default=900.0, gt=0, allow_inf_nan=False)
     # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
     extra_args: str = ""
     # Port the data-parallel ranks of a multi-node service coordinate on.

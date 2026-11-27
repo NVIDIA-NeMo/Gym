@@ -697,6 +697,21 @@ def test_build_vllm_ray_serve_command_passes_flags():
     assert "--pipeline-parallel-size 2" in cmd
     assert "--number-of-instances 2" in cmd
     assert "--trust-remote-code" in cmd
+    assert "--startup-timeout-s 900 " in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_startup_timeout():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        use_ray_serve=True,
+        ray_serve_startup_timeout_seconds=1800,
+    )
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
+    gateway_args = shlex.split(cmd.split("python3 ray_serve_gateway.py ", 1)[1].rstrip('"'))
+    flag = gateway_args.index("--startup-timeout-s")
+    assert float(gateway_args[flag + 1]) == 1800.0
 
 
 def test_build_vllm_ray_serve_command_passes_served_model_name_and_extra_args():
