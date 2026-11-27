@@ -10,6 +10,18 @@ modality: video
 licensing: CC-BY-NC-SA-4.0
 authors:
 - Guo Chen
+maintainers:
+- cg1177
+capabilities:
+- multimodal_input_understanding/temporal_media_understanding
+- retrieval_and_grounding/long_context_learning
+- reasoning/spatial_temporal_reasoning
+domains:
+- general
+primary_metric: mean/LVBench
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

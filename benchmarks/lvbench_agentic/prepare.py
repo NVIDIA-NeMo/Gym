@@ -50,10 +50,10 @@ def prepare(source_dir: str | None = None, video_dir: str | None = None, sandbox
     """
     if source_dir is None:
         raise ValueError("Set lvbench_agentic_source_dir to the directory that holds FILES.sha256 and video/")
-    source = Path(source_dir)
+    source = Path(source_dir).resolve()
     checksums = read_checksums(source / "FILES.sha256")
     records = load_records(annotations_path())
-    videos = Path(video_dir) if video_dir is not None else source / "video"
+    videos = (Path(video_dir) if video_dir is not None else source / "video").resolve()
     rows, cohort = prepare_dataset(
         records,
         benchmark="lvbench",

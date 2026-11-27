@@ -68,8 +68,10 @@ def read_checksums(path: Path) -> dict[str, str]:
 
 
 def media_bindings(records: list[dict], *, checksums: dict[str, str], video_url_dir: str) -> dict[str, VideoSource]:
-    """Each annotated video as ``file://<video_url_dir>/<key>.mp4`` with its SHA-256 from ``FILES.sha256``."""
-    base_dir = video_url_dir.rstrip("/")
+    """Each annotated video as a ``file://`` URI under ``video_url_dir`` with its SHA-256 from ``FILES.sha256``."""
+    base_dir = Path(video_url_dir)
+    if not base_dir.is_absolute():
+        raise ValueError("video_url_dir must be an absolute path")
     media = {}
     for video in dict.fromkeys(str(record["key"]) for record in records):
         relpath = f"video/{video}.mp4"
@@ -79,7 +81,7 @@ def media_bindings(records: list[dict], *, checksums: dict[str, str], video_url_
         media[video] = VideoSource(
             source_url=relpath,
             sha256=sha256,
-            video_url=f"file://{base_dir}/{video}.mp4",
+            video_url=(base_dir / f"{video}.mp4").as_uri(),
         )
     return media
 
@@ -92,9 +94,9 @@ def prepare(source_dir: str | None = None, video_url_dir: str | None = None) -> 
     """
     if source_dir is None:
         raise ValueError("Set lvbench_source_dir to the directory that holds FILES.sha256 and video/")
-    source = Path(source_dir).absolute()
+    source = Path(source_dir).resolve()
     url_dir = video_url_dir if video_url_dir is not None else str(source / "video")
-    if not url_dir.startswith("/"):
+    if not Path(url_dir).is_absolute():
         raise ValueError("video_url_dir must be an absolute path")
     checksums = read_checksums(source / "FILES.sha256")
     records = load_records(annotations_path())

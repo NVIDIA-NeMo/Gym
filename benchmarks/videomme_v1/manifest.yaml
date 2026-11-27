@@ -10,6 +10,18 @@ modality: video
 licensing: unknown
 authors:
 - Guo Chen
+maintainers:
+- cg1177
+capabilities:
+- multimodal_input_understanding/temporal_media_understanding
+- multimodal_input_understanding/scene_understanding
+- reasoning/spatial_temporal_reasoning
+domains:
+- general
+primary_metric: mean/Video_MME
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range:
   - 0.0

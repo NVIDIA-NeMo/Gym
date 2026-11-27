@@ -6,6 +6,7 @@ manifests on invented annotations (no dataset download)."""
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,8 +20,7 @@ from benchmarks.videomme_v2 import prepare as v2_st
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 from nemo_gym.agents.base_responses_api_agent import BaseRunRequest
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
-from nemo_gym.environment.benchmarks import BenchmarkConfig
-from nemo_gym.environment.manifest import load_manifest
+from nemo_gym.environment import BenchmarkConfig, load_manifest
 from nemo_gym.environment.validation import validate_environment
 from resources_servers.video_mcqa.app import AccuracyCohort, VideoMCQAResourcesServerConfig
 from resources_servers.video_mcqa.tests.test_videomme_agentic_prepare import v1_record, v2_record
@@ -65,6 +65,7 @@ def lvbench_qa(
 
 
 def stage_parquet(tmp_path, monkeypatch, module, records: list[dict], videos: list[str], env: str) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     parquet = tmp_path / "annotation.parquet"
     pq.write_table(pa.Table.from_pylist(records), parquet)
     monkeypatch.setenv(env, str(parquet))
@@ -82,6 +83,7 @@ def stage_parquet(tmp_path, monkeypatch, module, records: list[dict], videos: li
 
 
 def stage_lvbench(tmp_path, monkeypatch, target_module, records: list[dict], videos: list[str]) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     annotations = tmp_path / "video_info.meta.jsonl"
     annotations.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
     monkeypatch.setenv("LVBENCH_ANNOTATIONS", str(annotations))
@@ -329,18 +331,86 @@ def test_lvbench_agentic_prepare_and_errors(tmp_path, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="lvbench_agentic_source_dir"):
         lvbench_ag.prepare()
+    monkeypatch.chdir(tmp_path)
+    lvbench_ag.prepare(source_dir="source")
+    rel_rows = read_rows(lvbench_ag)
+    assert rel_rows[1]["video_binding"]["source"] == str((source / "video" / "clipB.mp4").resolve())
     (source / "FILES.sha256").write_text(f"{'0' * 64}  video/clipA.mp4\n", encoding="utf-8")
     with pytest.raises(ValueError, match="no SHA-256 for video/clipB.mp4"):
         lvbench_ag.prepare(source_dir=str(source))
 
 
 @pytest.mark.parametrize(
-    ("benchmark_name", "expected_profile", "expected_agent", "expected_agent_server", "expected_resource"),
+    ("special_dir", "encoded_segment"),
     [
-        ("videomme_v1", "custom-gym-verifier", "videomme_v1_single_turn", "simple_agent", "videomme_v1"),
-        ("videomme_v2", "custom-gym-verifier", "videomme_v2_single_turn", "simple_agent", "videomme_v2"),
-        ("lvbench", "custom-gym-verifier", "lvbench_single_turn", "simple_agent", "lvbench"),
-        ("lvbench_agentic", "custom-gym-agent-loop", "lvbench_agentic_opencode", "opencode_agent", "lvbench"),
+        ("video#archive", "video%23archive"),
+        ("video?archive", "video%3Farchive"),
+        ("video%2Farchive", "video%252Farchive"),
+    ],
+)
+def test_single_turn_file_urls_encode_special_path_characters(
+    tmp_path, monkeypatch, special_dir: str, encoded_segment: str
+) -> None:
+    url_dir = tmp_path / special_dir
+    url_dir.mkdir(parents=True, exist_ok=True)
+
+    v1_records = [v1_record("clipA", 1)]
+    v1_source = stage_parquet(tmp_path / "v1", monkeypatch, v1_st, v1_records, ["clipA"], "VIDEOMME_V1_PARQUET")
+    v1_st.prepare(source_dir=str(v1_source), video_url_dir=str(url_dir))
+    v1_url = read_rows(v1_st)[0]["responses_create_params"]["input"][0]["content"][0]["video_url"]
+    assert encoded_segment in v1_url
+    assert unquote(urlparse(v1_url).path) == str(url_dir / "clipA.mp4")
+
+    lv_records = [lvbench_video_record("clipA", [lvbench_qa("101", answer="B")])]
+    lv_source = stage_lvbench(tmp_path / "lv", monkeypatch, lvbench_st, lv_records, ["clipA"])
+    lvbench_st.prepare(source_dir=str(lv_source), video_url_dir=str(url_dir))
+    lv_url = read_rows(lvbench_st)[0]["responses_create_params"]["input"][0]["content"][0]["video_url"]
+    assert encoded_segment in lv_url
+    assert unquote(urlparse(lv_url).path) == str(url_dir / "clipA.mp4")
+
+    v2_records = [v2_record("001", position, 1) for position in range(1, 5)]
+    v2_source = stage_parquet(tmp_path / "v2", monkeypatch, v2_st, v2_records, ["001"], "VIDEOMME_V2_PARQUET")
+    v2_st.prepare(source_dir=str(v2_source), video_url_dir=str(url_dir))
+    v2_url = read_rows(v2_st)[0]["responses_create_params"]["input"][0]["content"][0]["video_url"]
+    assert encoded_segment in v2_url
+    assert unquote(urlparse(v2_url).path) == str(url_dir / "001.mp4")
+
+
+@pytest.mark.parametrize(
+    (
+        "benchmark_name",
+        "expected_profile",
+        "expected_agent",
+        "expected_agent_server",
+        "expected_resource",
+        "expected_metric",
+    ),
+    [
+        (
+            "videomme_v1",
+            "custom-gym-verifier",
+            "videomme_v1_single_turn",
+            "simple_agent",
+            "videomme_v1",
+            "mean/Video_MME",
+        ),
+        (
+            "videomme_v2",
+            "custom-gym-verifier",
+            "videomme_v2_single_turn",
+            "simple_agent",
+            "videomme_v2",
+            "Video_MME_v2/nonlinear_score",
+        ),
+        ("lvbench", "custom-gym-verifier", "lvbench_single_turn", "simple_agent", "lvbench", "mean/LVBench"),
+        (
+            "lvbench_agentic",
+            "custom-gym-agent-loop",
+            "lvbench_agentic_opencode",
+            "opencode_agent",
+            "lvbench",
+            "mean/LVBench_agentic",
+        ),
     ],
 )
 def test_video_benchmark_manifests_validate_cleanly(
@@ -349,12 +419,20 @@ def test_video_benchmark_manifests_validate_cleanly(
     expected_agent: str,
     expected_agent_server: str,
     expected_resource: str,
+    expected_metric: str,
 ) -> None:
     manifest_path = REPO_ROOT / "benchmarks" / benchmark_name / "manifest.yaml"
     config_path = REPO_ROOT / "benchmarks" / benchmark_name / "config.yaml"
     manifest = load_manifest(manifest_path)
     assert manifest.resources_server == expected_resource
     assert manifest.agent_server == expected_agent_server
+    assert manifest.maintainers == ["cg1177"]
+    assert manifest.capabilities
+    assert manifest.domains == ["general"]
+    assert manifest.primary_metric == expected_metric
+    assert manifest.requirements is not None
+    assert manifest.requirements.gpu is False
+    assert manifest.requirements.network == "allowlist"
 
     report = validate_environment(manifest_path, validate_datasets=False)
     assert report.warnings == ()
