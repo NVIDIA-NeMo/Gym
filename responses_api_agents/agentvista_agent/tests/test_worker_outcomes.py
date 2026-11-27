@@ -4,7 +4,9 @@
 
 import hashlib
 import json
+import subprocess
 import sys
+import time
 from types import ModuleType
 
 import pytest
@@ -54,6 +56,23 @@ def test_model_outcomes_are_judged_but_missing_tools_and_infrastructure_are_mask
         return {"reward": value, "status": "PASS" if value else "FAIL", "prediction": texts[-1] if texts else ""}
 
     monkeypatch.setattr(worker, "score", judge)
+    ready = tmp_path / "ready"
+
+    class ReadyPopen(subprocess.Popen):
+        """Start timed waits, such as the worker's agent deadline, once the fake CLI is ready or has exited.
+
+        The fake touches ``ready`` just before its timeout sleep, after listing its tools and printing any output, so
+        a slow start on a busy runner cannot look like a harness that never listed its tools or never answered.
+        Untimed waits (``--version``, ``git init``, ``communicate``) behave as in the standard library."""
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                limit = time.monotonic() + 30
+                while self.poll() is None and not ready.exists() and time.monotonic() < limit:
+                    time.sleep(0.01)
+            return super().wait(timeout)
+
+    monkeypatch.setattr(worker.subprocess, "Popen", ReadyPopen)
     cli = tmp_path / "cli"
     cli.write_text(f"""#!{sys.executable}
 import json,os,sys,time
@@ -77,7 +96,7 @@ elif ending in ('empty','length','reasoning-timeout'):
  print(json.dumps({{'type':'reasoning','part':{{'text':'Still working'}}}}),flush=True)
 elif ending=='native-error':
  print(json.dumps({{'type':'error','error':{{'name':'APIError'}}}}),flush=True);sys.exit(1)
-if ending.endswith('timeout'):time.sleep(5)
+if ending.endswith('timeout'):Path({str(ready)!r}).touch();time.sleep(5)
 print(json.dumps({{'type':'step_finish','part':{{'reason':'length' if ending=='length' else 'stop'}}}}),flush=True)
 """)
     cli.chmod(0o755)
@@ -104,7 +123,9 @@ print(json.dumps({{'type':'step_finish','part':{{'reason':'length' if ending=='l
         }
     )
     assert checked == [root]
-    assert value["mask_sample"] is masked, value
+    outcome = value.get("error", "judged")
+    assert value["mask_sample"] is masked, outcome
+    assert value.get("timed_out") is ending.endswith("timeout"), outcome
     assert value["reward"] == reward
     assert bool(judged) is not masked
     assert (tmp_path / "episode/result.json").is_file()
