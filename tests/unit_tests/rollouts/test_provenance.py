@@ -170,6 +170,314 @@ def test_review_provenance_bounds_row_decoding_but_hashes_all_bytes(tmp_path: Pa
     assert record.input_sampling_rows == 100
 
 
+def test_an_explicit_null_sampling_cap_reads_differently_from_an_unset_one() -> None:
+    record = provenance.build_provenance(
+        {"policy": {"max_tokens": None, "temperature": 0.6}, "judge": {"temperature": 0.0}}
+    )
+    assert record.sampling_parameters == {
+        "policy": {"max_tokens": None, "temperature": 0.6},
+        "judge": {"temperature": 0.0},
+    }
+
+
+def test_concurrency_limits_are_recorded_by_path() -> None:
+    record = provenance.build_provenance(
+        {
+            "num_samples_in_parallel": 64,
+            "policy_model": {"responses_api_models": {"openai_model": {"max_concurrent_requests": 128}}},
+            "episodes": {"environment_servers": {"legacy_agent": {"max_concurrent_episodes": None}}},
+            "judge": {"resources_servers": {"math_with_judge": {"library_verifier_max_concurrency": True}}},
+        }
+    )
+    assert record.concurrency_limits == {
+        provenance.TOP_LEVEL_PATH: {"num_samples_in_parallel": 64},
+        "policy_model.responses_api_models.openai_model": {"max_concurrent_requests": 128},
+        "episodes.environment_servers.legacy_agent": {"max_concurrent_episodes": None},
+    }
+
+
+def test_concurrency_limits_include_worker_counts_and_server_specific_limit_names() -> None:
+    record = provenance.build_provenance(
+        {
+            "num_samples_in_parallel": 64,
+            "max_resident_rollout_tasks": 256,
+            "policy_model": {
+                "responses_api_models": {
+                    "openai_model": {"num_workers": 4, "max_concurrent_requests": 32, "tensor_parallel_size": 8}
+                }
+            },
+            "stem_judge": {"resources_servers": {"stem_judge": {"judge_endpoint_max_concurrency": 64}}},
+            "frontiermath": {"resources_servers": {"frontiermath": {"verifier_max_concurrency": 16}}},
+            "gdpval": {"resources_servers": {"gdpval": {"num_workers": None, "preconvert_max_concurrent": 4}}},
+            "bird_sql": {"resources_servers": {"bird_sql": {"max_concurrency": 32}}},
+            "rna_design": {
+                "responses_api_agents": {
+                    "rna_design_agent": {"max_concurrent_rollouts": 8, "parallel_tool_calls": True}
+                }
+            },
+            "goose": {"responses_api_agents": {"goose_agent": {"concurrency": 32, "max_concurrent_flag": True}}},
+            "sandbox": {"docker": {"exec": {"default_timeout_s": 180, "concurrency": 32}}},
+            "judge": {"resources_servers": {"sciknoweval": {"env": {"judge_max_concurrency": 3}}}},
+        }
+    )
+    assert record.concurrency_limits == {
+        provenance.TOP_LEVEL_PATH: {"num_samples_in_parallel": 64, "max_resident_rollout_tasks": 256},
+        "policy_model.responses_api_models.openai_model": {"num_workers": 4, "max_concurrent_requests": 32},
+        "stem_judge.resources_servers.stem_judge": {"judge_endpoint_max_concurrency": 64},
+        "frontiermath.resources_servers.frontiermath": {"verifier_max_concurrency": 16},
+        "gdpval.resources_servers.gdpval": {"num_workers": None, "preconvert_max_concurrent": 4},
+        "bird_sql.resources_servers.bird_sql": {"max_concurrency": 32},
+        "rna_design.responses_api_agents.rna_design_agent": {"max_concurrent_rollouts": 8},
+        "goose.responses_api_agents.goose_agent": {"concurrency": 32},
+        "sandbox.docker.exec": {"concurrency": 32},
+    }
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize(
+    ("config_fpath", "path", "key", "limit"),
+    [
+        (
+            "benchmarks/healthbench/configs/nemotron-ultra.yaml",
+            "policy_model.responses_api_models.inference_provider",
+            "num_concurrent_requests",
+            4,
+        ),
+        (
+            "responses_api_models/azure_openai_model/configs/azure_openai_model.yaml",
+            "policy_model.responses_api_models.azure_openai_model",
+            "num_concurrent_requests",
+            8,
+        ),
+        (
+            "benchmarks/lmarena_v3/config_super35_gemini38flash_judge.yaml",
+            "lmarena_v3_benchmark_resources_server.resources_servers.arena",
+            "judge_concurrency",
+            32,
+        ),
+        ("nemo_gym/sandbox/providers/bwrap/configs/bwrap.yaml", "sandbox.bwrap", "exec_concurrency", 256),
+        (
+            "nemo_gym/sandbox/providers/openshell/configs/openshell.yaml",
+            "sandbox.openshell.operations",
+            "delete_concurrency",
+            32,
+        ),
+        (
+            "resources_servers/vision2code/configs/vision2code.yaml",
+            "vision2code.resources_servers.vision2code",
+            "render_concurrency",
+            8,
+        ),
+        (
+            "resources_servers/vision2code/configs/vision2code.yaml",
+            "vision2code.resources_servers.vision2code",
+            "image_metrics_concurrency",
+            2,
+        ),
+        (
+            "responses_api_agents/collab_intel_agent/configs/collab_intel_agent.yaml",
+            "collab_intel_agent.responses_api_agents.collab_intel_agent",
+            "max_concurrent",
+            16,
+        ),
+        (
+            "resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml",
+            "competitive_coding_challenges_resources_server.resources_servers.competitive_coding_challenges",
+            "num_parallel_requests",
+            16,
+        ),
+        ("resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml", "lab", "judge_parallelism", 6),
+        (
+            "responses_api_agents/conversational_tool_use_policy_tool_generation/configs/"
+            "conversational_tool_use_policy_tool_generation.yaml",
+            "conversational_tool_use_policy_tool_generation.responses_api_agents."
+            "conversational_tool_use_policy_tool_generation",
+            "max_judge_concurrency",
+            None,
+        ),
+        (
+            "responses_api_agents/qwen_code_agent/configs/qwen_code_agent.yaml",
+            "qwen_code_agent.responses_api_agents.qwen_code_agent",
+            "max_parallel_agents",
+            None,
+        ),
+    ],
+)
+def test_a_shipped_config_limit_under_its_own_name_is_recorded(config_fpath, path, key, limit) -> None:
+    node = OmegaConf.select(OmegaConf.load(REPO_ROOT / config_fpath), path)
+    config: dict = {}
+    for part in reversed(path.split(".")):
+        config = {part: config or {key: node[key]}}
+
+    record = provenance.build_provenance(config)
+
+    assert record.concurrency_limits == {path: {key: limit}}
+
+
+def test_limits_named_only_in_their_config_models_are_recorded() -> None:
+    record = provenance.build_provenance(
+        {
+            "global_aiohttp_connector_limit": 102400,
+            "global_aiohttp_connector_limit_per_host": 16384,
+            "global_aiohttp_intended_concurrency": 512,
+            "mm_coding": {
+                "resources_servers": {
+                    "mm_coding_training": {"verification_concurrency": 8, "checkpoint": {"parallelism": 16}}
+                }
+            },
+            "vcqa": {"responses_api_agents": {"vcqa_agent": {"sandbox_upload_concurrency": 4}}},
+            "sandbox": {"ecs_fargate": {"build_parallelism": 50}},
+        }
+    )
+    assert record.concurrency_limits == {
+        provenance.TOP_LEVEL_PATH: {
+            "global_aiohttp_connector_limit": 102400,
+            "global_aiohttp_connector_limit_per_host": 16384,
+        },
+        "mm_coding.resources_servers.mm_coding_training": {"verification_concurrency": 8},
+        "mm_coding.resources_servers.mm_coding_training.checkpoint": {"parallelism": 16},
+        "vcqa.responses_api_agents.vcqa_agent": {"sandbox_upload_concurrency": 4},
+        "sandbox.ecs_fargate": {"build_parallelism": 50},
+    }
+
+
+def _write_without_probing(output: Path, config, monkeypatch) -> dict:
+    monkeypatch.setattr(provenance, "served_models", lambda servers: {})
+    materialized_path_for(output).write_bytes(b"")
+    return orjson.loads(provenance.write_run_provenance(output, config).read_bytes())
+
+
+@pytest.mark.parametrize(("configured", "limit"), [(" 16 ", 16), (None, 32)])
+def test_an_env_backed_sandbox_exec_concurrency_is_recorded(configured, limit, monkeypatch) -> None:
+    if configured is None:
+        monkeypatch.delenv("SANDBOX_EXEC_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("SANDBOX_EXEC_CONCURRENCY", configured)
+    config = OmegaConf.create(
+        {
+            "sandbox": {
+                "docker": {"exec": {"default_timeout_s": 180, "concurrency": "${oc.env:SANDBOX_EXEC_CONCURRENCY,32}"}}
+            }
+        }
+    )
+    assert provenance.build_provenance(config).concurrency_limits == {"sandbox.docker.exec": {"concurrency": limit}}
+
+
+def test_a_setting_that_cannot_be_resolved_is_left_out_without_losing_the_record(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("PROVENANCE_UNSET_LIMIT", raising=False)
+    config = OmegaConf.create(
+        {
+            "seed": "${oc.env:PROVENANCE_UNSET_LIMIT}",
+            "num_samples_in_parallel": 16,
+            "judge": {
+                "responses_api_models": {
+                    "openai_model": {
+                        "openai_model": "judge",
+                        "max_concurrent_requests": "${oc.env:PROVENANCE_UNSET_LIMIT}",
+                        "num_workers": 2,
+                        "persist_dir": "???",
+                        "extra_body": {"temperature": "${missing.temperature}", "top_p": 0.9},
+                    }
+                }
+            },
+        }
+    )
+
+    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
+
+    assert record["status"] == "available"
+    assert record["seed"] is None
+    assert record["models"] == {"judge.responses_api_models.openai_model": {"openai_model": "judge"}}
+    assert record["concurrency_limits"] == {
+        provenance.TOP_LEVEL_PATH: {"num_samples_in_parallel": 16},
+        "judge.responses_api_models.openai_model": {"num_workers": 2},
+    }
+    assert record["sampling_parameters"] == {"judge.responses_api_models.openai_model.extra_body": {"top_p": 0.9}}
+
+
+def test_a_quoted_number_in_row_metadata_is_left_out_without_losing_the_record(tmp_path: Path) -> None:
+    output = tmp_path / "rollouts.jsonl"
+    inputs = materialized_path_for(output)
+    extra_body = orjson.dumps({"temperature": "123456789012345678901", "top_p": 0.9}).decode()
+    inputs.write_bytes(
+        orjson.dumps({"responses_create_params": {"temperature": "0.6", "metadata": {"extra_body": extra_body}}})
+        + b"\n"
+    )
+
+    record = orjson.loads(provenance.write_run_provenance(output, {"model": "policy"}).read_bytes())
+
+    assert record["status"] == "available"
+    assert record["materialized_inputs_sha256"] == sha256(inputs.read_bytes()).hexdigest()
+    assert record["input_sampling_parameters"] == [{"top_p": 0.9}]
+
+
+def test_a_row_whose_settings_cannot_be_written_is_skipped_on_its_own(tmp_path: Path, monkeypatch) -> None:
+    output = tmp_path / "rollouts.jsonl"
+    materialized_path_for(output).write_bytes(
+        b'{"responses_create_params":{"seed":1}}\n{"responses_create_params":{"temperature":0.5}}\n'
+    )
+    sampling = provenance._sampling
+    monkeypatch.setattr(
+        provenance,
+        "_sampling",
+        lambda config, **kwargs: {"seed": 2**70} if config.get("seed") == 1 else sampling(config, **kwargs),
+    )
+
+    record = orjson.loads(provenance.write_run_provenance(output, {"model": "policy"}).read_bytes())
+
+    assert record["status"] == "available"
+    assert record["input_sampling_rows_skipped"] == 1
+    assert record["input_sampling_parameters"] == [{"temperature": 0.5}]
+
+
+def test_strings_are_read_as_numbers_only_where_a_server_config_validates_them() -> None:
+    record = provenance.build_provenance(
+        {
+            "seed": "7",
+            "temperature": "0.6",
+            "judge": {
+                "resources_servers": {
+                    "judge": {
+                        "max_concurrent_requests": "${oc.env:UNRESOLVED}",
+                        "max_concurrency": "two",
+                        "concurrency": "1.5",
+                        "num_workers": "1_000",
+                        "judge_max_concurrency": "-1",
+                        "judge_endpoint_max_concurrency": 6.0,
+                        "verifier_max_concurrency": 6.5,
+                        "preconvert_max_concurrent": True,
+                        "max_concurrent_episodes": None,
+                        "max_tokens": "inf",
+                        "temperature": " 0.6 ",
+                        "top_p": "1e999",
+                        "top_k": "40.5",
+                        "min_p": float("inf"),
+                        "presence_penalty": "-0.5",
+                        "repetition_penalty": "true",
+                        "seed": "42",
+                        "judge_responses_create_params": {"temperature": "0.2", "top_p": 0.8},
+                    }
+                }
+            },
+        }
+    )
+    assert record.seed is None
+    assert record.concurrency_limits == {
+        "judge.resources_servers.judge": {
+            "num_workers": 1000,
+            "judge_max_concurrency": -1,
+            "judge_endpoint_max_concurrency": 6,
+            "max_concurrent_episodes": None,
+        }
+    }
+    assert record.sampling_parameters == {
+        "judge.resources_servers.judge": {"temperature": 0.6, "presence_penalty": -0.5, "seed": 42},
+        "judge.resources_servers.judge.judge_responses_create_params": {"top_p": 0.8},
+    }
+
+
 def test_review_provenance_excludes_boolean_sampling_values() -> None:
     record = provenance.build_provenance({"seed": True, "temperature": False, "top_p": 0.9})
     assert record.sampling_parameters == {provenance.TOP_LEVEL_PATH: {"top_p": 0.9}}
