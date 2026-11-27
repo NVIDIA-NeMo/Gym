@@ -341,7 +341,8 @@ def agent_response() -> NeMoGymResponse:
 
 
 class FakeAgentClient(ServerClient):
-    """Stands in for the agent server: answers the session seed, the turn and the close.
+    """Stands in for the agent server: answers the session seed, the turn and the close. It also answers the policy
+    model server's endpoint binding release, which an episode sends when ``policy_model_server`` is set.
 
     ``fail_path`` makes the next call to that path time out (a lost reply). ``slow_path`` delays
     that path by ``slow_seconds`` so an episode deadline can expire during it, or so a turn costs real time
@@ -409,6 +410,8 @@ class FakeAgentClient(ServerClient):
             )
         if url_path.endswith("/v1/responses"):
             return _Response(self.turn_response or agent_response().model_dump(mode="json"))
+        if url_path == "/endpoint_binding/release":
+            return _Response({"released": True})
         raise AssertionError(f"unexpected agent call {url_path}")
 
     async def get(self, server_name: str, url_path: str, **kwargs) -> _Response:
@@ -435,6 +438,10 @@ class FakeAgentClient(ServerClient):
 
     def paths(self) -> list[str]:
         return [call[1] for call in self.calls]
+
+    def release_calls(self) -> list[tuple[str, dict]]:
+        """The server and JSON body of each policy model endpoint binding release, in order."""
+        return [(call[0], call[2]["json"]) for call in self.calls if call[1] == "/endpoint_binding/release"]
 
 
 def make_client(implementation: str = "test") -> FakeAgentClient:

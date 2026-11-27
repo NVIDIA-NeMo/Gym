@@ -84,6 +84,10 @@ default: the first usable one on `PATH`), `repository` (default `$NEMO_GYM_BUILD
 [`fern/versions/latest/pages/reference/configuration.mdx`](../../fern/versions/latest/pages/reference/configuration.mdx)
 under "Harbor image builds". The job-level `compose_overlay` and `compose_variables` are documented in
 [`fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`](../../fern/versions/latest/pages/data/task-folders/compose-tasks.mdx).
+`policy_model_server` (unset by default) names the `vllm_model` server the harness calls; each episode's final cleanup
+then releases its endpoint binding there, which `endpoint_selection: least_sessions` needs to balance rollouts across vLLM
+replicas (see "Balance rollouts by active sessions" in
+[`fern/versions/latest/pages/model-server/vllm.mdx`](../../fern/versions/latest/pages/model-server/vllm.mdx)).
 
 ## Test it
 
