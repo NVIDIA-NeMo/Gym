@@ -2270,6 +2270,47 @@ class TestApp:
         assert self._resolve_rollout(server, "task-7-0") is failed
         assert self._resolve_rollout(server, "task-8-0") is not failed
 
+    async def test_least_sessions_rollouts_moved_off_a_failed_endpoint_probe_it_and_go_back(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """With no new rollouts in a wave, the rollouts moved off a failed endpoint are what probe it, as under the
+        hash, while a rollout that was never there keeps its endpoint."""
+        clock = [1000.0]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: clock[0])
+        server = self._setup_routing_server(
+            monkeypatch,
+            route_around=True,
+            endpoint_failure_threshold=1,
+            endpoint_retry_after_s=60.0,
+            endpoint_selection="least_sessions",
+        )
+        server._clients = server._clients[:2]
+        failed, healthy = server._clients
+        assert [self._resolve_rollout(server, f"task-{i}-0") for i in range(3)] == [failed, healthy, failed]
+        server._note_endpoint_failure(failed)
+        assert {self._resolve_rollout(server, capture_key) for capture_key in ("task-0-0", "task-2-0")} == {healthy}
+        assert self._session_counts(server) == [0, 3]
+
+        clock[0] += 59.0
+        assert {self._resolve_rollout(server, f"task-{i}-0") for i in range(3)} == {healthy}
+        clock[0] += 1.0
+        # The interval has run out: the rollout that was never on the failed endpoint stays, the first moved one is
+        # the trial call, and the other waits for the trial's answer.
+        assert self._resolve_rollout(server, "task-1-0") is healthy
+        assert self._resolve_rollout(server, "task-0-0") is failed
+        assert self._resolve_rollout(server, "task-2-0") is healthy
+        assert self._session_counts(server) == [1, 2]
+        # A good answer puts the endpoint back in the pool, and the other moved rollout goes back on its next call.
+        server._note_endpoint_success(failed)
+        assert not server._endpoint_failed(failed)
+        assert self._resolve_rollout(server, "task-2-0") is failed
+        assert [self._resolve_rollout(server, f"task-{i}-0") for i in range(3)] == [failed, healthy, failed]
+        assert self._session_counts(server) == [2, 1]
+        assert not server._rollout_session_moved_from
+        for i in range(3):
+            assert await self._release(server, f"task-{i}-0")
+        assert self._session_counts(server) == [0, 0]
+
     def test_least_sessions_keeps_the_hash_for_calls_without_a_rollout(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_routing_server(monkeypatch, route_around=False, endpoint_selection="least_sessions")
         hashed = self._hashed_client_idx("session-a", 4)

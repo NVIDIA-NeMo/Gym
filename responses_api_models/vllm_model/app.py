@@ -1221,6 +1221,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         can go there again; under ``hash`` only the cached assignment is dropped.
         """
         client = self._rollout_session_to_client.pop(body.session_key, None)
+        self._rollout_session_moved_from.pop(body.session_key, None)
         if client is not None:
             self._endpoint_session_counts[client.base_url] -= 1
             LOG.debug(
@@ -1376,6 +1377,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         # through _bind_session and the release route.
         self._rollout_session_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
         self._endpoint_session_counts: Counter[str] = Counter()
+        # endpoint_selection=least_sessions with route-around: the failed endpoint each rollout session was moved off,
+        # until it goes back there. Its next call after the endpoint's retry interval is the endpoint's trial call.
+        self._rollout_session_moved_from: Dict[str, NeMoGymAsyncOpenAI] = dict()
         # Keyed by base_url so the record outlives a client rebind to the same address.
         self._endpoint_health: Dict[str, _EndpointHealth] = dict()
         self._generation_cut_control_urls = dict(
@@ -2965,6 +2969,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client.clear()
         self._rollout_session_to_client.clear()
         self._endpoint_session_counts.clear()
+        self._rollout_session_moved_from.clear()
 
     def _note_endpoint_unpublished(self) -> None:
         now = monotonic()
@@ -3047,15 +3052,24 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         A session keeps the endpoint it is bound to, so its turns reuse that endpoint's prefix cache. It is bound to
         another one when route-around finds its endpoint failed, or when its endpoint holds more than
-        ``session_move_margin`` sessions above the least-loaded serving endpoint. A new session goes to the endpoint
+        ``session_move_margin`` sessions above the least-loaded serving endpoint. A session moved off a failed endpoint
+        goes back to it once it serves again or is due for its trial call, as under the hash: once a wave has started,
+        such sessions may be the only callers left to probe it. A new session goes to the endpoint
         with the fewest sessions, ties broken by list order. When that endpoint has failed, it takes the session only
         as its trial call once the retry interval has run out, so new sessions probe a recovered endpoint; otherwise
         the session goes to the least-loaded endpoint that has not failed.
         """
         serving = [client for client in self._clients if not self._endpoint_failed(client)] or self._clients
         client = self._rollout_session_to_client.get(session_key)
-        if client is not None and self.config.route_around_failing_endpoints and not self._endpoint_serves(client):
-            client = None
+        if client is not None and self.config.route_around_failing_endpoints:
+            moved_from = self._rollout_session_moved_from.get(session_key)
+            if moved_from is not None and self._endpoint_serves(moved_from):
+                del self._rollout_session_moved_from[session_key]
+                self._bind_session(session_key, moved_from)
+                return moved_from
+            if not self._endpoint_serves(client):
+                self._rollout_session_moved_from[session_key] = client
+                client = None
         if client is not None:
             least = self._least_loaded(serving)
             counts = self._endpoint_session_counts
