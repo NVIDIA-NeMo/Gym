@@ -77,6 +77,11 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
     )
     spatial_uncapped_judge_squared: bool = False
     artifact_dir: str = "artifacts/vision2code"
+    reference_root: str | None = Field(
+        default=None,
+        description="Absolute directory that relative reference image paths (verifier_metadata.image_path) resolve "
+        "against. Unset: the Gym checkout root, where the committed examples' repository-relative paths point.",
+    )
 
     @model_validator(mode="after")
     def validate_renderer(self) -> "Vision2CodeConfig":
@@ -84,6 +89,8 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
             raise ValueError("vision2code requires Gym's Enroot provider")
         if not self.sandbox_image.endswith(".sqsh") or not Path(self.sandbox_image).is_absolute():
             raise ValueError("sandbox_image must be an absolute local .sqsh path")
+        if self.reference_root is not None and not Path(self.reference_root).is_absolute():
+            raise ValueError("reference_root must be an absolute directory")
         config = self.sandbox_provider["enroot"]
         # This environment only needs provider storage paths and startup timeouts.
         # Do not let provider overrides add host mounts, hooks, or commands.
@@ -227,9 +234,11 @@ class Vision2CodeServer(SimpleResourcesServer):
         try:
             reference_path = Path(ref.image_path)
             if not reference_path.is_absolute():
-                # Gym starts servers from their component directory; committed examples
-                # use repository-relative paths so they remain portable across checkouts.
-                reference_path = Path(__file__).resolve().parents[2] / reference_path
+                # Gym starts servers from their component directory, so a relative path resolves against
+                # reference_root, or else the Gym checkout root: committed examples use repository-relative
+                # paths so they remain portable across checkouts.
+                root = self.config.reference_root or Path(__file__).resolve().parents[2]
+                reference_path = Path(root) / reference_path
             raw, mime, width, height = read_reference(reference_path)
             if hashlib.sha256(raw).hexdigest() != ref.sha256 or (width, height) != (ref.width, ref.height):
                 raise ValueError("Reference changed since task preparation; regenerate the JSONL")

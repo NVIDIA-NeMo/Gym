@@ -295,6 +295,30 @@ async def test_policy_failure_is_unmasked_zero(setup, status, name, blend):
 
 
 @pytest.mark.asyncio
+async def test_response_cut_by_output_cap_before_answering_is_unmasked_zero(setup):
+    server, body, renderer, judge = setup
+    body.response = NeMoGymResponse(
+        id="resp",
+        created_at=0,
+        model="test",
+        object="response",
+        output=[{"id": "rs", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan the chart"}]}],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+        status="incomplete",
+        incomplete_details={"reason": "max_output_tokens"},
+    )
+    renderer.side_effect = None
+    renderer.return_value = RenderResult(status="missing_output")
+    result = await server.verify(body)
+    assert renderer.call_args.kwargs["code"] == ""
+    assert result.reward == 0 and not result.mask_sample
+    assert result.failure_kind is None
+    judge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_infrastructure_is_masked(setup):
     server, body, renderer, judge = setup
     renderer.side_effect = None
@@ -353,6 +377,48 @@ async def test_committed_reference_is_independent_of_server_working_directory(se
         "image_url"
     ]
     assert content[1]["image_url"] == expected
+
+
+@pytest.mark.asyncio
+async def test_reference_root_resolves_relative_reference_paths(setup, tmp_path, monkeypatch):
+    server, body, _, judge = setup
+    root = tmp_path / "refs"
+    (root / "data" / "set").mkdir(parents=True)
+    (tmp_path / "reference.png").rename(root / "data" / "set" / "reference.png")
+    server.config.reference_root = str(root)
+    body.verifier_metadata.image_path = "data/set/reference.png"
+    monkeypatch.chdir(tmp_path)
+    judge.return_value = judge_result(body.verifier_metadata.rubric)
+    result = await server.verify(body)
+    assert not result.mask_sample and result.failure_kind is None
+
+
+@pytest.mark.asyncio
+async def test_absolute_reference_path_ignores_reference_root(setup, tmp_path):
+    server, body, _, judge = setup
+    other = tmp_path / "other"
+    other.mkdir()
+    server.config = app.Vision2CodeConfig(**{**server.config.model_dump(), "reference_root": str(other)})
+    judge.return_value = judge_result(body.verifier_metadata.rubric)
+    result = await server.verify(body)
+    assert not result.mask_sample and result.failure_kind is None
+
+
+@pytest.mark.asyncio
+async def test_relative_reference_path_without_reference_root_is_masked(setup, tmp_path):
+    server, body, renderer, judge = setup
+    # Unset reference_root: a relative path resolves against the Gym checkout, which has no such file.
+    body.verifier_metadata.image_path = "data/set/reference.png"
+    result = await server.verify(body)
+    assert result.mask_sample and result.failure_kind == "verifier_error"
+    renderer.assert_not_awaited()
+    judge.assert_not_awaited()
+
+
+def test_reference_root_must_be_absolute(setup):
+    server, _, _, _ = setup
+    with pytest.raises(ValueError, match="reference_root must be an absolute directory"):
+        app.Vision2CodeConfig(**{**server.config.model_dump(), "reference_root": "relative/dir"})
 
 
 @pytest.mark.asyncio
