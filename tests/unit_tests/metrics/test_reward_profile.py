@@ -22,7 +22,7 @@ import orjson
 import pandas as pd
 import pytest
 
-from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, rollout_run_labels
 from nemo_gym.metrics.reward_profile import (
     RewardProfiler,
     compute_aggregate_metrics,
@@ -369,16 +369,21 @@ class TestRewardProfile:
             {"_ng_task_index": 0, "_ng_rollout_index": r, "_ng_environment_server": "environment"} for r in range(2)
         ]
         results = [
-            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"usage": {"total_tokens": 3}}},
-            {"_ng_task_index": 0, "_ng_rollout_index": 1, "reward": 0.0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "is_looping": True},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "reward": 0.0, "is_looping": False},
         ]
+        results[0]["response"] = {"usage": {"total_tokens": 3}}
 
         _, agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
 
         assert [m["agent_ref"]["name"] for m in agent_level_metrics] == ["environment"]
         assert agent_level_metrics[0]["mean/reward"] == 0.5
+        coverage = coverage_by_agent(rows, results)
+        assert set(coverage) == {m["agent_ref"]["name"] for m in agent_level_metrics}
+        assert coverage["environment"]["looping/rate"] == 0.5
 
-    def test_profile_keeps_two_servers_that_front_one_agent_apart(self) -> None:
+    @pytest.mark.parametrize("mask_second", [False, True])
+    def test_profile_keeps_two_servers_that_front_one_agent_apart(self, mask_second: bool) -> None:
         rows = [
             {
                 "_ng_task_index": 0,
@@ -389,14 +394,26 @@ class TestRewardProfile:
             for r, server in enumerate(("hermes_relay", "hermes_turn"))
         ]
         results = [
-            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0},
-            {"_ng_task_index": 0, "_ng_rollout_index": 1, "reward": 0.0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "is_looping": False},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "reward": 0.0, "is_looping": True},
         ]
+        results[1]["mask_sample"] = mask_second
 
-        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+        measured_rows, measured_results, _, _ = select_measured(rows, results)
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(
+            measured_rows, measured_results, run_labels=rollout_run_labels(rows)
+        )
 
         rewards = {m["agent_ref"]["name"]: m["mean/reward"] for m in agent_level_metrics}
-        assert rewards == {"hermes_relay": 1.0, "hermes_turn": 0.0}
+        expected_rewards = {"hermes_relay": 1.0}
+        if not mask_second:
+            expected_rewards["hermes_turn"] = 0.0
+        assert rewards == expected_rewards
+        coverage = coverage_by_agent(rows, results)
+        assert {name: metrics["looping/rate"] for name, metrics in coverage.items()} == {
+            "hermes_relay": 0.0,
+            "hermes_turn": 1.0,
+        }
 
     def test_profile_from_data_series(self) -> None:
         rows = [

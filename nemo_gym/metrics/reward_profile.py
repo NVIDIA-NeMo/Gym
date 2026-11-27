@@ -412,7 +412,10 @@ class RewardProfiler:
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
         allow_partial_rollouts: bool = False,
+        *,
+        run_labels: dict[str, str] | None = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Profile measured results, retaining full-input run labels when provided."""
         aligned_rows_and_results = self.align_rows_and_results(
             rows, results, allow_partial_rollouts=allow_partial_rollouts
         )
@@ -425,7 +428,7 @@ class RewardProfiler:
         # one, so the detection must not introduce a new failure on unmatched (partial) rows.
         # Group by what ran each rollout, named the way aggregate metrics name it. Each label names
         # exactly one Environment Server, so two servers that front one agent stay separate.
-        labels = rollout_run_labels(rows)
+        labels = rollout_run_labels(rows) if run_labels is None else run_labels
 
         def _agent_name(row: Dict[str, Any]) -> Optional[str]:
             return labels.get(rollout_run_key(row))
@@ -961,24 +964,25 @@ def coverage_by_agent(
     rows: List[Dict[str, Any]],
     results: List[Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
-    """Coverage for each agent, computed from that agent's own records.
+    """Coverage with the same run labels as the quality metrics.
 
     A run-wide coverage block copied onto every agent tells each of them how much *the run*
     masked, which reads as that agent's own loss. An agent that masked nothing would carry
     another agent's count.
 
-    Agents are keyed by name; an agent whose every result was masked still gets an entry,
+    A run whose every result was masked still gets an entry,
     so a caller can keep reporting it after the quality metrics drop it.
     """
-    agent_of_key = {
-        _rollout_key(row): (row.get("agent_ref") or {}).get("name")
-        for row in rows
-        if (row.get("agent_ref") or {}).get("name") is not None
-    }
+    labels = rollout_run_labels(rows)
+    label_by_rollout = {}
+    for row in rows:
+        key = rollout_run_key(row)
+        if key is not None:
+            label_by_rollout[_rollout_key(row)] = labels[key]
 
     per_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for vr in results:
-        name = agent_of_key.get(_rollout_key(vr))
+        name = label_by_rollout.get(_rollout_key(vr))
         if name is not None:
             per_agent[name].append(vr)
 
