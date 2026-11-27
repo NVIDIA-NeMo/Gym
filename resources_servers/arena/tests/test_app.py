@@ -567,6 +567,7 @@ class TestArenaResourcesServer:
             ("judge_concurrency", 0),
             ("judge_timeout_secs", 0),
             ("bootstrap_rounds", 0),
+            ("judge_max_attempts_per_game", 0),
         ],
     )
     def test_invalid_numeric_config_is_rejected(self, config, field, value):
@@ -841,12 +842,13 @@ class TestArenaResourcesServer:
     async def test_verify_a_game_still_without_verdict_is_a_counted_failure_not_a_masked_row(
         self, server: ArenaResourcesServer, texts, reasons, expected
     ):
+        server.config.judge_max_attempts_per_game = 2
         request = self._make_verify_request("Answer.")
         self._setup_judge_texts(server, texts, reasons)
 
         result = await judge_failsafe(server.verify)(body=request)
 
-        # Each game without a verdict is asked once more, then the row stays in the main output.
+        # Each game without a verdict is asked until its attempts run out, then the row stays in the main output.
         assert server.server_client.post.await_count == len(texts)
         assert isinstance(result, ArenaVerifyResponse)
         assert "_ng_failure_class" not in result.model_dump()
@@ -869,6 +871,26 @@ class TestArenaResourcesServer:
         assert result.failure_kind is None
         assert result.mask_sample is False
 
+    async def test_a_game_is_asked_until_a_verdict_up_to_its_attempts(self, server: ArenaResourcesServer):
+        # Game 1 answers at once; game 2's judge replies empty twice, then gives a verdict on its third call.
+        self._setup_judge_texts(server, ["[[A>B]]", "", "", "[[B>A]]"])
+
+        result = await server.verify(self._make_verify_request("Answer."))
+
+        assert server.server_client.post.await_count == 4
+        assert [game.verdict for game in result.games] == ["[[A>B]]", "[[B>A]]"]
+        assert result.reward == approx(1.0)
+        assert result.failure_kind is None
+
+    async def test_one_attempt_per_game_asks_no_game_again(self, server: ArenaResourcesServer):
+        server.config.judge_max_attempts_per_game = 1
+        self._setup_judge_texts(server, ["[[A>B]]", ""])
+
+        result = await server.verify(self._make_verify_request("Answer."))
+
+        assert server.server_client.post.await_count == 2
+        assert result.failure_kind == JUDGE_NO_VERDICT
+
     async def test_a_game_that_gets_a_verdict_when_asked_again_completes_its_grading(
         self, server: ArenaResourcesServer
     ):
@@ -890,6 +912,7 @@ class TestArenaResourcesServer:
         assert result.reward == approx(1.0)
 
     async def test_a_row_without_verdict_counts_against_max_rollout_failure_rate(self, server: ArenaResourcesServer):
+        server.config.judge_max_attempts_per_game = 2
         self._setup_judge_texts(server, ["", "[[B>A]]", ""], ["content_filter", None, "content_filter"])
         failed = (await server.verify(self._make_verify_request("Answer."))).model_dump(mode="json")
         scored = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)

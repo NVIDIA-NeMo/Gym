@@ -95,6 +95,9 @@ class ArenaResourcesServerConfig(BaseResourcesServerConfig):
     judge_system_message_by_category: dict[str, str]
     # Per-request timeout for judge API calls in seconds.
     judge_timeout_secs: float = Field(gt=0)
+    # Judge calls per game while its reply holds no verdict (empty, filtered, cut or without a label). A judge
+    # sometimes returns an empty reply that the same prompt answers when asked again.
+    judge_max_attempts_per_game: int = Field(default=3, ge=1)
     tokenizer_model: str
     bootstrap_rounds: int = Field(ge=1)
     bootstrap_seed: int
@@ -270,8 +273,11 @@ class ArenaResourcesServer(SimpleResourcesServer):
         async def grade() -> ArenaVerifyResponse:
             games = await play([0, 1])
             # A game without a verdict (output cut at its token cap, filtered, empty or without a label) is asked
-            # once more: a judge that stalls in its reasoning often gives a verdict on the next call.
-            if retry := [index for index, game in enumerate(games) if game.verdict is None]:
+            # again, up to judge_max_attempts_per_game calls in all: the same prompt often gets a verdict next time.
+            for _ in range(self.config.judge_max_attempts_per_game - 1):
+                retry = [index for index, game in enumerate(games) if game.verdict is None]
+                if not retry:
+                    break
                 for index, game in zip(retry, await play(retry)):
                     games[index] = game
             game1, game2 = games
