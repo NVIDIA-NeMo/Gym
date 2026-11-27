@@ -2132,8 +2132,8 @@ async def test_a_task_that_declares_skills_gets_them_in_hermes_home(agent, state
     # The runner sets HERMES_HOME to this folder of the session directory, so Hermes finds the skills it holds.
     assert seeded.hermes_home == f"{seeded.session.session_dir}/hermes-home"
     (copy,) = [command for command in commands if " cp -RL -- " in command]
-    assert f"mkdir -p -- {seeded.hermes_home}/skills && cp -RL -- /workspace/skills/. " in copy
-    assert copy.endswith(f" {seeded.hermes_home}/skills/")
+    skills = f"{seeded.hermes_home}/skills"
+    assert f"mkdir -p -- {skills} && cp -RL -- /workspace/skills/. {skills}/;" in copy
 
 
 @pytest.mark.parametrize("context", ["", json.dumps({"mcp_servers": [{"name": "search"}], "skills_dir": None})])

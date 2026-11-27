@@ -1322,8 +1322,7 @@ async def test_a_re_bind_that_installs_the_session_files_again_stages_the_task_s
     # the folder the checkpoint names: the re-bind does not depend on task.json.
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     copies = [command for command in commands if " cp -RL -- " in command]
-    assert len(copies) == 1 and copies[0].endswith(" /sessions/s/config/opencode/skills/")
-    assert "cp -RL -- /workspace/skills/. " in copies[0]
+    assert len(copies) == 1 and "cp -RL -- /workspace/skills/. /sessions/s/config/opencode/skills/;" in copies[0]
     assert not any("task.json" in command for command in commands)
     assert state.task_skills == "/workspace/skills" and state.session is session
 
@@ -1764,7 +1763,7 @@ async def test_a_seed_retried_after_its_re_bind_failed_to_copy_the_task_skills_c
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed)
 
     # The seed is accepted only once a copy succeeded.
-    assert len(fork.copies) == 3 and fork.copies[-1].endswith(" /sessions/s/config/opencode/skills/")
+    assert len(fork.copies) == 3 and " /sessions/s/config/opencode/skills/;" in fork.copies[-1]
     assert restored.session is fork.session and not agent._session_records["s"].restored
     assert restored.task_skills == "/workspace/skills" and not restored.task_skills_pending
 

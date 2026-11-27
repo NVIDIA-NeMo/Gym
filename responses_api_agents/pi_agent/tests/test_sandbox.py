@@ -3739,8 +3739,7 @@ def test_a_task_that_declares_skills_gets_them_in_pi_skills_folder_and_on_the_co
     )
     skills = f"{directory}/home/.pi/agent/skills"
     (copy,) = [command for command in commands if " cp -RL -- " in command]
-    assert f"mkdir -p -- {skills} && cp -RL -- /workspace/skills/. " in copy
-    assert copy.endswith(f" {skills}/")
+    assert f"mkdir -p -- {skills} && cp -RL -- /workspace/skills/. {skills}/;" in copy
     # Discovery stays off; Pi loads the task's skills from the folder named after --skill, in PI_CODING_AGENT_DIR.
     command = payload["command"]
     assert "--no-skills" in command and command[command.index("--skill") + 1] == skills

@@ -7,13 +7,16 @@ The helper runs its commands in a real shell on a local sandbox, so the tests ob
 
 import json
 import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from nemo_gym.agents.base_responses_api_agent import AgentSeedRejectedError
 from nemo_gym.agents.utils import task_skills
+from nemo_gym.agents.utils.sandbox_session import SandboxSession
 from nemo_gym.agents.utils.task_skills import stage_task_skills
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
@@ -106,6 +109,105 @@ async def test_a_symlink_whose_target_cannot_be_read_is_refused(local_sandbox) -
             await stage_task_skills(local_sandbox.sandbox, str(local_sandbox.root / "config" / "skills"))
     finally:
         secret.chmod(0o644)
+
+
+@pytest.fixture
+def read_only_skills(local_sandbox):
+    """A skills folder an image ships read-only, as a non-root agent user finds root's files: the ``demo`` skill's
+    folders are 0555, its SKILL.md 0444 and its script 0555. Made writable again afterwards, for ``tmp_path``."""
+    folder = _skills_folder(local_sandbox.root)
+    demo = folder / "demo"
+    (demo / "SKILL.md").chmod(0o444)
+    (demo / "scripts" / "helper.sh").chmod(0o555)
+    (demo / "scripts").chmod(0o555)
+    demo.chmod(0o555)
+    yield folder
+    demo.chmod(0o755)
+    (demo / "scripts").chmod(0o755)
+
+
+def _modes(folder: Path) -> dict[str, int]:
+    """The permission bits of ``folder`` and of everything in it, by path relative to ``folder``."""
+    return {str(path.relative_to(folder)): stat.S_IMODE(path.lstat().st_mode) for path in [folder, *folder.rglob("*")]}
+
+
+def _lacking_owner_access(folder: Path) -> list[str]:
+    """The entries in ``folder`` that its owner cannot read and write, and the folders the owner cannot enter.
+
+    Read from the modes, since a test run as root reads and removes files whatever their modes.
+    """
+    lacking = []
+    for path in [folder, *folder.rglob("*")]:
+        mode = path.lstat().st_mode
+        needed = stat.S_IRWXU if stat.S_ISDIR(mode) else stat.S_IRUSR | stat.S_IWUSR
+        if mode & needed != needed:
+            lacking.append(str(path.relative_to(folder)))
+    return lacking
+
+
+async def _close_seeded_session(sandbox: AsyncSandbox, session_dir: Path) -> None:
+    """Close a session that borrowed ``sandbox`` and was seeded but never launched, as a refused seed is closed.
+
+    The close removes ``session_dir`` in the sandbox, as the user that staged the skills, then disconnects. The local
+    provider cannot be borrowed, so the disconnect is recorded instead of made. The sandbox is the environment's,
+    which verifies in it after the close, so the close must not stop it.
+    """
+    session = SandboxSession(sandbox=sandbox, session_dir=str(session_dir), workdir=None, harness="test")
+    with (
+        patch.object(sandbox, "disconnect", AsyncMock()) as disconnect,
+        patch.object(sandbox, "stop", AsyncMock()) as stop,
+    ):
+        await session.close(timeout=30)
+
+    disconnect.assert_awaited_once()
+    stop.assert_not_awaited()
+    assert not session_dir.exists() and not Path(f"{session_dir}.closed").exists()
+
+
+async def test_a_skill_shipped_read_only_is_staged_for_its_session_to_read_and_remove(
+    local_sandbox, read_only_skills
+) -> None:
+    """``cp`` gives the copy the task's read-only modes. The close, which removes the session's files as the agent
+    user, then could not unlink the files in a read-only folder, and did not release the environment's sandbox."""
+    source_modes = _modes(read_only_skills)
+    local_sandbox.context.write_text(json.dumps({"skills_dir": str(read_only_skills)}))
+    session_dir = local_sandbox.root / "session"
+    destination = session_dir / "config" / "skills"
+
+    await stage_task_skills(local_sandbox.sandbox, str(destination))
+
+    staged = destination / "demo"
+    assert (staged / "SKILL.md").read_text() == (read_only_skills / "demo" / "SKILL.md").read_text()
+    assert _lacking_owner_access(destination) == []
+    # The script stays executable, and the skill does not become so.
+    assert (staged / "scripts" / "helper.sh").stat().st_mode & stat.S_IXUSR
+    assert not (staged / "SKILL.md").stat().st_mode & 0o111
+    assert _modes(read_only_skills) == source_modes
+    await _close_seeded_session(local_sandbox.sandbox, session_dir)
+
+
+async def test_a_copy_that_fails_after_a_read_only_skill_keeps_its_error_and_its_session_still_closes(
+    local_sandbox, read_only_skills
+) -> None:
+    """A refused seed closes its session, which removes what the copy made before it failed."""
+    broken = read_only_skills / "broken"
+    broken.mkdir()
+    (broken / "reference.md").symlink_to("../../missing.md")
+    source_modes = _modes(read_only_skills)
+    local_sandbox.context.write_text(json.dumps({"skills_dir": str(read_only_skills)}))
+    session_dir = local_sandbox.root / "session"
+    destination = session_dir / "config" / "skills"
+
+    with pytest.raises(AgentSeedRejectedError) as refusal:
+        await stage_task_skills(local_sandbox.sandbox, str(destination))
+
+    # The copy's own exit status and message.
+    assert "(exit 1)" in refusal.value.detail and "reference.md" in refusal.value.detail
+    # cp carries on past the broken link, so the read-only skill is copied whichever of the two it reaches first.
+    assert (destination / "demo" / "SKILL.md").is_file()
+    assert _lacking_owner_access(destination) == []
+    assert _modes(read_only_skills) == source_modes
+    await _close_seeded_session(local_sandbox.sandbox, session_dir)
 
 
 async def test_paths_with_spaces_and_shell_characters_are_copied_as_written(local_sandbox) -> None:

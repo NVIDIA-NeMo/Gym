@@ -3086,8 +3086,8 @@ def test_a_task_that_declares_skills_gets_them_in_the_opencode_config_folder_and
     )
     # OpenCode finds skills in the skills folder of XDG_CONFIG_HOME/opencode, the folder the seed filled.
     (copy,) = [command for command in commands if " cp -RL -- " in command]
-    assert f"mkdir -p -- {config_home}/opencode/skills && cp -RL -- /workspace/skills/. " in copy
-    assert copy.endswith(f" {config_home}/opencode/skills/")
+    skills = f"{config_home}/opencode/skills"
+    assert f"mkdir -p -- {skills} && cp -RL -- /workspace/skills/. {skills}/;" in copy
     # OpenCode applies the last matching rule: the skill rule follows "*", and the profile's other rules stay.
     assert list(permission)[-1] == "skill" and permission["skill"] == "allow"
     assert permission["webfetch"] == permission["websearch"] == "deny"
