@@ -1,0 +1,176 @@
+# SWE-MM: multimodal issue repair (issues that carry screenshots) on swemer_v2 with the OpenCode session agent, as an
+# RL training environment. Each row is a swemer_v2 task in its own task image (repo and dependencies at /app/repo,
+# issue screenshots under /app/issue, the OpenCode runtime preinstalled under /opt/gym-assets), with its test command,
+# FAIL_TO_PASS / PASS_TO_PASS, and a prompt of one input_text plus one input_image per screenshot. Rows set agent_ref
+# to swe_mm_opencode_agent. There is no bundled dataset (`datasets: []`): the training framework supplies the rows.
+#
+# The task sandbox belongs to swemer_v2 (it seeds it, scrubs git, captures the patch and grades in a fresh sandbox).
+# The agent borrows it, so its network is swemer_v2's: enforce_agent_no_network allows only the policy model server.
+# The sandboxes use their own OpenSandbox provider instance, swe_mm_sandbox (opensandbox.yaml's settings over https,
+# with no setup commands), instead of the shared `sandbox` block, so setup commands or registry auth that a
+# multi-environment run adds to `sandbox` for other environments do not reach these task images.
+# OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY name the deployment.
+#
+# Compared with configs/swemer_v2.yaml (single_agent_turn, example taskset), this pairing is for training: episodes run
+# behind single_agent_turn_legacy, OpenCode is told the policy's context window and per-call output limit, has a
+# 60-step budget with compaction off, and uses the image's runtime, pinned by SHA-256.
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
+swe_mm_sandbox:
+  default_metadata:
+    sandbox-api: opensandbox-sdk
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY}
+      protocol: https
+      request_timeout_s: 300
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    create:
+      request_timeout_s: 1200
+      timeout_s: null
+      fail_fast_on_pending: false
+      connect_attempt_timeout_s: 1500
+      skip_health_check: false
+      retries: 10
+      retry_delay_s: 5.0
+      retry_max_delay_s: 90.0
+    probe:
+      timeout_s: 60
+      deadline_s: 180
+      stable_count: 2
+      stable_delay_s: 1.0
+    images:
+      rewrites: []
+      auth: {}
+    setup:
+      commands: []
+      timeout_s: 600
+      env: {}
+    operations:
+      retries: 5
+      retry_delay_s: 1.0
+      retry_max_delay_s: 45.0
+      command_retries: 0
+      close_timeout_s: 30
+      pause_resume_timeout_s: 1500
+      background_exec: true
+      background_poll_initial_s: 0.5
+      background_poll_interval_s: 30.0
+      checkpoint_background_poll_interval_s: 1.0
+      snapshot_timeout_s: 240
+      snapshot_lookup_grace_s: 60
+      snapshot_request_timeout_s: 30
+      snapshot_list_timeout_s: 300
+      snapshot_delete_timeout_s: 120
+      status_poll_timeout_s: 10.0
+    attribution:
+      enabled: true
+      key_prefix: nemo-gym.nvidia.com/
+
+swe_mm_resources_server:
+  resources_servers:
+    swemer_v2:
+      entrypoint: app.py
+      host: 127.0.0.1
+      domain: coding
+      verified: false
+      allowed_agents: [opencode_agent]
+      verification_log_dir: null
+      evaluation_timeout: 1800
+      inconclusive_verification_retries: 1
+      is_verifying_golden_patch: false
+      apply_anti_cheating: true
+      sandbox_provider: swe_mm_sandbox
+      enforce_agent_no_network: true
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      sandbox_config:
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        # The validation sandboxes ran each task at 4 vCPU / 16 GiB.
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 30
+        env:
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          purpose: opencode-rl
+          benchmark: swe-mm
+
+swe_mm_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      host: 127.0.0.1
+      description: SWE-MM issue repair with OpenCode in the task's own sandbox (issue screenshots attached)
+      resources_server:
+        type: resources_servers
+        name: swe_mm_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      concurrency: 256
+      thinking: true
+      image_input: true
+      network_access: inherit
+      timeout: 3600
+      context_window: 131072
+      max_output_tokens: 32768
+      session_close_timeout_seconds: 90
+      sandbox_install_timeout_seconds: 300
+      sandbox_executable_path: /opt/gym-assets/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      sandbox_ripgrep_path: /opt/gym-assets/rg
+      sandbox_ripgrep_sha256: a1c942be0be0c5637ac5a080dcad4b05e9fc9d61aef36b119bad86a4c68f2987  # pragma: allowlist secret
+      sandbox_plugin_dependencies_path: /opt/gym-assets/plugins.tar.gz
+      sandbox_plugin_dependencies_sha256: 9215aadd16a10e4a6f7e4b22f9f1a6fda3be6c04df35a130a178587d145759da  # pragma: allowlist secret
+      opencode_config:
+        tools:
+          webfetch: false
+          websearch: false
+          task: false
+        permission:
+          bash: allow
+          edit: allow
+          external_directory: allow
+          doom_loop: allow
+        # The prompt's Budget line says 60 model turns; OpenCode enforces it.
+        agent: {build: {steps: 60}}
+        compaction:
+          auto: false
+      datasets: []
+
+swe_mm_opencode_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: swe_mm_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swe_mm_opencode_agent
+      resources_tool_transports: []
+      max_concurrent_episodes: 256
+      queue_timeout_seconds: 1200
+      default_episode_timeout_seconds: 5400
+      cleanup_timeout_seconds: 180
