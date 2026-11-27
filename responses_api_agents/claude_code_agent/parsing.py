@@ -202,6 +202,11 @@ def parse_stream_json(
                 result_metadata["is_error"] = event["is_error"]
             if event.get("is_error") is True and isinstance(event.get("result"), str) and event["result"]:
                 result_metadata["error_message"] = event["result"][:2000]
+            # Why the turn ended, and the HTTP status of the model request that ended it.
+            if isinstance(event.get("terminal_reason"), str):
+                result_metadata["terminal_reason"] = event["terminal_reason"]
+            if type(event.get("api_error_status")) is int:
+                result_metadata["api_error_status"] = event["api_error_status"]
             duration_ms = event.get("duration_ms")
             if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool) and duration_ms >= 0:
                 result_metadata["duration_ms"] = float(duration_ms)
