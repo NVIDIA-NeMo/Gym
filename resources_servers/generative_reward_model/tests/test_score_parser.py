@@ -15,7 +15,7 @@
 
 import json
 
-from pytest import approx
+from pytest import approx, mark
 
 from resources_servers.generative_reward_model.score_parser import extract_scores
 
@@ -125,6 +125,29 @@ class TestExtractScores:
     def test_invalid_score_value_returns_none(self) -> None:
         bad_rubric = _rubric(1, "bad", 2, 1)
         obj = {"rubric_evaluations": [bad_rubric], "overall": _overall(5, 2, 1)}
+        assert extract_scores(json.dumps(obj)) is None
+
+    @mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "nan", "Infinity"])
+    def test_non_finite_overall_score_returns_none(self, value) -> None:
+        """json.loads accepts NaN and Infinity, and float() accepts "nan"; none of them is a score."""
+        for overall in (_overall(value, 2, 1), _overall(5, value, 1), _overall(5, 2, value)):
+            obj = {"rubric_evaluations": [_rubric(1, 5, 2, 1)], "overall": overall}
+            assert extract_scores(json.dumps(obj)) is None
+
+    def test_non_finite_rubric_score_returns_none(self) -> None:
+        for rubric in (
+            _rubric(1, float("nan"), 2, 1),
+            _rubric(1, 5, float("inf"), 1),
+            _rubric(1, 5, 2, float("-inf")),
+        ):
+            obj = {"rubric_evaluations": [rubric], "overall": _overall(5, 2, 1)}
+            assert extract_scores(json.dumps(obj)) is None
+
+    def test_non_finite_rubric_id_or_overflowing_score_returns_none(self) -> None:
+        """int(Infinity) and float(<huge int>) raise OverflowError; that is a parse failure, not a crash."""
+        obj = {"rubric_evaluations": [_rubric(float("inf"), 5, 2, 1)], "overall": _overall(5, 2, 1)}
+        assert extract_scores(json.dumps(obj)) is None
+        obj = {"rubric_evaluations": [_rubric(1, 5, 2, 1)], "overall": _overall(10**400, 2, 1)}
         assert extract_scores(json.dumps(obj)) is None
 
     def test_old_flat_format_returns_none(self) -> None:
