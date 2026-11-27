@@ -24,6 +24,8 @@ import stat
 import uuid
 from typing import Optional
 
+from nemo_gym.utils.processes import process_may_be_running
+
 
 RUNTIME_ROOT = "/tmp"
 _NAME = re.compile(r"ng-(?P<pid>\d+)-[0-9a-f]{8}")
@@ -66,7 +68,7 @@ def remove_stale_runtime_dirs(root: Optional[str] = None) -> list[str]:
                 continue
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:
                 continue
-            if _process_exists(int(match["pid"])) or _any_socket_accepts(entry.path):
+            if process_may_be_running(int(match["pid"])) or _any_socket_accepts(entry.path):
                 continue
             shutil.rmtree(entry.path, ignore_errors=True)
             removed.append(entry.path)
@@ -79,14 +81,8 @@ def _remove(pid: int, path: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+# Kept under its old name, which the old `nemo_gym.runtime_dir` import path still exposes.
+_process_exists = process_may_be_running
 
 
 def _any_socket_accepts(directory: str) -> bool:
