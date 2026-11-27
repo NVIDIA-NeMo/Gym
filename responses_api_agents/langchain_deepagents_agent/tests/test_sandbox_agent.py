@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -227,9 +227,9 @@ async def test_a_failed_runtime_install_releases_the_lent_sandbox(lent_sandbox, 
     monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=RuntimeError("no wheel")))
     disconnected, disconnect = [], AsyncSandbox.disconnect
 
-    async def recorded_disconnect(sandbox: AsyncSandbox) -> None:
+    async def recorded_disconnect(sandbox: AsyncSandbox, **kwargs: Any) -> None:
         disconnected.append(sandbox.sandbox_id)
-        await disconnect(sandbox)
+        await disconnect(sandbox, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "disconnect", recorded_disconnect)
 

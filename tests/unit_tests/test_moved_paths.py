@@ -635,6 +635,9 @@ class TestImportSurface:
 
     def test_moved_names_are_the_same_objects_at_both_paths(self) -> None:
         for module, names in moved_paths.MOVED_NAMES.items():
+            # A server module's own tests check its entries, so the core suite does not import the server.
+            if module.split(".")[0] != "nemo_gym":
+                continue
             for name, moved in names.items():
                 new_module, _, new_name = moved.new.partition(":")
                 with warnings.catch_warnings():
@@ -715,7 +718,7 @@ class TestNemoRLUsage:
             import nemo_gym.rollout_collection as gym_rollout_collection
 
         fake_helper, fake_collection = object(), object()
-        # `RunHelper` reaches nemo_gym.cli through the CLI refactor's `__getattr__` shim. Patch the module's namespace,
+        # `RunHelper` reaches nemo_gym.cli through the module's `__getattr__`. Patch the module's namespace,
         # so undoing the patch removes the name again; restoring it with setattr would leave it set for later tests.
         monkeypatch.setitem(vars(gym_cli), "RunHelper", fake_helper)
         monkeypatch.setattr(gym_rollout_collection, "RolloutCollectionHelper", fake_collection)
@@ -735,6 +738,36 @@ if __name__ == "__main__":
     IMPORT_SURFACE_PATH.write_text(
         "{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in sorted(surface.items())) + "\n}\n"
     )
+
+
+@pytest.mark.parametrize("old_module", ["nemo_gym.cli", "nemo_gym.cli.env", "nemo_gym.cli.eval"])
+def test_run_helper_resolves_to_server_supervisor_with_a_warning(old_module: str) -> None:
+    # `RunHelper` shipped at each of these paths before its rename. In a fresh interpreter, so no earlier access in
+    # this process has used up the once-per-path warning.
+    code = textwrap.dedent(
+        f"""
+        import importlib
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            old = importlib.import_module("{old_module}")
+        from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert old.RunHelper is ServerSupervisor
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning]
+        assert len(messages) == 1, messages
+        expected = (
+            "`{old_module}.RunHelper` moved to "
+            "`nemo_gym.server_runtime.supervisor.server_supervisor.ServerSupervisor`"
+        )
+        assert expected in messages[0], messages
+        assert "removed in nemo_gym 0.10.0" in messages[0], messages
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 @pytest.mark.parametrize("first", ["", "import nemo_gym.data.tasks.harbor\n"])
@@ -787,6 +820,21 @@ def test_package_facade_warns_once_for_a_renamed_name() -> None:
         ("nemo_gym.models", "ResponsesConverter", "ChatCompletionsConverter"),
         ("nemo_gym.models.token_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
         ("nemo_gym.token_id_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
+        # The vLLM-named aliases, released in 0.7.0. The vLLM model server's tests cover its re-exports.
+        ("nemo_gym.responses_converter", "VLLMConverter", "ChatCompletionsConverter"),
+        (
+            "nemo_gym.responses_converter",
+            "VLLMConverterResponsesToChatCompletionsState",
+            "ChatCompletionsConverterState",
+        ),
+        ("nemo_gym.models.chat_completions_converter", "VLLMConverter", "ChatCompletionsConverter"),
+        (
+            "nemo_gym.models.chat_completions_converter",
+            "VLLMConverterResponsesToChatCompletionsState",
+            "ChatCompletionsConverterState",
+        ),
+        ("nemo_gym.models", "VLLMConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.models", "VLLMConverterResponsesToChatCompletionsState", "ChatCompletionsConverterState"),
     ],
 )
 def test_renamed_converter_resolves_at_each_old_path_with_a_warning(module: str, old_name: str, new_name: str) -> None:
@@ -803,6 +851,30 @@ def test_renamed_converter_resolves_at_each_old_path_with_a_warning(module: str,
         assert len(messages) == 1, messages
         (message,) = messages
         assert "chat_completions_converter.{new_name}`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_renamed_sandbox_checkpointer_resolves_with_a_warning() -> None:
+    # In a fresh interpreter: the old name warns only on its first use in a process.
+    code = textwrap.dedent(
+        """
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from nemo_gym.server_runtime import SandboxSessionCheckpointer as old
+        from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes as new
+        assert old is new, (old, new)
+        messages = [
+            str(w.message)
+            for w in caught
+            if w.category is DeprecationWarning and "SandboxSessionCheckpointer`" in str(w.message)
+        ]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "owned_sandboxes.OwnedSandboxes`" in message, message
         assert "removed in nemo_gym 0.10.0" in message, message
         """
     )

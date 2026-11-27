@@ -40,6 +40,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -180,7 +181,8 @@ def parse_prime_agent_events(stdout: str, *, timed_out: bool = False) -> tuple[l
         if role == "assistant":
             usage = message.get("usage") or {}
             cache_read = usage.get("cacheRead")
-            input_tokens += int(usage.get("input") or 0) + int(cache_read or 0)
+            # Prime reports uncached input, cache reads, and cache writes separately.
+            input_tokens += int(usage.get("input") or 0) + int(cache_read or 0) + int(usage.get("cacheWrite") or 0)
             output_tokens += int(usage.get("output") or 0)
             # Pi's provider layer also writes cacheRead=0 when the backend reported no cache details, so
             # only positive counts are measurements. One unmeasured call makes the sum unknown.
@@ -793,16 +795,16 @@ class PrimeAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, PrimeSession):
             raise TypeError("Expected PrimeSession")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Prime Agent activation must use its seeded rollout route")
+            raise AgentSessionConflictError("Prime Agent activation must use its seeded rollout route")
         if state.session.closing:
-            raise HTTPException(409, "Prime Agent session is closing")
+            raise AgentSessionConflictError("Prime Agent session is closing")
         self._session_conversation(body)
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._activate_session(state, state.activation_request))
         elif body != state.activation_request:
-            raise HTTPException(
-                409, "Prime Agent sessions support one activation; retries must repeat the same request"
+            raise AgentSessionConflictError(
+                "Prime Agent sessions support one activation; retries must repeat the same request"
             )
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 

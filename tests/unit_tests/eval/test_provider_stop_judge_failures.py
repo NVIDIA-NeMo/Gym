@@ -13,8 +13,8 @@ from unittest.mock import Mock
 import orjson
 
 from nemo_gym.core.failure_kinds import quota_reset_text, quota_reset_unix
+from nemo_gym.eval.recovery.decision import RecoveryAction
 from nemo_gym.eval.rollout_reverification import due_judge_failures, rejudge_saved_judge_failures
-from nemo_gym.orchestration.recovery import RecoveryAction
 from nemo_gym.rollouts.rollout_collection import _credentials_rejected_stop, _quota_exhausted_stop
 from nemo_gym.rollouts.rollout_records import logical_rollout_id
 from nemo_gym.rollouts.rollout_recovery import RunManifest

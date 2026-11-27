@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Terminal-Bench 2.1 with OpenClaw, run through the Harbor environment server on the 89 pinned task folders of
+# environments/harbor/terminal_bench_2_1 (`gym dataset pull terminal_bench_2_1` fetches them). The server starts each
+# task's prebuilt image, lends the sandbox to openclaw_agent's agent session and grades the episode with the task's
+# own tests. `--agent-type` runs another harness on the same tasks. See README.md, "Run".
+harbor_target: terminal_bench_2_1
+config_paths:
+- responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
+
+openclaw_agent:
+  responses_api_agents:
+    openclaw_agent:
+      # OpenClaw 2026.11.5's exec tool needs glibc 2.33, which the qemu-alpine-ssh and qemu-startup images (glibc
+      # 2.31) lack, so session setup would refuse those two tasks. 2026.6.11 runs on all 89 task images.
+      openclaw_version: 2026.6.11
+
+# Eight rollouts per task, as on the resources-server path; `--num-repeats` replaces it.
+num_repeats: 8

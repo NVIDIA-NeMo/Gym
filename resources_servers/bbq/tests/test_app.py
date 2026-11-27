@@ -188,7 +188,7 @@ async def test_verify_starts_two_strict_json_judges_concurrently(example_rows) -
 
 @pytest.mark.asyncio
 async def test_a_graded_row_records_its_judge_grading_and_is_not_graded_again(example_rows) -> None:
-    from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+    from nemo_gym.eval.recovery.grading import reverification_cause, saved_row_evidence
     from nemo_gym.server_runtime import verifier_observability
     from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 

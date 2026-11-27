@@ -1,5 +1,9 @@
 config_paths:
   - resources_servers/agentic_if_realworld/configs/agentic_if_realworld.yaml
+agentic_if_realworld_resources:
+  resources_servers:
+    agentic_if_realworld:
+      response_source: gym_response
 rollout_collection_driver: benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection
 agentic_if_realworld_agent:
   responses_api_agents:
@@ -9,17 +13,22 @@ agentic_if_realworld_agent:
       model_server: {type: responses_api_models, name: policy_model}
       max_steps: 1
       skip_verification: true
+      execute_tools: false
+      max_model_retries: 0
 agentic_if_realworld_environment:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server: {type: resources_servers, name: agentic_if_realworld_resources}
       agent_server: {type: responses_api_agents, name: agentic_if_realworld_agent}
+      resources_tool_transports: []
+      tool_servers: []
+      skip_verification: true
 policy_model:
   responses_api_models:
-    agentic_if_text:
-      entrypoint: app.py
-      endpoint: ${oc.env:AGENTIC_IF_POLICY_ENDPOINT,http://localhost:8000/v1/chat/completions}
-      model: ${oc.env:AGENTIC_IF_POLICY_MODEL,policy}
-      receipt_dir: ${agentic_if_realworld_resources.resources_servers.agentic_if_realworld.receipt_dir}
-      api_key_env: AGENTIC_IF_POLICY_API_KEY
-      reasoning_effort: null
+    vllm_model:
+      max_num_tries: 1
+      max_http_attempts: 1
+      refit_output_budget_to_window: false
+      refit_output_budget_to_prompt: false
+      sampling_overrides: null

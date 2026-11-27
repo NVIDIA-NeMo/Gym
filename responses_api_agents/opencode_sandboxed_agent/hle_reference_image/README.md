@@ -4,8 +4,10 @@ The code sandbox that upstream's with-tools protocol prescribes, with OpenCode a
 Python 3.11.16, a shell, the twelve pinned packages of upstream's `requirements-tools.txt`, the
 OpenCode binary, and nothing else. It replaces the
 [offline scientific image](../offline_science_image/README.md) (Python 3.13, SageMath, Lean/Mathlib,
-solvers, OCR) for `benchmarks/hle_diamond/opencode_reference.yaml`, whose README states what the
-preset still does not reproduce.
+solvers, OCR) for `benchmarks/hle_diamond/opencode_reference.yaml` (Tavily tools),
+`benchmarks/hle_diamond/opencode_hle_tools.yaml` (upstream's `web_search` and `web_fetch`, 728 text rows) and
+`benchmarks/hle_diamond/opencode_hle_tools_full.yaml` (the same tools over all 1000 rows), whose README
+carries the fidelity table of what the presets match and still do not reproduce.
 
 **Protocol source.** [`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) at commit
 `22ed3074b1e7b134bcbc09028d0ba320839b0655`: <!-- pragma: allowlist secret -->
@@ -34,7 +36,8 @@ docker build --platform linux/amd64 -t gym-opencode-hle-reference:local .
 
 Nothing else: no SageMath, Lean/Mathlib, Z3, RDKit, OCR, chess engines, compilers, `git`, `curl` or
 Node in the final image. `pip`, `setuptools` and `wheel` are the base image's own and have no network
-to use. Provenance is kept under `/opt/image-provenance/` (`requirements-tools.txt`,
+to use: they are neutralised by the sandbox network policy, not removed, so a run on a provider without
+one (the local Docker override) can install packages and is not protocol-grade. Provenance is kept under `/opt/image-provenance/` (`requirements-tools.txt`,
 `requirements.lock`, `python-installed.txt` from `pip freeze`, `debian-installed.txt`). No
 credentials, benchmark rows or reference answers are included; network policy is the sandbox
 caller's, not the image's.

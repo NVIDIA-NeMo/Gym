@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Verify or install Droid from a transferred npm platform package with bash, coreutils, gzip and tar; no network.
+# The runtime also gets a fallback ps for images without procps.
 #
 # usage: install_droid_runtime.sh --version V --runtime DIR --sha256 HEX [--check-only | --source PACKAGE]
 # --sha256 names the package the runtime must come from. --check-only exits 3 when the runtime is absent or unhealthy.
@@ -22,11 +23,34 @@ done
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Droid runtime requires an exact version" >&2; exit 2; }
 [[ $expected =~ ^[0-9a-f]{64}$ ]] || { echo "A transferred Droid package requires a trusted SHA-256" >&2; exit 2; }
 
-# Succeed when DIR holds a binary from the expected package, unchanged since installation, that reports the version.
+# Droid asks `ps -o ppid= -p PID` for the parent of each process an Execute call starts. Without an answer it
+# reports most foreground calls as killed by SIGKILL, even ones that finished, and slim images ship without procps.
+# This ps answers that one call from /proc. The adapter appends its directory to Droid's PATH, so the image's own
+# ps is used when it has one.
+fallback_ps() {
+    cat <<'EOF'
+#!/bin/sh
+# Installed by NeMo Gym's Droid adapter for images without procps: answers only `ps -o ppid= -p PID`, from /proc.
+if [ $# -eq 4 ] && [ "$1" = -o ] && [ "$2" = ppid= ] && [ "$3" = -p ]; then
+    case $4 in '' | *[!0-9]*) exit 1 ;; esac
+    stat=$(cat "/proc/$4/stat" 2>/dev/null) || exit 1
+    # The fields after the command name, which may itself hold spaces and parentheses: state, then the parent.
+    set -- ${stat##*) }
+    echo "$2"
+    exit 0
+fi
+echo "ps: this image has no procps; only 'ps -o ppid= -p PID' is answered" >&2
+exit 1
+EOF
+}
+
+# Succeed when DIR holds a binary from the expected package, unchanged since installation, that reports the version,
+# and this installer's fallback ps.
 # Droid writes state under its home on every start, so the check gives it a throwaway one.
 verify() {
     local package binary digest actual home
-    [[ -x $1/droid && -f $1/receipt ]] || return 1
+    [[ -x $1/droid && -f $1/receipt && -x $1/fallback-bin/ps ]] || return 1
+    [[ $(<"$1/fallback-bin/ps") == "$(fallback_ps)" ]] || return 1
     read -r package binary <"$1/receipt" || return 1
     [[ $package == "$expected" ]] || { echo "Droid runtime comes from another package" >&2; return 1; }
     read -r digest _ < <(sha256sum "$1/droid")
@@ -96,7 +120,9 @@ staging=$(mktemp -d "$runtime.staging-XXXXXX")
 tar -xzf "$source" -C "$staging" package/bin/droid
 mv -- "$staging/package/bin/droid" "$staging/droid"
 rm -rf -- "$staging/package"
-chmod 700 "$staging" && chmod 755 "$staging/droid"
+mkdir "$staging/fallback-bin"
+fallback_ps >"$staging/fallback-bin/ps"
+chmod 700 "$staging" && chmod 755 "$staging/droid" "$staging/fallback-bin" "$staging/fallback-bin/ps"
 read -r binary _ < <(sha256sum "$staging/droid")
 echo "$expected $binary" >"$staging/receipt"
 verify "$staging"

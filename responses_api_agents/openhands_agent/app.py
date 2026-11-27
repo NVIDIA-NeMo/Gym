@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import math
 import shlex
 from asyncio import Semaphore
 from collections.abc import Mapping
@@ -24,6 +25,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -78,7 +80,7 @@ from responses_api_agents.openhands_agent.sandbox import (
 
 
 LOG = logging.getLogger(__name__)
-# OpenHands SDK 1.59.0 LLM settings that change only how the harness calls the model. The adapter owns the
+# OpenHands SDK LLM settings that change only how the harness calls the model. The adapter owns the
 # connection (model, base_url, api_key, usage_id, extra_headers) and turns OpenHands' own model retries off, so its
 # retry settings are not offered. Settings that write files (completion logs, tokenizer downloads), call other models
 # (fallbacks), or stream (Gym's Chat Completions route does not) are not offered either. OpenHands silently ignores
@@ -143,8 +145,14 @@ class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
             "a tool call or a run limit can still end the run without submitting."
         ),
     )
+    # OpenHands stops every MCP tool call after its own fixed 300 seconds (MCP_TOOL_TIMEOUT_SECONDS), whatever the
+    # server's timeout is, so a longer deadline could not take effect.
     mcp_tool_timeout_seconds: float = Field(
-        default=900, gt=0, allow_inf_nan=False, description="Per call to a tool from an MCP grant."
+        default=300,
+        gt=0,
+        le=300,
+        allow_inf_nan=False,
+        description="Deadline for each request to an MCP grant's server, tool calls and tool discovery included.",
     )
     # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
     sandbox_provider: Optional[str] = None
@@ -183,7 +191,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         self.sem = Semaphore(self.config.concurrency)
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Classify the error that ended an OpenHands 1.59.0 run, from the runner's recorded exception chain."""
+        """Classify the error that ended an OpenHands run, from the runner's recorded exception chain."""
         kind, status_code = classify_error(error_chain(dict(native_result)))
         return AgentOutcome(failure_kind=kind, status_code=status_code)
 
@@ -409,7 +417,8 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                     "url": str(access.connection.url),
                     "headers": access.connection.headers,
                     "required": access.required,
-                    "timeout": self.config.mcp_tool_timeout_seconds,
+                    # FastMCP takes integer milliseconds. Zero would disable its deadline.
+                    "timeout": math.ceil(self.config.mcp_tool_timeout_seconds * 1000),
                 }
                 for access in self.effective_tool_accesses(state.request)
                 if isinstance(access, MCPToolAccess)
@@ -577,9 +586,9 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         state = self._require_agent_session(session_id)
         assert isinstance(state, OpenHandsSandboxSession)
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "OpenHands activation does not match the seeded session and rollout")
+            raise AgentSessionConflictError("OpenHands activation does not match the seeded session and rollout")
         if state.session.closing:
-            raise HTTPException(409, "OpenHands session is closing")
+            raise AgentSessionConflictError("OpenHands session is closing")
         prompt, system, sampling = self._validate_request(body)
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
@@ -587,7 +596,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 self._activate(state, state.activation_request, prompt=prompt, system=system, sampling=sampling)
             )
         elif body != state.activation_request:
-            raise HTTPException(409, "OpenHands sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("OpenHands sessions support one activation; retry the same request")
         # A disconnected client must not cancel the shared activation; only close does.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 

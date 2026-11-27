@@ -58,7 +58,7 @@ from contextlib import nullcontext
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -114,6 +114,27 @@ class GdpPdfConfig(BaseResourcesServerConfig):
     reward_mode: RewardMode = "mean_criteria"
     mixed_reward_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    # Optional training-only length shaping of the reasoning (chain of thought), never of the answer the judge
+    # grades: no penalty up to ``reasoning_penalty_start_tokens`` reasoning tokens, then a penalty that grows
+    # linearly to ``reasoning_penalty_max`` at ``reasoning_penalty_end_tokens`` and stays there. It is subtracted
+    # from the reward of every rollout, passed or not, so a long failed attempt still ranks below a short one.
+    # Off by default (start is None), so evaluation is unaffected. Reasoning tokens come from
+    # ``response.usage.output_tokens_details.reasoning_tokens`` when the policy server reports them, otherwise
+    # from the reasoning items' text length divided by ``reasoning_chars_per_token``.
+    reasoning_penalty_start_tokens: Optional[int] = Field(default=None, ge=0)
+    reasoning_penalty_end_tokens: Optional[int] = Field(default=None, ge=1)
+    reasoning_penalty_max: float = Field(default=0.1, ge=0.0, le=1.0)
+    reasoning_chars_per_token: float = Field(default=4.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def _check_reasoning_penalty(self) -> "GdpPdfConfig":
+        start, end = self.reasoning_penalty_start_tokens, self.reasoning_penalty_end_tokens
+        if start is not None and (end is None or end <= start):
+            raise ValueError(
+                "reasoning_penalty_end_tokens must be set and greater than reasoning_penalty_start_tokens"
+            )
+        return self
+
     # Additional attempts after the first when the judge output fails to
     # parse; 5 total matches upstream's MAX_RETRIES=4.
     judge_max_attempts: int = 5
@@ -157,6 +178,11 @@ class GdpPdfVerifyResponse(BaseVerifyResponse):
     all_pass: float = 0.0
     mean_criterion_pass: float = 0.0
     criterion_evaluations: list[CriterionEvaluation] = []
+    # Set only when the reasoning-length penalty is on.
+    reasoning_tokens: Optional[int] = None
+    reasoning_tokens_source: Optional[Literal["usage", "text_estimate"]] = None
+    reasoning_penalty: float = 0.0
+    reward_before_reasoning_penalty: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +208,35 @@ def _extract_generated_answer(response: NeMoGymResponse) -> str:
             if isinstance(content, str):
                 return content.strip()
     return ""
+
+
+def _reasoning_tokens(response: NeMoGymResponse, chars_per_token: float) -> tuple[int, str]:
+    """Reasoning tokens of a response: the server's usage count, else an estimate from the reasoning text."""
+    usage = getattr(response, "usage", None)
+    details = (
+        usage.get("output_tokens_details")
+        if isinstance(usage, dict)
+        else getattr(usage, "output_tokens_details", None)
+    )
+    count = (
+        details.get("reasoning_tokens") if isinstance(details, dict) else getattr(details, "reasoning_tokens", None)
+    )
+    if type(count) is int and count >= 0:
+        return count, "usage"
+    chars = 0
+    for item in response.output:
+        if getattr(item, "type", None) == "reasoning":
+            # Providers can return both the reasoning and a summary of the same text.
+            content_chars = sum(len(part.text) for part in item.content or [])
+            chars += content_chars or sum(len(part.text) for part in item.summary or [])
+    return int(round(chars / chars_per_token)), "text_estimate"
+
+
+def _reasoning_penalty(tokens: int, start: int, end: int, max_penalty: float) -> float:
+    """0 up to ``start`` tokens, linear to ``max_penalty`` at ``end``, flat after."""
+    if tokens <= start:
+        return 0.0
+    return max_penalty * min(1.0, (tokens - start) / (end - start))
 
 
 class ParseError(ValueError):
@@ -307,8 +362,23 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         elif self.config.reward_mode == "mixed":
             alpha = self.config.mixed_reward_alpha
             reward = (1 - alpha) * mean_criterion_pass + alpha * all_pass
+        shaping: dict[str, Any] = {}
+        start = self.config.reasoning_penalty_start_tokens
+        if start is not None:
+            tokens, source = _reasoning_tokens(body.response, self.config.reasoning_chars_per_token)
+            penalty = _reasoning_penalty(
+                tokens, start, self.config.reasoning_penalty_end_tokens, self.config.reasoning_penalty_max
+            )
+            shaping = dict(
+                reasoning_tokens=tokens,
+                reasoning_tokens_source=source,
+                reasoning_penalty=penalty,
+                reward_before_reasoning_penalty=reward,
+            )
+            reward -= penalty
         return GdpPdfVerifyResponse(
             **body.model_dump(),
+            **shaping,
             reward=reward,
             reward_mode=self.config.reward_mode,
             num_criteria=total,

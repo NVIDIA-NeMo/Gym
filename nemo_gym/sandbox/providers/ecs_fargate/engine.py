@@ -602,6 +602,7 @@ class SshTunnel:
         self._simple_forward_port = forward_port
         self._forwards = list(forwards or [])
         self._reverses = list(reverses or [])
+        self._fixed_local_port = local_port_override is not None
         self._local_port: int | None = local_port_override
         self._proc: subprocess.Popen[bytes] | None = None
 
@@ -622,7 +623,7 @@ class SshTunnel:
         last_err = ""
         backoff = initial_backoff
         for attempt in range(1, max_retries + 1):
-            if use_simple:
+            if use_simple and not self._fixed_local_port:
                 self._local_port = _free_port()
             cmd = self._build_ssh_cmd()
             logger.info("SSH tunnel attempt %d/%d: %s", attempt, max_retries, " ".join(cmd))
@@ -837,12 +838,16 @@ from urllib.parse import parse_qs, urlparse
 _BASH = shutil.which("bash")
 _PORT = int(os.environ.get("TB_EXEC_PORT", "19542"))
 _BIND = os.environ.get("TB_EXEC_BIND", "127.0.0.1")
+_IDENTITY = os.environ.pop("NEMO_GYM_EXEC_IDENTITY", "")
 class _H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a): pass
     def do_GET(self):
         p = urlparse(self.path)
-        if p.path == "/health": self._ok({"ok": True})
-        elif p.path == "/download":
+        path = self._route(p.path)
+        if path is None: return
+        if path == "/health":
+            self._ok({"ok": True, "sandbox_identity": _IDENTITY} if _IDENTITY else {"ok": True})
+        elif path == "/download":
             qs = parse_qs(p.query)
             paths = qs.get("path", [])
             if not paths: self._err(400, "missing ?path=")
@@ -850,10 +855,25 @@ class _H(BaseHTTPRequestHandler):
         else: self._err(404, f"not found: {p.path}")
     def do_POST(self):
         p = urlparse(self.path)
+        path = self._route(p.path)
+        if path is None: return
         body = self._body()
-        if p.path == "/exec": self._exec(body)
-        elif p.path == "/upload": self._up(body)
+        if path == "/exec": self._exec(body)
+        elif path == "/upload": self._up(body)
         else: self._err(404, f"not found: {p.path}")
+    def _route(self, path):
+        if path.startswith("/sandbox/"):
+            identity, _, route = path[len("/sandbox/"):].partition("/")
+            if not _IDENTITY or identity != _IDENTITY:
+                self._err(409, "sandbox identity mismatch")
+                return None
+            return "/" + route
+        # Keep the unqualified health endpoint for SSH readiness checks. Old
+        # standalone servers without an identity keep their existing API.
+        if _IDENTITY and path != "/health":
+            self._err(409, "sandbox identity required")
+            return None
+        return path
     def _exec(self, b):
         cmd = b.get("cmd")
         if not cmd: self._err(400, "missing 'cmd'"); return
@@ -931,8 +951,13 @@ class ExecClient:
     threads, scaling past asyncio's default thread-pool cap.
     """
 
-    def __init__(self, *, port: int, connect_timeout: float = 30.0) -> None:
+    def __init__(self, *, port: int, connect_timeout: float = 30.0, sandbox_identity: str | None = None) -> None:
+        self._sandbox_identity = sandbox_identity
         self._base = f"http://127.0.0.1:{port}"
+        if sandbox_identity is not None:
+            # Older exec servers return 404 for this path, rather than executing
+            # an unqualified request after their port replaces a dead forward.
+            self._base += f"/sandbox/{sandbox_identity}"
         self._timeout = connect_timeout
         # Lazy: aiohttp.ClientSession needs a running loop, but ExecClient is built inside a
         # to_thread; create it on the first request.
@@ -987,6 +1012,17 @@ class ExecClient:
         return await self._request(
             label=f"download {remote_path}", url=url, method="GET", timeout=self._timeout, max_retries=max_retries
         )
+
+    async def verify_identity(self) -> None:
+        """Refuse a stale forward or a server that cannot identify its sandbox."""
+        raw = await self._request(label="identity", url=f"{self._base}/health", method="GET", timeout=5, max_retries=1)
+        response = json.loads(raw)
+        if (
+            not self._sandbox_identity
+            or not isinstance(response, dict)
+            or response.get("sandbox_identity") != self._sandbox_identity
+        ):
+            raise RuntimeError("ECS exec-server sandbox identity mismatch; request a fresh owner descriptor")
 
     async def health(self) -> bool:
         try:
@@ -1477,7 +1513,7 @@ _task_def_inflight: dict[str, threading.Event] = {}
 # Env keys whose values vary per invocation. Routed via RunTask containerOverrides (not baked into
 # the task def) so the task-def hash cache stays stable across invocations. OutsideEndpoint routing
 # keys are merged in dynamically at call time; this set holds the rest.
-_PER_INVOCATION_ENV_KEYS: frozenset[str] = frozenset({"_NEL_EFS_SESSION"})
+_PER_INVOCATION_ENV_KEYS: frozenset[str] = frozenset({"_NEL_EFS_SESSION", "NEMO_GYM_EXEC_IDENTITY"})
 
 
 def _compute_task_def_hash(payload: dict[str, Any]) -> str:
@@ -1508,6 +1544,7 @@ class EcsFargateSandbox:
     def __init__(self, spec: SandboxSpec, *, ecs_config: EcsFargateConfig) -> None:
         self._spec = spec
         self._cfg = ecs_config
+        self._exec_identity = uuid.uuid4().hex
         self._task_arn: str | None = None
         self._task_def_arn: str | None = None
         self._task_ip: str | None = None
@@ -1551,6 +1588,11 @@ class EcsFargateSandbox:
         return self._task_arn
 
     @property
+    def exec_identity(self) -> str:
+        """Per-sandbox identity used to detect stale local port forwards, not an AWS credential."""
+        return self._exec_identity
+
+    @property
     def local_port(self) -> int | None:
         if self._ssh_tunnel:
             try:
@@ -1589,6 +1631,46 @@ class EcsFargateSandbox:
                 await self._exec_client.close()
             await asyncio.to_thread(self._cleanup)
             raise
+
+    @classmethod
+    async def attach_exec_server(
+        cls,
+        spec: SandboxSpec,
+        *,
+        ecs_config: EcsFargateConfig,
+        task_arn: str,
+        port: int,
+        sandbox_identity: str,
+    ) -> EcsFargateSandbox:
+        """Borrow the owner's same-host SSH forward; do not launch a task or another tunnel."""
+        sandbox = cls(spec, ecs_config=ecs_config)
+        await asyncio.to_thread(sandbox._init_aws_clients)
+        sandbox._task_arn = task_arn
+        sandbox._exec_identity = sandbox_identity
+        sandbox._exec_client = ExecClient(port=port, sandbox_identity=sandbox_identity)
+        try:
+            await sandbox._exec_client.verify_identity()
+        except BaseException:
+            await sandbox._exec_client.close()
+            raise
+        sandbox._started = True
+        return sandbox
+
+    async def disconnect_exec_server(self) -> None:
+        """Release a borrowed exec client without stopping the owner's ECS task or tunnel."""
+        if self._exec_client is not None:
+            await self._exec_client.close()
+            self._exec_client = None
+        # Borrowed uploads own their staging objects, but not the task or tunnel.
+        # Do not use _cleanup(), which also tears down the owner's ECS task.
+        keys = list(self._s3_artifacts)
+        # Bound both S3 requests and thread-pool work during concurrent rollouts.
+        for offset in range(0, len(keys), 4):
+            batch = keys[offset : offset + 4]
+            await asyncio.gather(*(asyncio.to_thread(_delete_s3_object, self._cfg, key) for key in batch))
+            for key in batch:
+                self._s3_artifacts.remove(key)
+        self._stopped = True
 
     async def stop(self) -> None:
         if self._stopped:
@@ -1637,7 +1719,9 @@ class EcsFargateSandbox:
                             timeout=60.0,
                         )
                         old_client = self._exec_client
-                        self._exec_client = ExecClient(port=self._ssh_tunnel.local_port)  # type: ignore[union-attr]
+                        self._exec_client = ExecClient(
+                            port=self._ssh_tunnel.local_port, sandbox_identity=self._exec_identity
+                        )  # type: ignore[union-attr]
                         if old_client is not None:
                             await old_client.close()
                         return await self._exec_client.exec(shell_cmd, timeout=int(timeout_sec))
@@ -1689,10 +1773,13 @@ class EcsFargateSandbox:
         sidecar = self._cfg.ssh_sidecar
         if sidecar is None:
             return
+        # Connected workers borrow this address. Reconnect on the same port or fail;
+        # silently choosing a new port leaves every existing borrower stranded.
+        local_port = self.local_port
         if self._ssh_tunnel:
             self._ssh_tunnel.close()
             self._ssh_tunnel = None
-        await asyncio.to_thread(self._open_tunnel, sidecar)
+        await asyncio.to_thread(self._open_tunnel, sidecar, local_port=local_port)
 
     # ── Sync start (runs via asyncio.to_thread) ──────────────────────
 
@@ -1758,7 +1845,7 @@ class EcsFargateSandbox:
         if has_exec_server:
             health_url = f"http://127.0.0.1:{self._ssh_tunnel.local_port}/health"  # type: ignore[union-attr]
             self._ssh_tunnel.wait_ready(health_url=health_url, timeout=sidecar.ssh_ready_timeout_sec)  # type: ignore[union-attr]
-            self._exec_client = ExecClient(port=self._ssh_tunnel.local_port)  # type: ignore[union-attr]
+            self._exec_client = ExecClient(port=self._ssh_tunnel.local_port, sandbox_identity=self._exec_identity)  # type: ignore[union-attr]
 
     # ── Internal helpers ─────────────────────────────────────────────
 
@@ -1861,6 +1948,9 @@ class EcsFargateSandbox:
             for k, v in cfg.extra_env.items():
                 env[k] = self._render_env_value(v)
         env.update(self._outside_endpoint_routing.env_overrides())
+        if cfg.ssh_sidecar is not None and cfg.ssh_sidecar.exec_server_port is not None:
+            # A task override keeps this per-sandbox value out of cached task definitions.
+            env["NEMO_GYM_EXEC_IDENTITY"] = self._exec_identity
         return env
 
     def _split_env(self, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -2333,7 +2423,7 @@ class EcsFargateSandbox:
             time.sleep(2.0)
         raise TimeoutError(f"SSH not ready at {host}:{port} after {timeout:.0f}s")
 
-    def _open_tunnel(self, sidecar: SshSidecarConfig) -> None:
+    def _open_tunnel(self, sidecar: SshSidecarConfig, *, local_port: int | None = None) -> None:
         assert self._task_ip is not None and self._ssh_key_file is not None
         if sidecar.exec_server_port is not None:
             self._ssh_tunnel = SshTunnel(
@@ -2342,6 +2432,7 @@ class EcsFargateSandbox:
                 user="root",
                 key_file=self._ssh_key_file,
                 forward_port=sidecar.exec_server_port,
+                local_port_override=local_port,
                 reverses=self._outside_endpoint_routing.reverse_specs,
             )
             self._ssh_tunnel.open()

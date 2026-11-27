@@ -19,7 +19,7 @@ types are unknowable from it). verify() filters nulls defensively ({k: v for k, 
 ``kwargs`` is load-bearing wire format and must be kept verbatim.
 """
 
-from typing import Any, List, Literal
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +32,11 @@ class TaskData(BaseModel):
             "Numeric task identifier. Required by the wire request model but never read by "
             "verify logic — identity/passthrough only."
         ),
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one (IFBench: the source `key`).",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
     instruction_id_list: List[str] = Field(

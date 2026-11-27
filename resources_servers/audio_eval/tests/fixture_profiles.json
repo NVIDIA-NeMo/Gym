@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "fixture-asr": {
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audio",
+        "METRICS_TYPE": "audio"
+      }
+    }
+  }
+}

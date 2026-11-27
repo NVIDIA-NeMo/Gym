@@ -10,7 +10,6 @@ from typing import Literal
 
 from pydantic import ConfigDict
 
-from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.verification import VerifierFixture
 from resources_servers.agentic_if_realworld.benchmark.core import (
@@ -23,7 +22,11 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
     unscored,
 )
 from resources_servers.agentic_if_realworld.benchmark.scoring import score
-from resources_servers.agentic_if_realworld.benchmark.transport import delivered, verified_response
+from resources_servers.agentic_if_realworld.benchmark.transport import (
+    delivered,
+    project_gym_response,
+    verified_response,
+)
 
 
 class VerifyRequest(BaseVerifyRequest):
@@ -40,31 +43,6 @@ class VerifyResponse(BaseVerifyResponse):
     item_verdict: str | None = None
     item_id: str
     evaluation_completed: bool
-
-
-def project_gym_response(response: NeMoGymResponse) -> dict:
-    """Make a judging copy; keep the original Gym response and token metadata intact."""
-    if response.status != "completed" or response.error or response.incomplete_details:
-        raise ValueError("Incomplete Gym response")
-    message = {"role": "assistant", "content": "", "refusal": ""}
-    reasoning, messages = [], 0
-    for item in response.output:
-        if item.type == "reasoning":
-            # Gym's Chat adapter puts parsed reasoning in summary; Responses
-            # providers may expose full reasoning in content instead.
-            reasoning.extend(part.text for part in (item.content or item.summary))
-        elif item.type == "message" and item.status == "completed":
-            messages += 1
-            for part in item.content:
-                field = "content" if part.type == "output_text" else "refusal"
-                message[field] += part.text if field == "content" else part.refusal
-        else:
-            raise ValueError("Incomplete message or native action in Gym response")
-    if messages != 1:
-        raise ValueError("Expected one assistant message")
-    if reasoning:
-        message["reasoning_content"] = "\n\n".join(reasoning)
-    return delivered({"choices": [{"finish_reason": "stop", "message": message}]})
 
 
 class Verifier:

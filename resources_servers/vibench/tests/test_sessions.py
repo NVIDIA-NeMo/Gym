@@ -7,8 +7,10 @@ import dataclasses
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +21,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, sandbox_failure
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
     check_resources_session_contract,
 )
 from resources_servers.vibench import app as app_module
@@ -77,9 +80,9 @@ def stopped(monkeypatch) -> list[AsyncSandbox]:
     stopped: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopped.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return stopped
@@ -715,3 +718,37 @@ def test_failed_initial_prd_delivery_retains_cleanup(server, root, monkeypatch):
     assert _close(client, seed).status_code == 200
     assert stop.await_count == 3
     assert not session.scratch_dir.exists()
+
+
+async def test_a_close_cut_short_by_a_disconnect_still_drops_the_record_and_fences_the_session(server, monkeypatch):
+    seed = _seed()
+    await server.seed_session(SimpleNamespace(session={}), seed)
+    session = server._sessions[seed.resources_session_id]
+    sandbox = session.sandbox
+    stopping = asyncio.Event()
+    real_close = sandbox.provider.close
+
+    async def slow_close(handle):
+        stopping.set()
+        await asyncio.sleep(0.05)
+        await real_close(handle)
+
+    monkeypatch.setattr(sandbox.provider, "close", slow_close)
+    close = ResourcesCloseSessionRequest(resources_session_id=seed.resources_session_id, episode_id=seed.episode_id)
+
+    # A client that disconnects cancels the request's cancel scope while the build sandbox stops.
+    with anyio.fail_after(5):
+        with anyio.CancelScope() as request_scope:
+
+            async def disconnect() -> None:
+                await stopping.wait()
+                request_scope.cancel()
+
+            disconnecting = asyncio.create_task(disconnect())
+            await server.close_resources_session(SimpleNamespace(session={}), close)
+        await disconnecting
+
+    assert seed.resources_session_id not in server._sessions, "the record of the stopped sandbox is dropped"
+    assert not session.scratch_dir.exists()
+    with pytest.raises(ResourcesSessionConflictError, match="already closed"):
+        await server.seed_session(SimpleNamespace(session={}), seed)

@@ -182,6 +182,35 @@ def test_a_scored_count_as_zero_row_is_reported_apart_from_final_zeros(run):
     assert report["complete"] and report["completion_fraction"] == 1.0
 
 
+def test_a_counted_zero_that_carries_its_failure_facts_is_still_a_scored_zero_in_the_average(run):
+    """A row that names its failure kind, attribution and reason (DeepSWE's confirmed test deadline) is counted
+    exactly as one that carries only the decision: a reward 0 in the successful set, never masked or retried."""
+    output, manifest, rows = run
+    deadline_row = {
+        "failure_kind": "deepswe:test_deadline",
+        "failure_reason": "Tests did not finish within 600s on the model's patch",
+        "failure_outcome_action": "count_as_zero",
+        "failure_outcome_attribution": "model",
+        "evaluation_completed": True,
+        "mask_sample": False,
+        "verifier_timeout_s": 600.0,
+    }
+    with writer(run) as history:
+        for row in rows:
+            history.record_dispatch(row)
+        save(run, history, rows[0], reward=1.0)
+        save(run, history, rows[1] | deadline_row, reward=0.0)
+        for row in rows[2:]:
+            save(run, history, row, reward=1.0)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
+    report = recovered.coverage()
+    assert (report["successful"], report["failed"], report["masked"], report["failed_final"]) == (5, 0, 0, 0)
+    assert (report["final_zeros"], report["counted_zeros_in_successful"]) == (0, 1)
+    assert report["counted_zero_kinds"] == {"deepswe:test_deadline": 1}
+    assert recovered.pending(3) == [] and len(recovered.selected("success")) == 5
+    assert report["complete"] and report["completion_fraction"] == 1.0
+
+
 def test_duplicate_inventory_cannot_conflate_distinct_tasks(run):
     _, manifest, rows = run
     with pytest.raises(ConfigError, match="Duplicate logical rollout"):

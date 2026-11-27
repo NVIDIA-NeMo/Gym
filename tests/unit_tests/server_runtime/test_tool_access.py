@@ -40,6 +40,32 @@ def test_tool_access_supports_named_direct_http_and_mcp_servers() -> None:
     assert isinstance(accesses[1].connection, MCPStreamableHTTPConnection)
 
 
+@pytest.mark.parametrize(
+    ("name", "taken"),
+    [
+        ("company", True),
+        ("company.tools", True),
+        ("company_x", True),
+        ("company-x", True),
+        ("", False),
+        (".company", False),
+        ("_company", False),
+        ("-company", False),
+    ],
+)
+def test_an_mcp_grants_name_starts_with_a_letter_or_a_digit(name: str, taken: bool) -> None:
+    def grant() -> MCPToolAccess:
+        return MCPToolAccess(
+            name=name, required=True, connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp")
+        )
+
+    if taken:
+        assert grant().name == name
+    else:
+        with pytest.raises(ValidationError, match="name"):
+            grant()
+
+
 def test_mcp_http_connection_requires_an_absolute_url() -> None:
     with pytest.raises(ValidationError, match="valid URL"):
         MCPStreamableHTTPConnection(url="/mcp")

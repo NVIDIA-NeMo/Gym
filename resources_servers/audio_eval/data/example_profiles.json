@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "example-asr": {
+      "request": "greedy",
+      "prompt_override": {},
+      "skills": {
+        "EVAL_ARGS": "++eval_type=audio",
+        "METRICS_TYPE": "audio"
+      }
+    }
+  }
+}

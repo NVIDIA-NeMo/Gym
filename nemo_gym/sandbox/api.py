@@ -22,13 +22,15 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
+
+import anyio
 
 from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.sandbox.failures import sandbox_failure
@@ -36,6 +38,7 @@ from nemo_gym.sandbox.observability import span_attributes as default_span_attri
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
@@ -46,6 +49,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxBackgroundServices,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
+    SupportsSandboxExecArgv,
     SupportsSandboxIndependentUploads,
     SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
@@ -55,6 +59,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxSnapshot,
     create_provider,
 )
+from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
 from nemo_gym.sandbox.resource_telemetry import (
     ResourceProvider,
     ResourceSampler,
@@ -147,6 +152,19 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         return_code=int(exit_text) if parsed else SANDBOX_PTY_RUNTIME_RETURN_CODE,
         error_type=None if parsed else "pty",
     )
+
+
+STOP_TIMEOUT_S = 120.0
+"""How long :meth:`AsyncSandbox.stop` and :meth:`AsyncSandbox.disconnect` may take by default."""
+
+
+async def _close_private_session(session: SandboxPtySession) -> None:
+    """Close a terminal session a one-shot exec opened, even when its request is being cancelled.
+
+    Otherwise a cancelled request would leave the session, and the process it runs, in the sandbox.
+    """
+    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
+        await session.close()
 
 
 class SandboxPty:
@@ -346,7 +364,7 @@ class SandboxPty:
         except (TimeoutError, asyncio.TimeoutError):
             return _pty_timeout_result(command, timeout_s, reusable=True)
         finally:
-            await session.close()
+            await _close_private_session(session)
         return SandboxExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=None if pty else stderr.decode(errors="replace"),
@@ -393,7 +411,7 @@ class SandboxPty:
             return _pty_timeout_result(command, timeout_s, reusable=False)
         finally:
             if private:
-                await session.close()
+                await _close_private_session(session)
             else:
                 try:
                     await session.reattach()  # no-op unless a timeout left it detached
@@ -481,6 +499,38 @@ def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -
     if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
         return []
     return [name for name in keywords if name not in parameters]
+
+
+async def _stop_after_failed_start(sandbox: "AsyncSandbox", error: BaseException) -> None:
+    """Stop the sandbox a failed start leaves; if that stop fails too, the start's ``error`` is still raised.
+
+    The stop's error becomes the context of ``error``, so the caller acts on why the start failed and still sees that
+    the sandbox may be running. A function rather than a method, so ``sandbox.stop`` is what runs, as it was.
+    """
+    try:
+        await sandbox.stop()
+    except Exception:
+        raise error
+
+
+def _exec_argv(command: Sequence[str]) -> list[str]:
+    """``command`` as an argv list: a program name first, then any arguments, all strings without NUL.
+
+    The messages name no item, since a command can carry task content or secrets.
+    """
+    if not isinstance(command, Sequence):
+        raise TypeError(f"exec() takes shell text or a sequence of strings, got {type(command).__name__}")
+    argv = list(command)
+    if not argv:
+        raise ValueError("exec() got an empty argument list")
+    for item in argv:
+        if not isinstance(item, str):
+            raise TypeError(f"exec() argument list items must be strings, got {type(item).__name__}")
+        if "\0" in item:
+            raise ValueError("exec() argument list items must not contain NUL")
+    if not argv[0]:
+        raise ValueError("exec() argument list must start with a program name")
+    return argv
 
 
 class AsyncSandbox:
@@ -609,8 +659,13 @@ class AsyncSandbox:
         *,
         snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
+        take_ownership: Callable[["AsyncSandbox"], None] | None = None,
     ) -> "AsyncSandbox":
-        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
+        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image.
+
+        If supplied, ``take_ownership`` receives the sandbox when its handle can be stopped, before file upload.
+        The caller then owns rollback if startup fails or is cancelled. By default, start rolls back failed uploads.
+        """
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
@@ -656,6 +711,8 @@ class AsyncSandbox:
         self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
         self._stopped = False
+        if take_ownership is not None:
+            take_ownership(self)
         interval = sampling_interval()
         if interval and isinstance(self._provider, ResourceProvider):
             self._resource_sampler = ResourceSampler(
@@ -676,8 +733,10 @@ class AsyncSandbox:
                         else:
                             source_path.write_text(contents, encoding="utf-8")
                         await self.upload(source_path, target_path)
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            # An owner that tracks the handle rolls it back under its own provider concurrency limit.
+            if take_ownership is None:
+                await _stop_after_failed_start(self, error)
             raise
 
         return self
@@ -695,14 +754,14 @@ class AsyncSandbox:
         await self.start(spec)
         try:
             await setup(self)
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            await _stop_after_failed_start(self, error)
             raise
         return self
 
     async def exec(
         self,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -713,11 +772,31 @@ class AsyncSandbox:
     ) -> SandboxExecResult:
         """Run a command, optionally preserving services needed by later commands.
 
+        ``command`` is shell text, which a shell in the sandbox runs, or an
+        argument list (any sequence of strings but a string), which runs as
+        the process's argv without a shell: the sandbox's shell takes no part
+        and no value needs quoting. ``AsyncSandboxSidecar.exec`` runs sidecar
+        commands the same way, because sidecar images can be distroless. The
+        list names the program first and holds only strings without NUL. It
+        needs a provider that implements ``SupportsSandboxExecArgv``; with any
+        other provider, or for an option the provider can honor only through
+        a shell, this raises ``SandboxExecArgvUnsupportedError`` before
+        anything runs. An argument list cannot preserve background services.
+
         ``preserve_background_services`` selects a provider's service-preserving
         execution when available; other providers use ordinary exec. Services
         must redirect stdout and stderr. Per-command ``env`` and ``user``
         overrides apply to the service-preserving execution too.
         """
+        if not isinstance(command, str):
+            command = _exec_argv(command)
+            if preserve_background_services:
+                raise ValueError("preserve_background_services takes shell text, not an argument list")
+            if not (isinstance(self._provider, SupportsSandboxExecArgv) and self._provider.exec_takes_argv()):
+                raise SandboxExecArgvUnsupportedError(
+                    f"Sandbox provider {self._telemetry_provider_name()!r} cannot run an argument list "
+                    "without a shell; pass shell text instead"
+                )
         if not is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
                 command,
@@ -762,7 +841,7 @@ class AsyncSandbox:
 
     async def _exec_uninstrumented(
         self,
-        command: str,
+        command: str | list[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -770,7 +849,12 @@ class AsyncSandbox:
         user: str | int | None = None,
         preserve_background_services: bool = False,
     ) -> SandboxExecResult:
-        if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
+        # exec() refuses an argument list that would preserve background services, so only shell text gets here.
+        if (
+            preserve_background_services
+            and isinstance(command, str)
+            and isinstance(self._provider, SupportsSandboxBackgroundServices)
+        ):
             overrides = {name: value for name, value in (("env", env), ("user", user)) if value is not None}
             # Older custom providers implement only cwd and timeout_s. They still serve a command without
             # overrides; one with them is refused by name here rather than by a TypeError from inside the call.
@@ -789,14 +873,14 @@ class AsyncSandbox:
                 timeout_s=timeout_s,
                 **overrides,
             )
-        return await self._provider.exec(
-            self._require_handle(),
-            command,
-            cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
-            env=env,
-            timeout_s=timeout_s,
-            user=user if user is not None else self.default_user,
-        )
+        handle = self._require_handle()
+        cwd = cwd if cwd is not None else self.default_workdir
+        user = user if user is not None else self.default_user
+        if isinstance(command, str):
+            return await self._provider.exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        # exec() lets an argument list through only for a provider whose exec takes one.
+        argv_provider = cast(SupportsSandboxExecArgv, self._provider)
+        return await argv_provider.exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
     @property
     def default_user(self) -> str | int | None:
@@ -851,10 +935,22 @@ class AsyncSandbox:
         if not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
-        declared = [sidecar.name for sidecar in self._spec.sidecars] if self._spec is not None else []
+        declared = {sidecar.name: sidecar for sidecar in self._spec.sidecars} if self._spec is not None else {}
         if name not in declared:
-            raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
-        return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
+            raise ValueError(
+                f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {list(declared)!r}"
+            )
+        return AsyncSandboxSidecar(self._provider, self._require_handle(), name, ports=declared[name].ports)
+
+    async def exec_processes_terminated(self) -> bool:
+        """True only when the provider proves that no process of any exec of this sandbox can still run.
+
+        Providers without exec-scoped processes (``SupportsSandboxExecScopedProcesses``)
+        cannot prove it and always return False.
+        """
+        if not isinstance(self._provider, SupportsSandboxExecScopedProcesses):
+            return False
+        return await self._provider.exec_processes_terminated(self._require_handle())
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
@@ -922,7 +1018,24 @@ class AsyncSandbox:
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
         return await provider.snapshot(handle, name=name)
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout_s: float | None = STOP_TIMEOUT_S) -> None:
+        """Stop the sandbox and release its client; a no-op once stopped, so a caller may repeat it.
+
+        The stop is shielded from anyio cancellation, which is how a client that disconnects cancels its request, so
+        a request cut short still stops the sandbox instead of leaving it to its ``ttl_s``. ``timeout_s`` bounds it, so
+        a hung provider cannot hold the caller; ``None`` means no limit. The shield does not hold against a native
+        ``task.cancel()``, such as ``asyncio.timeout``, ``asyncio.wait_for`` or a checkpoint retire, and an enclosing
+        anyio deadline is held off like any other cancellation: only ``timeout_s`` bounds the stop.
+
+        Raises:
+            TimeoutError: The stop did not finish within ``timeout_s``. Like any failed stop, it leaves the sandbox
+                to be stopped again: an owner keeps it and retries at its next close or its shutdown.
+            Exception: Whatever the provider raised.
+        """
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+            await self._stop()
+
+    async def _stop(self) -> None:
         if self._closed:
             return
         # A failed remote stop is retryable. Do not close its client or mark the
@@ -963,16 +1076,27 @@ class AsyncSandbox:
                 raise
         self._closed = True
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, timeout_s: float | None = STOP_TIMEOUT_S) -> None:
         """Release this client without stopping a borrowed sandbox.
 
         Use this only for a sandbox rebuilt with :meth:`connect`.
         The component that created the sandbox remains responsible for stopping it.
+        Shielded from anyio cancellation and bounded by ``timeout_s`` like :meth:`stop`, so a cancelled request
+        still releases the client.
         """
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+            await self._disconnect()
+
+    async def _disconnect(self) -> None:
         if self._closed:
             return
         if not self._connected:
             raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        # Some providers allocate a client per attachment. Release that client
+        # even when the provider itself is shared across many episodes.
+        detach = getattr(self._provider, "disconnect_handle", None)
+        if detach is not None and self._handle is not None:
+            await detach(self._handle)
         if self._owns_provider:
             await self._provider.aclose()
         self._handle = None
@@ -1003,9 +1127,12 @@ class AsyncSandbox:
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
             descriptor = {**descriptor, "ports": list(self._spec.ports)}
         # Carry the declared sidecars so a borrower that connects can use `sidecar(name)` without re-declaring them.
-        # Only name and image travel: a sidecar's environment may hold secrets, and a borrower never starts it.
+        # Only name, image and ports travel: a sidecar's environment may hold secrets, and a borrower never starts it.
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.sidecars:
-            sidecars = [{"name": sidecar.name, "image": sidecar.image} for sidecar in self._spec.sidecars]
+            sidecars = [
+                {"name": sidecar.name, "image": sidecar.image, "ports": list(sidecar.ports)}
+                for sidecar in self._spec.sidecars
+            ]
             descriptor = {**descriptor, "sidecars": sidecars}
         # Carry the default user too, so a harness that reattaches runs commands as the same user.
         if isinstance(descriptor, dict) and descriptor.get("user") is None and self._spec is not None:
@@ -1027,6 +1154,7 @@ class AsyncSandbox:
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
         ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
+        # Sidecars the sandbox was created with, so `sidecar(name)` works on the reconnected sandbox.
         sidecars = descriptor.get("sidecars", ()) if isinstance(descriptor, Mapping) else ()
         user = descriptor.get("user") if isinstance(descriptor, Mapping) else None
         sandbox = cls(
@@ -1049,10 +1177,27 @@ class AsyncSandbox:
 class AsyncSandboxSidecar:
     """A sidecar container of a started sandbox; get one with ``AsyncSandbox.sidecar(name)``."""
 
-    def __init__(self, provider: SupportsSandboxSidecars, handle: SandboxHandle, name: str) -> None:
+    def __init__(
+        self, provider: SupportsSandboxSidecars, handle: SandboxHandle, name: str, *, ports: tuple[int, ...] = ()
+    ) -> None:
         self._provider = provider
         self._handle = handle
+        self._ports = ports
         self.name = name
+
+    def url(self, port: int | None = None) -> str:
+        """The ``http://host:port`` URL at which the sandbox reaches this sidecar's service.
+
+        Use it inside the sandbox, for example in the environment of a command; it need not resolve anywhere else.
+        ``port`` is one of the sidecar's declared ``ports`` and defaults to the only one.
+        """
+        if port is None and len(self._ports) == 1:
+            port = self._ports[0]
+        if port not in self._ports:
+            raise ValueError(
+                f"The URL of sidecar {self.name!r} needs one of its declared ports {list(self._ports)!r}, got {port!r}"
+            )
+        return f"http://{self._provider.sidecar_host(self._handle, self.name)}:{port}"
 
     async def exec(
         self, *argv: str, timeout_s: int | float, on_stdout: Callable[[str], None] | None = None
@@ -1183,7 +1328,7 @@ class Sandbox:
 
     def exec(
         self,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -1191,6 +1336,7 @@ class Sandbox:
         user: str | int | None = None,
         preserve_background_services: bool = False,
     ) -> SandboxExecResult:
+        """Blocking ``AsyncSandbox.exec``: ``command`` is shell text or an argument list run without a shell."""
         return self._runner.run(
             "exec",
             lambda: self._async_sandbox.exec(

@@ -28,6 +28,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -474,23 +475,25 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         agent_session_id = self._agent_session_id_from_request(request)
         if agent_session_id is None:
-            raise HTTPException(409, "CrewAI runs only in agent sessions; seed one through an Environment Server")
+            raise AgentSessionConflictError(
+                "CrewAI runs only in agent sessions; seed one through an Environment Server"
+            )
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if not isinstance(rollout_id, str):
-            raise HTTPException(409, "Agent sessions require an attempt-qualified rollout path")
+            raise AgentSessionConflictError("Agent sessions require an attempt-qualified rollout path")
         state = self._require_agent_session(agent_session_id)
         if not isinstance(state, CrewAISessionState):
             raise TypeError("Expected a CrewAI session state")
         if state.request.episode_id.capture_key != rollout_id:
-            raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+            raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
         if state.task is None:
             # No await until the task and its request are bound: a retry arriving meanwhile must find them.
             instruction = self._instruction(state, body)
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._activate(state, instruction))
         elif body != state.activation_request:
-            raise HTTPException(409, "CrewAI sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("CrewAI sessions support one activation; retry the same request")
         # A disconnected HTTP waiter must not cancel the shared run. Close owns cancellation; identical retries
         # join this task or replay its result or error.
         return (await asyncio.shield(state.task)).model_copy(deep=True)

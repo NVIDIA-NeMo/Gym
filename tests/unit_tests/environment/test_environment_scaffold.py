@@ -19,7 +19,12 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
 )
-from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
+from nemo_gym.environment.manifest import (
+    EnvironmentKind,
+    IntegrationProfile,
+    ManifestRequirements,
+    load_manifest,
+)
 from nemo_gym.environment.scaffold import (
     ScaffoldConflictError,
     ScaffoldError,
@@ -78,6 +83,15 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     assert manifest.kind == kind
     assert manifest.integration_profile == profile
     assert manifest.determinism.value == "unknown"
+    # Every selection field is written out, so the author sees it; "unknown" is valid until someone knows.
+    assert manifest.maintainers == ["TODO"]
+    benchmark = kind == EnvironmentKind.BENCHMARK
+    assert manifest.requirements is not None
+    # Every requirement is written out, including any added to ManifestRequirements later.
+    assert manifest.requirements.model_dump() == dict.fromkeys(ManifestRequirements.model_fields, "unknown")
+    assert (manifest.requirements.gpu, manifest.requirements.network) == ("unknown", "unknown")
+    assert manifest.primary_metric == ("TODO" if benchmark else None)
+    assert (manifest.capabilities, manifest.domains) == ("unknown", "unknown")
     report = validate_environment(asset / "manifest.yaml")
     if profile in {IntegrationProfile.CUSTOM_GYM_AGENT_LOOP, IntegrationProfile.EXTERNAL_AGENT_LOOP}:
         assert report.inferred_profile == "unknown"

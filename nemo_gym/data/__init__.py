@@ -21,6 +21,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.data.dataset_hooks import load_dataset_hooks
     from nemo_gym.data.dataset_preparation import TrainDataProcessor
     from nemo_gym.data.gitlab_utils import download_jsonl_dataset
     from nemo_gym.data.prompt import PromptConfig, apply_prompt_to_row, fill_prompt, load_prompt_config
@@ -45,6 +46,7 @@ _PUBLIC_API = {
     "download_jsonl_dataset": "gitlab_utils",
     "fill_prompt": "prompt",
     "load_prompt_config": "prompt",
+    "load_dataset_hooks": "dataset_hooks",
     "load_task_data_schema": "task_data",
     "materialize_task": "task_materialization",
     "normalize_task_fields": "task_data",

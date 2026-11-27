@@ -16,7 +16,7 @@ if [ -z "${NODE_ARCH:-}" ]; then
         *) echo "unsupported node architecture: $(uname -m)" >&2; exit 1 ;;
     esac
 fi
-PI_VERSION="${PI_VERSION:-0.80.2}"
+PI_VERSION="${PI_VERSION:-1.5.2}"
 
 install_portable_python
 install_nemo_gym_deps

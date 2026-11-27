@@ -116,6 +116,8 @@ calls `/close_session`.
 | `opencode.yaml` | `opencode_agent` | its own shell, Python and read tool | lent, with the task images |
 | `opencode_server_tools.yaml` | `opencode_agent` | on this server, over MCP | lent, empty |
 
+The base config allows only `agentic_mme_agent` (`allowed_agents`); the configs above set their own value. A config that pairs this server with another agent must set `allowed_agents` itself.
+
 The seed that an agent's `/run` sends through a `legacy_agent` relay still works, for compatibility.
 
 ## Run
@@ -131,6 +133,34 @@ Provide policy_base_url, policy_api_key and policy_model_name in private Gym con
       --input resources_servers/agentic_mme/data/example.jsonl \
       --output /tmp/agentic-mme-smoke.jsonl --num-repeats 1 \
       --max-output-tokens 4096 --temperature 0
+
+### Input image size
+
+The `agentic_mme_agent` loads each input image into its image workspace, within `max_image_pixels` per image
+(default 16,000,000) and `max_total_image_pixels` for the episode (default 64,000,000). Data prepared by
+`gym eval prepare --benchmark agentic_mme` is at most 2048x2048, so these limits matter only for other data, such as
+training rows with large photos.
+
+An input image over `max_image_pixels` rejects the task with HTTP 422, naming the image size and the limit. A caller
+that separates request errors from server errors records it as bad task data rather than retrying it. To use such
+images instead, scale them down for the tools:
+
+    gym env start \
+      --config resources_servers/agentic_mme/configs/agentic_mme.yaml \
+      --model-type openai_model \
+      ++agentic_mme_agent.responses_api_agents.agentic_mme_agent.downscale_oversized_input_images=true
+
+With `downscale_oversized_input_images: true`:
+
+- Only the tools' copy is resized, to at most `max_image_pixels` with the same aspect ratio, and the agent logs a
+  warning with both sizes. Tool coordinates are 0-1000, so the tools behave the same, at lower detail.
+- The model request still carries the task's original image, so the model server's own request and image limits
+  still apply to it.
+- The downscaled image still counts against `max_total_image_pixels`, which can still reject the task.
+- Sources over Pillow's decompression-bomb limit (`PIL.Image.MAX_IMAGE_PIXELS`) are still refused, before decoding.
+
+Before decoding, an input image's encoded size is also checked against a safety cap: 4 bytes per pixel of the input
+limit plus 1 MiB, and never less than 48,000,000 bytes.
 
 ### Image tools on the resources server
 

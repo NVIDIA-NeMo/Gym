@@ -12,14 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import io
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+import sentencepiece as spm
 from app import (
     BLEU_MIGRATION_WARNING,
     SPBLEU_TOKENIZER,
@@ -30,9 +33,58 @@ from app import (
     _normalize_for_scoring,
     _strip_reasoning_preamble,
 )
+from sacrebleu.tokenizers import tokenizer_spm
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
+
+
+# The sentences the spBLEU tests score, which the local SentencePiece model learns its pieces from.
+_LOCAL_SPM_TRAINING_SENTENCES = (
+    "The quick brown fox jumps over the lazy dog in the beautiful garden.",
+    "Der schnelle braune Fuchs springt über den faulen Hund in dem schönen Garten.",
+    "Le renard brun rapide saute par dessus le chien paresseux dans le beau jardin.",
+    "Hallo Welt. Café au lait chaud.",
+)
+
+
+@pytest.fixture(scope="session")
+def local_spm_sacrebleu_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Write a small SentencePiece model where sacrebleu looks for the FLORES-200 one."""
+    sacrebleu_dir = tmp_path_factory.mktemp("sacrebleu")
+    model_name = os.path.basename(tokenizer_spm.SPM_MODELS[SPBLEU_TOKENIZER]["url"])
+    model_path = sacrebleu_dir / "models" / model_name
+    model_path.parent.mkdir()
+    model = io.BytesIO()
+    spm.SentencePieceTrainer.train(
+        sentence_iterator=iter(_LOCAL_SPM_TRAINING_SENTENCES),
+        model_writer=model,
+        model_type="unigram",
+        vocab_size=100,
+        hard_vocab_limit=False,
+        character_coverage=1.0,
+        num_threads=1,
+        minloglevel=2,
+    )
+    model_path.write_bytes(model.getvalue())
+    return sacrebleu_dir
+
+
+@pytest.fixture(autouse=True)
+def offline_spbleu_tokenizer(local_spm_sacrebleu_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Score spBLEU with the local SentencePiece model and refuse any model download.
+
+    On first use sacrebleu downloads the FLORES-200 model from dl.fbaipublicfiles.com, so these tests failed
+    whenever that host could not be reached or its TLS certificate was invalid. With a local model, spBLEU still
+    runs the real sacrebleu BLEU and SentencePiece code; only the vocabulary differs, so the scores here are not
+    FLORES-200 spBLEU values.
+    """
+    monkeypatch.setattr(tokenizer_spm, "SACREBLEU_DIR", str(local_spm_sacrebleu_dir))
+
+    def refuse_download(source_path: str, dest_path: str, *args: object, **kwargs: object) -> None:
+        raise AssertionError(f"sacrebleu tried to download {source_path}; tests must score spBLEU offline")
+
+    monkeypatch.setattr(tokenizer_spm, "download_file", refuse_download)
 
 
 def _make_response(text: str) -> NeMoGymResponse:

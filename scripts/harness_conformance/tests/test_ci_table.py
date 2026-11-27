@@ -75,8 +75,9 @@ def test_ci_renders_same_table_without_retaining_json(ci_evidence):
     assert [p.name for p in output.parent.iterdir()] == ["table.mdx"]
     text = output.read_text()
     assert (
-        f'`pi` | <Badge intent="error" minimal>0/{len(ci_table.SCENARIOS)}</Badge> | — | —' in text
-        and f'`hermes` | <Badge intent="launch" minimal>{len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}</Badge> | — | —'
+        f'`pi` | <Badge intent="error" minimal>0/{len(ci_table.SCENARIOS)}</Badge> | <Badge intent="error" minimal>{len(ci_table.SCENARIOS)}</Badge> | 0 | 0'
+        in text
+        and f'`hermes` | <Badge intent="launch" minimal>{len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}</Badge> | 0 | 0 | 0'
         in text
     )
     assert "`calls.outcome` | ✗" in text and "<sub>Updated" in text
@@ -124,9 +125,9 @@ def test_ci_invalid_evidence_renders_dashes_without_discarding_other_harnesses(c
         output=output,
         run_url="https://github.com/NVIDIA-NeMo/Gym/actions/runs/12/attempts/2",
     )
-    assert "`pi` | — | — | —" in output.read_text()
+    assert "`pi` | — | — | — | —" in output.read_text()
     assert (
-        f'`hermes` | <Badge intent="launch" minimal>{len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}</Badge> | — | —'
+        f'`hermes` | <Badge intent="launch" minimal>{len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}</Badge> | 0 | 0 | 0'
         in output.read_text()
     )
     assert "### `pi`" not in output.read_text()
@@ -144,9 +145,12 @@ def test_ci_execution_errors_do_not_hide_completed_check_results(ci_evidence):
     ci_table.render_ci(artifacts=artifacts, commit=COMMIT, output=output, run_url="https://example.com/run")
 
     text = output.read_text()
-    assert f'`pi` | <Badge intent="error" minimal>5/{len(ci_table.SCENARIOS)}</Badge> | — | —' in text
     assert (
-        f'`hermes` | <Badge intent="launch" minimal>{len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}</Badge> | — | —'
+        f'`pi` | <Badge intent="error" minimal>5/{len(ci_table.SCENARIOS)}</Badge> | <Badge intent="error" minimal>{len(ci_table.SCENARIOS) - 5}</Badge> | 0 | 0'
+        in text
+    )
+    assert (
+        f'`hermes` | <Badge intent="launch" minimal>{len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}</Badge> | 0 | 0 | 0'
         in text
     )
     expected_checks = " | ".join(["✓"] * 5 + ["✗"] * (len(ci_table.SCENARIOS) - 5))
@@ -167,7 +171,7 @@ def test_ci_renderer_does_not_import_probe_runtime_modules():
     )
 
 
-def test_ci_table_shows_p1_failure_separately_from_p0(ci_evidence, monkeypatch):
+def test_ci_table_counts_higher_tier_failure_as_failed_scenario(ci_evidence, monkeypatch):
     artifacts, _, _, output = ci_evidence
     # The support PR has no catalog P1 scenario yet. Exercise a real P1
     # compaction check instead of relabeling a failed P0 calls.outcome check.
@@ -198,10 +202,10 @@ def test_ci_table_shows_p1_failure_separately_from_p0(ci_evidence, monkeypatch):
     count = len(ci_table.SCENARIOS)
     text = output.read_text()
     assert (
-        f'`hermes` | <Badge intent="launch" minimal>{count}/{count}</Badge> | <Badge intent="error" minimal>0/1</Badge> | —'
+        f'`hermes` | <Badge intent="error" minimal>{count - 1}/{count}</Badge> | 0 | <Badge intent="error" minimal>1</Badge> | 0'
         in text
     )
-    assert "| Harness | P0 | P1 | P2 |" in text
+    assert "| Harness | Scenarios passed | First failure: P0 | First failure: P1 | First failure: P2 |" in text
 
 
 def test_ci_command_downloads_its_own_attempt_and_has_unambiguous_output(tmp_path, monkeypatch):
@@ -230,4 +234,4 @@ def test_ci_command_downloads_its_own_attempt_and_has_unambiguous_output(tmp_pat
         == 0
     )
     assert len(calls) == 1 and calls[0][1]["run_id"] == "12" and calls[0][1]["attempt"] == "2"
-    assert "`pi` | — | — | —" in output.read_text()
+    assert "`pi` | — | — | — | —" in output.read_text()

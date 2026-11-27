@@ -4,6 +4,7 @@
 """Session ownership and grading retries with an in-process sandbox stub."""
 
 import asyncio
+import copy
 import json
 import shlex
 from pathlib import Path
@@ -29,11 +30,12 @@ from resources_servers.pdf_analyst_qa.app import (
     PdfAnalystQaVerifyRequest,
     _SessionState,
 )
-from resources_servers.pdf_analyst_qa.documents import MountedDocumentsConfig
-from resources_servers.pdf_analyst_qa.task_data import PdfAnalystQaTask
+from resources_servers.pdf_analyst_qa.documents import DOCUMENT_MANIFEST_PATH, MountedDocumentsConfig
+from resources_servers.pdf_analyst_qa.task_data import PdfAnalystQaTask, PdfAnalystQaTaskRow
 
 
-ROOT = Path(__file__).resolve().parents[1] / "data/example_bundle"
+EXAMPLE_ROW = json.loads((Path(__file__).resolve().parents[1] / "data/example/gym_input.jsonl").read_text())
+TASK_DATA = {key: value for key, value in EXAMPLE_ROW.items() if key not in {"agent_ref", "responses_create_params"}}
 TASK_ID = "task_111111111111111111111111"
 WORKSPACE_ID = "workspace_111111111111111111111111"
 START_SANDBOX = PdfAnalystQaResourcesServer._start_sandbox
@@ -43,13 +45,19 @@ def request():
     return MagicMock(session={})
 
 
-def seed(session_id="session-1", rollout_id="rollout-1"):
+def seed(session_id="session-1", rollout_id="rollout-1", task_data=None):
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
         episode_id=EpisodeId(rollout_id=rollout_id),
         task_id=TaskId(taskset="pdf_analyst_qa:example", task_id=TASK_ID),
-        task_data={"task_id": TASK_ID, "workspace_id": WORKSPACE_ID, "prompt_version": "example-document-v1"},
+        task_data=copy.deepcopy(TASK_DATA if task_data is None else task_data),
     )
+
+
+def with_reference(**update):
+    task_data = copy.deepcopy(TASK_DATA)
+    task_data["reference"] |= update
+    return task_data
 
 
 def verify_body(answer="23"):
@@ -89,7 +97,6 @@ def server(monkeypatch):
         port=9000,
         name="pdf_analyst_qa",
         entrypoint="app.py",
-        dataset_root=str(ROOT),
         document_image="example@sha256:" + "a" * 64,
         model_server={"type": "responses_api_models", "name": "policy_model"},
         mounted_documents=MountedDocumentsConfig(prefix="example"),
@@ -100,8 +107,9 @@ def server(monkeypatch):
     result = PdfAnalystQaResourcesServer.model_construct(config=config, server_client=client)
     sandboxes = []
 
-    async def start(server, state, workspace_id):
-        assert workspace_id == WORKSPACE_ID
+    async def start(server, state, body):
+        assert body.workspace_id == WORKSPACE_ID
+        assert state.task == body.reference
         sandbox = MagicMock()
         sandbox.exec = AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0))
         sandbox.serialize = AsyncMock(return_value={"sandbox_id": str(len(sandboxes))})
@@ -136,7 +144,7 @@ async def test_seed_retries_reuse_one_sandbox_and_close_without_cookie(server):
     close = ResourcesCloseSessionRequest(resources_session_id="session-1", episode_id=seed().episode_id)
     await resource.close_resources_session(close)
     await resource.close_resources_session(close)
-    sandboxes[0].stop.assert_awaited_once()
+    sandboxes[0].stop.assert_awaited_once_with(timeout_s=resource.config.cleanup_timeout_s)
     with pytest.raises(Exception):
         await resource.seed_session(request(), seed())
 
@@ -168,12 +176,9 @@ async def test_correct_wrong_and_retry_verification(server):
 async def test_numeric_precision_policy_determines_reward(server, monkeypatch, index, before, after, reward):
     resource, _ = server
     references = json.loads(Path(__file__).with_name("answer_references.json").read_text())
-    reference = PdfAnalystQaTask.model_validate(references[index]).model_copy(
-        update={"task_id": TASK_ID, "workspace_id": WORKSPACE_ID}
-    )
-    monkeypatch.setattr(PdfAnalystQaResourcesServer, "_load_task", lambda *_args: reference)
+    reference = PdfAnalystQaTask.model_validate(references[index] | {"task_id": TASK_ID, "workspace_id": WORKSPACE_ID})
     req = request()
-    await resource.seed_session(req, seed())
+    await resource.seed_session(req, seed(task_data=TASK_DATA | {"reference": reference.model_dump(mode="json")}))
     result = await resource.verify(req, verify_body(reference.final_answer.replace(before, after, 1)))
     assert result.reward == reward
     assert result.semantic_correct is bool(reward)
@@ -239,7 +244,7 @@ async def test_cancelled_initialization_releases_partial_allocation(server, monk
     started = asyncio.Event()
     wait = asyncio.Event()
 
-    async def hang(server, state, workspace_id):
+    async def hang(server, state, body):
         sandbox = MagicMock()
         sandbox.stop = AsyncMock()
         state.sandbox = sandbox
@@ -258,20 +263,38 @@ async def test_cancelled_initialization_releases_partial_allocation(server, monk
 
 
 @pytest.mark.asyncio
-async def test_malformed_reference_is_rejected_before_sandbox_start(server, tmp_path):
-    from environments.pdf_analyst_qa.prepare_example import prepare_example
-
+async def test_malformed_reference_is_rejected_before_sandbox_start(server):
     resource, sandboxes = server
-    root = tmp_path / "runtime"
-    prepare_example(root)
-    task_file = root / "tasks" / f"{TASK_ID}.json"
-    task = json.loads(task_file.read_text())
-    task["final_answer"] = ""
-    task_file.write_text(json.dumps(task))
-    resource.config.dataset_root = str(root)
     with pytest.raises(ResourcesSeedRejectedError, match="reference answer is invalid"):
-        await resource.seed_session(request(), seed())
+        await resource.seed_session(request(), seed(task_data=with_reference(final_answer="")))
     assert not sandboxes
+
+
+def document(**update):
+    return TASK_DATA["documents"][0] | update
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_data", "message"),
+    [
+        (with_reference(task_id="task_" + "2" * 24), "reference task and workspace differ"),
+        (with_reference(workspace_id="workspace_" + "2" * 24), "reference task and workspace differ"),
+        (TASK_DATA | {"documents": []}, "at least 1 item"),
+        (TASK_DATA | {"documents": [document(), document(path="other.pdf")]}, "targets must be unique"),
+        (TASK_DATA | {"documents": [document(path="../escape.pdf")]}, "relative PDF paths"),
+        (TASK_DATA | {"documents": [document(path="/abs/doc.pdf")]}, "relative PDF paths"),
+        (TASK_DATA | {"documents": [document(target="notes.txt")]}, "relative PDF paths"),
+        (TASK_DATA | {"documents": [document(sha256="F" * 64)]}, "String should match pattern"),
+        ({key: value for key, value in TASK_DATA.items() if key != "reference"}, "reference"),
+    ],
+)
+async def test_malformed_row_is_rejected_before_allocation(server, task_data, message):
+    resource, sandboxes = server
+    with pytest.raises(ResourcesSeedRejectedError, match=message):
+        await resource.seed_session(request(), seed(task_data=task_data))
+    assert not sandboxes
+    assert not resource._sandbox_slots.locked()
 
 
 @pytest.mark.asyncio
@@ -299,14 +322,10 @@ async def test_verifier_fixture_covers_reference_and_format_variants():
 
 
 @pytest.mark.asyncio
-async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monkeypatch, tmp_path):
-    from environments.pdf_analyst_qa.prepare_example import prepare_example
+async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monkeypatch):
     from resources_servers.pdf_analyst_qa import app
 
     resource, _ = server
-    root = tmp_path / "runtime"
-    prepare_example(root)
-    resource.config.dataset_root = str(root)
     resource.config.sandbox_request_cpu = 0.75
     resource.config.sandbox_request_memory_mib = 2048
     resource.config.mounted_documents = MountedDocumentsConfig(prefix="example")
@@ -327,17 +346,25 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
     monkeypatch.setattr(app, "create_provider", lambda config: config)
     monkeypatch.setattr(app, "AsyncSandbox", Sandbox)
     monkeypatch.setattr(app, "sandbox_server_url", lambda *_args, **_kwargs: "http://10.2.3.4:8000")
-    state = _SessionState(resource._load_task(resource.seed_request_model(**seed().task_data)), "example-document-v1")
-    await START_SANDBOX(resource, state, WORKSPACE_ID)
+    body = PdfAnalystQaTaskRow.model_validate(seed().task_data)
+    state = _SessionState(body.reference, body.prompt_version)
+    await START_SANDBOX(resource, state, body)
     sandbox = created[0]
     spec = sandbox.start.await_args.args[0]
+    assert json.loads(spec.files[DOCUMENT_MANIFEST_PATH]) == [
+        {
+            "source": "/mnt/s3-data/data/example/example-observatory.pdf",
+            "target": "Example Observatory Report.pdf",
+            "sha256": TASK_DATA["documents"][0]["sha256"],
+        }
+    ]
     assert spec.metadata == {"team": "test", "workspace-id": WORKSPACE_ID}
     assert spec.provider_options["network_policy"] == {
         "defaultAction": "deny",
         "egress": [{"action": "allow", "target": "10.2.3.4"}],
     }
     assert "volumes" not in spec.provider_options
-    assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 10}
+    assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 24}
     assert spec.files and spec.env["OPENCODE_CONFIG"] == "/opt/cli/opencode-model.json"
     assert sandbox.exec.await_args.kwargs["user"] == 0
     sandbox.set_default_user.assert_called_once_with(65534)
@@ -353,22 +380,19 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
     ("option", "value"),
     [("network_policy", {"defaultAction": "allow"}), ("resource_requests", {"cpu": 1})],
 )
-async def test_preconfigured_managed_sandbox_option_is_rejected(server, monkeypatch, tmp_path, option, value):
-    from environments.pdf_analyst_qa.prepare_example import prepare_example
+async def test_preconfigured_managed_sandbox_option_is_rejected(server, monkeypatch, option, value):
     from resources_servers.pdf_analyst_qa import app
 
     resource, _ = server
-    root = tmp_path / "runtime"
-    prepare_example(root)
-    resource.config.dataset_root = str(root)
     resource.config.sandbox_config = {"provider_options": {option: value}}
     resource.server_client.global_config_dict = {
         "sandbox": {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
     }
     monkeypatch.setattr(app, "sandbox_server_url", lambda *_args, **_kwargs: "http://10.2.3.4:8000")
-    state = _SessionState(resource._load_task(resource.seed_request_model(**seed().task_data)), "example-document-v1")
+    body = PdfAnalystQaTaskRow.model_validate(seed().task_data)
+    state = _SessionState(body.reference, body.prompt_version)
     with pytest.raises(ValueError, match=f"{option}.*managed"):
-        await START_SANDBOX(resource, state, WORKSPACE_ID)
+        await START_SANDBOX(resource, state, body)
 
 
 @pytest.mark.parametrize(

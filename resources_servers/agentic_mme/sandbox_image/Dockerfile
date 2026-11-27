@@ -46,9 +46,14 @@ RUN pip install --no-cache-dir \
 # The glibc x86_64 build that opencode_agent's installer picks for this image. Its SHA-256 is pinned in
 # benchmarks/agentic_mme/opencode.yaml, so a new version here needs a new pin there.
 ARG OPENCODE_VERSION=1.17.11
+# SHA-256 of the release archive, verified before any of its files are extracted.
+ARG OPENCODE_SHA256=36064327d5a3fba662264f5726f517eafa26d1aefb0d59bc95e66bddccf3497b
 RUN mkdir -p /opt/opencode/bin \
     && curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz" \
-        | tar -xz -C /opt/opencode/bin opencode \
+        -o /tmp/opencode.tar.gz \
+    && echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/opencode.tar.gz -C /opt/opencode/bin opencode \
+    && rm /tmp/opencode.tar.gz \
     && test "$(/opt/opencode/bin/opencode --version)" = "${OPENCODE_VERSION}"
 COPY --from=plugin-archive /opencode-1.17.11-plugin-dependencies.tar.gz /opt/opencode/
 

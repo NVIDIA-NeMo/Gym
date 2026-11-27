@@ -1,109 +1,72 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Scenario counts use each check's priority and applicability, not the overall P0 verdict."""
+"""Presentation requires all checks and groups failures at the first failing tier."""
 
 from scripts.harness_conformance.rendering import render_table
 
 
-def test_summary_counts_scenarios_independently_in_each_applicable_tier():
-    rows = {
-        "pi": {
-            "verdict": "not_fulfilled",
-            "scenarios": [
-                {
-                    "scenario": "tool_success",
-                    "verdict": "fulfilled",
-                    "checks": [
-                        {"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "pass"},
-                        {"id": "calls.usage", "kind": "schema", "tier": "P0", "status": "pass"},
-                        {"id": "efficiency.context", "kind": "behavioral", "tier": "P1", "status": "fail"},
-                    ],
-                },
-                {
-                    "scenario": "tool_failure",
-                    "verdict": "not_fulfilled",
-                    "checks": [
-                        {"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "fail"},
-                        {"id": "efficiency.context", "kind": "behavioral", "tier": "P1", "status": "not_applicable"},
-                    ],
-                },
-                {
-                    "scenario": "retry_429",
-                    "verdict": "fulfilled",
-                    "checks": [
-                        {"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "pass"},
-                        {"id": "efficiency.context", "kind": "behavioral", "tier": "P1", "status": "pass"},
-                        {"id": "efficiency.cache", "kind": "behavioral", "tier": "P2", "status": "fail"},
-                    ],
-                },
-                {
-                    "scenario": "model_error",
-                    "verdict": "not_fulfilled",
-                    "checks": [
-                        {"id": "efficiency.cache", "kind": "behavioral", "tier": "P2", "status": "not_applicable"},
-                    ],
-                },
-            ],
-        }
+def scenario(name, **statuses):
+    return {
+        "scenario": name,
+        # Deliberately passing: a P0-only runner verdict must not hide higher-tier failures.
+        "verdict": "fulfilled",
+        "checks": [
+            {"id": f"check.{tier.lower()}", "kind": "behavioral", "tier": tier, "status": status}
+            for tier, status in statuses.items()
+        ],
     }
 
-    text = render_table({"gym_commit": "a" * 40, "harnesses": rows})
 
-    assert "| Harness | P0 | P1 | P2 |" in text
+def render(scenarios):
+    return render_table({"gym_commit": "a" * 40, "harnesses": {"pi": {"scenarios": scenarios}}})
+
+
+def test_each_scenario_appears_once_with_all_check_results():
+    text = render(
+        [
+            scenario("tool_success", P0="pass"),
+            scenario("judge_verifier", P0="pass", P1="pass"),
+            scenario("context_compaction", P0="pass", P1="fail"),
+            scenario("tool_failure", P0="fail", P1="fail"),
+            scenario("efficiency", P0="pass", P1="pass", P2="fail"),
+        ]
+    )
     assert (
-        '| `pi` | <Badge intent="error" minimal>2/3</Badge> | '
-        '<Badge intent="error" minimal>1/2</Badge> | <Badge intent="error" minimal>0/1</Badge> |'
+        '| `pi` | <Badge intent="error" minimal>2/5</Badge> | '
+        '<Badge intent="error" minimal>1</Badge> | <Badge intent="error" minimal>1</Badge> | '
+        '<Badge intent="error" minimal>1</Badge> |'
     ) in text
-    assert "| `hermes` | — | — | — |" in text
     details = text.split("### `pi`", 1)[1].split("| Check |", 1)[0]
-    assert "**P0**\n\n- **Passing:** `tool_success`, `retry_429`\n- **Not passing:** `tool_failure`" in details
-    assert "**P1**\n\n- **Passing:** `retry_429`\n- **Not passing:** `tool_success`" in details
-    assert "**P2**\n\n- **Passing:** None\n- **Not passing:** `retry_429`" in details
-    assert "model_error" not in details
-    assert "Passing scenarios" not in text
-    assert "Passed" not in text and "Failed" not in text and "Unavailable" not in text
+    for name, result in {
+        "tool_success": "✓ (P0:✓)",
+        "judge_verifier": "✓ (P0:✓, P1:✓)",
+        "context_compaction": "✗ (P0:✓, P1:✗)",
+        "tool_failure": "✗ (P0:✗, P1:✗)",
+        "efficiency": "✗ (P0:✓, P1:✓, P2:✗)",
+    }.items():
+        assert details.count(f"`{name}`") == 1
+        assert f"- `{name}`: {result}" in details
+    assert "| `hermes` | — | — | — | — |" in text
 
 
-def test_tier_without_applicable_measurements_has_no_count():
-    rows = {
-        "pi": {
-            "verdict": "not_fulfilled",
-            "scenarios": [
-                {
-                    "scenario": "model_error",
-                    "verdict": "not_fulfilled",
-                    "checks": [
-                        {"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "not_applicable"},
-                    ],
-                }
-            ],
-        }
-    }
-
-    text = render_table({"gym_commit": "a" * 40, "harnesses": rows})
-    assert "| `pi` | — | — | — |" in text
+def test_no_applicable_checks_is_unmeasured_not_passed():
+    text = render([scenario("model_error", P0="not_applicable")])
+    assert "| `pi` | — | — | — | — |" in text
     assert "<Badge" not in text
-    assert "**Passing:**" not in text and "**Not passing:**" not in text
+    assert "`model_error`: — (no applicable checks)" in text
 
 
-def test_fully_passing_tier_uses_brand_color_and_names_its_scenarios():
-    rows = {
-        "simple": {
-            "verdict": "fulfilled",
-            "scenarios": [
-                {
-                    "scenario": "tool_success",
-                    "verdict": "fulfilled",
-                    "checks": [{"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "pass"}],
-                }
-            ],
-        }
-    }
+def test_fully_passing_scenarios_use_brand_color():
+    text = render([scenario("tool_success", P0="pass", P1="not_applicable")])
+    assert '| `pi` | <Badge intent="launch" minimal>1/1</Badge> | 0 | 0 | 0 |' in text
+    assert "`tool_success`: ✓ (P0:✓)" in text
 
-    text = render_table({"gym_commit": "a" * 40, "harnesses": rows})
 
-    assert '| `simple` | <Badge intent="launch" minimal>1/1</Badge> | — | — |' in text
-    details = text.split("### `simple`", 1)[1].split("| Check |", 1)[0]
-    assert "**P0**\n\n- **Passing:** `tool_success`\n- **Not passing:** None" in details
-    assert "**P1**" not in details and "**P2**" not in details
+def test_first_failure_uses_priority_order_and_does_not_require_lower_tiers():
+    text = render([scenario("context_compaction", P2="fail", P1="fail")])
+    assert (
+        '| `pi` | <Badge intent="error" minimal>0/1</Badge> | 0 | <Badge intent="error" minimal>1</Badge> | 0 |'
+        in text
+    )
+    assert "`context_compaction`: ✗ (P1:✗, P2:✗)" in text

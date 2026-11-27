@@ -6,7 +6,7 @@
 import re
 from datetime import UTC, datetime
 
-from nemo_gym.rollouts.harness_capabilities import PriorityTier, gate_passes, render_matrices
+from nemo_gym.rollouts.harness_capabilities import gate_passes, render_matrices
 
 from .documentation import BEGIN, END
 from .registry import HARNESSES
@@ -31,39 +31,45 @@ def validate_row(row: dict) -> None:
                 raise ValueError("invalid check tier in documentation results")
 
 
-def scenario_results(scenarios: list[dict], *, tier: PriorityTier) -> tuple[list[str], list[str]]:
-    """Partition applicable scenarios by their checks in this tier, independently of other tiers."""
-    passing, not_passing = [], []
-    for scenario in scenarios:
-        checks = scenario["checks"]
-        if any(check["tier"] == tier and check["status"] != "not_applicable" for check in checks):
-            target = passing if gate_passes(checks, tier=tier) else not_passing
-            target.append(scenario["scenario"])
-    return passing, not_passing
+def scenario_tiers(scenario: dict) -> dict[str, bool]:
+    """Evaluate applicable check tiers; the runner's gating verdict is separate."""
+    checks = scenario["checks"]
+    return {
+        tier: gate_passes(checks, tier=tier)
+        for tier in ("P0", "P1", "P2")
+        if any(check["tier"] == tier and check["status"] != "not_applicable" for check in checks)
+    }
 
 
-def scenario_count(scenarios: list[dict], *, tier: PriorityTier) -> str:
-    passing, not_passing = scenario_results(scenarios, tier=tier)
-    total = len(passing) + len(not_passing)
-    if not total:
-        return "—"
-    # Fern's launch intent uses the site's NVIDIA accent; minimal keeps the fill soft.
-    intent = "error" if not_passing else "launch"
-    return f'<Badge intent="{intent}" minimal>{len(passing)}/{total}</Badge>'
+def scenario_counts(scenarios: list[dict]) -> list[str]:
+    results = [tiers for scenario in scenarios if (tiers := scenario_tiers(scenario))]
+    if not results:
+        return ["—"] * 4
+    passing = sum(all(tiers.values()) for tiers in results)
+    intent = "launch" if passing == len(results) else "error"
+    counts = [f'<Badge intent="{intent}" minimal>{passing}/{len(results)}</Badge>']
+    first_failures = [next((tier for tier, passed in tiers.items() if not passed), None) for tiers in results]
+    for tier in ("P0", "P1", "P2"):
+        count = first_failures.count(tier)
+        counts.append(f'<Badge intent="error" minimal>{count}</Badge>' if count else "0")
+    return counts
 
 
 def scenario_details(scenarios: list[dict]) -> str:
     lines = []
-    for tier in ("P0", "P1", "P2"):
-        passing, not_passing = scenario_results(scenarios, tier=tier)
-        if not passing and not not_passing:
-            continue
-        lines += [f"**{tier}**", ""]
-        for label, names in (("Passing", passing), ("Not passing", not_passing)):
-            listed = ", ".join(f"`{name}`" for name in names) or "None"
-            lines.append(f"- **{label}:** {listed}")
-        lines.append("")
-    return "\n".join(lines)
+    for scenario in scenarios:
+        tiers = scenario_tiers(scenario)
+        if not tiers:
+            result = "— (no applicable checks)"
+        else:
+            symbol = "✓" if all(tiers.values()) else "✗"
+            result = (
+                symbol + " (" + ", ".join(f"{tier}:{'✓' if passed else '✗'}" for tier, passed in tiers.items()) + ")"
+            )
+        if scenario.get("unsupported_reason"):
+            result += " — not run: declared unsupported"
+        lines.append(f"- `{scenario['scenario']}`: {result}")
+    return "\n".join(lines) + "\n\n"
 
 
 def render_table(report: dict) -> str:
@@ -74,11 +80,16 @@ def render_table(report: dict) -> str:
     rows = report["harnesses"]
     for row in rows.values():
         validate_row(row)
-    lines = [BEGIN, "", "| Harness | P0 | P1 | P2 |", "| --- | --- | --- | --- |"]
+    lines = [
+        BEGIN,
+        "",
+        "| Harness | Scenarios passed | First failure: P0 | First failure: P1 | First failure: P2 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for harness in HARNESSES:
         row = rows.get(harness)
         scenarios = row["scenarios"] if row else []
-        counts = [scenario_count(scenarios, tier=tier) for tier in ("P0", "P1", "P2")]
+        counts = scenario_counts(scenarios)
         lines.append(f"| `{harness}` | " + " | ".join(counts) + " |")
     if rows:
         matrices = render_matrices(rows).replace("# Harness checks by scenario\n", "", 1)

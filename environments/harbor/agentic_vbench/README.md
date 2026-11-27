@@ -13,6 +13,7 @@ gym dataset validate agentic_vbench --sandbox docker \
   --config environments/harbor/agentic_vbench/harbor_sandbox.yaml   # plays each task's solution/ through its verifier
 gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
   --config environments/harbor/agentic_vbench/harbor_sandbox.yaml \
+  --output results/harbor/agentic_vbench/opencode_agent/rollouts.jsonl \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
@@ -38,7 +39,11 @@ gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
 
 Each task folder is the upstream folder with three adjustments; the adjustments and the digests of the files they
 touch are recorded under `.records/<task>/` in this folder (`judge_protocol.json`, `assembly_judge_guard.json`,
-`materials.json`). A task none of them applies to is byte for byte the upstream folder.
+`materials.json`). A task none of them applies to is byte for byte the upstream folder, plus two additions every
+task gets: `task_data.json` naming its family, and the OpenCode compaction plugins under the step's
+`workdir/.opencode-plugins/` (`opencode_plugins.json`), which sit unused unless a run loads them (see
+[`benchmarks/agentic_vbench/opencode_plugins/`](../../../benchmarks/agentic_vbench/opencode_plugins/README.md) and the
+training entry [`agentic_vbench_train`](../agentic_vbench_train/README.md)).
 
 | Tasks | Change | Why |
 | --- | --- | --- |
@@ -67,13 +72,42 @@ upstream does.
 (no empty default: without a key the value is null, which the server's `secrets` table rejects, so the server does
 not start), turns on separate verification for tasks with artifacts and the harness's `image_input`, and bounds
 concurrent episodes, since every episode starts one sandbox from a task image of a few gigabytes. Pass it with
-`--config`. The task Dockerfiles build their images (they download the task's clips from Hugging Face at build
+`--config`.
+
+The overlay names the OpenCode harness's block, so it loads only with `--agent opencode_agent`. `dataset.toml` also
+admits `pi_agent`, `openclaw_agent` and `codex_agent`, the other sandboxed session harnesses that send the model the
+images their tools read. Each has an overlay with the same server block:
+[`harbor_sandbox_pi.yaml`](harbor_sandbox_pi.yaml) and [`harbor_sandbox_openclaw.yaml`](harbor_sandbox_openclaw.yaml)
+set `image_input` on their harness; [`harbor_sandbox_codex.yaml`](harbor_sandbox_codex.yaml) sets
+`inline_tool_output_images` on a `vllm_model` server instead, because Codex's `view_image` tool returns a frame
+inside the tool result. All three raise the harness's time ceiling so that each task's own agent budget applies.
+
+```sh
+gym eval run agentic_vbench --agent pi_agent --sandbox docker \
+  --config environments/harbor/agentic_vbench/harbor_sandbox_pi.yaml \
+  --output results/harbor/agentic_vbench/pi_agent/rollouts.jsonl \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+```
+
+The three install their runtime into the sandbox at session start (or read one the image carries; see the harness
+READMEs). The generated rows and run config include the harness name (`tasks_pi_agent.jsonl`,
+`run_config_pi_agent.yaml`). All harnesses default to the same `results/harbor/agentic_vbench/rollouts.jsonl`.
+Give each harness its own `--output` path as above when comparing runs.
+
+The published numbers and the full-set run below are OpenCode's; no full-set run of another harness has been recorded
+here yet, and a harness is an experimental variable, so compare a harness's scores with its own.
+
+The task Dockerfiles build their images (they download the task's clips from Hugging Face at build
 time), so `gym eval run` and `gym dataset validate` build them once at prepare through the top-level `builds:` block
 (`tool`, `repository`); with `--sandbox docker` and no repository, `docker` builds them locally.
 
 Each task declares 1800 s for the agent and 1800 s for the verifier. The benchmark's published runs gave the
-verifiers a 3x allowance; `[gym.defaults] timeout_multiplier` scales the agent budget too, so a comparable run is not
-expressible yet, and runs through this entry use the task budgets as published.
+verifiers a 3x allowance, which `dataset.toml` declares as `[gym.defaults] verifier_timeout_multiplier = 3.0`: the
+verifiers get 5400 s and the agent budgets stay as published (`timeout_multiplier` would scale both).
+
+Every task also carries `task_data.json` naming its family (typed by `task_data.py` beside this README), so
+`python -m benchmarks.agentic_vbench.family_metrics <rollouts.jsonl>` computes the per-family means and the
+leaderboard's equal-family mean from a run's rows.
 
 ## Scoring and validation status
 

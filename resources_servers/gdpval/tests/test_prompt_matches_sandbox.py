@@ -27,9 +27,9 @@ def _user_prompt(name: str) -> str:
     return yaml.safe_load((_PROMPTS / name).read_text(encoding="utf-8"))["user"]
 
 
-@pytest.fixture(params=["default-stirrup.yaml", "harness-neutral.yaml"])
+@pytest.fixture(params=["default-stirrup.yaml", "harness-neutral.yaml", "nooa.yaml"])
 def prompt(request) -> str:
-    """Both GDPval user prompts as this tree defines them."""
+    """Each GDPval user prompt as this tree defines it."""
     return _user_prompt(request.param)
 
 

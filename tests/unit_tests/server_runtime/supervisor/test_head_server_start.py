@@ -20,22 +20,24 @@ from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME
 from nemo_gym.core.failure_kinds import SERVER_START_FAILED
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
     HeadServerUnresponsiveError,
-    RunHelper,
     ServerStartFailedError,
+    ServerSupervisor,
 )
 from tests.unit_tests.server_runtime.supervisor.test_server_start_failed import taken_port as taken_port
 
 
-def waiting_runner(monkeypatch, *, alive: bool, statuses: list[str], timeout_s: float | None = None) -> RunHelper:
-    runner = RunHelper()
-    runner._server_client = MagicMock(poll_for_status=MagicMock(side_effect=statuses))
-    runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=alive))
+def waiting_supervisor(
+    monkeypatch, *, alive: bool, statuses: list[str], timeout_s: float | None = None
+) -> ServerSupervisor:
+    supervisor = ServerSupervisor()
+    supervisor._server_client = MagicMock(poll_for_status=MagicMock(side_effect=statuses))
+    supervisor._head_server_thread = MagicMock(is_alive=MagicMock(return_value=alive))
     if timeout_s is not None:
-        runner._head_server_spinup_timeout_seconds = timeout_s
+        supervisor._head_server_spinup_timeout_seconds = timeout_s
     clock = {"now": 0.0}
     monkeypatch.setattr(env_module, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(env_module, "sleep", lambda seconds: clock.update(now=clock["now"] + seconds))
-    return runner
+    return supervisor
 
 
 def test_a_head_server_whose_port_is_taken_reports_eaddrinuse(monkeypatch) -> None:
@@ -43,11 +45,11 @@ def test_a_head_server_whose_port_is_taken_reports_eaddrinuse(monkeypatch) -> No
     holder.bind(("127.0.0.1", 0))
     holder.listen()
     port = holder.getsockname()[1]
-    runner = waiting_runner(monkeypatch, alive=False, statuses=["connection_error"])
-    runner._head_server_instance = SimpleNamespace(config=SimpleNamespace(host="127.0.0.1", port=port))
+    supervisor = waiting_supervisor(monkeypatch, alive=False, statuses=["connection_error"])
+    supervisor._head_server_instance = SimpleNamespace(config=SimpleNamespace(host="127.0.0.1", port=port))
     try:
         with pytest.raises(ServerStartFailedError) as raised:
-            runner._wait_for_head_server()
+            supervisor._wait_for_head_server()
     finally:
         holder.close()
 
@@ -60,31 +62,31 @@ def test_a_head_server_that_died_on_a_free_port_reports_no_errno(monkeypatch) ->
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    runner = waiting_runner(monkeypatch, alive=False, statuses=["connection_error"])
-    runner._head_server_instance = SimpleNamespace(config=SimpleNamespace(host="127.0.0.1", port=port))
+    supervisor = waiting_supervisor(monkeypatch, alive=False, statuses=["connection_error"])
+    supervisor._head_server_instance = SimpleNamespace(config=SimpleNamespace(host="127.0.0.1", port=port))
 
     with pytest.raises(ServerStartFailedError) as raised:
-        runner._wait_for_head_server()
+        supervisor._wait_for_head_server()
     assert raised.value.errno is None and not isinstance(raised.value, HeadServerUnresponsiveError)
 
 
 def test_a_taken_head_server_port_is_retried_once_on_a_fresh_port(taken_port: dict) -> None:
-    runner = RunHelper()
-    runner.shutdown = MagicMock()
+    supervisor = ServerSupervisor()
+    supervisor.shutdown = MagicMock()
     config = env_module.get_global_config_dict()
     head_ports: list[int] = []
 
     def start(_parser_config: object) -> None:
-        runner._server_configs = {"judge_model": taken_port["server_config"]}
+        supervisor._server_configs = {"judge_model": taken_port["server_config"]}
         head_ports.append(config[HEAD_SERVER_KEY_NAME].port)
         if len(head_ports) == 1:
             raise ServerStartFailedError(
                 "server_start_failed", server_name=HEAD_SERVER_KEY_NAME, errno=errno.EADDRINUSE
             )
 
-    runner._start = MagicMock(side_effect=start)
+    supervisor._start = MagicMock(side_effect=start)
 
-    runner.start(None)
+    supervisor.start(None)
 
     assert head_ports == [11000, 20007]
     assert set(taken_port["picked"][0]["disallowed_ports"]) == {21001, 11000}
@@ -92,10 +94,10 @@ def test_a_taken_head_server_port_is_retried_once_on_a_fresh_port(taken_port: di
 
 
 def test_a_live_head_server_that_never_answers_stops_after_the_bound(monkeypatch) -> None:
-    runner = waiting_runner(monkeypatch, alive=True, statuses=["connection_error"] * 1000)
+    supervisor = waiting_supervisor(monkeypatch, alive=True, statuses=["connection_error"] * 1000)
 
     with pytest.raises(HeadServerUnresponsiveError) as raised:
-        runner._wait_for_head_server()
+        supervisor._wait_for_head_server()
 
     error = raised.value
     assert error.failure_kind == SERVER_START_FAILED and error.stop_exit_code == 76
@@ -104,9 +106,11 @@ def test_a_live_head_server_that_never_answers_stops_after_the_bound(monkeypatch
 
 
 def test_a_zero_bound_waits_until_the_head_server_answers(monkeypatch) -> None:
-    runner = waiting_runner(monkeypatch, alive=True, statuses=["connection_error"] * 400 + ["success"], timeout_s=0)
+    supervisor = waiting_supervisor(
+        monkeypatch, alive=True, statuses=["connection_error"] * 400 + ["success"], timeout_s=0
+    )
 
-    runner._wait_for_head_server()
+    supervisor._wait_for_head_server()
 
     assert env_module.monotonic() > 900
 

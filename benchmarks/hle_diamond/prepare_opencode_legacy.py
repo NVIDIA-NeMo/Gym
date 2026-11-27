@@ -12,14 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare the full HLE-Diamond set for the OpenCode sandboxed harness.
+"""Prepare the full HLE-Diamond set for the OpenCode harnesses.
 
 Thin wrapper around ``benchmarks.hle_diamond.prepare.prepare`` with ``prompt="opencode"``:
 all 1000 questions, image questions included, are materialized with
 ``prompts/opencode.yaml`` (the HLE instruction folded after the question into the single
-user message the harness forwards) and written to
-``benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl`` for
-``opencode_full.yaml`` and ``opencode_search_full.yaml``.
+user message the harnesses forward; image rows carry an ``input_image`` block in that same
+turn) and written to ``benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl``
+for ``opencode_hle_tools_full.yaml`` (the ``opencode_agent`` session preset) and the deprecated
+``opencode_full.yaml`` and ``opencode_search_full.yaml`` (``opencode_sandboxed_agent`` behind
+the relay). The module keeps its name; the file serves both harnesses.
 """
 
 import argparse

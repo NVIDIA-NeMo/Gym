@@ -16,7 +16,7 @@ from typing import Literal
 from fastapi import HTTPException
 from pydantic import Field, PrivateAttr
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import AgentSessionConflictError, BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
     AGENT_COMMAND_NOT_ALLOWED,
@@ -158,10 +158,9 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
 
         requested_version = body.verifier_metadata.get("harness_version")
         if body.verifier_metadata.get("harness", self.config.harness) != self.config.harness:
-            raise HTTPException(409, "Dataset harness differs; prepare the selected harness again")
+            raise AgentSessionConflictError("Dataset harness differs; prepare the selected harness again")
         if requested_version and requested_version != HARNESS_VERSIONS[self.config.harness]:
-            raise HTTPException(
-                409,
+            raise AgentSessionConflictError(
                 "Prepared dataset targets a different harness version; prepare it again",
             )
         fingerprint = hashlib.sha256(
@@ -176,7 +175,7 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
         ).hexdigest()
         output = Path(self.config.output_root).resolve() / identity
         if identity in self._fingerprints and self._fingerprints[identity] != fingerprint:
-            raise HTTPException(409, "Rollout ID reused with different request")
+            raise AgentSessionConflictError("Rollout ID reused with different request")
         if identity not in self._inflight:
             self._fingerprints[identity] = fingerprint
             self._inflight[identity] = asyncio.create_task(self._episode(body, output, fingerprint, rollout_id))
@@ -199,11 +198,10 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                     json.dump({"fingerprint": fingerprint, "rollout_id": rollout_id}, stream)
             except FileExistsError:
                 if json.loads(binding.read_text())["fingerprint"] != fingerprint:
-                    raise HTTPException(409, "Rollout ID reused with different request")
+                    raise AgentSessionConflictError("Rollout ID reused with different request")
                 result_path = output / "result.json"
                 if not result_path.exists():
-                    raise HTTPException(
-                        409,
+                    raise AgentSessionConflictError(
                         "Incomplete episode requires inspection; use a new rollout ID to retry",
                     )
                 return json.loads(result_path.read_text())

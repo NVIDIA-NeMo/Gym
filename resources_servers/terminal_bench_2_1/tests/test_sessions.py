@@ -125,7 +125,7 @@ def test_resources_session_http_lifecycle_keeps_task_until_close(setup, reward: 
         assert client.post("/close_session", json=close_body(seed).model_dump(mode="json")).json() == closed.json()
         assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
         assert client.post("/verify", json=verify_body(seed).model_dump(mode="json")).status_code == 409
-    sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once_with(timeout_s=server.config.session_close_timeout_seconds)
     assert not server._session_id_to_sandbox
     assert not server._session_id_to_state
 
@@ -614,11 +614,11 @@ async def test_shutdown_stops_sessions_concurrently_under_their_locks(setup) -> 
     await server.seed_session(request, seed)
     entered, release, other_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    async def stop():
+    async def stop(**_: object):
         entered.set()
         await release.wait()
 
-    async def stop_other():
+    async def stop_other(**_: object):
         other_entered.set()
 
     sandbox.stop.side_effect = stop
@@ -679,10 +679,11 @@ async def test_golden_cleanup_is_bounded_and_preserves_primary_result(
     if original is not None:
         server._upload_folder.side_effect = original
 
-    async def stop():
+    async def stop(*, timeout_s: float | None = None):
+        # The sandbox's stop is bounded by the configured timeout and raises TimeoutError when it runs out.
         if stop_failure == "error":
             raise RuntimeError("provider unavailable")
-        await asyncio.Event().wait()
+        raise TimeoutError
 
     sandbox.stop.side_effect = stop
     if original is None:
@@ -692,7 +693,7 @@ async def test_golden_cleanup_is_bounded_and_preserves_primary_result(
         with pytest.raises(failure) as error:
             await asyncio.wait_for(server.verify(request, verify_body(seed)), timeout=1)
         assert error.value is original
-    sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once_with(timeout_s=server.config.session_close_timeout_seconds)
 
 
 @pytest.mark.parametrize(

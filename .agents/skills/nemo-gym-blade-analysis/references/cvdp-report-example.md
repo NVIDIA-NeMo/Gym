@@ -21,8 +21,8 @@ test harness and returns binary reward.
 This reference is intentionally an opt-in example, not a default-loaded
 benchmark package.
 
-- D1 analysis skill: the generic `nemo-gym-blade-analysis` skill explains the
-  portable BLADE workflow. The source CVDP-specific skill is more specialized
+- D1 analysis skill: the generic `nemo-gym-analyzing-results` skill explains the
+  portable BLADE analysis method. The source CVDP-specific skill is more specialized
   than a generic NeMo Gym skill and is not loaded by default.
 - D2 rollout data: small public CVDP example rollouts live in
   `resources_servers/cvdp/data/` and are suitable for learning the report
@@ -89,7 +89,7 @@ Per-task verifier outputs are the evidence source for failure explanations.
 
 ## How To Interpret The Report
 
-Use the generic BLADE workflow from the main skill, then add CVDP-specific
+Use the generic BLADE method from `nemo-gym-analyzing-results`, then add CVDP-specific
 questions:
 
 - Which CVDP category has the largest pass-rate drop?

@@ -20,9 +20,14 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.core.outcome_policy import (
     OutcomeAction,
+    OutcomePolicyConfig,
     StageOutcomePolicyConfig,
     StagePolicyConfig,
+    applied_outcome_fields,
     choose_stage_outcome,
+    declare_action_kind,
+    environment_fault_policy,
+    require_retry_or_fail,
 )
 from nemo_gym.trajectory.trajectory_record import SandboxObservation
 
@@ -238,3 +243,97 @@ def test_event_adapter_uses_supplied_classification_without_mutating_event():
     assert failure_outcome_policy(failure, config=policy) == "fail"
     assert failure_outcome_policy(failure, config=policy, classification=classification) == "retry"
     assert failure.to_record() == before
+
+
+def test_a_boundary_overlay_keeps_its_default_classification_under_a_partial_override() -> None:
+    defaults = StageOutcomePolicyConfig(
+        classification={
+            "by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "evaluation", "demo:other": "model"}}}
+        },
+        by_stage={"agent": {"by_failure_class": {"evaluation": "retry"}}},
+    )
+    override = {"classification": {"by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "model"}}}}}
+
+    policy = StageOutcomePolicyConfig.model_validate(StageOutcomePolicyConfig.overlay(defaults, override))
+
+    kinds = policy.classification.by_stage["agent"].by_failure_kind
+    assert (kinds["demo:cut_off"], kinds["demo:other"]) == ("model", "model")
+    assert kinds[PROVIDER_OOM_KILLED] == "model"  # the shared default stays
+    assert policy.by_stage["agent"].by_failure_class == {"evaluation": "retry"}
+    # With no classification override at all, the boundary's classification stands.
+    untouched = StageOutcomePolicyConfig.model_validate(StageOutcomePolicyConfig.overlay(defaults, {}))
+    assert untouched.classification.by_stage["agent"].by_failure_kind["demo:cut_off"] == "evaluation"
+    # The boundary's own rules still select the action, and the attribution follows the classification.
+    cut_off = choose_stage_outcome(failure_kind="demo:cut_off", http_status=None, stage="agent", config=untouched)
+    assert (cut_off.action, cut_off.attribution) == ("retry", "evaluation")
+    other = choose_stage_outcome(failure_kind="demo:other", http_status=None, stage="agent", config=untouched)
+    assert (other.action, other.attribution) == ("fail", "model")
+
+
+def test_an_environment_fault_policy_classifies_its_kinds_and_retries_them_by_default() -> None:
+    policy = environment_fault_policy("agent", ("demo:cut_off",))
+
+    assert require_retry_or_fail(policy, "agent", ("demo:cut_off",)) is policy
+    assert applied_outcome_fields(failure_kind="demo:cut_off", stage="agent", config=policy) == {
+        "failure_outcome_action": "retry",
+        "failure_outcome_attribution": "evaluation",
+        "_ng_failure_stage": "agent",
+    }
+    # Other stages and the shared defaults are untouched.
+    assert choose_stage_outcome(
+        failure_kind=PROVIDER_OOM_KILLED, http_status=None, stage="agent", config=policy
+    ).action == ("count_as_zero")
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        {"default_action": "count_as_zero"},
+        {"by_failure_class": {"evaluation": "count_as_zero"}},
+    ],
+    ids=["default-action", "class-rule"],
+)
+def test_a_boundary_that_cannot_count_a_zero_refuses_that_action_for_its_kinds(rules: dict) -> None:
+    policy = StageOutcomePolicyConfig.model_validate(
+        StageOutcomePolicyConfig.overlay(
+            environment_fault_policy("agent", ("demo:cut_off",)), {"by_stage": {"agent": rules}}
+        )
+    )
+
+    with pytest.raises(
+        ValueError, match="demo:cut_off supports only retry or fail at the agent stage, not count_as_zero"
+    ):
+        require_retry_or_fail(policy, "agent", ("demo:cut_off",))
+
+
+def test_a_boundary_refuses_retry_for_a_kind_classified_as_the_model() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    policy = StageOutcomePolicyConfig.model_validate(
+        StageOutcomePolicyConfig.overlay(
+            environment_fault_policy("agent", ("demo:cut_off",)),
+            {"classification": {"by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "model"}}}}},
+        )
+    )
+
+    with pytest.raises(
+        ValueError, match="demo:cut_off cannot be retried at the agent stage while it is classified as"
+    ):
+        require_retry_or_fail(policy, "agent", ("demo:cut_off",))
+    # Leaving the same kind ungraded is consistent with the model attribution.
+    ungraded = StageOutcomePolicyConfig.model_validate(
+        StageOutcomePolicyConfig.overlay(policy, {"by_stage": {"agent": {"default_action": "fail"}}})
+    )
+    assert require_retry_or_fail(ungraded, "agent", ("demo:cut_off",)) is ungraded
+
+
+def test_an_action_rule_names_only_the_namespaced_kinds_a_boundary_declared() -> None:
+    kind = declare_action_kind("demo:declared_cut_off")
+
+    assert StagePolicyConfig(by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    assert OutcomePolicyConfig(default_action="fail", by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    # An undeclared name, a misspelled registered one and a name that is not namespaced stay rejected.
+    for name in ("demo:undeclared", "provider_oom_kild"):
+        with pytest.raises(ValidationError, match="Unregistered failure kinds"):
+            StagePolicyConfig(by_failure_kind={name: "retry"})
+    with pytest.raises(ValueError, match="not a namespaced"):
+        declare_action_kind("provider_oom_killed")

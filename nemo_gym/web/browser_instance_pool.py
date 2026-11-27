@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import secrets
+import select
 import shutil
 import signal
 import subprocess
@@ -64,7 +65,7 @@ class LocalBrowserInstancePoolProvider:
         *,
         size: int,
         port_base: int,
-        display_base: int = 100,
+        display_base: int | None = None,
         host: str = "127.0.0.1",
         log_dir: str = "cache/visual-browser/instances",
         python: str | None = None,
@@ -74,7 +75,11 @@ class LocalBrowserInstancePoolProvider:
     ) -> None:
         if size < 1:
             raise ValueError("local_instance_pool size must be at least 1")
-        self._slots = [_Slot(index=i, display=f":{display_base + i}", port=port_base + i) for i in range(size)]
+        self._slots = [
+            _Slot(index=i, display=f":{display_base + i}" if display_base is not None else "", port=port_base + i)
+            for i in range(size)
+        ]
+        self._automatic_display = display_base is None
         self._host = host
         self._log_dir = Path(log_dir).expanduser().resolve()
         self._python = python or sys.executable
@@ -257,16 +262,53 @@ class LocalBrowserInstancePoolProvider:
                 raise _LaunchRollbackError(f"browser instance rollback failed for slot {slot.index}") from exc
             raise
 
-    def _launch_slot(self, slot: _Slot) -> None:
-        slot.token = secrets.token_hex(16)
-        slot.tmpdir = Path(tempfile.mkdtemp(prefix=f"browser-instance-{slot.index}-"))
-        with (self._log_dir / f"slot-{slot.index:03d}.log").open("ab") as log:
+    def _launch_xvfb(self, slot: _Slot, log, deadline: float) -> None:
+        options = ["-screen", "0", self._screen, "-ac", "-nolisten", "tcp"]
+        if not self._automatic_display:
+            occupied = subprocess.run(
+                ["xdpyinfo", "-display", slot.display], capture_output=True, timeout=min(2, self._startup_timeout)
+            )
+            if occupied.returncode == 0:
+                raise BrowserSessionError(f"X display {slot.display} is already in use")
             slot.xvfb = subprocess.Popen(
-                ["Xvfb", slot.display, "-screen", "0", self._screen, "-ac", "-nolisten", "tcp"],
+                ["Xvfb", slot.display, *options], stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+            )
+            return
+        read_fd, write_fd = os.pipe()
+        try:
+            slot.xvfb = subprocess.Popen(
+                ["Xvfb", "-displayfd", str(write_fd), *options],
+                pass_fds=(write_fd,),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            os.close(write_fd)
+            write_fd = -1
+            selected = b""
+            while b"\n" not in selected and len(selected) < 16:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([read_fd], [], [], remaining)[0]:
+                    raise BrowserSessionError("Xvfb did not report its allocated display before startup timed out")
+                fragment = os.read(read_fd, 16)
+                if not fragment:
+                    raise BrowserSessionError("Xvfb exited without allocating a display")
+                selected += fragment
+            number = selected.strip()
+            if not number.isdigit() or not 0 <= int(number) <= 65535:
+                raise BrowserSessionError("Xvfb returned an invalid allocated display")
+            slot.display = f":{int(number)}"
+        finally:
+            os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+
+    def _launch_slot(self, slot: _Slot) -> None:
+        slot.token = secrets.token_hex(16)
+        slot.tmpdir = Path(tempfile.mkdtemp(prefix=f"browser-instance-{slot.index}-"))
+        deadline = time.monotonic() + self._startup_timeout
+        with (self._log_dir / f"slot-{slot.index:03d}.log").open("ab") as log:
+            self._launch_xvfb(slot, log, deadline)
             env = dict(os.environ)
             env.update(
                 {
@@ -282,7 +324,6 @@ class LocalBrowserInstancePoolProvider:
             xauthority = slot.tmpdir / "Xauthority"
             xauthority.touch(mode=0o600)
             env["XAUTHORITY"] = str(xauthority)
-            deadline = time.monotonic() + self._startup_timeout
             while subprocess.run(["xdpyinfo", "-display", slot.display], env=env, capture_output=True).returncode:
                 if slot.xvfb.poll() is not None or time.monotonic() > deadline:
                     raise BrowserSessionError(f"Xvfb {slot.display} did not start (slot {slot.index})")

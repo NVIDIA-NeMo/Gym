@@ -25,6 +25,13 @@ from nemo_gym.trajectory.trajectory_record import (
 
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
+NG_TERMINAL_KEY = "_ng_failure_terminal"
+# Set by the producer of a final failure row that must be counted as a zero in the metrics, whatever
+# count_failure_classes_as_zero names (a rollout the evaluated model failed, for example).
+NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
+# The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
+# instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
+NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Response metadata an agent sets on the placeholder response it returns when no generation happened, for
 # example when its remote service or simulator failed before the model answered. Recovery never keeps such a

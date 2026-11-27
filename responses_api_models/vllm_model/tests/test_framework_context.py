@@ -92,9 +92,11 @@ def make_capture_harness(
     model_config=None,
     decide_input=None,
     parent_resolution_mode="source_history",
+    allow_system_suffix=False,
     checkpoint=False,
     stream_keepalive_s=None,
     dynamo=False,
+    custom_tool_strategy="passthrough",
 ):
     """Allow paired RL tests to inject their staging transport and prefix reader.
 
@@ -109,6 +111,7 @@ def make_capture_harness(
             "enabled": True,
             "external_staging": True,
             "parent_resolution": parent_resolution_mode,
+            "allow_system_suffix": allow_system_suffix,
             "rebuild_response": False,
             "lineage_store": "nemo_gym.models.token_capture.lineage:FileLineageStore",
             "lineage_store_kwargs": {"root": str(tmp_path / "lineage")},
@@ -135,6 +138,7 @@ def make_capture_harness(
             checkpoint={"policy": checkpoint},
             stream_keepalive_s=stream_keepalive_s,
             dynamo_frontend=dynamo,
+            custom_tool_strategy=custom_tool_strategy,
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict=config),
     )
@@ -691,14 +695,14 @@ def test_conversion_error_is_rejected_before_intent(monkeypatch, tmp_path, route
     ],
     ids=lambda item: item["type"],
 )
-def test_unsupported_replay_item_is_rejected_before_intent(monkeypatch, tmp_path, route, prior_call, item):
+def test_unsupported_history_item_is_rejected_before_intent(monkeypatch, tmp_path, route, prior_call, item):
     harness = make_capture_harness(monkeypatch, tmp_path)
     history = list(HISTORY)
     if prior_call:
         first = assert_clean(harness.post("attempt", history))
         history += first["output"]
     history += [item, {"role": "user", "content": "next"}]
-    # This is valid Responses input; the rejection must come from replay support.
+    # The default chat converter or source-history replay rejects these valid Responses input items.
     NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": history})
     before = harness.manifest("attempt")
     root = tmp_path / "lineage"
@@ -956,6 +960,47 @@ def test_framework_checkpoint_restores_a_closed_attempt_and_accepts_its_next_cal
     assert candidate.parent_call_id == first_record.model_call_id
     assert candidate.staging_chain == [first_record.staging_key]
     assert harness.post("episode", HISTORY).status_code == 409
+
+
+def test_custom_tool_result_continues_the_served_call(monkeypatch, tmp_path):
+    harness = make_capture_harness(monkeypatch, tmp_path, custom_tool_strategy="function_bridge")
+    original_worker = NeMoGymAsyncOpenAI.create_chat_completion
+    tool_input = '{"x": 1}'
+
+    async def worker(client, **body):
+        response = await original_worker(client, **body)
+        if len(harness.worker_calls) == 1:
+            choice = response["choices"][0]
+            choice["finish_reason"] = "tool_calls"
+            choice["message"].update(
+                content=None,
+                tool_calls=[
+                    {
+                        "type": "function",
+                        "id": "call-1",
+                        "function": {"name": "exec", "arguments": json.dumps({"input": tool_input})},
+                    }
+                ],
+            )
+        return response
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", worker)
+    path = "/ng-rollout/attempt/training-token-capture/v1/responses"
+    tools = [{"type": "custom", "name": "exec"}]
+    history = [{"role": "user", "content": "run the tool"}]
+    first = assert_clean(harness.client.post(path, json={"input": history, "tools": tools}))
+    (call,) = first["output"]
+    assert (call["type"], call["input"]) == ("custom_tool_call", tool_input)
+    result = {"type": "custom_tool_call_output", "call_id": call["call_id"], "output": "ok"}
+    assert_clean(harness.client.post(path, json={"input": [*history, call, result], "tools": tools}))
+    admission = harness.worker_calls[-1][0]
+    assert admission.parent_call_id == harness.manifest("attempt").records[0].model_call_id
+    assert [item.role for item in admission.request_replay.items[-2:]] == ["assistant", "tool"]
+
+    # Free-form input is exact text, even when it happens to parse as JSON.
+    edited = {**call, "input": '{"x":1}'}
+    assert_clean(harness.client.post(path, json={"input": [*history, edited, result], "tools": tools}))
+    assert harness.worker_calls[-1][0].root_reason == "no_prefix_match"
 
 
 def test_tool_arguments_beyond_the_64_bit_range_still_admit(monkeypatch, tmp_path):
@@ -1629,3 +1674,103 @@ def test_measurement_resolves_under_the_identity_of_the_calling_agent_instance(m
     assert (named.agent_instance, named.agent_kind, named.model_ref.name) == ("judge.2", "judge", "policy")
     assert (unnamed.agent_instance, unnamed.agent_kind, unnamed.model_ref.name) == (None, None, "policy")
     assert harness.ledger.export_rows("attempt") == before
+
+
+@pytest.mark.parametrize("tool", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatch, tmp_path, tool, stream, reasoning):
+    harness = make_capture_harness(monkeypatch, tmp_path, reasoning=reasoning)
+    worker = NeMoGymAsyncOpenAI.create_chat_completion
+
+    async def tool_worker(client, **body):
+        payload = await worker(client, **body)
+        if tool:
+            reasoning_fields = {
+                key: payload["choices"][0]["message"][key]
+                for key in ("reasoning_content", "reasoning")
+                if key in payload["choices"][0]["message"]
+            }
+            payload["choices"][0].update(
+                finish_reason="tool_calls",
+                message={
+                    **reasoning_fields,
+                    "role": "assistant",
+                    "content": " \n",
+                    "tool_calls": [
+                        {
+                            "id": f"call-{len(harness.worker_calls)}",
+                            "type": "function",
+                            "function": {"name": "Agent", "arguments": '{"prompt":"solve"}'},
+                        }
+                    ],
+                },
+            )
+        return payload
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", tool_worker)
+    path = "/ng-rollout/attempt/training-token-capture/v1/messages"
+    body = {
+        "model": "test-model",
+        "max_tokens": 64,
+        "stream": stream,
+        "system": "solve independently",
+        "messages": [{"role": "user", "content": "task"}],
+        "tools": [{"name": "Agent", "input_schema": {"type": "object"}}],
+    }
+
+    def post(payload):
+        response = harness.client.post(path, json=payload)
+        if not stream:
+            return assert_clean(response)
+        assert response.status_code == 200, response.text
+        for field in (NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD, "prompt_token_ids"):
+            assert field not in response.text
+        result = _reconstruct_streamed_response(response.content, "messages")
+        assert result is not None
+        return result
+
+    first = post(body)
+    feedback = [{"type": "tool_result", "tool_use_id": "call-1", "content": "solved"}] if tool else "continue"
+    # Messages clients drop blank text blocks when they echo history.
+    echoed = [block for block in first["content"] if block["type"] != "text" or block["text"].strip()]
+    continued = {
+        **body,
+        "messages": body["messages"]
+        + [{"role": "assistant", "content": echoed}, {"role": "user", "content": feedback}],
+    }
+    post(continued)
+    manifest = harness.manifest("attempt")
+    if tool:
+        assert any(block["type"] == "text" and not block["text"].strip() for block in first["content"])
+        assert "call-1" in [item.id for item in manifest.records[0].output_items]
+    if reasoning:
+        assert any(block["type"] == "thinking" for block in first["content"])
+    assert harness.worker_calls[1][0].mode == "candidate"
+    assert harness.worker_calls[1][0].requires_empty_tool_content_equivalence is False
+    assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
+    post({**continued, "system": "rewritten context"})
+    assert harness.worker_calls[2][0].mode == "text"
+    assert harness.worker_calls[2][0].root_reason == "no_prefix_match"
+    final = harness.manifest("attempt")
+    assert len(final.records) == 3
+    assert not final.failures and not final.pending_call_ids
+    assert final.records[0].response_id == first["id"]
+
+
+@pytest.mark.parametrize("allow_system_suffix", [False, True])
+def test_system_suffix_requires_worker_opt_in(monkeypatch, tmp_path, allow_system_suffix):
+    harness = make_capture_harness(monkeypatch, tmp_path, allow_system_suffix=allow_system_suffix)
+    path = "/ng-rollout/attempt/training-token-capture/v1/chat/completions"
+    history = [{"role": "user", "content": "question"}]
+    first = assert_clean(harness.client.post(path, json={"messages": history}))
+    parent = harness.manifest("attempt").records[0]
+    history += [
+        {"role": "assistant", "content": first["choices"][0]["message"]["content"]},
+        {"role": "system", "content": "remaining budget: 100"},
+    ]
+    assert_clean(harness.client.post(path, json={"messages": history}))
+    admission = harness.worker_calls[-1][0]
+    assert admission.mode == ("candidate" if allow_system_suffix else "text")
+    assert admission.parent_call_id == (parent.model_call_id if allow_system_suffix else None)
+    assert admission.root_reason == (None if allow_system_suffix else "non_user_suffix")

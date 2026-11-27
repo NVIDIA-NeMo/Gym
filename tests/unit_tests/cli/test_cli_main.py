@@ -812,15 +812,17 @@ class TestFriendlyValidationError:
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
     ) -> None:
         # The issue's headline: `gym env start` used to initialise Ray and spawn the head server, then die on the
-        # bad value inside HeadServer.run_webserver. `run` now fails in its config parse, before RunHelper exists.
+        # bad value inside HeadServer.run_webserver. `run` now fails in its config parse, before ServerSupervisor exists.
         import nemo_gym.cli.env as cli_env
 
         class _NoServerMayStart:
             def __init__(self, *args, **kwargs) -> None:
-                raise AssertionError("RunHelper must not be built for a malformed head_server")
+                raise AssertionError("ServerSupervisor must not be built for a malformed head_server")
 
-        monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
-        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(cli_env, "ServerSupervisor", _NoServerMayStart)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.supervisor.server_supervisor, "ServerSupervisor", _NoServerMayStart
+        )
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
@@ -1879,7 +1881,7 @@ class TestAgentSelector:
             ),
             # The documented example: a `???`-bound harness is composed onto the benchmark's agent.
             (
-                ["eval", "run", "--benchmark", "terminal_bench_2_1/opencode"],
+                ["eval", "run", "--benchmark", "terminal_bench_2_1/opencode_legacy_agent"],
                 "terminus_2_sandboxed_agent",
                 [],
                 ("terminal_bench_2_1_terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent"),
@@ -2491,6 +2493,35 @@ def test_eval_status_missing_artifact_is_actionable(tmp_path, monkeypatch, capsy
         cli_main.main()
     assert error.value.code == 2
     assert "No batch_status.json or Gym job record found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_eval_lustre_stats_reads_the_stats_of_a_benchmark_dir(tmp_path, monkeypatch, capsys, json_output):
+    stats = tmp_path / "logs" / "lustre-md-stats-5.tsv"
+    stats.parent.mkdir()
+    stats.write_text("start\t10\tn1\tMDT000b\tclose\t1\nend\t20\tn1\tMDT000b\tclose\t41\n")
+    argv = ["gym", "eval", "lustre-stats", str(tmp_path), *(["--json"] if json_output else [])]
+    monkeypatch.setattr(sys, "argv", argv)
+    cli_main.main()
+    output = capsys.readouterr().out
+    if json_output:
+        [total] = json.loads(output)[str(stats)]["intervals"]
+        assert (total["interval"], total["requests"], total["requests_per_second"]) == ("total", 40, 4.0)
+    else:
+        assert "MDT000b 4.0/s" in output
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [([], "Slurm compute sets lustre_md_stats: true"), (["+x=1"], "does not accept Hydra overrides")],
+    ids=["no_stats", "override"],
+)
+def test_eval_lustre_stats_usage_errors(tmp_path, monkeypatch, capsys, extra, message):
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "lustre-stats", str(tmp_path), *extra])
+    with pytest.raises(SystemExit) as error:
+        cli_main.main()
+    assert error.value.code == 2
+    assert message in capsys.readouterr().err
 
 
 def test_review_eval_status_lists_stem_files_and_expected_aggregation(tmp_path, monkeypatch, capsys):

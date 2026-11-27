@@ -18,11 +18,13 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
     check_resources_session_contract,
 )
 from resources_servers.terminal_bench_4 import app as app_module
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
+from resources_servers.terminal_bench_4.environment import ExecLimitConfigurationError
 from resources_servers.terminal_bench_4.models import (
     AgentTermination,
     ResourcesSessionVerifyRequest,
@@ -100,6 +102,7 @@ class Harness:
         session.result["environment_setup"] = {"started_at": "t0", "finished_at": "t1"}
         if self.prepare_error is not None:
             # The real _prepare_session records the failure, cleans up, and keeps a terminated seed.
+            lifecycle.exception(session, self.prepare_error)
             session.termination = AgentTermination(reason="infrastructure_error", detail=str(self.prepare_error))
             await lifecycle.cleanup(session)
             session.seed_response = SeedSessionResponse(session_id=session.session_id, termination=session.termination)
@@ -290,7 +293,7 @@ async def test_close_fences_inflight_provisioning_and_waits_for_its_cleanup(harn
     harness.release_prepare.set()
     seeded, closed = await asyncio.gather(seeding, closing, return_exceptions=True)
     # The fenced seed releases its sandboxes instead of lending them.
-    assert isinstance(seeded, HTTPException) and seeded.status_code == 409
+    assert isinstance(seeded, ResourcesSessionConflictError) and seeded.status_code == 409
     assert "closed during setup" in seeded.detail
     assert closed.resources_session_id == seed.resources_session_id
     assert harness.graded == []
@@ -482,6 +485,20 @@ async def test_failed_provisioning_is_retryable_and_replayed(harness) -> None:
             await harness.server.seed_session(SimpleNamespace(session={}), seed)
         assert error.value.status_code == 503
         assert "image pull failed" in error.value.detail
+    assert harness.prepared == 1
+    await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
+    assert all(environment.closed for environment in harness.environments)
+
+
+async def test_a_configuration_error_in_provisioning_is_final_and_replayed(harness) -> None:
+    # Only a configuration change fixes it, so the Environment Server must not retry it: 422, not 503.
+    harness.prepare_error = ExecLimitConfigurationError("environment.default_exec_timeout_s is too short")
+    seed = harness.seed()
+    for _ in range(2):
+        with pytest.raises(HTTPException) as error:
+            await harness.server.seed_session(SimpleNamespace(session={}), seed)
+        assert error.value.status_code == 422
+        assert "default_exec_timeout_s is too short" in error.value.detail
     assert harness.prepared == 1
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
     assert all(environment.closed for environment in harness.environments)

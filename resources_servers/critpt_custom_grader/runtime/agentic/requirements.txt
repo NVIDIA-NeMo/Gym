@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Scientific execution runtime. NumPy/SciPy/SymPy/mpmath match ../requirements.txt;
+# Matplotlib matches the repository uv.lock. These are recipe pins, not AA image versions.
+numpy==2.5.1
+scipy==1.18.0
+sympy==1.14.0
+mpmath==1.3.0
+matplotlib==3.11.0

@@ -260,7 +260,7 @@ async def test_active_shared_session_retries_unknown_cleanup_before_cancelling_p
             events.append("capture")
         await original_download(source, destination)
 
-    async def disconnect() -> None:
+    async def disconnect(**_) -> None:
         events.append("disconnect")
 
     sandbox.exec.side_effect = execute

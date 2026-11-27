@@ -76,10 +76,22 @@ def _is_codeact_loop_stop(error: BaseException) -> bool:
     )
 
 
+def _is_codeact_text_only_stop(error: BaseException) -> bool:
+    # The pinned strategy raises GenerationError for this model-output guard too.
+    # Require its raising frame and exhausted counter, not text copied by agent code.
+    # The counter reaches the limit only right before that raise; other raises in the frame see it below.
+    frame = _generation_error_frame(error)
+    if frame is None or frame.f_code is not CodeActStrategy._run_generation.__code__:
+        return False
+    session = frame.f_locals.get("session")
+    limit = frame.f_locals.get("max_text_only")
+    return isinstance(session, CodeActSession) and type(limit) is int and 0 < limit <= session.consecutive_text_only
+
+
 def policy_termination(
     error: BaseException | None, *, model_error: BaseException | None = None
 ) -> tuple[NOOATerminationReason | None, str | None]:
-    """Recognize native stops and model errors without hiding cleanup or outer failures."""
+    """Recognize NOOA strategy stops and model errors without hiding cleanup or outer failures."""
     seen: set[int] = set()
     while isinstance(error, Exception) and id(error) not in seen:
         seen.add(id(error))
@@ -94,6 +106,8 @@ def policy_termination(
         if isinstance(error, PolicyCallBudgetExceeded):
             return NOOATerminationReason.POLICY_BUDGET_EXCEEDED, str(error)
         if isinstance(error, InvalidPolicyOutputError):
+            return NOOATerminationReason.INVALID_POLICY_OUTPUT, str(error)
+        if _is_codeact_text_only_stop(error):
             return NOOATerminationReason.INVALID_POLICY_OUTPUT, str(error)
         if _is_codeact_iteration_exhaustion(error):
             return NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, str(error)

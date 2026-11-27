@@ -131,6 +131,7 @@ None of these keys enters a task digest.
 | --- | --- | --- |
 | `num_repeats` | `1` | Rollouts per task for `gym eval run`. `+num_repeats=<n>` replaces it. |
 | `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`, including a step's own. Collect hooks, health checks and build timeouts do not scale. |
+| `verifier_timeout_multiplier` | `1.0` | Scales the verifier budgets alone, on top of `timeout_multiplier`: `[verifier].timeout_sec`, a step's `[steps.verifier].timeout_sec` and the step default a step inherits. The agent budgets keep `timeout_multiplier`. |
 | `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb` of `[environment]` and `[verifier.environment]`, rounded up. GPUs, `[steps.verifier.environment]` and Compose sidecars do not scale. |
 
 ### [gym.tasks."task-id"]

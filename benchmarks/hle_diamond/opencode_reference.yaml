@@ -14,11 +14,15 @@
 # Gym's _inherit_from is a single-step rename, so the agent inherits opencode_agent directly (which carries
 # the offline_science profile, as in opencode.yaml) and restates the hle_diamond keys of opencode.yaml and
 # opencode_search.yaml; a test holds the two agents equal apart from the image and the environment note.
-# Not a benchmark of its own (no dataset redeclared), exactly like opencode_search.yaml: selectable with
-# --benchmark, not listed.
+# Unlike opencode_search.yaml, the restated block redeclares the dataset, so `gym list benchmarks` discovers
+# this file as hle_diamond/opencode_reference (one `type: benchmark` dataset); opencode_hle_tools.yaml, which
+# extends it without a dataset, is selectable with --benchmark only.
 #
-# Web tools: the Tavily search and page tools of opencode_search.yaml until the hle_web_tools server
-# (web_search / web_fetch) exists; the note below names neither implementation.
+# Web tools: the Tavily search and page tools of opencode_search.yaml; the note below names neither
+# implementation. opencode_hle_tools.yaml extends this preset and swaps the tool server for hle_web_tools
+# (exactly web_search / web_fetch behind upstream's blocklist), keeping this agent, image and egress policy;
+# it is the preset that follows upstream's protocol, and this one is the Tavily-tools comparison on the same
+# sandbox.
 config_paths:
 - benchmarks/hle_diamond/opencode_search.yaml
 hle_diamond_opencode_agent: null

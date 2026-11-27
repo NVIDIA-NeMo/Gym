@@ -32,6 +32,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -264,6 +265,15 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "recorded in the trajectory, so it is off by default to keep rollouts unsteered; the GDPVal "
         "benchmark config opts in.",
     )
+    context_overflow_recovery: bool = Field(
+        default=False,
+        description="When the model server rejects a request with HTTP 400 or 413 and the structured error "
+        "code `context_length_exceeded`, let Stirrup drop the latest completed turn and send the request "
+        "again instead of ending the episode on the rejection. A dropped turn no longer counts against "
+        "`agent_max_turns`, so only `sandbox_runner_timeout_seconds` bounds repeated recovery. It changes "
+        "which turns a rollout keeps, so it is off by default; a benchmark config opts in. Pair it with the "
+        "model server settings the README lists, so that the code means the prompt alone fills the window.",
+    )
     min_compaction_summary_words: int = Field(
         default=1,
         ge=1,
@@ -429,6 +439,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "min_completion_tokens": self.config.min_completion_tokens,
                 "prompt_estimator_truncate_history_thinking": self.config.prompt_estimator_truncate_history_thinking,
                 "truncation_recovery": self.config.truncation_recovery,
+                "context_overflow_recovery": self.config.context_overflow_recovery,
             },
         }
         # A task row's own budget shortens the run; it never extends the configured one.
@@ -477,12 +488,12 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         agent_session_id = self._agent_session_id_from_request(request)
         if agent_session_id is None:
-            raise HTTPException(409, "Stirrup runs only in agent sessions; use an environment server")
+            raise AgentSessionConflictError("Stirrup runs only in agent sessions; use an environment server")
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         state = self._require_agent_session(agent_session_id)
         if state.request.episode_id.capture_key != rollout_id:
-            raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+            raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
         if state.task is None:
             # No await until the task and its request binding are installed.
             state.activation_request = body.model_copy(deep=True)
@@ -493,7 +504,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
             state.task = asyncio.create_task(activate())
         elif body != state.activation_request:
-            raise HTTPException(409, "Stirrup sandbox sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("Stirrup sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation; a disconnected waiter must not cancel the activation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 

@@ -20,12 +20,12 @@ from nemo_gym.config.global_config import SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NA
 from nemo_gym.server_runtime.supervisor.server_venv import run_command
 
 
-def _runner(processes, grace_s=0.1):
-    runner = server_supervisor.RunHelper()
-    runner._processes = processes
-    runner._head_server = None
-    runner._server_shutdown_timeout_seconds = grace_s
-    return runner
+def _supervisor(processes, grace_s=0.1):
+    supervisor = server_supervisor.ServerSupervisor()
+    supervisor._processes = processes
+    supervisor._head_server = None
+    supervisor._server_shutdown_timeout_seconds = grace_s
+    return supervisor
 
 
 def _wait_for(path, process, timeout_s=5):
@@ -81,9 +81,9 @@ print('cleanup finished', flush=True)
         _wait_for(ready, process)
         assert int(ready.read_text()) == process.pid
         assert process.pid != os.getsid(0)
-        runner = _runner({"server": process}, grace_s=2)
-        runner.shutdown()
-        runner.shutdown()
+        supervisor = _supervisor({"server": process}, grace_s=2)
+        supervisor.shutdown()
+        supervisor.shutdown()
         assert process.returncode == 0
         assert interrupts.read_text() == "SIGINT\n"
         assert "cleanup finished" in (tmp_path / "logs/server.log").read_text()
@@ -124,7 +124,7 @@ while True:
     try:
         _wait_for(ready, process, timeout_s=30)  # the stand-in imports the server runtime first
         assert started_blocked.read_text() == "True"  # the block reached it through its launch shell and log tee
-        _runner({"server": process}, grace_s=10).shutdown()
+        _supervisor({"server": process}, grace_s=10).shutdown()
         assert stopped.exists()  # yet it ran its own shutdown
         assert process.returncode == 0
         assert "server stopping" in (tmp_path / "logs/server.log").read_text()
@@ -157,7 +157,7 @@ subprocess.Popen([sys.executable, '-c', {child!r}], stdin=subprocess.DEVNULL, st
             time.sleep(0.01)
         child_pid = int(ready.read_text())
         assert os.getpgid(child_pid) == process.pid
-        _runner({"server": process}).shutdown()
+        _supervisor({"server": process}).shutdown()
         deadline = time.monotonic() + 2
         while psutil.pid_exists(child_pid) and psutil.Process(child_pid).status() != psutil.STATUS_ZOMBIE:
             assert time.monotonic() < deadline
@@ -169,9 +169,9 @@ subprocess.Popen([sys.executable, '-c', {child!r}], stdin=subprocess.DEVNULL, st
 def test_shutdown_tolerates_an_already_exited_group(tmp_path):
     process = _launch(tmp_path, "pass")
     process.wait(timeout=5)
-    runner = _runner({"finished": process})
-    runner.shutdown()
-    assert runner._processes == {}
+    supervisor = _supervisor({"finished": process})
+    supervisor.shutdown()
+    assert supervisor._processes == {}
 
 
 @pytest.mark.parametrize("value", [True, False, -1, "-1", "nan", "inf", float("-inf"), "later", []])
@@ -209,7 +209,7 @@ def test_shutdown_uses_shared_grace_and_reap_deadlines(monkeypatch):
     monkeypatch.setattr(
         server_supervisor, "_signal_server_group", lambda process, sig: calls.append(("signal", process, sig))
     )
-    _runner(dict(zip(("first", "second"), processes)), grace_s=0.3).shutdown()
+    _supervisor(dict(zip(("first", "second"), processes)), grace_s=0.3).shutdown()
     waits = [call[2] for call in calls if call[0] == "wait"]
     assert waits == pytest.approx([0.3, 0, server_supervisor._FORCE_KILL_REAP_TIMEOUT_SEC, 0])
     kill_indexes = [i for i, call in enumerate(calls) if call[0] == "signal" and call[2] == signal.SIGKILL]

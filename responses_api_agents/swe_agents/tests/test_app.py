@@ -18,6 +18,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import ExitStack
@@ -29,7 +30,7 @@ import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.client import ServerClient
-from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef
+from nemo_gym.config import CACHE_DIR_KEY_NAME, ConfigError, ModelServerRef
 from nemo_gym.config.config_types import OmegaConf
 from nemo_gym.core import (
     AGENT_LIMIT,
@@ -139,7 +140,7 @@ def _minimal_server_config() -> SWEBenchWrapperConfig:
     )
 
 
-def _create_wrapper(monkeypatch) -> SWEBenchWrapper:
+def _create_wrapper(monkeypatch, **more_global_config) -> SWEBenchWrapper:
     """Create a SWEBenchWrapper with all setup calls mocked."""
     global_config = OmegaConf.create(
         {
@@ -151,7 +152,8 @@ def _create_wrapper(monkeypatch) -> SWEBenchWrapper:
                         "model": "test-model",
                     }
                 }
-            }
+            },
+            **more_global_config,
         }
     )
     monkeypatch.setattr(
@@ -2244,6 +2246,16 @@ class TestSWEBenchWrapper:
         assert wrapper._vllm_converter is not None
         assert wrapper._swe_bench_wrapper_server_config is not None
         assert wrapper._swe_bench_wrapper_server_config.run_session_id is not None
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="the limit on one environment variable is Linux's")
+    def test_a_config_too_long_to_export_into_the_agent_container_stops_the_start(self, monkeypatch) -> None:
+        """The agent script exports the whole config as one variable; over the limit every rollout would score 0.0."""
+        # Linux refuses one environment variable over 32 memory pages.
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        _create_wrapper(monkeypatch, tasks="a" * (31 * page_size))
+
+        with pytest.raises(ConfigError, match="too long for the environment variable"):
+            _create_wrapper(monkeypatch, tasks="a" * (32 * page_size))
 
     def test_resolve_absolute_path_none(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)

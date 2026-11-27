@@ -44,15 +44,16 @@ def started(monkeypatch) -> list:
 
 
 @pytest.fixture
-def stopped(monkeypatch) -> list[AsyncSandbox]:
-    stopped: list[AsyncSandbox] = []
-    real_stop = AsyncSandbox.stop
+def stopped(monkeypatch) -> list[str]:
+    """The ids of the sandboxes the provider closed, in order."""
+    stopped: list[str] = []
+    real_close = LocalProvider.close
 
-    async def stop(self: AsyncSandbox) -> None:
-        stopped.append(self)
-        await real_stop(self)
+    async def close(self: LocalProvider, handle) -> None:
+        await real_close(self, handle)
+        stopped.append(handle.sandbox_id)
 
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
     return stopped
 
 
@@ -83,7 +84,7 @@ async def test_lend_starts_one_sandbox_per_session_and_release_stops_it(workdir,
     sandbox = lender.get("session")
     await lender.release("session")
     await lender.release("session")
-    assert stopped == [sandbox]
+    assert stopped == [sandbox.sandbox_id]
     assert lender.get("session") is None
 
 
@@ -100,14 +101,14 @@ async def test_lend_can_start_an_empty_sandbox(workdir, started, stopped) -> Non
 async def test_a_failed_stop_keeps_the_sandbox_so_a_close_can_retry(workdir, started, monkeypatch) -> None:
     lender = _lender(workdir)
     await lender.lend("session", TASK)
-    real_stop = AsyncSandbox.stop
-    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=RuntimeError("provider down")))
+    real_close = LocalProvider.close
+    monkeypatch.setattr(LocalProvider, "close", AsyncMock(side_effect=RuntimeError("provider down")))
 
     with pytest.raises(RuntimeError, match="provider down"):
         await lender.release("session")
     assert lender.get("session") is not None
 
-    monkeypatch.setattr(AsyncSandbox, "stop", real_stop)
+    monkeypatch.setattr(LocalProvider, "close", real_close)
     await lender.release("session")
     assert lender.get("session") is None
 
@@ -117,14 +118,14 @@ async def test_release_all_stops_every_sandbox_and_logs_a_failed_stop(workdir, s
     await lender.lend("ok", TASK)
     await lender.lend("stuck", TASK)
     stuck = lender.get("stuck")
-    real_stop = AsyncSandbox.stop
+    real_close = LocalProvider.close
 
-    async def stop(self: AsyncSandbox) -> None:
-        if self is stuck:
+    async def close(self: LocalProvider, handle) -> None:
+        if handle.sandbox_id == stuck.sandbox_id:
             raise RuntimeError("provider down")
-        await real_stop(self)
+        await real_close(self, handle)
 
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
     with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__):
         await lender.release_all()
 
@@ -150,19 +151,19 @@ async def test_release_finishes_the_stop_when_the_close_is_cancelled(workdir, st
     lender = _lender(workdir)
     await lender.lend("session", TASK)
     sandbox = lender.get("session")
-    finished: list[AsyncSandbox] = []
+    finished: list[str] = []
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def close(self: LocalProvider, handle) -> None:
         # A checkpoint where an unshielded stop would be cancelled with its request.
         await anyio.sleep(0)
-        finished.append(self)
+        finished.append(handle.sandbox_id)
 
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
     with anyio.CancelScope() as scope:
         scope.cancel()
         await lender.release("session")
 
-    assert finished == [sandbox]
+    assert finished == [sandbox.sandbox_id]
     assert lender.get("session") is None
 
 
@@ -171,10 +172,10 @@ async def test_a_stop_that_hangs_times_out_and_keeps_the_sandbox(workdir, starte
     await lender.lend("session", TASK)
     monkeypatch.setattr(sandbox_lending, "STOP_TIMEOUT_S", 0.05)
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def close(self: LocalProvider, handle) -> None:
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
     release = asyncio.create_task(lender.release("session"))
     done, _ = await asyncio.wait({release}, timeout=5)
 
@@ -188,17 +189,17 @@ async def test_release_all_stops_the_sandboxes_concurrently(workdir, started, mo
     lender = _lender(workdir)
     for session in ("a", "b", "c"):
         await lender.lend(session, TASK)
-    entered: list[AsyncSandbox] = []
+    entered: list[str] = []
     all_entered = asyncio.Event()
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def close(self: LocalProvider, handle) -> None:
         # Each stop waits until all three have started, so stops run one at a time would never finish.
-        entered.append(self)
+        entered.append(handle.sandbox_id)
         if len(entered) == 3:
             all_entered.set()
         await all_entered.wait()
 
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
     await asyncio.wait_for(lender.release_all(), timeout=5)
 
     assert len(entered) == 3
@@ -208,7 +209,7 @@ async def test_release_all_stops_the_sandboxes_concurrently(workdir, started, mo
 async def test_a_lend_cancelled_while_describing_the_sandbox_still_stops_it(workdir, monkeypatch) -> None:
     lender = _lender(workdir)
     seed = anyio.CancelScope()
-    finished: list[AsyncSandbox] = []
+    finished: list[str] = []
 
     async def serialize(self: AsyncSandbox, *, scope: str | None = None) -> dict[str, str]:
         # The seed request is cancelled while the new sandbox is being described.
@@ -216,13 +217,13 @@ async def test_a_lend_cancelled_while_describing_the_sandbox_still_stops_it(work
         await anyio.sleep(0)
         return {"sandbox_id": "local"}
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def close(self: LocalProvider, handle) -> None:
         # A checkpoint where an unshielded stop would be cancelled with the seed.
         await anyio.sleep(0)
-        finished.append(self)
+        finished.append(handle.sandbox_id)
 
     monkeypatch.setattr(AsyncSandbox, "serialize", serialize)
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
     with seed:
         await lender.lend("session", TASK)
 
@@ -258,21 +259,21 @@ async def test_a_lend_cancelled_while_delivering_files_still_stops_the_sandbox(w
     assert len(closed) == 1, "nothing is left for the shutdown to stop"
 
 
-def _stop_failing_first(monkeypatch, failure) -> list[AsyncSandbox]:
-    """Make the first stop fail by calling ``failure``, and record each later stop, which really stops."""
-    stopped: list[AsyncSandbox] = []
-    real_stop = AsyncSandbox.stop
+def _stop_failing_first(monkeypatch, failure) -> list[str]:
+    """Make the provider's first close fail by calling ``failure``, and record each later close, which really closes."""
+    stopped: list[str] = []
+    real_close = LocalProvider.close
     calls = 0
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def close(self: LocalProvider, handle) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             await failure()
-        await real_stop(self)
-        stopped.append(self)
+        await real_close(self, handle)
+        stopped.append(handle.sandbox_id)
 
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
     return stopped
 
 
@@ -322,7 +323,7 @@ async def test_a_repeated_seed_stops_the_failed_seed_s_sandbox_before_it_starts_
     access = await lender.lend("session", TASK)
 
     assert len(started) == 2
-    assert len(stopped) == 1 and stopped[0] is not lender.get("session")
+    assert len(stopped) == 1 and stopped[0] != lender.get("session").sandbox_id
     assert access.connection.descriptor == {"sandbox_id": "local"}
     await lender.release("session")
     assert len(stopped) == 2
@@ -333,8 +334,8 @@ async def test_a_repeated_seed_fails_while_the_failed_seed_s_sandbox_cannot_be_s
 ) -> None:
     monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=RuntimeError("no descriptor")))
     lender = _lender(workdir)
-    real_stop = AsyncSandbox.stop
-    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=RuntimeError("provider down")))
+    real_close = LocalProvider.close
+    monkeypatch.setattr(LocalProvider, "close", AsyncMock(side_effect=RuntimeError("provider down")))
     with pytest.raises(RuntimeError, match="no descriptor"):
         await lender.lend("session", TASK)
 
@@ -342,7 +343,7 @@ async def test_a_repeated_seed_fails_while_the_failed_seed_s_sandbox_cannot_be_s
         await lender.lend("session", TASK)
     assert len(started) == 1, "no second sandbox starts while the first one may still run"
 
-    monkeypatch.setattr(AsyncSandbox, "stop", real_stop)
+    monkeypatch.setattr(LocalProvider, "close", real_close)
     await lender.release("session")
     assert lender.get("session") is None
 
@@ -363,7 +364,7 @@ class _RecordingSandbox:
     async def serialize(self, *, scope: str) -> dict:
         return {"sandbox_id": "recorded"}
 
-    async def stop(self) -> None:
+    async def stop(self, *, timeout_s: float | None = None) -> None:
         pass
 
 

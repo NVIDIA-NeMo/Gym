@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Convert the OpenHands SDK 1.59.0 events and run result that the sandbox runner writes into Gym records.
+"""Convert the OpenHands SDK events and run result that the sandbox runner writes into Gym records.
 
 The runner writes each event as ``[seen_at, event]``, where ``event`` is the SDK's own JSON for one event
 (``kind`` names its class). A tool result also carries ``tool_message_text``, the text of the tool message the
@@ -176,7 +176,7 @@ def response_usage(
         return sum(value for usage in usages if type(value := usage.get(name)) is int and value >= 0)
 
     input_tokens, output_tokens = total("prompt_tokens"), total("completion_tokens")
-    # SDK 1.59.0 normalizes missing cache/reasoning details to zero. Even positive aggregates can be
+    # The SDK normalizes missing cache/reasoning details to zero. Even positive aggregates can be
     # incomplete, so its per-call stats cannot establish known detail totals. Keep the raw stats intact.
     return NeMoGymResponseUsage(
         input_tokens=input_tokens,

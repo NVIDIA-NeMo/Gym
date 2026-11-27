@@ -4,16 +4,9 @@ A training environment for answering questions about PDFs with OpenCode. The res
 
 ## Dataset integration
 
-The data pipeline supplies Gym JSONL rows, task records, document selections, and read-only PDFs. Requests must be ready for the OpenCode harness; conversion and generation metadata belong in the data pipeline.
+The data pipeline supplies Gym JSONL rows and PDFs. Requests must be ready for the OpenCode harness; conversion and generation metadata belong in the data pipeline.
 
-```text
-<dataset_root>/gym_input.jsonl
-<dataset_root>/tasks/<task_id>.json
-<dataset_root>/workspaces/<workspace_id>/documents.json
-<dataset_root>/document_store/<document_id>.pdf
-```
-
-Each row identifies its task and workspace and contains the agent's input in `responses_create_params.input`. [task_data.py](task_data.py) defines request identity and reference records; [documents.py](documents.py) defines document selections. The [example dataset](data/example_bundle/) shows the file formats.
+Each row identifies its task and contains the agent's input in `responses_create_params.input`, the reference record used for grading, and the PDFs the agent may read with their checksums. [task_data.py](task_data.py) defines the row format. The [example dataset](data/example/) shows the file formats.
 
 Supply a dataset YAML that includes the shared [environment config](../../environments/pdf_analyst_qa/config.yaml):
 
@@ -21,7 +14,6 @@ Supply a dataset YAML that includes the shared [environment config](../../enviro
 config_paths:
 - environments/pdf_analyst_qa/config.yaml
 
-pdf_analyst_qa_dataset_root: /path/to/dataset
 pdf_analyst_qa_document_prefix: my-dataset
 
 pdf_analyst_qa_agent:
@@ -34,19 +26,13 @@ pdf_analyst_qa_agent:
         license: <dataset-license>
 ```
 
-Keep the dataset outside the source tree. Copy its `document_store/` to the configured bucket prefix. The dataset root points to the corresponding local directory on the resources server.
+Keep the dataset outside the source tree. Copy its PDFs to the configured bucket prefix, so that the document paths in the rows resolve under it.
 
 Start Gym with `gym env start --config /path/to/dataset.yaml`. Configure the policy model through Gym's model server and keep training recipes in the training framework.
 
 ## Included example
 
-[example.yaml](../../environments/pdf_analyst_qa/example.yaml) uses the manually authored example bundled with this repository. Copy it to the runtime location specified by that YAML:
-
-```bash
-python -m environments.pdf_analyst_qa.prepare_example --output-root /tmp/pdf-analyst-qa-example
-```
-
-The helper copies the files and makes the PDFs read-only. Publish the copied `document_store/` under the example's bucket prefix, then run `gym env start --config environments/pdf_analyst_qa/example.yaml`.
+[example.yaml](../../environments/pdf_analyst_qa/example.yaml) uses the manually authored example bundled with this repository. Publish its [document_store/](data/example/document_store/) under the example's bucket prefix, then run `gym env start --config environments/pdf_analyst_qa/example.yaml`.
 
 ## Sandbox setup
 
@@ -69,6 +55,8 @@ The final build prints the SHA-256 of `/opt/cli/opencode` and `/opt/cli/opencode
 The archive uses the pinned dependency set in Gym's visual-coding image. The harness verifies it and unpacks it into each session's private OpenCode configuration directory before launch, avoiding an npm install in the network-restricted sandbox.
 
 OpenCode 1.17.11 supports the request `temperature` and `top_p` fields supplied by NeMo RL. Set NeMo RL's `max_new_tokens` to at least 8192, the environment's configured per-call `max_output_tokens`; smaller request limits are rejected by the harness.
+
+Each sandbox holds a copy of its task's selected PDFs. `sandbox_disk_gib` sets the sandbox's ephemeral storage limit, so it must cover the dataset's largest selection plus the agent's working files. The default of 24 GiB fits selections up to about 17.5 GiB; raise it for datasets with larger selections.
 
 Before running on a deployment, check sandbox access and model connectivity:
 

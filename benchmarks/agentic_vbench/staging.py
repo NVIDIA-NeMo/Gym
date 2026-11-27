@@ -165,14 +165,21 @@ def _file_digest(path: Path) -> str:
     return _digest(path.read_bytes())
 
 
-def _harden_assembly_judge(source: bytes, task_id: str) -> bytes:
+def _harden_assembly_judge(source: bytes, task_id: str) -> bytes | None:
+    """The hardened judge, or ``None`` for an unpinned judge without the upstream manifest parser.
+
+    A pinned task's judge must match its recorded digest before and after; a task outside the pin (a generated
+    training task, whose judge is a copy of an upstream one) is hardened when it carries the parser verbatim.
+    """
     expected = _ASSEMBLY_JUDGE_SHA256.get(task_id)
+    text = source.decode()
     if expected is None:
-        raise ValueError(f"Unexpected pinned assembly task: {task_id}")
+        if text.count(_ASSEMBLY_MANIFEST_PARSER) != 1:
+            return None
+        return text.replace(_ASSEMBLY_MANIFEST_PARSER, _ASSEMBLY_HARDENED_PARSER).encode()
     source_sha256, staged_sha256 = expected
     if _digest(source) != source_sha256:
         raise ValueError(f"Pinned assembly judge has an unexpected source digest: {task_id}")
-    text = source.decode()
     if text.count(_ASSEMBLY_MANIFEST_PARSER) != 1:
         raise ValueError(f"Pinned assembly judge has an unexpected manifest parser: {task_id}")
     hardened = text.replace(_ASSEMBLY_MANIFEST_PARSER, _ASSEMBLY_HARDENED_PARSER).encode()
@@ -182,22 +189,24 @@ def _harden_assembly_judge(source: bytes, task_id: str) -> bytes:
 
 
 def stage_assembly_judge_guard(task_path: Path, *, staging: Path, output: Path) -> Path:
-    """Make the pinned assembly judge reject a non-object manifest with reward zero.
+    """Make the assembly judge reject a non-object manifest with reward zero.
 
     The upstream judge calls ``sol.get`` right after ``json.loads``, so valid JSON of the wrong top-level shape
-    (a bare list) raises ``AttributeError`` instead of scoring 0 like every other malformed manifest. Only the
-    exact pinned assembly judges are patched; valid-object scoring is unchanged and the source stays clean.
+    (a bare list) raises ``AttributeError`` instead of scoring 0 like every other malformed manifest. A pinned
+    task's judge is patched against its recorded digests; a generated task's judge is patched when it carries the
+    upstream parser verbatim and left alone otherwise. Valid-object scoring is unchanged and the source stays clean.
     """
     if task_path.parent.name != _ASSEMBLY_FAMILY:
         return task_path
     task_id = task_path.name
     source_judge = task_path / "steps/solve/tests/judge.py"
     hardened = _harden_assembly_judge(source_judge.read_bytes(), task_id)
+    if hardened is None:
+        return task_path
     staged = staging / task_path.name
-    expected_staged_sha256 = _ASSEMBLY_JUDGE_SHA256[task_id][1]
     if staged.exists():
         staged_judge = staged / "steps/solve/tests/judge.py"
-        if not staged_judge.is_file() or _file_digest(staged_judge) != expected_staged_sha256:
+        if not staged_judge.is_file() or _file_digest(staged_judge) != _digest(hardened):
             raise ValueError(f"Existing staged assembly judge has an unexpected digest: {task_id}")
         return staged
     shutil.copytree(task_path, staged)
@@ -208,6 +217,7 @@ def stage_assembly_judge_guard(task_path: Path, *, staging: Path, output: Path) 
         {
             "source_task": str(task_path),
             "reason": "non-object solution manifests score zero instead of crashing the verifier",
+            "pinned": task_id in _ASSEMBLY_JUDGE_SHA256,
             "original_judge_sha256": _file_digest(source_judge),
             "staged_judge_sha256": _file_digest(judge),
         },
@@ -324,6 +334,49 @@ def stage_materials(task_path: Path, *, staging: Path, output: Path) -> Path:
                 "original": _file_digest(task_path / "task.toml"),
                 "staged": _file_digest(staged / "task.toml"),
             },
+        },
+    )
+    return staged
+
+
+# OpenCode plugins for sessions that compact (opencode_plugins/README.md), staged into every step's workdir so they
+# reach the agent's sandbox under its working directory; the training entry's compaction_plugins.yaml loads them.
+OPENCODE_PLUGINS_DIR = Path(__file__).with_name("opencode_plugins")
+OPENCODE_PLUGINS = ("compaction_order.mjs", "compaction_anchor.mjs", "compaction_summary_header.mjs")
+OPENCODE_PLUGINS_WORKDIR = ".opencode-plugins"
+OPENCODE_PLUGINS_SANDBOX_DIR = "/workspace/" + OPENCODE_PLUGINS_WORKDIR
+
+
+def stage_opencode_plugins(task_path: Path, *, staging: Path, output: Path) -> Path:
+    """Copy a task with the OpenCode plugins under every step's ``workdir/.opencode-plugins/``.
+
+    The step's ``workdir/`` is merged into the sandbox's working directory before the agent session opens, so the
+    plugins land at ``/workspace/.opencode-plugins/`` for a task whose image works in ``/workspace`` (every
+    Agentic-VBench task does; a task whose Dockerfile names another ``WORKDIR`` is refused rather than staged where
+    the overlay would not find it).
+    """
+    dockerfile = task_path / "environment" / "Dockerfile"
+    if "WORKDIR /workspace" not in dockerfile.read_text().splitlines():
+        raise ValueError(f"{task_path}: the OpenCode plugins are staged for a task that works in /workspace")
+    task = tomllib.loads((task_path / "task.toml").read_text())
+    staged = staging / task_path.name
+    if staged.exists():
+        shutil.rmtree(staged)
+    shutil.copytree(task_path, staged)
+    digests = {}
+    for step in task.get("steps", []):
+        target = staged / "steps" / step["name"] / "workdir" / OPENCODE_PLUGINS_WORKDIR
+        target.mkdir(parents=True, exist_ok=True)
+        for name in OPENCODE_PLUGINS:
+            shutil.copyfile(OPENCODE_PLUGINS_DIR / name, target / name)
+            digests[f"steps/{step['name']}/workdir/{OPENCODE_PLUGINS_WORKDIR}/{name}"] = _file_digest(target / name)
+    _write_record(
+        output / "opencode_plugins.json",
+        {
+            "source_task": str(task_path),
+            "reason": "OpenCode compaction plugins staged for the training overlay compaction_plugins.yaml",
+            "sandbox_dir": OPENCODE_PLUGINS_SANDBOX_DIR,
+            "files": digests,
         },
     )
     return staged

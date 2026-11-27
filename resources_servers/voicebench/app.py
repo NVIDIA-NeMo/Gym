@@ -10,7 +10,8 @@ import os
 import random
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import ClassVar, Literal, cast
+from unittest.mock import MagicMock
 
 from pydantic import (
     ConfigDict,
@@ -21,7 +22,15 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym import CACHE_DIR
+from nemo_gym.client import ServerClient
+from nemo_gym.config import (
+    CACHE_DIR_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    get_global_config_dict,
+    maybe_get_global_config_dict,
+)
 from nemo_gym.core import JUDGE_UNPARSEABLE, NeMoGymResponse
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
@@ -31,33 +40,65 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.verification import VerifierFixture
 from resources_servers.voicebench.legacy import replay_rule_rows
 from resources_servers.voicebench.metrics import MetricValue, compute_voicebench_metrics
 from resources_servers.voicebench.scorers.base import ScoringResult
-from resources_servers.voicebench.scorers.open_judge import JudgeSettings, OpenJudgeScorer
+from resources_servers.voicebench.scorers.open_judge import JudgeLimiter, JudgeSettings, OpenJudgeScorer
 from resources_servers.voicebench.scorers.reference_qa import ReferenceQAScorer
 from resources_servers.voicebench.serialization import json_safe
 from resources_servers.voicebench.task_data import SUBSET_SCORERS, ScoringType, Subset, VoiceBenchMetadata
 
 
+ALL_SUBSETS = "all"
+
+
 class VoiceBenchConfig(BaseResourcesServerConfig, JudgeSettings):
+    """One runtime scores one subset, or every subset in ``expected_rows`` when ``subset`` is ``all``.
+
+    In ``all`` mode each row's ``verifier_metadata.subset`` selects its scorer, the open and reference-QA judges take
+    ``judge_prompt_files`` and share one concurrency budget, and metrics are reported per subset under
+    ``voicebench/<subset>/``.
+    """
+
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
-    subset: Subset
-    scoring_type: ScoringType
+    subset: Subset | Literal["all"]
+    scoring_type: ScoringType | None = None
     scoring_version: str = "legacy_v1"
     seed: int | None = None
-    expected_num_rows: int = Field(gt=0)
+    expected_num_rows: int | None = Field(default=None, gt=0)
+    expected_rows: dict[Subset, int] | None = None
     expected_sample_ids_file: str | None = None
     nltk_data_dir: str | None = None
+    judge_prompt_files: dict[ScoringType, str] | None = None
+    # "vlmeval": reference audio adapter answer (last message, empty answer falls back to reasoning, blank is "nan").
+    # "message": the last assistant message's text as returned, so a response without one is scored as empty.
+    answer_extraction: Literal["vlmeval", "message"] = "vlmeval"
+
+    @property
+    def subsets(self) -> list[str]:
+        return list(self.expected_rows or {}) if self.subset == ALL_SUBSETS else [self.subset]
 
     @model_validator(mode="after")
     def validate_profile(self) -> "VoiceBenchConfig":
-        if self.scoring_type != SUBSET_SCORERS[self.subset]:
-            raise ValueError(f"subset {self.subset} requires scoring_type={SUBSET_SCORERS[self.subset]}")
         if self.scoring_version != "legacy_v1":
             raise ValueError("supported scoring_version is legacy_v1")
         if self.num_workers not in (None, 1):
             raise ValueError("legacy scoring requires one worker for the shared random stream")
+        if self.subset == ALL_SUBSETS:
+            if self.scoring_type is not None or self.expected_num_rows is not None or self.expected_sample_ids_file:
+                raise ValueError("subset=all takes expected_rows, not scoring_type/expected_num_rows/sample IDs")
+            if not self.expected_rows or any(count <= 0 for count in self.expected_rows.values()):
+                raise ValueError("subset=all requires positive expected_rows per subset")
+            judged = {SUBSET_SCORERS[name] for name in self.expected_rows} & {"open", "reference_qa"}
+            if judged:
+                if self.judge_model_server is None or not judged <= set(self.judge_prompt_files or {}):
+                    raise ValueError(f"judge scoring requires judge_model_server and judge_prompt_files for {judged}")
+            return self
+        if self.scoring_type is None or self.expected_num_rows is None:
+            raise ValueError("a single subset requires scoring_type and expected_num_rows")
+        if self.scoring_type != SUBSET_SCORERS[self.subset]:
+            raise ValueError(f"subset {self.subset} requires scoring_type={SUBSET_SCORERS[self.subset]}")
         if self.scoring_type in ("open", "reference_qa"):
             if self.judge_model_server is None or self.judge_prompt_file is None:
                 raise ValueError("judge scoring requires judge_model_server and judge_prompt_file")
@@ -122,6 +163,18 @@ def final_answer(response: NeMoGymResponse) -> str:
     return ""
 
 
+def message_text(response: NeMoGymResponse) -> str:
+    """The last assistant message's text, as returned; a response that never reached its final message is empty.
+
+    Like ``final_answer`` this reads only the last assistant message, so an earlier commentary message is not fused
+    into the answer. Its ``output_text`` parts are joined without a separator, as returned.
+    """
+    for item in reversed(response.output):
+        if item.type == "message" and item.role == "assistant":
+            return "".join(part.text for part in item.content if part.type == "output_text")
+    return ""
+
+
 def _expected_ids(path: str, subset: str) -> set[str]:
     text = Path(path).read_text()
     if text.lstrip().startswith("["):
@@ -151,7 +204,11 @@ def _ensure_nltk(data_dir: str | None) -> None:
     import nltk
 
     if data_dir is None:
-        data_dir = os.environ.get("NLTK_DATA", "").split(os.pathsep)[0] or str(Path.home() / ".voicebench_nltk_data")
+        # Consult the global config only when this process already has one: a bare process never parses a CLI.
+        cache_dir = (maybe_get_global_config_dict() or {}).get(CACHE_DIR_KEY_NAME) or CACHE_DIR
+        data_dir = os.environ.get("NLTK_DATA", "").split(os.pathsep)[0] or str(
+            Path(cache_dir) / "voicebench" / "nltk_data"
+        )
     Path(data_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
     nltk.data.path.insert(0, data_dir)
     for name in ("punkt", "punkt_tab"):
@@ -166,6 +223,7 @@ class VoiceBenchServer(SimpleResourcesServer):
     ray_enabled = False
     config: VoiceBenchConfig
     _judge: OpenJudgeScorer | None = PrivateAttr(default=None)
+    _judges: dict[str, OpenJudgeScorer] = PrivateAttr(default_factory=dict)
     _expected_sample_ids: set[str] | None = PrivateAttr(default=None)
     _rule_rng: random.Random = PrivateAttr(default_factory=random.Random)
 
@@ -175,27 +233,53 @@ class VoiceBenchServer(SimpleResourcesServer):
             self._expected_sample_ids = _expected_ids(self.config.expected_sample_ids_file, self.config.subset)
             if len(self._expected_sample_ids) != self.config.expected_num_rows:
                 raise ValueError("expected_sample_ids_file count differs from expected_num_rows")
-        if self.config.scoring_type == "open":
-            self._judge = OpenJudgeScorer(self.config, self.server_client)
-        elif self.config.scoring_type == "reference_qa":
-            self._judge = ReferenceQAScorer(self.config, self.server_client)
-        elif self.config.scoring_type == "ifeval":
+        scoring_types = {SUBSET_SCORERS[name] for name in self.config.subsets}
+        if scoring_types & {"open", "reference_qa"}:
+            self._require_judge_endpoint()
+        limiter = JudgeLimiter(self.config.judge_max_concurrency)
+        for scoring_type, scorer_class in (("open", OpenJudgeScorer), ("reference_qa", ReferenceQAScorer)):
+            if scoring_type in scoring_types:
+                settings = self.config
+                if self.config.subset == ALL_SUBSETS:
+                    settings = self.config.model_copy(
+                        update={"judge_prompt_file": self.config.judge_prompt_files[scoring_type]}
+                    )
+                self._judges[scoring_type] = scorer_class(settings, self.server_client, limiter)
+        if self.config.subset != ALL_SUBSETS:
+            self._judge = self._judges.get(self.config.scoring_type)
+        if "ifeval" in scoring_types:
             _ensure_nltk(self.config.nltk_data_dir)
         super().model_post_init(context)
 
+    def _require_judge_endpoint(self) -> None:
+        """Fail at startup when the judge endpoint is still the judge config's ``unset.local`` placeholder."""
+        server = get_global_config_dict().get(self.config.judge_model_server.name) or {}
+        for instance in (server.get(self.config.judge_model_server.type) or {}).values():
+            if isinstance(instance, Mapping) and "unset.local" in str(instance.get("openai_base_url", "")):
+                raise ValueError(
+                    f"The judge model server {self.config.judge_model_server.name!r} has no endpoint: "
+                    "set judge_base_url, judge_api_key and judge_model_name in env.yaml"
+                )
+
     async def verify(self, body: VoiceBenchVerifyRequest) -> VoiceBenchVerifyResponse:
-        if body.verifier_metadata.subset != self.config.subset:
-            raise ValueError(f"resource {self.config.subset} cannot score subset {body.verifier_metadata.subset}")
-        answer = final_answer(body.response)
-        metadata = body.verifier_metadata.model_dump(mode="json")
-        identity = f"{self.config.subset}/{body.verifier_metadata.sample_id}"
-        # pandas.read_excel converts a blank prediction to NaN, then the old
-        # wrapper sends str(NaN) to every evaluator and judge.
-        scoring_answer = answer if answer != "" else "nan"
-        if self._judge is not None:
-            scored = await self._judge.score(scoring_answer, metadata)
+        subset = body.verifier_metadata.subset
+        if subset not in self.config.subsets:
+            raise ValueError(f"resource {self.config.subset} cannot score subset {subset}")
+        scoring_type = SUBSET_SCORERS[subset]
+        if self.config.answer_extraction == "message":
+            answer = scoring_answer = message_text(body.response)
         else:
-            module = importlib.import_module(f"resources_servers.voicebench.scorers.{self.config.scoring_type}")
+            answer = final_answer(body.response)
+            # pandas.read_excel converts a blank prediction to NaN, then the
+            # reference wrapper sends str(NaN) to every evaluator and judge.
+            scoring_answer = answer if answer != "" else "nan"
+        metadata = body.verifier_metadata.model_dump(mode="json")
+        identity = f"{subset}/{body.verifier_metadata.sample_id}"
+        judge = self._judges.get(scoring_type)
+        if judge is not None:
+            scored = await judge.score(scoring_answer, metadata)
+        else:
+            module = importlib.import_module(f"resources_servers.voicebench.scorers.{scoring_type}")
             scored: ScoringResult = module.score(scoring_answer, metadata, rng=self._rule_rng)
         candidate_valid = (
             body.response.status == "completed" and body.response.incomplete_details is None and bool(answer.strip())
@@ -208,10 +292,10 @@ class VoiceBenchServer(SimpleResourcesServer):
             | scored.details
             | {
                 "reward": scored.reward,
-                "subset": self.config.subset,
+                "subset": subset,
                 "sample_id": body.verifier_metadata.sample_id,
                 "canonical_sample_id": identity,
-                "scoring_type": self.config.scoring_type,
+                "scoring_type": scoring_type,
                 "scoring_version": self.config.scoring_version,
                 "scoring_seed": self.config.seed,
                 "score_valid": scored.valid,
@@ -226,7 +310,7 @@ class VoiceBenchServer(SimpleResourcesServer):
                 else None,
                 "status_safe_reward": scored.reward if candidate_valid and scored.valid else 0.0,
                 "failure_kind": JUDGE_UNPARSEABLE
-                if not scored.valid and self._judge
+                if not scored.valid and judge
                 else "voicebench:invalid_score"
                 if not scored.valid
                 else None,
@@ -236,17 +320,42 @@ class VoiceBenchServer(SimpleResourcesServer):
             }
         )
 
-    def compute_metrics(self, tasks: Sequence[Sequence[Mapping[str, object]]]) -> dict[str, MetricValue]:
-        """Aggregate subset scores, sample coverage, and judge diagnostics."""
-        return compute_voicebench_metrics(
-            replay_rule_rows(tasks, scoring_type=self.config.scoring_type, seed=self.config.seed),
-            scoring_type=self.config.scoring_type,
-            expected_num_rows=self.config.expected_num_rows,
+    def _subset_metrics(self, tasks: Sequence[Sequence[Mapping[str, object]]], subset: str) -> dict[str, MetricValue]:
+        scoring_type = SUBSET_SCORERS[subset]
+        judge = self._judges.get(scoring_type)
+        multi = self.config.subset == ALL_SUBSETS
+        metrics = compute_voicebench_metrics(
+            replay_rule_rows(tasks, scoring_type=scoring_type, seed=self.config.seed),
+            scoring_type=scoring_type,
+            expected_num_rows=self.config.expected_rows[subset] if multi else self.config.expected_num_rows,
             expected_sample_ids=self._expected_sample_ids,
-            judge_enabled=self._judge is not None,
+            judge_enabled=judge is not None,
             judge_max_concurrency=self.config.judge_max_concurrency,
-            judge_peak_inflight=self._judge.peak_inflight if self._judge is not None else 0,
+            judge_peak_inflight=judge.peak_inflight if judge is not None else 0,
         )
+        if not multi:
+            return metrics
+        return {key.replace("voicebench/", f"voicebench/{subset}/", 1): value for key, value in metrics.items()}
+
+    def compute_metrics(self, tasks: Sequence[Sequence[Mapping[str, object]]]) -> dict[str, MetricValue]:
+        """Aggregate subset scores, sample coverage, and judge diagnostics (per subset in ``all`` mode)."""
+        if self.config.subset != ALL_SUBSETS:
+            return self._subset_metrics(tasks, self.config.subset)
+        by_subset: dict[str, list[Mapping[str, object]]] = {name: [] for name in self.config.subsets}
+        for row in (row for task in tasks for row in task):
+            name = row.get("subset") or (row.get("verifier_metadata") or {}).get("subset")
+            if name not in by_subset:
+                raise ValueError(f"cannot aggregate a row of subset {name!r}")
+            by_subset[name].append(row)
+        metrics: dict[str, MetricValue] = {}
+        for name, rows in by_subset.items():
+            try:
+                metrics |= self._subset_metrics([rows], name)
+            except ValueError as error:
+                # A subset refuses to aggregate when one of its rows could not be scored (for example an unparseable
+                # judge grade). That is that subset's failure, not the whole benchmark's: keep every other subset.
+                metrics[f"voicebench/{name}/aggregation_error"] = str(error)
+        return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, MetricValue]) -> dict[str, MetricValue]:
         return {key: value for key, value in agent_metrics.items() if key.startswith("voicebench/")}
@@ -259,6 +368,30 @@ class VoiceBenchServer(SimpleResourcesServer):
         aggregated.agent_metrics.update(metrics)
         aggregated.key_metrics.update(self.get_key_metrics(metrics))
         return aggregated
+
+
+def _fixture_server() -> VoiceBenchServer:
+    """A rule-scored (MCQ) server: the fixture needs no judge or network."""
+    return VoiceBenchServer(
+        config=VoiceBenchConfig(
+            name="voicebench",
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="app.py",
+            subset="openbookqa",
+            scoring_type="mcq",
+            expected_num_rows=1,
+            seed=0,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=_fixture_server,
+    request_model=VoiceBenchVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":

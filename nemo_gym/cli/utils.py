@@ -155,7 +155,7 @@ def exit_cleanly_on_config_error(fn):
         except BaseException as e:
             if getattr(e, "failure_kind", None) is not None:
                 # The driver step of a resumable job hands the kind to the guard of its next segment.
-                from nemo_gym.orchestration.executors.resume_script import record_failure_kind
+                from nemo_gym.eval.recovery.markers import record_failure_kind
 
                 record_failure_kind(e)
             if isinstance(e, IncompleteEvaluationError):
@@ -171,6 +171,22 @@ def exit_cleanly_on_config_error(fn):
             # A typed stop (for example a head server that never answered): exit with its code, not a traceback.
             rich.print(f"[red]Stopped:[/red] {escape(str(e))}")
             raise SystemExit(code) from None
+
+    return wrapper
+
+
+def exit_cleanly_on_job_error(fn):
+    """Decorator: turn a `gym job` command's expected failure (unknown id, unreachable scheduler, missing log)
+    into a message on stderr and a non-zero exit, so stdout stays clean for `--json`."""
+    from functools import wraps
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, RuntimeError, FileNotFoundError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            raise SystemExit(1)
 
     return wrapper
 

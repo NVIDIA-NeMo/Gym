@@ -12,6 +12,7 @@ Do not change runtime revisions while resuming historical runs.
 | `hrbench8k/opencode.yaml` | HRBench8K TSV and images | Mean accuracy across cycles |
 | `vtcbench/opencode.yaml` | VTCBench TSV and images | Rule matching with LLM fallback |
 | `zerobench/opencode.yaml` | Official main-split Parquet with embedded images | Case-insensitive exact answer accuracy |
+| `agentx/opencode.yaml` | Agent-X source data or prepared bundle | Independent reference grading on 605 non-generative tasks |
 
 ## Prepare data
 
@@ -32,6 +33,26 @@ Supply these preparation arguments through Gym's `prepare_kwargs`:
 TSV files can contain embedded images or image paths. Use relative image paths
 for portable datasets. VStar and HRBench8K inputs are checked against the manifests in
 [`manifests/`](manifests/) before applying `limit`; keep the original image bytes.
+
+### Agent-X
+
+Download the release identified in [`manifests/AgentX.json`](manifests/AgentX.json),
+including `data.json`, `dataset.json`, and `files/`. Set `prepare_kwargs.source_root`
+to its directory. Preparation validates the source files and produces 494 image
+tasks and 111 video tasks. Videos are sampled at approximately one frame per second,
+up to 128 frames. The manifest records the selected tasks and exclusions.
+
+To package prepared tasks for another machine:
+
+```bash
+python -m benchmarks.opencode_multimodal_benchmarks.bundle_agentx \
+  benchmarks/opencode_multimodal_benchmarks/data/agentx.jsonl \
+  /data/agentx/bundle --sha256 <prepared-jsonl-sha256>
+```
+
+Use a new destination directory. The bundle contains `agentx.jsonl`, `media/`, and
+`provenance.json`. To load it, supply `prepare_kwargs.dataset`, `sha256`, and
+`media_root` instead of `source_root`.
 
 ### ZeroBench
 
@@ -105,6 +126,8 @@ score zero.
   is ambiguous. HRBench8K averages the per-cycle accuracies.
 - **VTCBench:** apply the rule matcher, then judge answers that did not match.
   Set `vtc_llm_fallback: false` for rule-only scoring.
+- **Agent-X:** use the independent reference-answer judge. Objective answers receive 0 or 1;
+  subjective answers receive a score from 0 to 1. Image-generation tasks are excluded.
 
 Unresolved judge failures need rejudging before reporting a complete benchmark
 score. For agent sessions, the Environment Server's `agent_outcome_policy`

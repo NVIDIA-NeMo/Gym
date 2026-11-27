@@ -224,6 +224,24 @@ async def test_already_expired_budget_stops_without_snapshot_or_simulator(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_context_limit_stops_without_snapshot_or_simulator(tmp_path):
+    value, llm = state(tmp_path, [])
+    turn = activation()
+    turn.response = turn.response.model_copy(
+        update={
+            "status": "incomplete",
+            "_ng_agent_observations": {
+                "records": [{"kind": "agent_invocation", "status": "incomplete", "error_type": "context_limit"}]
+            },
+        }
+    )
+    result = await server(tmp_path)._next_user_turn(value, turn)
+    assert result.kind == "stop" and result.stop_reason == "context_limit"
+    value.snapshots.capture.assert_not_awaited()
+    llm.call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_provider_timeout_is_not_an_interaction_budget_stop(tmp_path):
     value, _ = state(tmp_path, [])
     value.snapshots.capture.side_effect = TimeoutError("command status GET exceeded 10s")

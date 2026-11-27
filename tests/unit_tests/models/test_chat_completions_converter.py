@@ -51,8 +51,6 @@ from nemo_gym.core.responses_api_types import (
 from nemo_gym.models.chat_completions_converter import (
     ChatCompletionsConverter,
     ChatCompletionsConverterState,
-    VLLMConverter,
-    VLLMConverterResponsesToChatCompletionsState,
     _usage_detail,
     chat_completion_usage_to_response_usage,
     split_responses_input_output_items,
@@ -111,16 +109,6 @@ def converter() -> ChatCompletionsConverter:
 @pytest.fixture(autouse=True)
 def _fixed_uuid(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
-
-
-# ===========================================================================
-# Backward-compatible aliases
-# ===========================================================================
-
-
-def test_backwards_compatible_aliases():
-    assert VLLMConverter is ChatCompletionsConverter
-    assert VLLMConverterResponsesToChatCompletionsState is ChatCompletionsConverterState
 
 
 def test_usage_detail_ignores_ambiguous_top_level_names():
@@ -1584,6 +1572,91 @@ def test_postprocess_tool_calls(converter: ChatCompletionsConverter):
     assert tool_calls[0].call_id == "call_1"
 
 
+def _function_call_arguments(converter: ChatCompletionsConverter, name: str, arguments: str) -> str:
+    output = converter.postprocess_assistant_message_dict(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "function": {"name": name, "arguments": arguments}}],
+        }
+    )
+    tool_calls = [item for item in output if isinstance(item, NeMoGymResponseFunctionToolCall)]
+    assert len(tool_calls) == 1
+    return tool_calls[0].arguments
+
+
+# Tool parameter types as a run configures them (`tool_parameter_types`): the
+# parameters of the Codex CLI's shell tools that are not strings.
+_TOOL_PARAMETER_TYPES = {
+    "exec_command": {"yield_time_ms": "integer", "max_output_tokens": "integer", "login": "boolean", "tty": "boolean"},
+    "write_stdin": {"session_id": "integer", "yield_time_ms": "integer", "max_output_tokens": "integer"},
+}
+
+
+@pytest.fixture
+def typing_converter() -> ChatCompletionsConverter:
+    return ChatCompletionsConverter(return_token_id_information=False, tool_parameter_types=_TOOL_PARAMETER_TYPES)
+
+
+def test_listed_tool_parameters_get_their_json_type_back(typing_converter: ChatCompletionsConverter):
+    """A tool parser types parameters from the declared schema, so an undeclared tool's parameters are all strings."""
+    write_stdin = _function_call_arguments(
+        typing_converter,
+        "write_stdin",
+        json.dumps({"session_id": "86902", "chars": "12\n", "yield_time_ms": " 1000 "}),
+    )
+    assert json.loads(write_stdin) == {"session_id": 86902, "chars": "12\n", "yield_time_ms": 1000}
+
+    exec_command = _function_call_arguments(
+        typing_converter,
+        "exec_command",
+        json.dumps({"cmd": "sleep 30", "yield_time_ms": '"30000"', "max_output_tokens": "-1", "tty": "False"}),
+    )
+    assert json.loads(exec_command) == {
+        "cmd": "sleep 30",
+        "yield_time_ms": 30000,
+        "max_output_tokens": -1,
+        "tty": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        # Already typed by the parser: returned byte for byte, key order and spacing included.
+        ("exec_command", '{"yield_time_ms":1000,  "cmd":"ls"}'),
+        # A string parameter that happens to spell a number is not one of the listed parameters.
+        ("exec_command", '{"cmd": "42", "workdir": "7"}'),
+        # Not a whole number or a boolean: the harness reports the value itself.
+        ("exec_command", '{"cmd": "ls", "yield_time_ms": "1.5", "login": "yes"}'),
+        ("write_stdin", '{"session_id": "abc", "yield_time_ms": "-"}'),
+        # A digit outside ASCII, and more digits than a 64-bit integer holds.
+        ("write_stdin", '{"session_id": "\u00b2", "yield_time_ms": "1234567890123456789"}'),
+        # Arguments that are not a JSON object.
+        ("write_stdin", "not json"),
+        ("write_stdin", '["86902"]'),
+        # A tool that is not listed is left alone, whatever its parameters are called.
+        ("get_weather", '{"session_id": "86902", "yield_time_ms": "1000"}'),
+    ],
+)
+def test_retyping_leaves_every_other_call_unchanged(
+    typing_converter: ChatCompletionsConverter, name: str, arguments: str
+):
+    assert _function_call_arguments(typing_converter, name, arguments) == arguments
+
+
+def test_a_converter_without_tool_parameter_types_converts_nothing(converter: ChatCompletionsConverter):
+    arguments = json.dumps({"session_id": "86902", "yield_time_ms": "1000"})
+    assert _function_call_arguments(converter, "write_stdin", arguments) == arguments
+
+
+def test_tool_parameter_types_refuses_an_unknown_type():
+    with pytest.raises(ValidationError):
+        ChatCompletionsConverter(
+            return_token_id_information=False, tool_parameter_types={"write_stdin": {"session_id": "number"}}
+        )
+
+
 def test_postprocess_chat_response_via_choice(converter: ChatCompletionsConverter):
     choice = NeMoGymChoice(
         index=0,
@@ -2580,3 +2653,106 @@ def test_chat_message_without_a_known_role_gets_one_error_naming_the_roles(messa
     (error,) = excinfo.value.errors()
     assert error["type"] == "chat_message_role"
     assert "role" in error["msg"] and "assistant" in error["msg"]
+
+
+# ===========================================================================
+# preserve_thinking_blocks: signed provider thinking through the Responses side
+# ===========================================================================
+
+SIGNED_BLOCKS = [{"type": "thinking", "thinking": "ls -a shows dotfiles.", "signature": "EqQBCkgIBhABGAIiQ..."}]
+
+
+def _assistant_with_thinking() -> dict:
+    # LiteLLM's Anthropic chat answer: a reasoning summary, signed blocks, a tool call.
+    return {
+        "role": "assistant",
+        "content": "<think>Use ls -a.</think>",
+        "provider_specific_fields": {"thinking_blocks": SIGNED_BLOCKS},
+        "tool_calls": [
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {"name": "exec_command", "arguments": '{"cmd": "ls -a"}'},
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("content", [None, []])
+def test_preserve_thinking_blocks_round_trip(content) -> None:
+    converter = ChatCompletionsConverter(return_token_id_information=False, preserve_thinking_blocks=True)
+    output = converter.postprocess_assistant_message_dict(_assistant_with_thinking())
+    reasoning = [o for o in output if o.type == "reasoning"]
+    reasoning[0].content = content
+    assert len(reasoning) == 1
+    assert reasoning[0].summary[0].text == "Use ls -a."
+    assert ChatCompletionsConverter.decode_thinking_blocks(reasoning[0].encrypted_content) == SIGNED_BLOCKS
+
+    # The next turn as a Responses client (Codex) sends it: the output items verbatim, then the tool result.
+    items = [o.model_dump(exclude_none=True) for o in output]
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "List /tmp."},
+                *items,
+                {"type": "function_call_output", "call_id": "toolu_1", "output": ".\n.hidden"},
+            ]
+        )
+    )
+    messages = [dict(m) for m in params.messages]
+    assistant = next(m for m in messages if m["role"] == "assistant")
+    assert assistant["thinking_blocks"] == SIGNED_BLOCKS
+    assert "<think>" not in (assistant.get("content") or "")  # the blocks carry the thinking, not the summary
+    assert assistant["tool_calls"][0]["id"] == "toolu_1"
+    assert messages[-1]["role"] == "tool"
+    # Validation keeps the field on the outbound body.
+    dumped = params.model_dump(exclude_none=True)
+    assert next(m for m in dumped["messages"] if m["role"] == "assistant")["thinking_blocks"] == SIGNED_BLOCKS
+
+
+def test_preserve_thinking_blocks_does_not_discard_separate_reasoning_content() -> None:
+    converter = ChatCompletionsConverter(return_token_id_information=False, preserve_thinking_blocks=True)
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "A readable summary"}],
+                "encrypted_content": converter.encode_thinking_blocks(SIGNED_BLOCKS),
+                "content": [{"type": "reasoning_text", "text": "Keep this separate reasoning"}],
+            }
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="reasoning content/encrypted_content cannot be preserved"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_thinking_blocks_ignored_unless_enabled() -> None:
+    converter = ChatCompletionsConverter(return_token_id_information=False)
+    output = converter.postprocess_assistant_message_dict(_assistant_with_thinking())
+    reasoning = [o for o in output if o.type == "reasoning"]
+    assert reasoning[0].encrypted_content is None
+    # And an encoded item from elsewhere is still refused by a converter without the flag.
+    with pytest.raises(NotImplementedError):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    {
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "summary": [],
+                        "encrypted_content": ChatCompletionsConverter.encode_thinking_blocks(SIGNED_BLOCKS),
+                    }
+                ]
+            )
+        )
+
+
+def test_preserve_thinking_blocks_creates_item_without_summary() -> None:
+    converter = ChatCompletionsConverter(return_token_id_information=False, preserve_thinking_blocks=True)
+    message = _assistant_with_thinking()
+    message["content"] = "Running it."
+    message["thinking_blocks"] = message.pop("provider_specific_fields")["thinking_blocks"]
+    reasoning = [o for o in converter.postprocess_assistant_message_dict(message) if o.type == "reasoning"]
+    assert reasoning and reasoning[0].summary == []
+    assert ChatCompletionsConverter.decode_thinking_blocks(reasoning[0].encrypted_content) == SIGNED_BLOCKS

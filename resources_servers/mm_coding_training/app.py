@@ -10,7 +10,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from pydantic import ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
@@ -32,6 +32,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     ResourcesSeedRejectedError,
+    ResourcesSessionConflictError,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
@@ -290,7 +291,7 @@ class CodingTrainingServer(SimpleResourcesServer):
                 return self.lost_result(body)
             seeded = self._tasks.get(session_id)
             if seeded is not None and seeded.task != body.task:
-                raise HTTPException(409, "Verification does not match the seeded task")
+                raise ResourcesSessionConflictError("Verification does not match the seeded task")
             verification.retain(None)
             return await self._verify_answer(body)
 

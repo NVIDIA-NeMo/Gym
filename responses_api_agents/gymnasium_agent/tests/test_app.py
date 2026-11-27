@@ -955,8 +955,7 @@ class TestAgentObservation:
 # collector and the trial gate. Each is what ``GymnasiumAgent.run`` returns for the case's step and model response
 # with fake model and environment servers; only the random invocation id is fixed.
 FAKE_SERVER_ROWS = (
-    Path(__file__).resolve().parents[3]
-    / "tests/unit_tests/orchestration/fixtures/gymnasium-agent-rows-fake-servers.json"
+    Path(__file__).resolve().parents[3] / "tests/unit_tests/fixtures/gymnasium-agent-rows-fake-servers.json"
 )
 FIXED_INVOCATION_ID = "gymnasium_" + "0" * 32
 
