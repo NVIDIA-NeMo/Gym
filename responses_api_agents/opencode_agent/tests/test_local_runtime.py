@@ -156,6 +156,7 @@ def test_unseeded_responses_run_local_cli(
                     {"input_tokens": 3, "output_tokens": 2},
                     "local-model",
                     AgentObservationBundle(source="opencode"),
+                    None,
                 )
             ),
         ) as local,

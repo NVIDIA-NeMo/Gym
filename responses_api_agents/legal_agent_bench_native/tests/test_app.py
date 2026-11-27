@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,6 +24,7 @@ from responses_api_agents.legal_agent_bench_native.app import (
     LegalAgentBenchNativeAgent,
     LegalAgentBenchNativeAgentConfig,
 )
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 
 
 def seed(**kwargs):
@@ -144,9 +146,7 @@ async def test_native_staging_preserves_literal_arguments(tmp_path, monkeypatch,
     )
     state = LabNativeSession(request=seed(), session=session, completion=CompletionState())
     try:
-        result = await agent()._execute_tool(
-            state, tool, json.dumps(arguments), deadline=asyncio.get_running_loop().time() + 30
-        )
+        result = await agent()._execute_tool(state, tool, json.dumps(arguments), deadline=monotonic() + 30)
         assert output.read_text() == content
         assert not sentinel.exists(), "Tool data was interpreted as shell commands"
         if tool == "bash":
@@ -510,6 +510,34 @@ async def test_staging_deadline_uses_real_executor_and_requires_cleanup(monkeypa
     box.stop.assert_not_awaited()  # The resources server still owns the task sandbox.
 
 
+def test_staging_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(monkeypatch):
+    from nemo_gym.sandbox import SandboxExecResult
+
+    async def main():
+        runner, state, box = _tool_loop(monkeypatch)
+
+        async def execute(command, **kwargs):
+            if command.startswith("mkdir"):
+                await asyncio.Event().wait()
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        begin_activation = state.session.begin_activation
+
+        async def yielding_begin_activation(**kwargs):
+            await asyncio.sleep(0)  # Let an expired activation timeout cancel the wait.
+            await begin_activation(**kwargs)
+
+        box.exec.side_effect = execute
+        state.session.begin_activation = yielding_begin_activation
+        running = runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
+        return await asyncio.wait_for(running, 2), box
+
+    result, box = run_on_clock_ahead_loop(main())
+    assert result.status == "incomplete" and result.metadata["lab_finish_reason"] == "agent_timeout"
+    # The turn reached staging, so neither the turn budget nor the activation wait expired at once.
+    assert any(call.args[0].startswith("mkdir") for call in box.exec.call_args_list)
+
+
 async def test_deadline_during_rearm_waits_for_previous_cleanup_and_never_stages(monkeypatch):
     runner, state, box = _tool_loop(monkeypatch)
     cancelling = asyncio.Event()
@@ -560,9 +588,7 @@ async def test_shorter_tool_timeout_remains_an_observation_after_confirmed_clean
         AsyncMock(return_value={"cleanup_confirmed": True, "return_code": 124, "timed_out": True, "error": None}),
     )
     monkeypatch.setattr(SandboxSession, "read_output_log", AsyncMock(return_value="partial output"))
-    text = await runner._execute_tool(
-        state, "bash", '{"command":"sleep 2"}', deadline=asyncio.get_running_loop().time() + 10
-    )
+    text = await runner._execute_tool(state, "bash", '{"command":"sleep 2"}', deadline=monotonic() + 10)
     assert "Error: tool exited with 124" in text and "partial output" in text
     assert state.session.cleanup_confirmed and not state.session.closing
     box.exec.side_effect = None

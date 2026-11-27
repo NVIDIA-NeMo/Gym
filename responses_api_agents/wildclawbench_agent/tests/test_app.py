@@ -395,7 +395,8 @@ else:
     running = asyncio.create_task(environment.run_legacy(body))
     started = None
     for _ in range(100):
-        matches = list((tmp_path / "episodes").glob("*/started"))
+        # The worker creates `started` before it writes its PID; cancelling in between leaves the file empty.
+        matches = [path for path in (tmp_path / "episodes").glob("*/started") if path.read_text()]
         if matches:
             started = matches[0]
             break

@@ -50,6 +50,11 @@ By default the converter reads the `problem` field and routes examples to the
 
 - The verifier can run through Gym's `/v1/responses` path or through external
   OpenAI-compatible judge servers exposed with `JUDGE_SERVER_ARGS`.
+- With `JUDGE_SERVER_ARGS`, the first verification waits for the judge server to accept connections, without limit
+  by default. Set `external_judge_wait_timeout_seconds` to make that verification fail with a `TimeoutError` instead.
+  `external_judge_request_timeout_seconds` is the judge SDK's per-request timeout (4 hours by default). It sets the
+  connect, read, write and pool limits, and the SDK retries a failed request twice by default, so it is not a limit on
+  the total time of one verification.
 - `alpha` and `beta` in
   [proof_judge.yaml](configs/proof_judge.yaml)
   control the weight of verifier reward versus self-evaluation consistency.
