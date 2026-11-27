@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Video-Index v1.1 (144 questions in the latest cleaned release, 2-10 options, 4 capability groups), single-turn:
+# one model call per question with the item's video via file:// URL (under videoindex_v1_1_video_url_dir) and the
+# official Video-Index prompt. Scored by the official Apache-2.0 rule (videoindex_rule_v1) by default; compose with
+# resources_servers/videoindex/configs/videoindex_single_turn_llm_extraction.yaml and
+# ++prepare_script_args.answer_policy=llm_extraction_v1 to extract choices with a judge model instead.
+# Data: prepare.py checks items/test.jsonl from Video-Index/Video-Index-v1-1 @ e7404c468cd0ad83d7c96834c6eb4767fe831a72
+# by SHA-256 and binds each question to videos/<name>.mp4 under videoindex_v1_1_source_dir.
+config_paths:
+  - resources_servers/videoindex/configs/videoindex_single_turn.yaml
+
+videoindex_v1_1_source_dir: null
+videoindex_v1_1_video_dir: ${videoindex_v1_1_source_dir}/videos
+videoindex_v1_1_video_url_dir: ${videoindex_v1_1_video_dir}
+videoindex_cohort_manifest: benchmarks/videoindex_v1_1/data/videoindex_v1_1_cohort.json
+num_repeats: 1
+prepare_script_args:
+  source_dir: ${videoindex_v1_1_source_dir}
+  video_dir: ${videoindex_v1_1_video_dir}
+  video_url_dir: ${videoindex_v1_1_video_url_dir}
+  num_repeats: ${num_repeats}
+
+videoindex_single_turn:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: videoindex_v1_1
+        type: benchmark
+        jsonl_fpath: benchmarks/videoindex_v1_1/data/videoindex_v1_1_benchmark.jsonl
+        prepare_script: benchmarks/videoindex_v1_1/prepare.py
+        num_repeats: 1

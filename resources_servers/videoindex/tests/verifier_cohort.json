@@ -1,0 +1,24 @@
+{
+  "benchmark": "videoindex_v1_0",
+  "dataset_source": "https://huggingface.co/datasets/Video-Index/Video-Index",
+  "dataset_revision": "fb63b6c93948e78e76aee9c87745bf78358d3011",
+  "setting": "single_turn",
+  "answer_policy": "videoindex_rule_v1",
+  "task_ids": [
+    "videoindex_v1_0:fixture_1",
+    "videoindex_v1_0:fixture_2"
+  ],
+  "task_subsets": {
+    "videoindex_v1_0:fixture_1": {
+      "capability_group": [
+        "perception"
+      ]
+    },
+    "videoindex_v1_0:fixture_2": {
+      "capability_group": [
+        "reasoning_knowledge"
+      ]
+    }
+  },
+  "num_repeats": 1
+}

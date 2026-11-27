@@ -11,6 +11,18 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## Video-Index prompt and answer rule
+
+`resources_servers/videoindex/scoring.py` adapts `PROMPT`, `INTRO_VIDEO`, `ANSWER_INSTR`, `extract_letter`,
+and `score_reply` from `integrations/vlmevalkit/vlmeval/dataset/utils/video_index.py` (matching the
+multiple-choice branch of `video_index/scoring.py`) in
+[Espere-1119-Song/Video-Index](https://github.com/Espere-1119-Song/Video-Index), revision
+`4819d9252ae177f87a134f0ceda74855847afe2a`, under Apache-2.0.
+Local changes are names, type annotations, docstrings, reasoning-block stripping via `final_answer_text`,
+integration with `video_mcqa`'s `VerifierMetadata` and `QuestionScore`, and explicit 2–10 option bounds.
+The notice is in `resources_servers/videoindex/third-party-notices.md`.
+No benchmark items or videos are included in this repository.
+
 ## WildClawBench instruction prefix
 
 `responses_api_agents/wildclawbench_agent/worker.py` retains the actor instruction

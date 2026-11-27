@@ -1,0 +1,44 @@
+name: videoindex_v1_0_agentic
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: Video-Index v1.0 agentic video multiple-choice QA (840 questions, 2-10 options) answered by OpenCode in
+  a shared video_mcqa sandbox with frame-sampling tools across four capability groups.
+modality: video
+licensing: unknown
+authors:
+- Guo Chen
+maintainers:
+- cg1177
+capabilities:
+- multimodal_input_understanding/temporal_media_understanding
+- tool_and_computer_use/multi_step_tool_use
+- multimodal_input_understanding/scene_understanding
+- reasoning/spatial_temporal_reasoning
+domains:
+- general
+primary_metric: mean/Video_Index_v1_0_agentic
+requirements:
+  gpu: false
+  network: allowlist
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: videoindex
+agent_server: opencode_agent
+datasets:
+- name: videoindex_v1_0_agentic
+  type: benchmark
+  jsonl_fpath: benchmarks/videoindex_v1_0_agentic/data/videoindex_v1_0_agentic_benchmark.jsonl
+  prepare_script: benchmarks/videoindex_v1_0_agentic/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from resources_servers.lvbench import task_data as lvbench
 from resources_servers.video_mcqa.task_data import TaskData, VideoBinding, VideoMCQATaskData
+from resources_servers.videoindex import task_data as videoindex
 from resources_servers.videomme_v1 import task_data as videomme_v1
 
 
@@ -83,7 +84,7 @@ def test_rows_without_their_question_and_options_are_rejected(missing):
 @pytest.mark.parametrize("updates", [{"level": 2}, {"group_id": "group-1"}])
 def test_only_videomme_v2_rows_take_levels_and_groups(updates):
     assert VideoMCQATaskData.model_validate({**ROW, **updates})
-    for schema in (TaskData, videomme_v1.TaskData, lvbench.TaskData):
+    for schema in (TaskData, videomme_v1.TaskData, lvbench.TaskData, videoindex.TaskData):
         with pytest.raises(ValidationError, match="no v2 group or level"):
             schema.model_validate({**ROW, **updates})
 
@@ -94,3 +95,8 @@ def test_any_number_of_choices_except_in_videomme_v1_and_lvbench():
         assert schema.model_validate(ROW).option_count == 4
         with pytest.raises(ValidationError, match="four choices"):
             schema.model_validate({**ROW, **FIVE_CHOICES})
+    ten_choices = {"option_count": 10, "options": [f"Choice {i}" for i in range(10)], "expected_answer": "J"}
+    eleven_choices = {"option_count": 11, "options": [f"Choice {i}" for i in range(11)], "expected_answer": "K"}
+    assert videoindex.TaskData.model_validate({**ROW, **ten_choices}).option_count == 10
+    with pytest.raises(ValidationError, match="two and ten choices"):
+        videoindex.TaskData.model_validate({**ROW, **eleven_choices})
