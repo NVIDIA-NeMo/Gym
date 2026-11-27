@@ -1924,8 +1924,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 f"{self._mcp_transports_text} MCP tool grants; required grants it cannot use: "
                 + ", ".join(unsupported)
             )
+        # Only the grants OpenCode configures register tools: an optional one over another transport is left out.
         colliding = _colliding_mcp_grants(
-            [access.name for access in self.effective_tool_accesses(body) if isinstance(access, MCPToolAccess)]
+            [access.name for access in mcp_grants_over(self.effective_tool_accesses(body), self._mcp_transports)]
         )
         if colliding:
             raise HTTPException(

@@ -287,6 +287,19 @@ def test_a_configured_grant_and_a_session_grant_that_could_collide_are_refused(s
     sandbox.exec.assert_not_awaited()
 
 
+@pytest.mark.parametrize("make_grant", [sse_grant, stdio_grant], ids=["sse", "stdio"])
+def test_an_sse_or_stdio_grant_opencode_1_configures_counts_toward_a_tool_name_collision(setup, make_grant):  # noqa: F811
+    """OpenCode 1 configures SSE and stdio grants too, so their tools take part in the naming check."""
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("company_files", required=True), make_grant("company", required=False)]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422
+    assert "'company'" in response.json()["detail"] and "'company_files'" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
 @pytest.mark.parametrize("names", [("company", "store"), ("company", "companyfiles"), ("company", "company-files")])
 def test_grants_whose_tools_cannot_share_a_name_are_kept(setup, names):  # noqa: F811
     agent, _ = setup

@@ -250,6 +250,21 @@ def test_an_optional_stdio_grant_is_left_out(opencode2):
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
 
 
+def test_an_optional_grant_opencode_2_leaves_out_does_not_count_toward_a_tool_name_collision(opencode2):
+    """OpenCode 2 registers no tools for an optional SSE grant it leaves out, so its name cannot collide with a
+    streamable HTTP grant's (`company` and `company_files` would both give `company_files_list`)."""
+    agent, sandbox = opencode2
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("company_files", required=True), sse_grant("company", required=False)]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        _, config = launch_config(sandbox)
+        assert list(config["mcp"]["servers"]) == ["company_files"]
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
 def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
     agent, sandbox = opencode2
     agent.config.mcp_tool_timeout_seconds = 900
