@@ -11,6 +11,6 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_community_label.yml@0472fc397f9d6de36d928cae2aa270d91eb2c71d
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_community_label.yml@f47f58bcf571d7dee8678e0fc5f6eec7800dadd4
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
