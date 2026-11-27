@@ -31,9 +31,11 @@ Once the verifier has run, the attempt counts: a missing or invalid reward file 
 A Gym-side failure while verifying, such as a lost sandbox, sets `mask_sample` and leaves the attempt out of the
 score. So does an image `ENTRYPOINT` that exits non-zero after the seed or in a separate verifier's sandbox
 (`harbor:entrypoint_failed`), or an image without the `timeout` or `bash` that `test.sh` needs. An episode that
-fails earlier (say, its sandbox does not start) or runs past its time budget has no result: it goes to
-`rollouts_failures.jsonl`, and `--resume` retries it unless the failure is terminal. A task with several steps runs
-one turn per step; see [Multi-Step Task Folders](/main/data/task-folders/multi-step-tasks).
+fails earlier (say, its sandbox does not start) or runs past its time budget has no result. With `seed_retries` set,
+a seed that failed for a retryable reason first runs again on a fresh sandbox that many times, before any model call.
+A failed episode goes to `rollouts_failures.jsonl` with no reward, and `--resume` retries it unless the row's
+`_ng_failure_terminal` says running it again cannot help. A task with several steps runs one turn per step; see
+[Multi-Step Task Folders](/main/data/task-folders/multi-step-tasks).
 
 ## Task folders or a Resources Server
 
@@ -171,6 +173,7 @@ Pass the file with `--config <file>`, or set one key with
 | `request_gpu_type` | `false` | Send the first of a task's `gpu_types` as the GPU type of each GPU sandbox; providers without that filter reject it. |
 | `sandbox_ready_timeout_s` | `900` | Bound on one sandbox start. |
 | `image_pull_retries` | `2` | Retries of a sandbox start that failed on an image pull. |
+| `seed_retries` | `0` | Runs a seed that failed for a retryable reason again on a fresh sandbox, before the episode becomes a failure row. A refused task, row or configuration and rejected provider credentials are not retried. |
 | `sandbox_provider_options` | `{}` | Provider options for every sandbox. |
 | `sandbox_metadata` | `{benchmark: harbor}` | Metadata added to every sandbox. |
 | `sandbox_resources_override` | none | Replaces only the task resources it names (`cpu`, `memory_mib`, `disk_gib`), except in Compose sidecars. |

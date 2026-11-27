@@ -1507,8 +1507,9 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     assert (
         f"hello: its 2 steps need up to 4s once the sandbox is ready (harness setup, setup.sh and healthcheck "
         f"bounds, agent and verifier budgets, hooks and grace per step), 5s with one sandbox start and up to "
-        f"{seed_bound + 4.0:.0f}s with every image pull retry; default_episode_timeout_seconds=0 is below that "
-        f"bound, so the episode deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 4.0:.0f}s)"
+        f"{seed_bound + 4.0:.0f}s with every image pull and seed retry; default_episode_timeout_seconds=0 is below "
+        f"that bound, so the episode deadline and the sandbox lifetime follow the task's own bound "
+        f"({seed_bound + 4.0:.0f}s)"
     ) in caplog.text
     # The derived deadline is the task's own budget, not a blank cheque: `test_the_task_deadline_ends_an_overrunning_turn`
     # keeps the task deadline firing on a turn that runs past it.
@@ -1635,8 +1636,8 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
     assert (
         f"Task 'hello': its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh and "
         f"healthcheck bounds, agent and verifier budgets, hooks and grace per step), 3s with one sandbox start and "
-        f"up to {seed_bound + 2.2:.0f}s with every image pull retry, above default_episode_timeout_seconds=2 after "
-        f"one sandbox start already, and enforce_task_timeouts is off"
+        f"up to {seed_bound + 2.2:.0f}s with every image pull and seed retry, above "
+        f"default_episode_timeout_seconds=2 after one sandbox start already, and enforce_task_timeouts is off"
     ) in failure.failure_reason
     assert (
         f"raise default_episode_timeout_seconds to at least 3 ({seed_bound + 2.2:.0f} to cover a retried seed)"
@@ -1653,10 +1654,10 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
     assert (
         f"hello: its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh and healthcheck "
         f"bounds, agent and verifier budgets, hooks and grace per step), 3s with one sandbox start and up to "
-        f"{seed_bound + 2.2:.0f}s with every image pull retry; default_episode_timeout_seconds=4 covers the episode "
-        f"after one sandbox start but not after a retried seed, and enforce_task_timeouts is off, so an episode "
-        f"whose seed retries its image pulls may time out and be retried; set enforce_task_timeouts: true to give "
-        f"the episode the task's own bound"
+        f"{seed_bound + 2.2:.0f}s with every image pull and seed retry; default_episode_timeout_seconds=4 covers "
+        f"the episode after one sandbox start but not after a retried seed, and enforce_task_timeouts is off, so an "
+        f"episode whose seed retries its image pulls may time out and be retried; set enforce_task_timeouts: true to "
+        f"give the episode the task's own bound"
     ) in caplog.text
     # A default that covers the worst case runs them without a word, as before.
     caplog.clear()
@@ -1665,6 +1666,36 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
         response = await server.run_request(request_for(task, rollout="r3"))
     assert response.failure is None and [turn.name for turn in response.result.turns] == ["plan", "build"]
     assert "default_episode_timeout_seconds" not in caplog.text
+
+
+async def test_seed_retries_count_in_a_multi_step_episode_bound(tmp_path, monkeypatch):
+    """The deadline of a multi-step episode opens before its seed, so it covers every seed `seed_retries` allows
+    (each with its own image pull attempts) and the longest backoff before each retry: a retried seed cannot eat
+    the last turns' budget, and the sandbox lives as long."""
+    server, task, _, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        LONG_STEPS,
+        {"plan": "P", "build": "B"},
+        default_episode_timeout_seconds=0.1,
+        sandbox_ready_timeout_s=1,
+        image_pull_retries=1,
+    )
+    # Two sandbox starts per seed (one image pull retry), each the ready timeout plus the create grace.
+    one_seed = (1 + SEED_CREATE_GRACE_S) * 2
+    assert server.config.seed_retries == 0 and server._seed_bound_s(task) == pytest.approx(one_seed)
+    without_retries = server._episode_bound_s(task)
+
+    server.config.seed_retries = 1
+
+    # One more seed, and one backoff of at most 1.5 x the 60 s cap of the jittered delay before it.
+    assert server._seed_bound_s(task) == pytest.approx(2 * one_seed + 90)
+    with_retries = server._episode_bound_s(task)
+    assert with_retries == pytest.approx(without_retries + one_seed + 90)
+    assert server._episode_budget_s(task) == pytest.approx(with_retries)
+    request = request_for(task)
+    await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
+    assert await server.episode_timeout_seconds(request) == pytest.approx(with_retries)
 
 
 MCP_TOML = """
