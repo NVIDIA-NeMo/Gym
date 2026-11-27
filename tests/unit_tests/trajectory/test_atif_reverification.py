@@ -32,6 +32,7 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
+from nemo_gym.trajectory.atif_export import transcript_to_atif
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
     AtifReverifyManifestEntry,
@@ -712,6 +713,62 @@ def test_observation_results_are_paired_by_source_call_id() -> None:
         "function_call_output",
         "message",
     ]
+
+
+def test_a_skill_call_result_holding_the_loaded_skill_text_round_trips() -> None:
+    # Claude Code sends the text a Skill call loads as a message after the call's result; its agent server appends
+    # that text to the call's function_call_output (tested with the agent). These are the items it builds for one
+    # such run, so trajectory.json keeps the text as that call's observation result and reverification projects the
+    # same response back.
+    skill_text = "Base directory for this skill: /workspace/.claude/skills/calculator\n\n# Calculator"
+    skill_result = "Launching skill: calculator\n\n" + skill_text
+    items = [
+        {
+            "type": "function_call",
+            "id": "call-skill",
+            "call_id": "call-skill",
+            "name": "Skill",
+            "arguments": json.dumps({"skill": "calculator"}),
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call-skill", "output": skill_result, "status": "completed"},
+        {
+            "type": "function_call",
+            "id": "call-bash",
+            "call_id": "call-bash",
+            "name": "Bash",
+            "arguments": json.dumps({"command": "calc 2 + 3 * 4"}),
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call-bash", "output": "Result: 14", "status": "completed"},
+        {
+            "type": "message",
+            "id": "msg-4",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "14", "annotations": []}],
+        },
+    ]
+    trajectory = transcript_to_atif(
+        "What is 2 + 3 * 4?", items, session_id="rollout", agent_name="claude_code_agent", agent_version="test"
+    )
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate_json(trajectory.model_dump_json()))
+
+    assert [(result.source_call_id, result.content) for result in trajectory.steps[1].observation.results] == [
+        ("call-skill", skill_result)
+    ]
+    assert [(item.type, getattr(item, "call_id", None)) for item in response.output] == [
+        ("function_call", "call-skill"),
+        ("function_call_output", "call-skill"),
+        ("function_call", "call-bash"),
+        ("function_call_output", "call-bash"),
+        ("message", None),
+    ]
+    assert [(item.call_id, item.output) for item in response.output if item.type == "function_call_output"] == [
+        ("call-skill", skill_result),
+        ("call-bash", "Result: 14"),
+    ]
+    assert response.output_text == "14"
 
 
 def test_text_only_multipart_messages_and_tool_results_preserve_part_order() -> None:

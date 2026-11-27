@@ -1,0 +1,474 @@
+{
+ "about": "One Claude Code 2.1.292 run that loads a skill: the model calls the Skill tool, runs the skill's script with Bash and answers. stream: the stream-json events. transcript: the user and assistant entries of the session transcript. Event and entry structure, keys, tool call ids and usage are as Claude Code wrote them; the served response ids, the model name and the SKILL.md body are replaced by short stand-ins, and the result event keeps only the fields Gym reads.",
+ "source": "Claude Code 2.1.292 in a sandbox session through Gym's model server, a hosted GPT model behind an OpenAI-compatible endpoint, 2026-11-23. The task asks to compute 2 + 3 * 4 with the calculator skill.",
+ "stream": [
+  {
+   "type": "system",
+   "subtype": "init",
+   "claude_code_version": "2.1.292",
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "uuid": "5968cac6-205e-4428-93ba-5c4d3d54a0d3"
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "id": "resp_1",
+    "model": "gpt-model",
+    "role": "assistant",
+    "stop_reason": null,
+    "type": "message",
+    "usage": {
+     "cache_creation_input_tokens": 10758,
+     "cache_read_input_tokens": 0,
+     "input_tokens": 1941,
+     "output_tokens": 0
+    },
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "call_sNZmrvuQCpMYJsvFevDEZ18U",
+      "name": "Skill",
+      "input": {
+       "skill": "calculator",
+       "args": "2 + 3 * 4"
+      }
+     }
+    ],
+    "context_management": null
+   },
+   "parent_tool_use_id": null,
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "uuid": "1622d06b-82bd-4c93-88b1-f4495a437f3b",
+   "timestamp": "2026-11-23T07:55:53.280Z"
+  },
+  {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result",
+      "tool_use_id": "call_sNZmrvuQCpMYJsvFevDEZ18U",
+      "content": "Launching skill: calculator"
+     }
+    ]
+   },
+   "parent_tool_use_id": null,
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "uuid": "faf722da-5dce-45b8-8ec2-1280c8e2d30d",
+   "timestamp": "2026-11-23T07:55:53.315Z",
+   "tool_use_result": {
+    "success": true,
+    "commandName": "calculator"
+   }
+  },
+  {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Base directory for this skill: /workspace/.claude/skills/calculator\n\n# Calculator\n\nRun `scripts/calc.py` with the user's expression and return its result.\n\n\nARGUMENTS: 2 + 3 * 4"
+     }
+    ]
+   },
+   "parent_tool_use_id": null,
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "uuid": "8e833319-5ed8-4731-b435-d12915979ac3",
+   "timestamp": "2026-11-23T07:55:53.308Z",
+   "isSynthetic": true
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "id": "resp_2",
+    "model": "gpt-model",
+    "role": "assistant",
+    "stop_reason": null,
+    "type": "message",
+    "usage": {
+     "cache_creation_input_tokens": 2365,
+     "cache_read_input_tokens": 10758,
+     "input_tokens": 20,
+     "output_tokens": 0
+    },
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "call_ns5MdHHKci6nSW1KCjoSrc6O",
+      "name": "Bash",
+      "input": {
+       "command": "python /workspace/.claude/skills/calculator/scripts/calc.py '2 + 3 * 4'",
+       "description": "Calculate expression with calculator skill"
+      }
+     }
+    ],
+    "context_management": null
+   },
+   "parent_tool_use_id": null,
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "uuid": "7658c9c3-004f-45d2-b9f5-63cf9059fb59",
+   "timestamp": "2026-11-23T07:55:55.098Z"
+  },
+  {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "tool_use_id": "call_ns5MdHHKci6nSW1KCjoSrc6O",
+      "type": "tool_result",
+      "content": "Result: 14",
+      "is_error": false
+     }
+    ]
+   },
+   "parent_tool_use_id": null,
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "uuid": "502e0953-e515-43e8-9ce5-d86a26d6c77e",
+   "timestamp": "2026-11-23T07:55:55.317Z",
+   "tool_use_result": {
+    "stdout": "Result: 14",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+   }
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "id": "resp_3",
+    "model": "gpt-model",
+    "role": "assistant",
+    "stop_reason": null,
+    "type": "message",
+    "usage": {
+     "cache_creation_input_tokens": 80,
+     "cache_read_input_tokens": 13123,
+     "input_tokens": 20,
+     "output_tokens": 0
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "14"
+     }
+    ],
+    "context_management": null
+   },
+   "parent_tool_use_id": null,
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "uuid": "2e1b52af-f73f-42b3-a51a-1acb55f78f58",
+   "timestamp": "2026-11-23T07:55:57.124Z"
+  },
+  {
+   "session_id": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "usage": {
+    "input_tokens": 1981,
+    "cache_creation_input_tokens": 13203,
+    "cache_read_input_tokens": 23881,
+    "output_tokens": 80
+   },
+   "modelUsage": {
+    "gpt-model": {
+     "inputTokens": 1981,
+     "outputTokens": 80,
+     "cacheReadInputTokens": 23881,
+     "cacheCreationInputTokens": 13203
+    }
+   },
+   "is_error": false,
+   "num_turns": 4,
+   "subtype": "success",
+   "result": "14",
+   "type": "result",
+   "duration_ms": 7414,
+   "uuid": "548e997e-05fb-49ca-82d9-44a9a279fa8a"
+  }
+ ],
+ "transcript": [
+  {
+   "parentUuid": null,
+   "isSidechain": false,
+   "promptId": "c0e6e372-4b38-48c3-a04c-6de02415e0ce",
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": "What is 2 + 3 * 4? Please use the calculator skill to compute this.\n"
+   },
+   "uuid": "d945fad8-73ba-4933-a2c0-27b8bea8d2b4",
+   "timestamp": "2026-11-23T07:55:49.801Z",
+   "permissionMode": "bypassPermissions",
+   "promptSource": "sdk",
+   "turnOrigin": "sdk",
+   "turnPosition": {
+    "promptIndex": 0,
+    "turnIndex": 1
+   },
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace",
+   "sessionId": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "version": "2.1.292",
+   "gitBranch": "HEAD"
+  },
+  {
+   "parentUuid": "d472fdb1-b6cd-4988-9334-7c6e3d4df7da",
+   "isSidechain": false,
+   "message": {
+    "id": "resp_1",
+    "model": "gpt-model",
+    "role": "assistant",
+    "stop_reason": "tool_use",
+    "type": "message",
+    "usage": {
+     "input_tokens": 1941,
+     "cache_creation_input_tokens": 10758,
+     "cache_read_input_tokens": 0,
+     "output_tokens": 27,
+     "output_tokens_details": {
+      "thinking_tokens": 0
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "",
+     "iterations": [],
+     "speed": "standard",
+     "fallback_credit": null
+    },
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "call_sNZmrvuQCpMYJsvFevDEZ18U",
+      "name": "Skill",
+      "input": {
+       "skill": "calculator",
+       "args": "2 + 3 * 4"
+      }
+     }
+    ],
+    "stop_details": null
+   },
+   "apiBlockIndex": 0,
+   "type": "assistant",
+   "uuid": "1622d06b-82bd-4c93-88b1-f4495a437f3b",
+   "timestamp": "2026-11-23T07:55:53.280Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace",
+   "sessionId": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "version": "2.1.292",
+   "gitBranch": "HEAD"
+  },
+  {
+   "parentUuid": "1622d06b-82bd-4c93-88b1-f4495a437f3b",
+   "isSidechain": false,
+   "promptId": "c0e6e372-4b38-48c3-a04c-6de02415e0ce",
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result",
+      "tool_use_id": "call_sNZmrvuQCpMYJsvFevDEZ18U",
+      "content": "Launching skill: calculator"
+     }
+    ]
+   },
+   "uuid": "faf722da-5dce-45b8-8ec2-1280c8e2d30d",
+   "timestamp": "2026-11-23T07:55:53.315Z",
+   "toolUseResult": {
+    "success": true,
+    "commandName": "calculator"
+   },
+   "sourceToolAssistantUUID": "1622d06b-82bd-4c93-88b1-f4495a437f3b",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace",
+   "sessionId": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "version": "2.1.292",
+   "gitBranch": "HEAD"
+  },
+  {
+   "parentUuid": "faf722da-5dce-45b8-8ec2-1280c8e2d30d",
+   "isSidechain": false,
+   "promptId": "c0e6e372-4b38-48c3-a04c-6de02415e0ce",
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Base directory for this skill: /workspace/.claude/skills/calculator\n\n# Calculator\n\nRun `scripts/calc.py` with the user's expression and return its result.\n\n\nARGUMENTS: 2 + 3 * 4"
+     }
+    ]
+   },
+   "isMeta": true,
+   "turnCompanion": true,
+   "uuid": "8e833319-5ed8-4731-b435-d12915979ac3",
+   "timestamp": "2026-11-23T07:55:53.308Z",
+   "sourceToolUseID": "call_sNZmrvuQCpMYJsvFevDEZ18U",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace",
+   "sessionId": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "version": "2.1.292",
+   "gitBranch": "HEAD"
+  },
+  {
+   "parentUuid": "463a90ef-f510-4bcd-a257-0e0eeaa387b2",
+   "isSidechain": false,
+   "message": {
+    "id": "resp_2",
+    "model": "gpt-model",
+    "role": "assistant",
+    "stop_reason": "tool_use",
+    "type": "message",
+    "usage": {
+     "input_tokens": 20,
+     "cache_creation_input_tokens": 2365,
+     "cache_read_input_tokens": 10758,
+     "output_tokens": 48,
+     "output_tokens_details": {
+      "thinking_tokens": 0
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "",
+     "iterations": [],
+     "speed": "standard",
+     "fallback_credit": null
+    },
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "call_ns5MdHHKci6nSW1KCjoSrc6O",
+      "name": "Bash",
+      "input": {
+       "command": "python /workspace/.claude/skills/calculator/scripts/calc.py '2 + 3 * 4'",
+       "description": "Calculate expression with calculator skill"
+      }
+     }
+    ],
+    "stop_details": null
+   },
+   "apiBlockIndex": 0,
+   "attributionSkill": "calculator",
+   "type": "assistant",
+   "uuid": "7658c9c3-004f-45d2-b9f5-63cf9059fb59",
+   "timestamp": "2026-11-23T07:55:55.098Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace",
+   "sessionId": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "version": "2.1.292",
+   "gitBranch": "HEAD"
+  },
+  {
+   "parentUuid": "7658c9c3-004f-45d2-b9f5-63cf9059fb59",
+   "isSidechain": false,
+   "promptId": "c0e6e372-4b38-48c3-a04c-6de02415e0ce",
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "tool_use_id": "call_ns5MdHHKci6nSW1KCjoSrc6O",
+      "type": "tool_result",
+      "content": "Result: 14",
+      "is_error": false
+     }
+    ]
+   },
+   "uuid": "502e0953-e515-43e8-9ce5-d86a26d6c77e",
+   "timestamp": "2026-11-23T07:55:55.317Z",
+   "toolUseResult": {
+    "stdout": "Result: 14",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+   },
+   "sourceToolAssistantUUID": "7658c9c3-004f-45d2-b9f5-63cf9059fb59",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace",
+   "sessionId": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "version": "2.1.292",
+   "gitBranch": "HEAD"
+  },
+  {
+   "parentUuid": "110b3753-8b43-4b9c-b071-8a059a654dd1",
+   "isSidechain": false,
+   "message": {
+    "id": "resp_3",
+    "model": "gpt-model",
+    "role": "assistant",
+    "stop_reason": "end_turn",
+    "type": "message",
+    "usage": {
+     "input_tokens": 20,
+     "cache_creation_input_tokens": 80,
+     "cache_read_input_tokens": 13123,
+     "output_tokens": 5,
+     "output_tokens_details": {
+      "thinking_tokens": 0
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "",
+     "iterations": [],
+     "speed": "standard",
+     "fallback_credit": null
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "14"
+     }
+    ],
+    "stop_details": null
+   },
+   "apiBlockIndex": 0,
+   "attributionSkill": "calculator",
+   "type": "assistant",
+   "uuid": "2e1b52af-f73f-42b3-a51a-1acb55f78f58",
+   "timestamp": "2026-11-23T07:55:57.124Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace",
+   "sessionId": "3a9aa73b-f0bc-4efe-948c-06da6bd33565",
+   "version": "2.1.292",
+   "gitBranch": "HEAD"
+  }
+ ]
+}

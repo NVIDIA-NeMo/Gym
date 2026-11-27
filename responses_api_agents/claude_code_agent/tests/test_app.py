@@ -34,6 +34,7 @@ from nemo_gym.config import SKILLS_REF_KEY_NAME
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -41,7 +42,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import AnthropicConverter
 from nemo_gym.models.token_capture import TokenEntry, resolve_terminal, stamp_continuation
-from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, transcript_to_atif
 from responses_api_agents.claude_code_agent import sandbox as adapter
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
@@ -54,6 +55,7 @@ from responses_api_agents.claude_code_agent.app import (
     parse_stream_json,
 )
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations, read_transcripts
+from responses_api_agents.claude_code_agent.parsing import ToolResultAdditions, tool_result_additions
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -1768,6 +1770,478 @@ class TestCaptureFriendlyTranscript:
         assert attribution.model_call_id == "parent", attribution.reason
         assert attribution.method == "response_id"
         assert "corroborated_by=item_id+content_cumulative" in attribution.reason
+
+
+# A real Claude Code 2.1.292 run that loads the calculator skill (tests/fixtures/claude_code_skill_call.json says what
+# was shortened). The Skill tool answers "Launching skill: calculator"; the skill's text follows as a message that the
+# stream marks only isSynthetic and the transcript links to the call with sourceToolUseID. Each stream event has the
+# uuid of its transcript entry.
+SKILL_RUN = json.loads((Path(__file__).parent / "fixtures" / "claude_code_skill_call.json").read_text())
+SKILL_ENTRY = next(entry for entry in SKILL_RUN["transcript"] if entry.get("sourceToolUseID"))
+SKILL_TEXT = SKILL_ENTRY["message"]["content"][0]["text"]
+SKILL_CALL_ID = SKILL_ENTRY["sourceToolUseID"]
+SKILL_RESULT = "Launching skill: calculator\n\n" + SKILL_TEXT
+SKILL_TASK = "What is 2 + 3 * 4? Please use the calculator skill to compute this.\n"
+
+
+def _write_skill_transcript(config_dir: Path) -> None:
+    path = config_dir / "projects" / "-workspace" / "session.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in SKILL_RUN["transcript"]))
+
+
+def _item_shapes(items: list) -> list[tuple[str, str | None]]:
+    return [(item.type, getattr(item, "role", None) or getattr(item, "name", None)) for item in items]
+
+
+def _results(items: list) -> dict[str, list[str]]:
+    results: dict[str, list[str]] = {}
+    for item in items:
+        if item.type == "function_call_output":
+            results.setdefault(item.call_id, []).append(item.output)
+    return results
+
+
+def _skill_trajectory(items: list):
+    return transcript_to_atif(
+        SKILL_TASK,
+        [item.model_dump(mode="json") for item in items],
+        session_id="rollout",
+        agent_name="claude_code_agent",
+        agent_version="test",
+    )
+
+
+SKILL_RUN_SHAPES = [
+    ("function_call", "Skill"),
+    ("function_call_output", None),
+    ("function_call", "Bash"),
+    ("function_call_output", None),
+    ("message", "assistant"),
+]
+
+
+class TestLoadedSkillText:
+    """The text the Skill tool loads is part of the Skill call's result in the output and the trajectory."""
+
+    @pytest.mark.parametrize("fold_thinking", [True, False])
+    def test_skill_text_is_in_the_skill_calls_result(self, fold_thinking: bool) -> None:
+        stream = _capture_stream(SKILL_RUN)
+        items, metadata = parse_stream_json(
+            stream, fold_thinking=fold_thinking, transcript_records=SKILL_RUN["transcript"]
+        )
+        assert _item_shapes(items) == SKILL_RUN_SHAPES
+        skill_call, launched = items[:2]
+        assert skill_call.call_id == launched.call_id == SKILL_CALL_ID
+        assert SKILL_TEXT.startswith("Base directory for this skill: ")
+        assert launched.output == SKILL_RESULT
+        assert _results(items) == {SKILL_CALL_ID: [SKILL_RESULT], "call_ns5MdHHKci6nSW1KCjoSrc6O": ["Result: 14"]}
+
+        # Without the transcript nothing links the stream's message to its call, so the result is the tool's own, as
+        # before. Every other item, the ids included, and the usage are the same either way.
+        without, without_metadata = parse_stream_json(stream, fold_thinking=fold_thinking)
+        assert without[1].output == "Launching skill: calculator"
+        assert [item.model_dump() for item in items if item is not launched] == [
+            item.model_dump() for item in without if item is not without[1]
+        ]
+        assert metadata == without_metadata
+        assert (metadata["input_tokens"], metadata["cached_tokens"], metadata["output_tokens"]) == (
+            1981 + 13203 + 23881,
+            23881,
+            80,
+        )
+
+    @pytest.mark.parametrize("fold_thinking", [True, False])
+    def test_transcript_records_may_be_a_generator(self, fold_thinking: bool) -> None:
+        # The transcript is read for the skill text and, when the CLI was cut off before its result event, again for
+        # usage. A generator of records, which can be read only once, gives the same output and usage as a list.
+        stream = _capture_stream(SKILL_RUN, drop_result=True)
+        from_list = parse_stream_json(stream, fold_thinking=fold_thinking, transcript_records=SKILL_RUN["transcript"])
+        items, metadata = parse_stream_json(
+            stream, fold_thinking=fold_thinking, transcript_records=(entry for entry in SKILL_RUN["transcript"])
+        )
+        assert items[1].output == SKILL_RESULT
+        assert [item.model_dump() for item in items] == [item.model_dump() for item in from_list[0]]
+        assert metadata == from_list[1]
+        # The usage comes from the transcript: without it the stream's per-message usage is all there is.
+        assert metadata != parse_stream_json(stream, fold_thinking=fold_thinking)[1]
+
+    @pytest.mark.parametrize("capture", [False, True], ids=["evaluation", "capture"])
+    def test_readers_of_the_answer_and_the_trajectory(self, capture: bool) -> None:
+        # The response a verifier reads, after its JSON round trip: the answer is the model's, SWE Together's view
+        # of the turn holds no skill text, and trajectory.json ties the skill text to the Skill call.
+        from environment_servers.swe_together.context import project_turn
+
+        agent = _make_agent(token_id_capture=True) if capture else _make_agent()
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True}} if capture else {}
+        items, metadata = parse_stream_json(
+            _capture_stream(SKILL_RUN), fold_thinking=not capture, transcript_records=SKILL_RUN["transcript"]
+        )
+        sent = agent._response_from_output(
+            NeMoGymResponseCreateParamsNonStreaming(input="2 + 3 * 4"), items, "model", metadata
+        )
+        response = NeMoGymResponse.model_validate_json(sent.model_dump_json())
+        assert response.output_text == "14"
+        assert project_turn(response) == ("[1] tool_call(Skill)\n[2] tool_call(Bash)", "[3] agent: 14")
+        assert _item_shapes(response.output) == SKILL_RUN_SHAPES
+        assert response.output[1].output == SKILL_RESULT
+
+        trajectory = _skill_trajectory(response.output)
+        assert [step.source for step in trajectory.steps] == ["user", "agent", "agent", "agent"]
+        skill_step, bash_step = trajectory.steps[1:3]
+        assert [call.function_name for call in skill_step.tool_calls] == ["Skill"]
+        assert [(result.source_call_id, result.content) for result in skill_step.observation.results] == [
+            (SKILL_CALL_ID, SKILL_RESULT)
+        ]
+        assert [result.content for result in bash_step.observation.results] == ["Result: 14"]
+        assert trajectory.extra["nemo_gym"]["conversion"]["status"] == "complete"
+
+    def test_host_run_returns_the_skill_text(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {}
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(_capture_stream(SKILL_RUN).encode(), b""))
+
+        async def run_claude(*command, env, **kwargs):
+            _write_skill_transcript(Path(env["CLAUDE_CONFIG_DIR"]))
+            return proc
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", new=run_claude),
+        ):
+            response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="2 + 3 * 4")))
+        assert _item_shapes(response.output) == SKILL_RUN_SHAPES
+        assert response.output[1].output == SKILL_RESULT
+
+    def test_sandbox_run_returns_the_skill_text(self, tmp_path: Path, monkeypatch) -> None:
+        _write_skill_transcript(tmp_path)
+        artifacts = adapter.ClaudeCodeArtifacts(_capture_stream(SKILL_RUN), _archive(tmp_path))
+        state = adapter.ClaudeCodeSandboxSession(
+            request=AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id={"rollout_id": "rollout"},
+                task_id={"taskset": "fixture", "task_id": "task"},
+            ),
+            runtime="/runtime",
+            session=SimpleNamespace(
+                session_dir="/tmp/session",
+                workdir="/workspace",
+                artifacts=artifacts,
+                cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
+            ),
+        )
+        monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
+        response = asyncio.run(
+            _make_agent()._sandbox_response(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="2 + 3 * 4"), prompt="2 + 3 * 4", system=None
+            )
+        )
+        assert _item_shapes(response.output) == SKILL_RUN_SHAPES
+        assert response.output[1].output == SKILL_RESULT
+        # The observations read the same transcript and keep the text as the message Claude Code sent.
+        (root,) = [record for record in state.observations.records if isinstance(record, AgentInvocation)]
+        assert [getattr(item, "content", None) for item in root.conversation].count(SKILL_TEXT) == 1
+
+    @pytest.mark.parametrize("fold_thinking", [True, False])
+    def test_a_subagents_skill_text_stays_with_its_frames(self, fold_thinking: bool) -> None:
+        # The same run inside a subagent: evaluation output keeps subagent frames, capture output leaves them out.
+        # The subagent's transcript entries name it (agentId), and its stream events the call that started it.
+        spawn = _tool_call("spawn-call", "task", message_id="resp_parent", name="Task")
+        spawned = _result("spawn-result", "task", "14", toolUseResult={"agentId": "child"})
+        child = [{**entry, "isSidechain": True, "agentId": "child"} for entry in SKILL_RUN["transcript"]]
+        events = [_streamed(spawn)]
+        for event in SKILL_RUN["stream"]:
+            if event["type"] in ("assistant", "user"):
+                events.append(json.dumps({**event, "parent_tool_use_id": "task"}))
+        events.append(_streamed(spawned))
+        items, _ = parse_stream_json(
+            "\n".join(events), fold_thinking=fold_thinking, transcript_records=[spawn, spawned, *child]
+        )
+        if fold_thinking:
+            assert _results(items) == {
+                SKILL_CALL_ID: [SKILL_RESULT],
+                "call_ns5MdHHKci6nSW1KCjoSrc6O": ["Result: 14"],
+                "task": ["14"],
+            }
+        else:
+            assert [item.call_id for item in items] == ["task", "task"]
+            assert _results(items) == {"task": ["14"]}
+
+    def test_capture_attributes_the_same_terminal_call(self) -> None:
+        # Under training-token capture the loaded text is not model-authored, so attribution is unchanged.
+        converter = AnthropicConverter()
+        entries: list[TokenEntry] = []
+        request_items: list[dict] = []
+        for index, event in enumerate(event for event in SKILL_RUN["stream"] if event["type"] == "assistant"):
+            served = converter.anthropic_to_responses(
+                {"content": event["message"]["content"]}, NeMoGymResponseCreateParamsNonStreaming(input="q"), "model"
+            )
+            served.id = event["message"]["id"]
+            entry = TokenEntry(
+                capture_key="rollout",
+                model_call_id=f"call-{index}",
+                response_id=served.id,
+                prompt_token_ids=[1],
+                generation_token_ids=[index + 2],
+                generation_log_probs=[-0.1],
+                output_items=[item.model_dump() for item in served.output],
+            )
+            stamp_continuation(entry, request_items)
+            entries.append(entry)
+            request_items.extend(entry.output_items)
+        agent = _make_agent(token_id_capture=True)
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+        body = NeMoGymResponseCreateParamsNonStreaming(input="2 + 3 * 4")
+
+        def attribution(transcript_records):
+            items, metadata = parse_stream_json(
+                _capture_stream(SKILL_RUN), fold_thinking=False, transcript_records=transcript_records
+            )
+            response = agent._response_from_output(body, items, "model", metadata)
+            return response, resolve_terminal(entries, response.model_dump())
+
+        response, with_text = attribution(SKILL_RUN["transcript"])
+        _, without_text = attribution(None)
+        assert response.id == "resp_3" and response.output[1].output == SKILL_RESULT
+        assert with_text.model_call_id == "call-2", with_text.reason
+        # The content witness hashes the transcript's model-authored items and agrees with the served id.
+        assert "corroborated_by=content_cumulative" in with_text.reason
+        assert (with_text.model_call_id, with_text.method, with_text.reason) == (
+            without_text.model_call_id,
+            without_text.method,
+            without_text.reason,
+        )
+
+
+def _entry(kind: str, uuid: str, content, *, agent: str | None = None, message_id: str | None = None, **extra) -> dict:
+    """A transcript entry of the session's main agent, or of subagent ``agent``."""
+    message = {"role": kind, "content": content, **({"id": message_id} if message_id else {})}
+    entry = {"type": kind, "uuid": uuid, "sessionId": "session", "isSidechain": agent is not None, "message": message}
+    return {**entry, **({"agentId": agent} if agent else {}), **extra}
+
+
+def _streamed(entry: dict, *, parent: str | None = None) -> str:
+    """The stream-json event of a transcript entry: the same message and uuid, and for a subagent's entry the call
+    that started the subagent. The stream does not carry sourceToolUseID."""
+    return _event(
+        entry["type"],
+        message=entry["message"],
+        uuid=entry["uuid"],
+        session_id=entry["sessionId"],
+        parent_tool_use_id=parent,
+    )
+
+
+def _tool_call(uuid: str, call_id: str, *, message_id: str, name: str = "Skill", agent: str | None = None) -> dict:
+    block = {"type": "tool_use", "id": call_id, "name": name, "input": {"skill": call_id}}
+    return _entry("assistant", uuid, [block], agent=agent, message_id=message_id)
+
+
+def _result(uuid: str, call_id: str, text: str | None = None, *, agent: str | None = None, **extra) -> dict:
+    block = {"type": "tool_result", "tool_use_id": call_id, "content": text or f"Launching skill: {call_id}"}
+    return _entry("user", uuid, [block], agent=agent, **extra)
+
+
+def _loaded(uuid: str, call_id: str, text: str, *, agent: str | None = None, **extra) -> dict:
+    """The entry of the message that holds a loaded skill's text, linked to its call by sourceToolUseID."""
+    return _entry("user", uuid, text, agent=agent, isMeta=True, sourceToolUseID=call_id, **extra)
+
+
+def _stream_of(*entries: dict, parent: str | None = None) -> list[str]:
+    return [_streamed(entry, parent=parent) for entry in entries]
+
+
+class TestSkillTextInEdgeCases:
+    """Several skills, a result that never arrived or arrived twice, and the 2.1.330 ``appendToToolResult`` shape."""
+
+    @pytest.mark.parametrize("fold_thinking", [True, False])
+    def test_each_skill_text_stays_with_its_own_call(self, fold_thinking: bool) -> None:
+        # Two Skill calls in one message, whose results come back in reverse order, then one whose result the stream
+        # repeats, one whose text was never written (the run was cut off after its result) and one that never got
+        # its result, so its text, though in the transcript, has no result to join.
+        transcript = [
+            _tool_call("u1", "a", message_id="m1"),
+            _tool_call("u2", "b", message_id="m1"),
+            _result("u3", "b"),
+            _loaded("u4", "b", "text of b"),
+            _result("u5", "a"),
+            _loaded("u6", "a", "text of a"),
+            _tool_call("u7", "c", message_id="m2"),
+            _result("u8", "c"),
+            _loaded("u9", "c", "text of c"),
+            _tool_call("u10", "d", message_id="m3"),
+            _result("u11", "d"),
+            _tool_call("u12", "e", message_id="m4"),
+            _loaded("u13", "e", "text of e"),
+        ]
+        # The stream repeats c's result; e's call never got its result, so e's text was not streamed either.
+        stream = _stream_of(*transcript[:9], transcript[7], *transcript[9:12])
+        items, _ = parse_stream_json("\n".join(stream), fold_thinking=fold_thinking, transcript_records=transcript)
+        assert _results(items) == {
+            "b": ["Launching skill: b\n\ntext of b"],
+            "a": ["Launching skill: a\n\ntext of a"],
+            # The model read the result twice but the skill's text once.
+            "c": ["Launching skill: c\n\ntext of c", "Launching skill: c"],
+            "d": ["Launching skill: d"],
+        }
+        assert not any("text of e" in json.dumps(item.model_dump()) for item in items)
+        assert all(item.type in ("function_call", "function_call_output") for item in items)
+        if not fold_thinking:
+            # Capture output keeps the call that never got its result, as incomplete.
+            assert [(item.call_id, item.status) for item in items if item.type == "function_call"] == [
+                ("a", "completed"),
+                ("b", "completed"),
+                ("c", "completed"),
+                ("d", "completed"),
+                ("e", "incomplete"),
+            ]
+
+    def test_a_compatibility_line_goes_into_the_result_and_its_instruction_after_the_skill_text(self) -> None:
+        # Claude Code 2.1.330 can send a second message for a skill with a ``compatibility`` frontmatter line (only in
+        # some session modes, not by default for ``claude -p``). It puts the message's appendToToolResult line into
+        # the tool result itself and its text after the skill's text.
+        transcript = [
+            _tool_call("u1", "a", message_id="m1"),
+            _result("u2", "a"),
+            _loaded("u3", "a", "Base directory for this skill: /skills/a\n\n# A"),
+            _loaded(
+                "u4",
+                "a",
+                "An instruction about the compatibility line.",
+                appendToToolResult="compatibility: needs a VPN",
+            ),
+        ]
+        items, _ = parse_stream_json("\n".join(_stream_of(*transcript)), transcript_records=transcript)
+        assert _results(items) == {
+            "a": [
+                "Launching skill: a\n\ncompatibility: needs a VPN\n\nBase directory for this skill: /skills/a\n\n# A"
+                "\n\nAn instruction about the compatibility line."
+            ]
+        }
+
+
+def _skill_load(prefix: str, call_id: str, skill: str, *, agent: str | None = None) -> list[dict]:
+    """A Skill call, its result and the entry that holds the loaded text, ``text of <skill>``."""
+    return [
+        _tool_call(f"{prefix}-call", call_id, message_id=f"resp-{prefix}", agent=agent),
+        _result(f"{prefix}-result", call_id, f"Launching skill: {skill}", agent=agent),
+        _loaded(f"{prefix}-text", call_id, f"text of {skill}", agent=agent),
+    ]
+
+
+def _with_subagent(main: list[dict], child: list[dict]) -> tuple[str, list[dict]]:
+    """A run whose main agent writes ``main``, starts a subagent that writes ``child``, and answers."""
+    spawn = _tool_call("spawn-call", "spawn", message_id="resp-spawn", name="Agent")
+    spawned = _result("spawn-result", "spawn", "done", toolUseResult={"agentId": "child"})
+    answer = _entry("assistant", "main-answer", [{"type": "text", "text": "14"}], message_id="resp-answer")
+    stream = _stream_of(*main, spawn) + _stream_of(*child, parent="spawn") + _stream_of(spawned, answer)
+    # Claude Code writes the main agent's entries to the session's transcript and the subagent's to a file of its own.
+    return "\n".join(stream), [*main, spawn, spawned, answer, *child]
+
+
+class TestSkillTextBelongsToOneAgentsSkillCall:
+    """The text a transcript entry links to a call id joins only a Skill call of the same agent, once.
+
+    Through a model server the model makes the call ids, so they need not be unique: Kimi K2 (the kimi_k2 tool parser)
+    numbers them per conversation, and the main agent and a subagent can each load a skill as ``functions.Skill:0``.
+    """
+
+    @pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
+    def test_the_main_agent_and_a_subagent_each_get_their_own_skill_text(self, fold_thinking: bool) -> None:
+        call = "functions.Skill:0"
+        stream, transcript = _with_subagent(
+            _skill_load("main", call, "a"), _skill_load("child", call, "b", agent="child")
+        )
+        items, _ = parse_stream_json(stream, fold_thinking=fold_thinking, transcript_records=transcript)
+        if fold_thinking:
+            assert _results(items) == {
+                call: ["Launching skill: a\n\ntext of a", "Launching skill: b\n\ntext of b"],
+                "spawn": ["done"],
+            }
+        else:
+            # Capture output leaves the subagent's frames out, and its skill text with them.
+            assert _results(items) == {call: ["Launching skill: a\n\ntext of a"], "spawn": ["done"]}
+            assert "text of b" not in json.dumps([item.model_dump() for item in items])
+
+    @pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
+    def test_a_subagents_skill_text_does_not_join_the_main_agents_bash_call(self, fold_thinking: bool) -> None:
+        # An id two agents share need not name the same tool: here the main agent's Bash call and the subagent's
+        # Skill call are both call_0.
+        bash = [
+            _tool_call("main-call", "call_0", message_id="resp-main", name="Bash"),
+            _result("main-result", "call_0", "Result: 14"),
+        ]
+        stream, transcript = _with_subagent(bash, _skill_load("child", "call_0", "b", agent="child"))
+        items, _ = parse_stream_json(stream, fold_thinking=fold_thinking, transcript_records=transcript)
+        child = ["Launching skill: b\n\ntext of b"] if fold_thinking else []
+        assert _results(items) == {"call_0": ["Result: 14", *child], "spawn": ["done"]}
+
+    def test_text_linked_to_a_bash_call_is_left_out(self) -> None:
+        transcript = [
+            _tool_call("u1", "call_0", message_id="m1", name="Bash"),
+            _result("u2", "call_0", "Result: 14"),
+            _loaded("u3", "call_0", "Base directory for this skill: /skills/a"),
+        ]
+        items, _ = parse_stream_json("\n".join(_stream_of(*transcript)), transcript_records=transcript)
+        assert _results(items) == {"call_0": ["Result: 14"]}
+
+    def test_an_id_that_names_two_calls_of_one_agent_is_left_out(self) -> None:
+        # The main agent made two Skill calls with one id (a model that numbers its calls anew after a context
+        # compaction could). Which text follows which call is not certain, so neither result gets one.
+        call = "functions.Skill:0"
+        transcript = [*_skill_load("first", call, "a"), *_skill_load("second", call, "b")]
+        items, _ = parse_stream_json("\n".join(_stream_of(*transcript)), transcript_records=transcript)
+        assert _results(items) == {call: ["Launching skill: a", "Launching skill: b"]}
+
+    @pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
+    def test_an_entry_read_twice_adds_its_text_once(self, fold_thinking: bool) -> None:
+        # The same entries (same uuid) twice: the text entry repeated, and the whole transcript read again.
+        transcript = list(SKILL_RUN["transcript"])
+        transcript.insert(transcript.index(SKILL_ENTRY) + 1, dict(SKILL_ENTRY))
+        items, _ = parse_stream_json(
+            _capture_stream(SKILL_RUN), fold_thinking=fold_thinking, transcript_records=transcript + transcript
+        )
+        assert _results(items) == {SKILL_CALL_ID: [SKILL_RESULT], "call_ns5MdHHKci6nSW1KCjoSrc6O": ["Result: 14"]}
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        ("loaded text", ["loaded text"]),
+        ([{"type": "text", "text": "loaded text"}], ["loaded text"]),
+        ([{"type": "text", "text": "first"}, {"type": "text", "text": "second"}], ["first\n\nsecond"]),
+        ([{"type": "text", "text": " "}], None),
+        ([{"type": "image", "source": {}}], None),
+        (None, None),
+    ],
+)
+def test_tool_result_additions_read_the_text_linked_to_a_call(content, expected) -> None:
+    records = [
+        _tool_call("call-entry", "call", message_id="m1"),
+        _result("result-entry", "call"),
+        {**_loaded("text-entry", "call", "unused"), "message": {"role": "user", "content": content}},
+        # An attachment is no message, including the skills Claude Code sends again after compacting the context; a
+        # compaction summary names no call; an entry without a uuid, or a subagent's entry that does not name its
+        # subagent, is not read.
+        {"type": "attachment", "uuid": "x1", "sessionId": "session", "sourceToolUseID": "call", "attachment": {}},
+        {
+            "type": "attachment",
+            "uuid": "x2",
+            "sessionId": "session",
+            "sourceToolUseID": "call",
+            "attachment": {"type": "invoked_skills", "skills": [{"name": "x", "content": "loaded text"}]},
+        },
+        _entry("user", "x3", "Summary: loaded text", isCompactSummary=True),
+        {key: value for key, value in _loaded("x4", "call", "no uuid").items() if key != "uuid"},
+        {key: value for key, value in _loaded("x5", "call", "no agentId", agent="child").items() if key != "agentId"},
+    ]
+    additions = tool_result_additions(records)
+    if expected is None:
+        assert additions == {}
+    else:
+        assert additions == {("result-entry", "call"): ToolResultAdditions(result_lines=[], messages=expected)}
 
 
 @pytest.mark.asyncio
