@@ -206,7 +206,19 @@ class BaseServer(BaseModel):
         @app.get("/health", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
-            return {"status": "ok"}
+            return liveness_body()
+
+
+# A token the supervisor gives every server it starts in one run (and its own head server). Each server returns it on
+# its liveness route, so the supervisor counts as ready only answers from its own servers, not from another run's
+# server that holds the same port.
+NEMO_GYM_SERVER_RUN_TOKEN_ENV_VAR_NAME = "NEMO_GYM_SERVER_RUN_TOKEN"
+
+
+def liveness_body() -> dict:
+    """The liveness routes' body: `ok`, with this run's token when the supervisor set one."""
+    token = environ.get(NEMO_GYM_SERVER_RUN_TOKEN_ENV_VAR_NAME)
+    return {"status": "ok", "run_token": token} if token else {"status": "ok"}
 
 
 class UvicornLoggingConfig(BaseModel):

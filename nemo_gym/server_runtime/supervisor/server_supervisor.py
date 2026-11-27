@@ -18,6 +18,7 @@ import asyncio
 import errno
 import os
 import re
+import secrets
 import shlex
 import socket
 import sys
@@ -61,6 +62,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
+from nemo_gym.server_runtime.base_server import NEMO_GYM_SERVER_RUN_TOKEN_ENV_VAR_NAME
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
 from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
 from nemo_gym.server_runtime.supervisor.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
@@ -815,6 +817,11 @@ class ServerSupervisor:  # pragma: no cover
             OmegaConf.to_yaml(global_config_dict), configured_servers, global_config_dict
         )
 
+        # Every server of this start attempt returns this token on its liveness route, so readiness counts only answers
+        # from our own servers. The head server runs in this process and reads it from the environment.
+        self._run_token = secrets.token_hex(16)
+        os.environ[NEMO_GYM_SERVER_RUN_TOKEN_ENV_VAR_NAME] = self._run_token
+
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
         self._startup.mark("start_head_server")
@@ -836,7 +843,10 @@ class ServerSupervisor:  # pragma: no cover
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
 
-            extra_env = config_dict_env | {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path}
+            extra_env = config_dict_env | {
+                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
+                NEMO_GYM_SERVER_RUN_TOKEN_ENV_VAR_NAME: self._run_token,
+            }
             if top_level_path not in ray_server_names:
                 # A server that uses Ray without declaring it then fails on its first Ray call, rather than
                 # starting a private cluster in each of its processes.
@@ -993,7 +1003,9 @@ class ServerSupervisor:  # pragma: no cover
             # Checked before trusting an answer: a dead thread means our head server never bound its port.
             thread_alive = self._head_server_thread.is_alive()
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            own_started = self._own_head_server_started()
+            own_started = self._own_head_server_started() and (
+                status != "success" or self._answer_is_ours(HEAD_SERVER_KEY_NAME)
+            )
             if status == "success" and thread_alive and own_started:
                 return
             if not thread_alive:
@@ -1043,6 +1055,20 @@ class ServerSupervisor:  # pragma: no cover
 
             poll_count += 1
             sleep(3)
+
+    def _answer_is_ours(self, server_name: str) -> bool:
+        """Whether the server answering on `server_name`'s address is this start attempt's: it returns our run token,
+        or none at all (a server whose Gym predates run tokens). A failed check counts as not ours, to be asked again.
+        """
+        run_token = getattr(self, "_run_token", None)
+        if run_token is None:
+            return True
+        try:
+            token = self._server_client.answer_run_token(server_name)
+        except Exception:
+            return False
+        # Anything but a string is no token, as the client reads it.
+        return not isinstance(token, str) or token == run_token
 
     def _own_head_server_started(self) -> bool:
         """Whether this process's head server has bound its port and started serving (uvicorn's `started`)."""
@@ -1354,6 +1380,9 @@ it is listening.
                 probe_timeout_seconds = min(probe_timeout_seconds, remaining_seconds)
 
             status = self._server_client.poll_for_status(name, timeout_seconds=probe_timeout_seconds)
+            # An answer from another run's server on this port (its bind won ours) is not this server being ready.
+            if status == "success" and not self._answer_is_ours(name):
+                status = "other_server"
             statuses.append((name, status))
 
         return statuses

@@ -76,7 +76,14 @@ NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
 NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
 
 
-ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
+# `other_server`: something answers on the server's address, but with another run's token (see `answer_run_token`).
+ServerStatus = Union[
+    Literal["success"],
+    Literal["connection_error"],
+    Literal["timeout"],
+    Literal["unknown_error"],
+    Literal["other_server"],
+]
 
 
 def _connectable_client_host(host: str) -> str:
@@ -342,6 +349,19 @@ class ServerClient(BaseModel):
             return "timeout"
         except Exception:
             return "unknown_error"
+
+    def answer_run_token(self, server_name: str, *, timeout_seconds: float = 5) -> Optional[str]:
+        """The run token a server returns on its liveness route (`/`), or None when it returns none (a server whose
+        Gym predates run tokens). Raises when the request fails or the body is not a JSON object."""
+        if server_name == HEAD_SERVER_KEY_NAME:
+            server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]
+        else:
+            server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        body = requests.get(self._build_server_base_url(server_config_dict), timeout=timeout_seconds).json()
+        if not isinstance(body, dict):
+            raise ValueError(f"liveness body is not an object: {body!r}")
+        token = body.get("run_token")
+        return token if isinstance(token, str) else None
 
     def _resolve_base_url(self, server_name: str) -> str:
         cached = self._server_base_urls.get(server_name)

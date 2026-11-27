@@ -35,7 +35,12 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.config.secret_utils import mask_credentials
-from nemo_gym.server_runtime.base_server import BaseServer, UvicornBacklogConfig, UvicornProxyHeadersConfig
+from nemo_gym.server_runtime.base_server import (
+    BaseServer,
+    UvicornBacklogConfig,
+    UvicornProxyHeadersConfig,
+    liveness_body,
+)
 from nemo_gym.telemetry.observer import observe_app_event_loop
 
 
@@ -55,7 +60,7 @@ class HeadServer(BaseServer):
         @app.get("/livez", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
-            return {"status": "ok"}
+            return liveness_body()
 
         @app.get("/readyz", include_in_schema=False)
         @app.get("/healthz", include_in_schema=False)
