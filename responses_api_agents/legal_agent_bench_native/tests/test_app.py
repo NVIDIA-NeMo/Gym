@@ -521,12 +521,21 @@ def test_staging_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(monkey
                 await asyncio.Event().wait()
             return SandboxExecResult(stdout="", stderr="", return_code=0)
 
-        box.exec.side_effect = execute
-        running = runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
-        return await asyncio.wait_for(running, 2)
+        begin_activation = state.session.begin_activation
 
-    result = run_on_clock_ahead_loop(main())
+        async def yielding_begin_activation(**kwargs):
+            await asyncio.sleep(0)  # Let an expired activation timeout cancel the wait.
+            await begin_activation(**kwargs)
+
+        box.exec.side_effect = execute
+        state.session.begin_activation = yielding_begin_activation
+        running = runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
+        return await asyncio.wait_for(running, 2), box
+
+    result, box = run_on_clock_ahead_loop(main())
     assert result.status == "incomplete" and result.metadata["lab_finish_reason"] == "agent_timeout"
+    # The turn reached staging, so neither the turn budget nor the activation wait expired at once.
+    assert any(call.args[0].startswith("mkdir") for call in box.exec.call_args_list)
 
 
 async def test_deadline_during_rearm_waits_for_previous_cleanup_and_never_stages(monkeypatch):

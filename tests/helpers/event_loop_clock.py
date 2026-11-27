@@ -31,9 +31,6 @@ class ClockAheadEventLoop(asyncio.SelectorEventLoop):
 
 
 def run_on_clock_ahead_loop[T](coroutine: Coroutine[Any, Any, T]) -> T:
-    """Run ``coroutine`` to completion on a fresh ``ClockAheadEventLoop`` and close the loop."""
-    loop = ClockAheadEventLoop()
-    try:
-        return loop.run_until_complete(coroutine)
-    finally:
-        loop.close()
+    """Run ``coroutine`` on a fresh ``ClockAheadEventLoop``, then clean up and close the loop as ``asyncio.run`` does."""
+    with asyncio.Runner(loop_factory=ClockAheadEventLoop) as runner:
+        return runner.run(coroutine)
