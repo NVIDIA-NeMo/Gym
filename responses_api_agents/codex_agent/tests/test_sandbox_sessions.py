@@ -105,8 +105,8 @@ def test_a_task_that_declares_skills_gets_them_in_codex_home_before_the_cli_runs
         directory = agent._session_records[session_id].state.session.session_dir
         commands = [call.args[0] for call in sandbox.exec.await_args_list]
         (copy,) = [command for command in commands if " cp -RL -- " in command]
-        assert f"mkdir -p -- {directory}/home/.codex/skills && cp -RL -- /workspace/skills/. " in copy
-        assert copy.endswith(f" {directory}/home/.codex/skills/")
+        skills = f"{directory}/home/.codex/skills"
+        assert f"mkdir -p -- {skills} && cp -RL -- /workspace/skills/. {skills}/;" in copy
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Read the skill"})
         assert result.status_code == 200, result.text
         # Codex discovers user skills in CODEX_HOME/skills, the folder the seed filled.

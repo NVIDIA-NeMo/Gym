@@ -51,6 +51,11 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | No
     missing or unreadable fails the copy, so the seed is refused rather than staging a skill the CLI cannot read.
     A read or copy that did not report an exit code (a timeout or a provider failure) raises ``RuntimeError``,
     which a seed answers as a retryable failure.
+
+    The copy belongs to the session, whose close removes it: after the copy, and after one that failed part way, its
+    owner can read and write every entry and enter every folder, whatever the modes in the task's folder (an image
+    can ship its skills read-only to a non-root agent user). Executable files stay executable, and the task's folder
+    is left as it was.
     """
     context_path = shlex.quote(TASK_CONTEXT_FILE)
     # A file that exists but cannot be read fails the read instead of passing for an absent one.
@@ -76,9 +81,12 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | No
             f"The task's skills_dir {skills_dir!r} is not an absolute path, so its skills cannot be staged for the CLI"
         )
     source, target = shlex.quote(skills_dir), shlex.quote(destination)
+    # cp gives the copy the task's modes, and a read-only folder in it would keep the close from removing the session.
+    # The chmod runs after a failed copy too; its own errors are dropped, so a refusal reports the copy's.
     copied = await sandbox.exec(
         f"[ -d {source} ] || {{ echo 'not a folder in the sandbox' >&2; exit 2; }}; "
-        f"mkdir -p -- {target} && cp -RL -- {source}/. {target}/",
+        f"mkdir -p -- {target} && cp -RL -- {source}/. {target}/; copy_status=$?; "
+        f"chmod -R u+rwX -- {target} 2>/dev/null; exit $copy_status",
         cwd="/",
         timeout_s=_COPY_TIMEOUT_S,
     )
