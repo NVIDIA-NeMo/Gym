@@ -136,20 +136,52 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
     config: VideoMCQAResourcesServerConfig
     benchmark: ClassVar[Benchmark | None] = None
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
-    _cohort: AccuracyCohort | QuestionSetCohort = PrivateAttr()
+    verify_response_cls: ClassVar[type[VideoMCQAVerifyResponse]] = VideoMCQAVerifyResponse
+    score_cls: ClassVar[type[QuestionScore]] = QuestionScore
+    _cohort: object = PrivateAttr()
+
+    def _load_cohort(self, manifest: Path) -> object:
+        return load_question_set(manifest) or AccuracyCohort.model_validate_json(manifest.read_text(encoding="utf-8"))
+
+    def _validate_cohort(self) -> None:
+        if self.benchmark is not None and (
+            isinstance(self._cohort, QuestionSetCohort) or self._cohort.benchmark != self.benchmark
+        ):
+            raise ValueError("Cohort belongs to a different benchmark resources server")
+
+    def _validate_option_count(self, metadata: VerifierMetadata) -> None:
+        if isinstance(self._cohort, AccuracyCohort) and metadata.option_count != 4:
+            raise ValueError("VideoMME-v1/LVBench require four choices")
+
+    def _cohort_scope(self) -> str:
+        cohort = self._cohort
+        return cohort.question_set if isinstance(cohort, QuestionSetCohort) else cohort.benchmark
+
+    def _metric_spec(self) -> tuple[str, dict[str, dict[str, tuple[str, ...]]]]:
+        cohort = self._cohort
+        if isinstance(cohort, QuestionSetCohort):
+            return cohort.question_set, {}
+        metric = "Video_MME" if cohort.benchmark == "videomme_v1" else "LVBench"
+        return metric, cohort.task_subsets
+
+    def _grade_rule(
+        self,
+        final_text: str | None,
+        metadata: VerifierMetadata,
+        *,
+        setting: Setting,
+        answer_policy: str,
+        failure: Failure | None = None,
+    ) -> QuestionScore:
+        return grade_answer(final_text, metadata, setting=setting, answer_policy=answer_policy, failure=failure)
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         # The server runs in its own directory, and benchmark configs name their prepared cohort relative to the Gym
         # root (benchmarks/<name>/data/), so a relative path is resolved the way Gym resolves its other read paths.
         manifest = _resolve_under_cwd_or_install(self.config.cohort_manifest)
-        self._cohort = load_question_set(manifest) or AccuracyCohort.model_validate_json(
-            manifest.read_text(encoding="utf-8")
-        )
-        if self.benchmark is not None and (
-            isinstance(self._cohort, QuestionSetCohort) or self._cohort.benchmark != self.benchmark
-        ):
-            raise ValueError("Cohort belongs to a different benchmark resources server")
+        self._cohort = self._load_cohort(manifest)
+        self._validate_cohort()
         self.config.check_answer_judge(self._cohort.answer_policy)
 
     def _validate_metadata(self, metadata: VerifierMetadata, *, setting: str) -> None:
@@ -163,8 +195,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
             raise ValueError("Result benchmark, task, revision, source or setting differs from the frozen cohort")
         if metadata.level is not None or metadata.group_id is not None:
             raise ValueError("VideoMME-v1/LVBench and question sets have no v2 group or level")
-        if isinstance(cohort, AccuracyCohort) and metadata.option_count != 4:
-            raise ValueError("VideoMME-v1/LVBench require four choices")
+        self._validate_option_count(metadata)
 
     async def verify(self, body: VideoMCQAVerifyRequest) -> VideoMCQAVerifyResponse:
         """Score final answers only; masked infrastructure failures remain inconclusive."""
@@ -179,6 +210,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
             answer_policy=self._cohort.answer_policy,
             failure=failure,
             respond=lambda score: self._verify_response(body, score, failure, reason),
+            grade_rule=self._grade_rule,
         )
 
     def _verify_response(
@@ -187,8 +219,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
         reward = score.reward if score.reward is not None else 0.0
         if score.outcome == "no_answer" and self.config.empty_answer_reward is not None and body.response.output:
             reward = self.config.empty_answer_reward
-        cohort = self._cohort
-        scope = cohort.question_set if isinstance(cohort, QuestionSetCohort) else cohort.benchmark
+        scope = self._cohort_scope()
         payload = body.model_dump(
             exclude={
                 "reward",
@@ -201,7 +232,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
                 "evaluation_completed",
             }
         )
-        return VideoMCQAVerifyResponse(
+        return self.verify_response_cls(
             **payload,
             reward=reward,
             mask_sample=not score.evaluation_completed,
@@ -229,7 +260,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
             if result.get("task_id") != metadata.task_id or result.get("answer_policy") != cohort.answer_policy:
                 raise ValueError("Result task or answer policy differs from the frozen cohort")
             score = (
-                grade_answer(
+                self._grade_rule(
                     None,
                     metadata,
                     setting=cohort.setting,
@@ -237,7 +268,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
                     failure="infrastructure_failure",
                 )
                 if result.get("mask_sample", False)
-                else QuestionScore(
+                else self.score_cls(
                     task_id=metadata.task_id,
                     dataset_revision=metadata.dataset_revision,
                     setting=result["setting"],
@@ -265,11 +296,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
         """
         cohort = self._cohort
         repeats = self._attempts(body)
-        if isinstance(cohort, QuestionSetCohort):
-            metric, task_subsets = cohort.question_set, {}
-        else:
-            metric = "Video_MME" if cohort.benchmark == "videomme_v1" else "LVBench"
-            task_subsets = cohort.task_subsets
+        metric, task_subsets = self._metric_spec()
         if cohort.setting == "agentic":
             metric += "_agentic"
         subsets: dict[str, tuple[str, ...]] = {metric: cohort.task_ids}
@@ -289,6 +316,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
                     dataset_revision=cohort.dataset_revision,
                     setting=cohort.setting,
                     answer_policy=cohort.answer_policy,
+                    allowed_policies=self.score_cls.ALLOWED_POLICIES,
                 )
                 for scores in repeats
             ]

@@ -12,10 +12,13 @@ from resources_servers.video_mcqa.dataset import (
     VideoSource,
     load_lvbench,
     load_videomme_v1,
+    parse_embedded_options,
+    parse_options,
     text,
     validate_subsets,
 )
 from resources_servers.video_mcqa.prepare import prepare_dataset
+from resources_servers.video_mcqa.task import LABELS
 from resources_servers.video_mcqa.tests.helpers import REVISION, lv_record, media, v1_record
 
 
@@ -100,6 +103,33 @@ def test_invalid_v1_rows(updates) -> None:
 def test_unlabeled_v1_options() -> None:
     row = v1_record(options=["Circle", "Square", "Triangle", "Star"])
     assert load_videomme_v1([row], dataset_revision=REVISION, media=media())[0].question.options[1] == "Square"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["E. coli", "Staph", "Yeast", "Mold"],
+        ["J. CREW", "Zara", "Uniqlo", "Gap"],
+    ],
+)
+def test_unlabeled_v1_options_starting_with_out_of_range_initials_are_preserved(options) -> None:
+    row = v1_record(options=options)
+    loaded = load_videomme_v1([row], dataset_revision=REVISION, media=media())
+    assert loaded[0].question.options == tuple(options)
+
+
+def test_lvbench_embedded_options_preserve_inner_roman_numeral_lines_and_reject_extra_options() -> None:
+    record = lv_record(
+        question="Which invented step happens last?\n(A) Alpha\n(B) Beta\n(C) Gamma\n(D) Delta\n(I) Sub-step"
+    )
+    loaded = load_lvbench([record], dataset_revision=REVISION, media=media())
+    assert loaded[0].question.options == ("Alpha", "Beta", "Gamma", "Delta\n(I) Sub-step")
+
+    extra = lv_record(
+        question="Which invented step happens last?\n(A) Alpha\n(B) Beta\n(C) Gamma\n(D) Delta\n(E) Extra"
+    )
+    with pytest.raises(ValueError, match="canonical \\(A\\)-\\(D\\) options"):
+        load_lvbench([extra], dataset_revision=REVISION, media=media())
 
 
 def test_source_duplicate_options_are_preserved_flagged_and_never_relabelled() -> None:
@@ -272,3 +302,60 @@ def test_agentic_sandbox_root_is_an_absolute_directory(root) -> None:
             setting="agentic",
             sandbox_root=root,
         )
+
+
+@pytest.mark.parametrize("count", [2, 5, 8, 9, 10, 26])
+@pytest.mark.parametrize("fmt", ["{L}. Choice {i}", "{L}) Choice {i}", "({L}) Choice {i}", "Choice {i}"])
+def test_parse_options_supports_two_to_twenty_six_canonical_choices(count: int, fmt: str) -> None:
+    raw = [fmt.format(L=LABELS[i], i=i + 1) for i in range(count)]
+    parsed = parse_options(raw)
+    assert parsed == tuple(f"Choice {i + 1}" for i in range(count))
+
+
+def test_parse_options_strip_labels_false_preserves_literal_text() -> None:
+    raw = ["A. First", "Second"]
+    assert parse_options(raw, strip_labels=False) == ("A. First", "Second")
+    with pytest.raises(ValueError, match="canonical A-B order"):
+        parse_options(raw, strip_labels=True)
+
+
+@pytest.mark.parametrize(
+    "raw,exact_count",
+    [
+        (["Only one"], None),
+        ([f"Choice {i}" for i in range(27)], None),
+        (["A. X", "C. Y"], None),
+        (["A. X", "B. Y", "D. Z"], None),
+        (["A. X", "Y"], None),
+        (["A. X", "B. Y", "C. Z"], 4),
+        (["A. X", "B. Y"], 1),
+        (["A. X", "B. Y"], 27),
+        (["A. X", "B. Y"], True),
+    ],
+)
+def test_parse_options_rejects_invalid_counts_and_labels(raw, exact_count) -> None:
+    with pytest.raises(ValueError):
+        parse_options(raw, exact_count=exact_count)
+
+
+@pytest.mark.parametrize("count", [2, 5, 10, 26])
+def test_parse_embedded_options_supports_two_to_twenty_six_canonical_choices(count: int) -> None:
+    block = "\n".join(f"({LABELS[i]}) Option {i + 1}" for i in range(count))
+    stem, options = parse_embedded_options(f"Which item appears first?\n{block}")
+    assert stem == "Which item appears first?"
+    assert options == tuple(f"Option {i + 1}" for i in range(count))
+
+
+@pytest.mark.parametrize(
+    "question_text,exact_count",
+    [
+        ("Stem\n(A) Only one", None),
+        ("Stem\n(A) First\n(C) Second", None),
+        ("Stem\n(A) First\n(B) Second\n(C) Third", 4),
+        ("Stem\n(A) First\n(B) Second", 1),
+        ("Stem\n(A) First\n(B) Second", True),
+    ],
+)
+def test_parse_embedded_options_rejects_invalid_shapes(question_text, exact_count) -> None:
+    with pytest.raises(ValueError):
+        parse_embedded_options(question_text, exact_count=exact_count)

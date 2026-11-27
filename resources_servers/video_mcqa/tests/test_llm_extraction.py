@@ -157,6 +157,19 @@ def test_a_reply_that_names_no_option_is_unusable(reply) -> None:
         parse_llm_choice(reply, option_count=4)
 
 
+def test_parse_llm_choice_option_count_boundaries() -> None:
+    assert parse_llm_choice('{"choice": "j"}', option_count=10) == "J"
+    assert parse_llm_choice('{"choice": "Z"}', option_count=26) == "Z"
+    assert parse_llm_choice('{"choice": "B"}', option_count=2) == "B"
+    with pytest.raises(ValueError, match="A-J"):
+        parse_llm_choice('{"choice": "K"}', option_count=10)
+    with pytest.raises(ValueError, match="A-B"):
+        parse_llm_choice('{"choice": "C"}', option_count=2)
+    for bad_count in (0, 1, 27, True):
+        with pytest.raises(ValueError, match="option_count"):
+            parse_llm_choice('{"choice": "A"}', option_count=bad_count)
+
+
 QUESTION = "Which invented shape moves?\nA. Circle\nB. Square\nC. Triangle\nD. Star"
 
 
