@@ -21,6 +21,7 @@ Covers per-call sampling kwargs (``temperature``, ``top_p``,
 from __future__ import annotations
 
 import json
+import logging
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +29,7 @@ import httpx
 import pytest
 from openai import APIStatusError
 from pydantic import BaseModel
+from stirrup.clients.utils import to_openai_messages
 from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, Tool, ToolCall, ToolMessage, UserMessage
 
@@ -869,3 +871,93 @@ class TestProviderHistoryMatchesStrictIngress:
         assert assistant.reasoning is not None and assistant.reasoning.signature == "sig-1"
         assert assistant.metadata == {"k": "v"}
         assert assistant.tool_calls[0].signature == "tsig"
+
+
+def _signed_thinking_response(blocks, reasoning_content=None):
+    response = _make_response(content="")
+    response.choices[0].message.thinking_blocks = blocks
+    response.choices[0].message.reasoning_content = reasoning_content
+    return response
+
+
+async def _generate_reasoning(blocks, reasoning_content="plain text"):
+    client = _make_client()
+    client._client = MagicMock()
+    client._client.chat.completions.create = AsyncMock(
+        return_value=_signed_thinking_response(blocks, reasoning_content)
+    )
+    assistant = await client.generate([UserMessage(content="task")], tools={})
+    return assistant.reasoning
+
+
+@pytest.mark.asyncio
+async def test_signed_thinking_is_kept_as_signed_reasoning() -> None:
+    """A signed thinking block (Anthropic through a LiteLLM-compatible endpoint) becomes the message's Reasoning."""
+    blocks = [{"type": "thinking", "thinking": "block text", "signature": "sig-abc"}]
+
+    reasoning = await _generate_reasoning(blocks)
+
+    assert reasoning.signature == "sig-abc"
+    assert reasoning.content == "block text"
+    # Upstream contract: Stirrup's serializer turns a signed Reasoning back into the block the provider issued.
+    assistant = AssistantMessage(
+        content="", reasoning=reasoning, token_usage=TokenUsage(input=1, answer=1, reasoning=0)
+    )
+    (replayed,) = to_openai_messages([assistant])
+    assert replayed["thinking_blocks"] == [{"type": "thinking", "signature": "sig-abc", "thinking": "block text"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "blocks,signature,content",
+    [
+        (
+            [{"type": "redacted_thinking", "data": "opaque"}, {"type": "thinking", "thinking": "t", "signature": "s"}],
+            "s",
+            "t",
+        ),
+        ([{"type": "thinking", "thinking": "t", "thinking_signature": "s"}], "s", "t"),
+        (
+            [
+                {"type": "thinking", "thinking": "first", "signature": "s1"},
+                {"type": "thinking", "thinking": "second", "signature": "s2"},
+            ],
+            "s1",
+            "first",
+        ),
+        # The signature covers the block's text, so a block without text is kept as issued.
+        ([{"type": "thinking", "signature": "s"}], "s", ""),
+    ],
+)
+async def test_the_first_signed_thinking_block_is_kept_verbatim(blocks, signature, content) -> None:
+    reasoning = await _generate_reasoning(blocks)
+
+    assert (reasoning.signature, reasoning.content) == (signature, content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        None,
+        [],
+        [{"type": "thinking", "thinking": "unsigned"}],
+        [{"type": "redacted_thinking", "data": "opaque", "signature": "not-a-thinking-block"}],
+        ["not a mapping"],
+    ],
+)
+async def test_unsigned_or_absent_thinking_keeps_the_plain_reasoning(blocks) -> None:
+    reasoning = await _generate_reasoning(blocks)
+
+    assert reasoning.content == "plain text"
+    assert reasoning.signature is None
+
+
+@pytest.mark.asyncio
+async def test_several_thinking_blocks_are_reported(caplog) -> None:
+    blocks = [{"type": "thinking", "thinking": "a", "signature": "s"}, {"type": "redacted_thinking", "data": "x"}]
+
+    with caplog.at_level(logging.WARNING):
+        await _generate_reasoning(blocks)
+
+    assert "2 thinking blocks" in caplog.text
