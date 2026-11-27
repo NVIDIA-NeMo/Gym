@@ -256,8 +256,13 @@ def _sheet_rows(world: dict, ref, sheets) -> dict:
 def row_problems(info: dict, *, requester: bool) -> list[str]:
     """What makes a row unusable before any rollout, the checks load_environment and each rollout's setup_state share:
     world assertions on wall-clock fields, a multi-day row without its wait texts or with a time that is not ISO 8601, a
-    multi-turn row without a requester endpoint, a requester service that is no app, a day assertion without a record."""
+    multi-turn row without a requester endpoint, a requester service that is no app, a day assertion without a record,
+    a per-row max_turns that is not a positive integer or an unavailable_call_break that is not a boolean."""
     problems = []
+    if "max_turns" in info and not (type(info["max_turns"]) is int and info["max_turns"] > 0):
+        problems.append(f"max_turns must be a positive integer, got {info['max_turns']!r}")
+    if "unavailable_call_break" in info and not isinstance(info["unavailable_call_break"], bool):
+        problems.append(f"unavailable_call_break must be true or false, got {info['unavailable_call_break']!r}")
     for a in info.get("assertions", []):
         if fields := stamped_fields(a):
             problems.append(
@@ -666,7 +671,9 @@ def load_environment(
 
     `requester_base_url` and `requester_model` name the OpenAI-compatible endpoint that plays the requester on
     multi-turn rows. `requester_body` is merged over the built-in sampling values. A key is read from the variable named
-    by `requester_api_key_env` or the file `requester_api_key_file` and sent as a Bearer token."""
+    by `requester_api_key_env` or the file `requester_api_key_file` and sent as a Bearer token. A row's info may set
+    `max_turns` and `unavailable_call_break`, which override the values given here for that row, so rows of every kind
+    can share one environment."""
     if not (0 < requester_timeout_s < math.inf):
         raise ValueError(f"requester_timeout_s must be positive and finite, got {requester_timeout_s!r}")
     if requester_max_tries < 1:
@@ -720,7 +727,7 @@ def load_environment(
 
         def _unavailable(self, state, key: str) -> None:
             state[key] = state.get(key, 0) + 1
-            if unavailable_call_break:
+            if state["info"].get("unavailable_call_break", unavailable_call_break):
                 state["violation"] = 1
 
         def update_tool_args(self, tool_name, tool_args, messages, state, **update_kwargs):
@@ -754,6 +761,13 @@ def load_environment(
         def _requester_failed(self, state, error: Exception) -> None:
             state["requester_failed"] = 1
             logger.warning("ab_synth: episode ends unscored: %s", str(error)[:200])
+
+        @vf.stop
+        async def max_turns_reached(self, state) -> bool:
+            """The row's own max_turns, else the environment's."""
+            limit = state["info"].get("max_turns")
+            limit = limit if type(limit) is int else self.max_turns  # a bad value has already refused the row
+            return 0 < limit <= len(state["trajectory"])
 
         @vf.stop
         async def invalid_row(self, state) -> bool:

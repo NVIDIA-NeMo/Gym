@@ -78,6 +78,10 @@ multi-day row is graded at `period_end`: the clock runs to it first, so an event
 applies. With `unavailable_call_break: true`, a call to a tool the agent was not given, or to a service not connected
 for it (a requester-owned app included), also breaks a guardrail.
 
+A row's `info` may set `max_turns` and `unavailable_call_break` for itself. They override the environment's values,
+so single-day, multi-day and multi-turn rows with different limits can run on one agent. A value of the wrong type
+refuses the row.
+
 Metrics: `user_turns`, `requester_failed`, `env_row_invalid`, `empty_turn`, `unknown_tool_calls`, `out_of_scope_calls`,
 `requester_service_calls`, `requester_tool_calls`, `violation`.
 

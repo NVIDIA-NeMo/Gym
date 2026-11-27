@@ -216,6 +216,23 @@ class LoadEnvironmentTest(unittest.TestCase):
             self.assertEqual(state["unknown_tool_calls"], 1)
             self.assertEqual(env.reward(state), reward)
 
+    def test_a_row_can_set_its_own_guardrail_and_turn_limit(self):
+        for env_break, row_break, reward in ((False, True, 0.0), (True, False, 1.0)):
+            vf_env, state = load({**SINGLE_DAY, "unavailable_call_break": row_break}, unavailable_call_break=env_break)
+            vf_env.update_tool_args("send_email", {}, [], state)
+            state["clock"].fetch(**PROMOTE)
+            self.assertEqual(env.reward(state), reward)
+        for row, env_turns in (({"max_turns": 2}, 80), ({}, 2)):
+            vf_env, state = load({**SINGLE_DAY, **row}, max_turns=env_turns)
+            end_turn(state, "one")
+            self.assertFalse(asyncio.run(vf_env.max_turns_reached(state)))
+            end_turn(state, "two")
+            self.assertTrue(asyncio.run(vf_env.max_turns_reached(state)))
+
+    def test_a_bad_per_row_setting_refuses_the_row(self):
+        for row in ({"max_turns": 0}, {"max_turns": True}, {"max_turns": "50"}, {"unavailable_call_break": "yes"}):
+            self.assertTrue(env.row_problems({**SINGLE_DAY, **row}, requester=True), row)
+
 
 class RequesterTest(unittest.TestCase):
     def test_requester_answers_from_its_notes_then_done_ends_the_episode(self):
