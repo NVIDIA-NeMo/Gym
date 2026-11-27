@@ -46,7 +46,36 @@ async def test_transport_connections_use_declared_endpoints(monkeypatch, transpo
         assert calls[0][0][0].command == "tool"
     else:
         assert calls[0][0][0] == server["url"]
+        assert calls[0][1]["headers"] is None
         assert calls[0][1]["httpx_client_factory"] is module.http_client
+
+
+@pytest.mark.parametrize("transport", ["sse", "streamable-http"])
+async def test_http_transports_forward_declared_headers(monkeypatch, transport):
+    calls = []
+
+    @asynccontextmanager
+    async def connection(*args, **kwargs):
+        calls.append((args, kwargs))
+        yield ("read", "write", "unused")
+
+    client = SimpleNamespace(initialize=AsyncMock())
+
+    @asynccontextmanager
+    async def session(read, write):
+        yield client
+
+    monkeypatch.setattr(module, "sse_client" if transport == "sse" else "streamablehttp_client", connection)
+    monkeypatch.setattr(module, "ClientSession", session)
+    headers = {"Authorization": "Bearer test-token", "X-Region": "eu"}
+    server = {"name": "search", "transport": transport, "url": "http://mcp.example/mcp", "headers": headers}
+    async with AsyncExitStack() as stack:
+        assert await module.connect(server, stack) is client
+    assert calls[0][0][0] == server["url"]
+    assert calls[0][1]["headers"] == headers
+    assert calls[0][1]["httpx_client_factory"] is module.http_client
+    async with module.http_client(headers=headers) as http:
+        assert {key: http.headers[key] for key in headers} == headers
 
 
 async def test_mcp_session_preserves_tool_state_across_cli_calls(monkeypatch):

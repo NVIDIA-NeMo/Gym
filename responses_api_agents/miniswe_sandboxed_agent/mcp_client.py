@@ -24,9 +24,11 @@ async def connect(server, stack):
     if server["transport"] == "stdio":
         transport = stdio_client(StdioServerParameters(command=server["command"], args=server.get("args", [])))
     elif server["transport"] == "sse":
-        transport = sse_client(server["url"], httpx_client_factory=http_client)
+        transport = sse_client(server["url"], headers=server.get("headers"), httpx_client_factory=http_client)
     else:
-        transport = streamablehttp_client(server["url"], httpx_client_factory=http_client)
+        transport = streamablehttp_client(
+            server["url"], headers=server.get("headers"), httpx_client_factory=http_client
+        )
     streams = await stack.enter_async_context(transport)
     client = await stack.enter_async_context(ClientSession(streams[0], streams[1]))
     await client.initialize()
