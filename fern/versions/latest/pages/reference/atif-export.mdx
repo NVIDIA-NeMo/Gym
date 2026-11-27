@@ -62,8 +62,10 @@ model's own output departs from the strict profile.
   arrived, so a parallel pair that finishes out of order keeps both calls in the model's order.
 - A call without a result (the harness stopped while the tool ran) stays open and is listed in
   `extra.nemo_gym.conversion.open_tool_calls`.
-- A result with the status `incomplete` holds a tool's output so far, which the model never read (the harness stopped
-  while the tool ran). Its `extra.nemo_gym.status` is `incomplete`.
+- A result whose status is `incomplete` keeps it in `extra.nemo_gym.status`. What it means depends on the harness:
+  `codex_agent` sets it on a command's output so far, which the model never read (the run stopped while the command
+  ran); some harnesses, such as `qwen_code_agent`, `nooa_agent` and `simple_strands_agent`, set it on a failed tool's
+  result, which the model read.
 - A custom (free-form) tool call, such as Codex's `apply_patch`, keeps its name and carries its text as the one argument,
   `input`; `extra.nemo_gym.item_type` is `custom_tool_call`.
 - A call with a namespace, such as an MCP tool, is named by its bare tool name. The namespace is in

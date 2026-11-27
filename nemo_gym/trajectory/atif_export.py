@@ -1337,7 +1337,8 @@ def transcript_to_atif(
             if step is None:
                 raise _path_error(path, f"function result {item.call_id!r} matches no pending call")
             results = list(step.observation.results) if step.observation is not None else []
-            # An incomplete result is a tool's output so far (it was stopped while it ran), not what the model read.
+            # The result item's own status, whose meaning is the harness's: codex_agent sets it on a command's output
+            # so far, which the model never read; other harnesses set it on a failed tool's result, which it read.
             result_extra = ({"source_item_id": item.id} if item.id is not None else {}) | (
                 {"status": "incomplete"} if getattr(item, "status", None) == "incomplete" else {}
             )

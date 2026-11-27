@@ -1998,9 +1998,9 @@ def test_transcript_to_atif_keeps_a_free_form_call_without_its_result_open() -> 
     assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == ["patch-1"]
 
 
-def test_transcript_to_atif_marks_a_result_the_tool_had_not_finished() -> None:
-    """A harness stopped while a command ran can give the call its output so far as an incomplete result. The model
-    never read it, so the export says so; a finished result has no such mark."""
+def test_transcript_to_atif_keeps_the_incomplete_status_of_a_result() -> None:
+    """An incomplete result keeps its status in ``extra.nemo_gym.status``. Here it is a command's output so far, as the
+    Codex agent gives it when the run stops while the command runs; a finished result has no such mark."""
     trajectory = _transcript(
         "Run the tests",
         [
