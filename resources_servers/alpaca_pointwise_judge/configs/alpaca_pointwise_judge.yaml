@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+alpaca_pointwise_judge:
+  resources_servers:
+    alpaca_pointwise_judge:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Custom AlpacaEval pointwise ratings for multilingual instruction following.
+      value: Judge independent answers on an anchored 1–5 rubric with language coverage diagnostics.
+      judge_model_server:
+        type: responses_api_models
+        name: alpaca_pointwise_judge_model
+      judge_chat_completions_create_params:
+        messages: []
+        max_tokens: 4096
+        temperature: 0.0
+        reasoning_effort: low
+      max_judge_attempts: 3
+
+alpaca_pointwise_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: alpaca_pointwise_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/alpaca_pointwise_judge/data/example.jsonl
+        license: Apache 2.0
+
+alpaca_pointwise_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: alpaca_pointwise_judge_simple_agent
+
+alpaca_pointwise_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:INDIC_ALPACA_JUDGE_BASE_URL,MISSING}
+      openai_api_key: ${oc.env:INDIC_ALPACA_JUDGE_API_KEY,MISSING}
+      openai_model: ${oc.env:INDIC_ALPACA_JUDGE_MODEL,MISSING}
+      max_http_attempts: 3
+      max_concurrent_requests: 1
