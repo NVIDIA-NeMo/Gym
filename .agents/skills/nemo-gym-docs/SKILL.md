@@ -117,6 +117,10 @@ Fern renders `title:` as the page heading, so do not repeat it as a `# <Page Tit
 
 Call the product NeMo Gym in prose, not Gym. Commands, package names and other identifiers, such as `gym eval run` or `nemo_gym`, stay as written.
 
+### Lists That Change
+
+Do not list which harnesses, agents, environments or providers support a feature ("today only `opencode_agent` can", "OpenCode, Claude Code and Codex support ..."). Such lists go stale as soon as another one adds support. Say how a reader finds out instead: the route or field that reports it (for example `GET /v1/agent_sessions/capabilities`), the command that lists it (`gym search`), or what happens when it is missing (refused at seed with a clear error). Name a specific component only as an example, marked as one, or on that component's own page or README.
+
 ### Components
 
 Use Fern's MDX components. GitHub `> [!NOTE]` syntax does not render.
