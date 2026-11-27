@@ -45,16 +45,17 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from sklearn.linear_model import LogisticRegression
 
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )
 from nemo_gym.data import PromptConfig, load_prompt_config
 from nemo_gym.metrics import (
+    compute_aggregate_metrics,
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
@@ -64,11 +65,18 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import call_judge, record_parsed_judge_verdict
+from resources_servers.arena_judge.indic_metrics import (
+    HEADLINE_METRIC,
+    _flatten,
+    compute_indic_metrics,
+    flatten_indic_metrics,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -101,8 +109,21 @@ def sanitize_generation(generation: str) -> str:
     return json.loads(s)
 
 
+def final_answer_only(text: str) -> str:
+    """Keep text after the last literal </think> in candidate, baseline, and judge text.
+
+    Other reasoning delimiters are untouched; unfinished <think> has no answer.
+    """
+    closing = text.rfind("</think>")
+    answer = text[closing + len("</think>") :] if closing >= 0 else text
+    return "" if "<think>" in answer else answer
+
+
 class ArenaJudgeConfig(BaseResourcesServerConfig):
     """Arena Hard v2 pairwise-judge server config."""
+
+    # Verification uses only the saved response, task fields and judge configuration.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     judge_model_server: ModelServerRef
     # The judge is called via /v1/chat/completions; this is the endpoint
@@ -135,6 +156,26 @@ class ArenaJudgeConfig(BaseResourcesServerConfig):
     # produce generations with lone UTF-8 surrogate halves or NULs that
     # break the judge's HTTP layer; enable to scrub those before judging.
     sanitize_generations: bool = False
+    strip_thinking: bool = False
+
+    indic_metrics_input_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Opt in to Indic Arena language metrics using this prepared JSONL as the expected task population. "
+            "Its adjacent preparation_report.json establishes full-benchmark coverage. "
+            "Unset preserves pooled Arena-Elo metrics."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_indic_metrics_protocol(self) -> ArenaJudgeConfig:
+        if self.indic_metrics_input_fpath is not None and (
+            not self.indic_metrics_input_fpath
+            or self.arena_elo_bootstrap_rounds != 100
+            or self.arena_elo_bootstrap_seed != 42
+        ):
+            raise ValueError("Indic Arena metrics require prepared inputs, 100 bootstrap rounds, and seed 42")
+        return self
 
 
 class ArenaJudgeRunRequest(BaseRunRequest):
@@ -207,6 +248,9 @@ class ArenaJudgeServer(SimpleResourcesServer):
         candidate_answer = self._extract_response_output_text(body.response)
         question = body.question or ""
         baseline_answer = body.baseline_answer or ""
+        if self.config.strip_thinking:
+            candidate_answer = final_answer_only(candidate_answer)
+            baseline_answer = final_answer_only(baseline_answer)
         if self.config.sanitize_generations:
             candidate_answer = sanitize_generation(candidate_answer)
             baseline_answer = sanitize_generation(baseline_answer)
@@ -291,6 +335,8 @@ class ArenaJudgeServer(SimpleResourcesServer):
             response_model=NeMoGymChatCompletion,
         )
         text = self._extract_chat_completion_text(judge_response)
+        if self.config.strip_thinking:
+            text = final_answer_only(text)
         verdict = self._parse_verdict(text)
         if verdict is not None:
             record_parsed_judge_verdict()
@@ -345,6 +391,40 @@ class ArenaJudgeServer(SimpleResourcesServer):
     # Aggregate metrics overrides
     # ------------------------------------------------------------------
 
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        if self.config.indic_metrics_input_fpath is None:
+            return await super().aggregate_metrics(body)
+        # Gym excludes masked rows from generic reward statistics. Indic coverage
+        # must still see their identities and reject duplicate/repeated tasks.
+        metrics = self.compute_metrics([[row] for row in body.verify_responses])
+        result = compute_aggregate_metrics(
+            body.verify_responses,
+            compute_metrics_fn=lambda _: dict(metrics),
+            get_key_metrics_fn=self.get_key_metrics,
+        )
+        # Generic aggregation returns early for empty or fully masked batches.
+        # Retain expected-population diagnostics without publishing a score.
+        result.agent_metrics.update(metrics)
+        result.key_metrics.update(self.get_key_metrics(result.agent_metrics))
+        judged = sum(
+            value
+            for key, value in metrics.items()
+            if key.startswith("arena_elo/language/") and key.endswith("/judged")
+        )
+        if judged:
+            # Gym's generic profiler omits single-repeat rows. This protocol
+            # validates one repeat per aggregate, so publish its actual estimate
+            # for suite consumers without inventing uncertainty across repeats.
+            result.repeat_level_metrics = [
+                {
+                    "_ng_rollout_index": _flatten(body.verify_responses[0]).get("_ng_rollout_index", 0),
+                    "sample_count": judged,
+                    "missing_count": metrics["arena_elo/coverage/expected"] - judged,
+                    **{name: value for name, value in metrics.items() if type(value) in (int, float)},
+                }
+            ]
+        return result
+
     @staticmethod
     def _arena_score_fn(r: dict) -> Dict[str, float]:
         """Map a verify response dict to named float scores for pass@k.
@@ -373,6 +453,14 @@ class ArenaJudgeServer(SimpleResourcesServer):
         }
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        if self.config.indic_metrics_input_fpath is not None:
+            return flatten_indic_metrics(
+                compute_indic_metrics(
+                    [row for rollouts in tasks for row in rollouts],
+                    inputs=self.config.indic_metrics_input_fpath,
+                    aggregate_scores=self._aggregate_arena_elo,
+                )
+            )
         metrics = compute_pass_majority_metrics(
             tasks,
             score_fn=self._arena_score_fn,
@@ -398,6 +486,16 @@ class ArenaJudgeServer(SimpleResourcesServer):
         for name in ("mean/input_tokens", "mean/output_tokens"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
+        if self.config.indic_metrics_input_fpath is not None:
+            names = (
+                HEADLINE_METRIC,
+                "arena_elo/language/en/all/score",
+                "arena_elo/coverage/indic_complete",
+                "arena_elo/coverage/headline_available",
+                "arena_elo/coverage/expected",
+            )
+            key.update({name: agent_metrics[name] for name in names if name in agent_metrics})
+            return key
         # Arena-Elo is the headline for this benchmark.
         for name in ("arena_elo/score", "arena_elo/ci_lower", "arena_elo/ci_upper", "arena_elo/invalid_scores"):
             if name in agent_metrics:

@@ -27,11 +27,13 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NgFailureEvent,
 )
+from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.verification import is_judge_failure
 from resources_servers.arena_judge.app import (
     ArenaJudgeConfig,
     ArenaJudgeServer,
     ArenaJudgeVerifyRequest,
+    final_answer_only,
     sanitize_generation,
 )
 
@@ -106,6 +108,21 @@ class TestSanitizeGeneration:
         assert "mixed" in result
 
 
+@pytest.mark.parametrize(
+    ("text", "answer"),
+    [
+        ("  final answer  ", "  final answer  "),
+        ("<think>reasoning</think>answer", "answer"),
+        ("<think>first</think><think>second</think>answer", "answer"),
+        ("reasoning</think>answer", "answer"),
+        ("<think>unfinished", ""),
+        ("<think>closed</think><think>unfinished", ""),
+    ],
+)
+def test_final_answer_only(text: str, answer: str) -> None:
+    assert final_answer_only(text) == answer
+
+
 class TestParseVerdict:
     """Contract tests for _parse_verdict — mirrors arena-hard-auto's
     per-judgment score extraction (regex match, set-uniqueness, valid
@@ -171,6 +188,9 @@ class TestExtractOutputText:
 
 
 class TestArenaJudgeServer:
+    def test_reverification_is_declared_stateless(self) -> None:
+        assert ArenaJudgeConfig.REVERIFY_MODE is ReverifyMode.STATELESS
+
     @fixture
     def config(self) -> ArenaJudgeConfig:
         return ArenaJudgeConfig(
@@ -391,6 +411,34 @@ class TestArenaJudgeServer:
                 content = message["content"]
                 assert "\ud83d" not in content
                 assert "\udc00" not in content
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("strip_thinking", [False, True])
+    async def test_thinking_removal_is_opt_in_for_answers_and_judge(
+        self, config: ArenaJudgeConfig, strip_thinking: bool
+    ) -> None:
+        config.strip_thinking = strip_thinking
+        server_mock = MagicMock(spec=ServerClient)
+        self._mock_judge_sequence(
+            server_mock,
+            ["<think>[[B>A]]</think>[[A>B]]", "<think>[[A>B]]</think>[[B>A]]"],
+        )
+        server = ArenaJudgeServer(config=config, server_client=server_mock)
+        result = await server.verify(
+            ArenaJudgeVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=_make_response("<think>CANDIDATE_REASONING</think>candidate answer"),
+                question="q",
+                baseline_answer="<think>BASELINE_REASONING</think>baseline answer",
+            )
+        )
+        assert result.verdict_gen_base == ("A>B" if strip_thinking else None)
+        assert result.verdict_base_gen == ("B>A" if strip_thinking else None)
+        for call in server_mock.post.call_args_list:
+            prompt = "\n".join(message["content"] for message in call.kwargs["json"].messages)
+            assert ("CANDIDATE_REASONING" in prompt) is not strip_thinking
+            assert ("BASELINE_REASONING" in prompt) is not strip_thinking
+            assert "candidate answer" in prompt and "baseline answer" in prompt
 
     @pytest.mark.asyncio
     async def test_creative_writing_category_uses_creative_prompt(self, config: ArenaJudgeConfig) -> None:
