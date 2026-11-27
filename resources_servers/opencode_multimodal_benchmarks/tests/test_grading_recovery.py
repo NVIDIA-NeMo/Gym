@@ -4,7 +4,7 @@
 import pytest
 
 from nemo_gym.trajectory import grading_result_binding
-from tests.unit_tests.orchestration.test_environment_grading_health import _collect_session, _gate
+from tests.unit_tests.eval.recovery.test_environment_grading_health import _collect_session, _gate
 
 
 @pytest.mark.parametrize("base", [0.0, 1.0])

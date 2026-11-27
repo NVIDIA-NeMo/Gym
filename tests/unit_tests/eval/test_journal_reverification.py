@@ -421,3 +421,34 @@ async def test_rescore_limit_does_not_interpret_unrequested_completion(prepared_
             await reverify.RolloutReverificationHelper().run_from_config(config)
         assert seen == []
     assert snapshot(output) == before
+
+
+async def test_failed_rescore_keeps_source_provenance_without_execution_ownership(prepared_run, monkeypatch):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row in store.pending():
+            store.record_dispatch(row)
+            store.record_outcome(row | {"reward": 1.0, "response": {"answer": "saved"}})
+        run_id = store.manifest.run_id
+    before = snapshot(output)
+    seen = _install_scoring_judge(monkeypatch, status="terminal")
+    destination = output.parent / "rescored" / "rollouts.jsonl"
+    config = _config(output, destination)
+    result = await reverify.RolloutReverificationHelper().run_from_config(config)
+    failures = list(read_records(reverify.failures_path_for(destination)))
+    persisted = list(read_records(destination))
+    assert len(failures) == len(seen) == 2
+    assert result == []
+    assert persisted == result
+    for row in failures + persisted:
+        assert row["_ng_reverification_source_run_id"] == run_id
+        assert row["_ng_reverification_source_answer"]["run_id"] == run_id
+        assert "_ng_attempt_index" in row
+        assert RUN_ID_KEY not in row
+    seen.clear()
+    resumed = await reverify.RolloutReverificationHelper().run_from_config(
+        config.model_copy(update={"resume_from_cache": True})
+    )
+    assert not seen
+    assert resumed == result
+    assert snapshot(output) == before

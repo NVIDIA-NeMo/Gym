@@ -4,8 +4,10 @@
 """Worker-custody tests for typed staging admission and vLLM extraction."""
 
 import asyncio
+import re
 import threading
 from collections.abc import Mapping
+from enum import IntEnum
 from types import SimpleNamespace
 from typing import Any
 
@@ -31,7 +33,7 @@ from nemo_gym.models.token_capture.staging.capture import (
     StreamingUnsupportedError,
     install_capture,
 )
-from nemo_gym.models.token_capture.staging.digest import compute_chain_hash, hash_token_ids
+from nemo_gym.models.token_capture.staging.digest import compute_chain_hash, compute_extras_digest, hash_token_ids
 from nemo_gym.models.token_capture.staging.records import (
     CaptureAdmission,
     GenerationCutContinuation,
@@ -91,7 +93,7 @@ class _IncompleteSink:
     async def put(self, entry: Any) -> None:
         raise AssertionError("normal TokenEntry capture must not run")
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str) -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
         self.incomplete.append((rollout_id, model_call_id))
 
 
@@ -288,6 +290,173 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
     # The aggregate record uses the oldest version so staleness admission is conservative.
     assert coords.weight_version == 7
     assert sink.records[-1].weight_version == 7
+
+
+def test_generation_cut_resume_and_chunk_hashes_cover_the_parent_prefix() -> None:
+    extras = {"routed_experts": [[[1, 2]], [[3, 4]]]}
+    original_capture, sink = _capture(weight_version=7)
+    cut = original_capture.build_prefix_record(
+        original_capture.begin_call(_child()),
+        prompt_token_ids=[10, 11, 12, 20],
+        generated_token_ids=[21, 22],
+        generated_logprobs=[-0.25, -0.5],
+    )
+    continuation = GenerationCutContinuation(
+        source_capture_key="rollout-1",
+        source_model_call_id="c2",
+        staging_keys=("__generation_cut__/c2",),
+        prefix_token_count=2,
+        prefix_digest=cut.digest,
+        effective_output_limit=128,
+    )
+    admission = _child().model_copy(update={"capture_key": "rollout-1-a1", "generation_cut": continuation})
+    resumed_capture, _ = _capture(sink, weight_version=9)
+    resumed = resumed_capture.begin_call(
+        admission, generation_cut=cut, generation_cut_staging_keys=continuation.staging_keys
+    )
+
+    chunk = resumed_capture.build_generation_chunk_record(
+        resumed, generated_token_ids=[23], generated_logprobs=[-0.75], extras=extras
+    )
+    assert chunk.chain_hash == compute_chain_hash(_PARENT_CHAIN_HASH, [23])
+    assert chunk.cumulative_hash == hash_token_ids([10, 11, 12, 23])
+    assert chunk.extras_digest == compute_extras_digest(extras)
+
+    coords = resumed_capture.complete_call(
+        resumed,
+        prompt_token_ids=[10, 11, 12, 20, 21, 22],
+        generated_token_ids=[23, 24],
+        generated_logprobs=[-0.75, -1.0],
+        extras=extras,
+    )
+    assert coords.disposition == "staged"
+    record = sink.records[-1]
+    # The resumed delta is the durable cut plus the new tail; both hashes cover the full engine prompt and output.
+    assert record.token_ids_delta == [20, 21, 22, 23, 24]
+    assert record.chain_hash == compute_chain_hash(_PARENT_CHAIN_HASH, [20, 21, 22, 23, 24])
+    assert record.cumulative_hash == hash_token_ids([10, 11, 12, 20, 21, 22] + [23, 24])
+    assert record == StagedCallRecord.from_components(
+        capture_key="rollout-1-a1",
+        model_call_id="c2",
+        parent_call_id="c1",
+        mode="token_in",
+        prev_len=3,
+        delta_len=5,
+        cum_len=8,
+        weight_version=7,
+        token_ids_delta=[20, 21, 22, 23, 24],
+        token_mask_delta=[0.0, 1.0, 1.0, 1.0, 1.0],
+        generation_log_probs_delta=[0.0, -0.25, -0.5, -0.75, -1.0],
+        extras=extras,
+        extras_digest=compute_extras_digest(extras),
+        chain_hash=record.chain_hash,
+        cumulative_hash=record.cumulative_hash,
+    )
+    assert (coords.digest, coords.chain_hash, coords.cumulative_hash) == (
+        record.digest,
+        record.chain_hash,
+        record.cumulative_hash,
+    )
+
+
+class _TokenId(IntEnum):
+    TWENTY_TWO = 22
+
+
+@pytest.mark.parametrize(
+    ("required_prefix", "prompt_token_ids", "generated_token_ids", "bad"),
+    [
+        ([10, 11, 12], [10, 11, 12, 20, 21], [_TokenId.TWENTY_TWO, 23], "<_TokenId.TWENTY_TWO: 22>"),
+        # Each prompt prefix compares equal to the required prefix, so only an exact type check rejects it.
+        ([10, 1, 12], [10, True, 12, 20, 21], [22, 23], "True"),
+        ([10, 11, 12], [10.0, 11, 12, 20, 21], [22, 23], "10.0"),
+    ],
+)
+def test_local_record_builders_reject_token_ids_that_are_not_exact_ints(
+    required_prefix: list[int], prompt_token_ids: list[Any], generated_token_ids: list[Any], bad: str
+) -> None:
+    capture, sink = _capture()
+    call = capture.begin_call(_child().model_copy(update={"required_prefix_token_ids": required_prefix}))
+
+    with pytest.raises(ValueError, match=f"token_id must be an unsigned 64-bit integer, got {re.escape(bad)}"):
+        capture.build_prefix_record(
+            call,
+            prompt_token_ids=prompt_token_ids,
+            generated_token_ids=generated_token_ids,
+            generated_logprobs=[-0.25, -0.5],
+        )
+    coords = capture.complete_call(
+        call,
+        prompt_token_ids=prompt_token_ids,
+        generated_token_ids=generated_token_ids,
+        generated_logprobs=[-0.25, -0.5],
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.records == []
+
+
+def test_generation_chunk_rejects_an_int_subclass_token_id() -> None:
+    capture, _ = _capture()
+    call = capture.begin_call(_child())
+
+    with pytest.raises(ValueError, match="token_id must be an unsigned 64-bit integer"):
+        capture.build_generation_chunk_record(
+            call, generated_token_ids=[_TokenId.TWENTY_TWO], generated_logprobs=[-0.5]
+        )
+
+
+def _count_real_packs(monkeypatch: pytest.MonkeyPatch) -> tuple[list[tuple[int, ...]], list[tuple[str, int]]]:
+    """Record every numeric column the digest module packs from scratch (reused encodings are not recorded)."""
+    from nemo_gym.models.token_capture.staging import digest
+
+    token_packs: list[tuple[int, ...]] = []
+    float_packs: list[tuple[str, int]] = []
+    encode_tokens, encode_floats = digest.encode_token_ids, digest._encode_float32_values
+
+    def counting_tokens(token_ids):
+        if type(token_ids) is not digest.PackedTokenIds:
+            token_packs.append(tuple(token_ids))
+        return encode_tokens(token_ids)
+
+    def counting_floats(values, *, field):
+        if type(values) is not digest.PackedFloat32Values:
+            float_packs.append((field, len(values)))
+        return encode_floats(values, field=field)
+
+    monkeypatch.setattr(digest, "encode_token_ids", counting_tokens)
+    monkeypatch.setattr(digest, "_encode_float32_values", counting_floats)
+    return token_packs, float_packs
+
+
+def test_local_record_builders_pack_each_numeric_column_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    token_packs, float_packs = _count_real_packs(monkeypatch)
+    capture, _ = _capture()
+    call = capture.begin_call(_child())
+
+    prefix = capture.build_prefix_record(
+        call,
+        prompt_token_ids=[10, 11, 12, 20, 21],
+        generated_token_ids=[22, 23],
+        generated_logprobs=[-0.25, -0.5],
+    )
+    # Chain hash, cumulative hash, and staging digest share one delta encoding; only the parent prefix is packed besides.
+    assert sorted(token_packs) == [(10, 11, 12), (20, 21, 22, 23)]
+    # Pydantic kept the validated float objects, so the staging digest reused both float columns.
+    assert sorted(float_packs) == [("generation_log_probs_delta", 4), ("token_mask_delta", 4)]
+
+    token_packs.clear()
+    float_packs.clear()
+    chunk = capture.build_generation_chunk_record(call, generated_token_ids=[24, 25], generated_logprobs=[-0.75, -1.0])
+    assert sorted(token_packs) == [(10, 11, 12), (24, 25)]
+    assert sorted(float_packs) == [("generation_log_probs_delta", 2), ("token_mask_delta", 2)]
+
+    # Wire validation still packs its own columns and accepts the reused-encoding digests.
+    token_packs.clear()
+    float_packs.clear()
+    for record in (prefix, chunk):
+        assert StagedCallRecord.model_validate_json(record.model_dump_json()) == record
+    assert sorted(token_packs) == [(20, 21, 22, 23), (24, 25)]
+    assert len(float_packs) == 4
 
 
 def test_generation_cut_resume_rejects_a_prefix_from_newer_weights() -> None:

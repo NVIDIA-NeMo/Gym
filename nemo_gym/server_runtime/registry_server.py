@@ -20,7 +20,7 @@ from typing import List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, Response
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.client.server_client import (
@@ -31,8 +31,10 @@ from nemo_gym.config.config_types import (
     BaseServerConfig,
 )
 from nemo_gym.config.global_config import (
+    HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME,
     get_global_config_dict,
 )
+from nemo_gym.config.secret_utils import mask_credentials
 from nemo_gym.server_runtime.base_server import BaseServer, UvicornBacklogConfig, UvicornProxyHeadersConfig
 from nemo_gym.telemetry.observer import observe_app_event_loop
 
@@ -110,8 +112,19 @@ class HeadServer(BaseServer):
 
     async def global_config_dict_yaml(self) -> str:
         if self._cached_yaml is None:
-            self._cached_yaml = OmegaConf.to_yaml(get_global_config_dict())
+            self._cached_yaml = OmegaConf.to_yaml(served_global_config_dict(get_global_config_dict()))
         return self._cached_yaml
+
+
+def served_global_config_dict(global_config_dict: DictConfig) -> DictConfig:
+    """The global config as the head server serves it: credential values masked unless
+    `head_server_serve_credentials` is set. The route has no authentication and the head server shares its host's
+    loopback with whatever runs there (agent sandboxes with host networking), while servers Gym launches read the
+    unmasked config from NEMO_GYM_CONFIG_DICT; HTTP clients use this copy for routing, not for credentials."""
+    if global_config_dict.get(HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME) is True:
+        return global_config_dict
+    container = OmegaConf.to_container(global_config_dict, resolve=False, throw_on_missing=False)
+    return OmegaConf.create(mask_credentials(container))
 
 
 class ServerInstanceDisplayConfig(BaseModel):

@@ -40,6 +40,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -1298,16 +1299,18 @@ class ClineAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             assert isinstance(state, ClineSandboxSession)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "Cline activation does not match the seeded session and rollout route")
+                raise AgentSessionConflictError("Cline activation does not match the seeded session and rollout route")
             if state.session.closing:
-                raise HTTPException(409, "Cline session is closing")
+                raise AgentSessionConflictError("Cline session is closing")
             body = self._validate_session_request(body)
             if state.task is None:
                 # Bind the request before the first await so retries join one invocation.
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(self._sandbox_response(state, state.activation_request))
             elif body != state.activation_request:
-                raise HTTPException(409, "Cline sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "Cline sandbox sessions support one activation; retry the same request"
+                )
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
 
@@ -1369,7 +1372,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: ClineAgentRunRequest) -> ClineAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Cline sandbox sessions run through an Environment Server's /run")
+            raise AgentSessionConflictError("Cline sandbox sessions run through an Environment Server's /run")
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Cline /run requires resources_server; sandbox sessions use an Environment Server"

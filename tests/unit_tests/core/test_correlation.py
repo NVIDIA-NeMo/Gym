@@ -280,3 +280,19 @@ def test_a_valid_bare_prefix_is_read_only_when_an_empty_rest_is_allowed(path, co
 def test_a_context_takes_keyword_arguments_only():
     with pytest.raises(TypeError):
         CorrelationContext("k", "judge")
+
+
+@pytest.mark.parametrize(
+    "headers, expected",
+    [
+        ([(b"x-session-id", b"s-1")], "s-1"),
+        ([(b"X-Session-Id", b"s-1"), (b"x-session-id", b"s-1")], "s-1"),
+        ([(b"x-session-id", b"s-1"), (b"x-session-id", b"s-2")], None),
+        ([(b"x-session-id", b"")], None),
+        ([], None),
+    ],
+)
+def test_the_client_session_header_is_read_only_when_unambiguous(headers, expected):
+    from nemo_gym.core.correlation import client_session_id
+
+    assert client_session_id({"type": "http", "headers": headers}) == expected

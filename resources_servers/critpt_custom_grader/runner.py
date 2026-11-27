@@ -56,8 +56,10 @@ try:
         MAX_ELEMENTS,
         MAX_INTEGER_DIGITS,
         MAX_POLICY_BYTES,
+        MAX_SEMANTIC_CONFIG_BYTES,
         MAX_TASK_BYTES,
         MAX_TEXT_BYTES,
+        MAX_VALIDATOR_SOURCE_BYTES,
         MAX_WIRE_BYTES,
         bounded_json,
         decimal_text,
@@ -79,8 +81,10 @@ except ImportError:  # Executed as a script inside a sandbox: the package direct
         MAX_ELEMENTS,
         MAX_INTEGER_DIGITS,
         MAX_POLICY_BYTES,
+        MAX_SEMANTIC_CONFIG_BYTES,
         MAX_TASK_BYTES,
         MAX_TEXT_BYTES,
+        MAX_VALIDATOR_SOURCE_BYTES,
         MAX_WIRE_BYTES,
         bounded_json,
         decimal_text,
@@ -100,9 +104,13 @@ RESULT_BYTES_LIMIT = MAX_CASES * (MAX_WIRE_BYTES + 512) + 65_536
 # Reserve two wire/outcome envelopes and one full policy per case, plus the task allowance and 1 MiB of
 # job fields.
 JOB_BYTES_LIMIT = MAX_TASK_BYTES + MAX_CASES * (2 * (MAX_WIRE_BYTES + 512) + MAX_POLICY_BYTES) + 1_048_576
+# A compare job that names a semantic validator also carries the transported inputs (a second task allowance) and
+# one validator configuration per case.
+SEMANTIC_JOB_BYTES_LIMIT = JOB_BYTES_LIMIT + MAX_TASK_BYTES + MAX_CASES * MAX_SEMANTIC_CONFIG_BYTES
 # The worker RLIMIT_FSIZE per-file allowance. Neither it nor the job read cap bounds aggregate disk use or
 # authenticates any file.
 FILE_LIMIT_BYTES = max(JOB_BYTES_LIMIT, 4 * RESULT_BYTES_LIMIT)
+SEMANTIC_FILE_LIMIT_BYTES = max(SEMANTIC_JOB_BYTES_LIMIT, 4 * RESULT_BYTES_LIMIT)
 RUN_STATUSES = ("completed", "source_error", "timeout", "runner_error")
 COMPARE_STATUSES = ("completed", "timeout", "runner_error")
 SOURCE_ERROR_CODES = (
@@ -241,17 +249,49 @@ def validate_job(job: Any, mode: str) -> str | None:
             if any(type(key) is not str or not _IDENTIFIER.fullmatch(key) for key in case["kwargs"]):
                 return "invalid_job"
         return None
-    if mode != COMPARE_MODE or set(job) != {"version", "mode", "nonce", "observed_role", "cases", "limits"}:
+    compare_keys = {"version", "mode", "nonce", "observed_role", "cases", "limits"}
+    if mode != COMPARE_MODE or not compare_keys <= set(job) <= compare_keys | {"semantic_validator"}:
         return "invalid_job"
     if job["observed_role"] not in ROLES:
         return "invalid_job"
+    semantic = job.get("semantic_validator")
+    if "semantic_validator" in job:
+        if type(semantic) is not dict or set(semantic) != {"source_path", "entrypoint"}:
+            return "invalid_job"
+        if (
+            type(semantic["source_path"]) is not str
+            or not semantic["source_path"].startswith("/")
+            or len(semantic["source_path"]) > 1024
+            or type(semantic["entrypoint"]) is not str
+            or not _IDENTIFIER.fullmatch(semantic["entrypoint"])
+        ):
+            return "invalid_job"
     for case in cases:
-        if type(case) is not dict or not {"observed", "expected"} <= set(case) <= {"observed", "expected", "policy"}:
+        required = {"observed", "expected"}
+        if semantic is not None:
+            required |= {"inputs", "validator_config"}
+        if type(case) is not dict or not required <= set(case) <= required | {"policy"}:
             return "invalid_job"
         if type(case["observed"]) is not dict or type(case["expected"]) is not dict:
             return "invalid_job"
         if "policy" in case and type(case["policy"]) is not dict:
             return "invalid_job"
+        if semantic is not None:
+            inputs = case["inputs"]
+            if type(inputs) is not dict or set(inputs) != {"args", "kwargs"}:
+                return "invalid_job"
+            if type(inputs["args"]) is not list or len(inputs["args"]) > 128:
+                return "invalid_job"
+            if type(inputs["kwargs"]) is not dict or len(inputs["kwargs"]) > 128:
+                return "invalid_job"
+            if any(type(key) is not str or not _IDENTIFIER.fullmatch(key) for key in inputs["kwargs"]):
+                return "invalid_job"
+            if type(case["validator_config"]) is not dict:
+                return "invalid_job"
+            try:
+                bounded_json(case["validator_config"], max_bytes=MAX_SEMANTIC_CONFIG_BYTES, max_depth=MAX_DEPTH)
+            except (ValueError, UnicodeError, RecursionError, TypeError):
+                return "invalid_job"
     return None
 
 
@@ -702,7 +742,7 @@ def _reset_signals() -> None:
                 pass
 
 
-def _apply_limits(limits: dict) -> str | None:
+def _apply_limits(limits: dict, file_limit_bytes: int = FILE_LIMIT_BYTES) -> str | None:
     """Worker side: address space, CPU time, file size, core and process-count limits for the task process."""
     import resource
 
@@ -711,7 +751,7 @@ def _apply_limits(limits: dict) -> str | None:
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
         cpu = int(limits["cpu_time_s"])
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 30))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_LIMIT_BYTES, FILE_LIMIT_BYTES))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit_bytes, file_limit_bytes))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         processes = int(limits["processes"])
         resource.setrlimit(resource.RLIMIT_NPROC, (processes, processes))
@@ -737,6 +777,19 @@ def _read_json(path: str, limit: int) -> Any:
     if len(data) > limit:
         raise RunnerError("invalid_job")
     return json.loads(data.decode("utf-8"))
+
+
+def _read_job(path: str, mode: str) -> Any:
+    """Read the job file under its byte cap. Only a compare job that names a semantic validator gets the larger cap."""
+    if mode != COMPARE_MODE:
+        return _read_json(path, JOB_BYTES_LIMIT)
+    data = _read_file(path, SEMANTIC_JOB_BYTES_LIMIT)
+    if len(data) > SEMANTIC_JOB_BYTES_LIMIT:
+        raise RunnerError("invalid_job")
+    job = json.loads(data.decode("utf-8"))
+    if len(data) > JOB_BYTES_LIMIT and not (type(job) is dict and "semantic_validator" in job):
+        raise RunnerError("invalid_job")
+    return job
 
 
 def _load_source(path: str) -> tuple[str | None, str | None]:
@@ -919,14 +972,25 @@ def _compare_worker(channel: int, job: dict) -> None:
     ``limits.per_case_s`` (optional) arms a wall-clock timer around every single comparison, so one heavy case cannot
     consume the batch; a case that overruns it is reported ``uncertain``/``comparator_timeout``.
     """
-    code = _apply_limits(job["limits"])
-    compare_request = _result = None
+    semantic = job.get("semantic_validator")
+    if semantic is None:
+        code = _apply_limits(job["limits"])
+    else:
+        # This job may be larger than an expected-value job, and the worker's file allowance covers its job file.
+        code = _apply_limits(job["limits"], SEMANTIC_FILE_LIMIT_BYTES)
+    compare_request = compare_semantic_request = _result = None
     if code is None:
         try:
             try:
                 from .comparator import _result, compare_request
+
+                if semantic is not None:
+                    from .semantic_validation import compare_semantic_request
             except ImportError:
                 from critpt_grader_rt.comparator import _result, compare_request
+
+                if semantic is not None:
+                    from critpt_grader_rt.semantic_validation import compare_semantic_request
         except ImportError:
             code = "missing_dependency"
     if code is not None:
@@ -951,11 +1015,23 @@ def _compare_worker(channel: int, job: dict) -> None:
         }
         if "policy" in case:
             request["policy"] = case["policy"]
+        if semantic is not None:
+            request["inputs"] = case["inputs"]
+            request["validator_config"] = case["validator_config"]
         try:
             if per_case_s:
                 signal.setitimer(signal.ITIMER_REAL, per_case_s)
             try:
-                item = compare_request(request)
+                if semantic is None:
+                    item = compare_request(request)
+                else:
+                    try:
+                        source = _read_file(semantic["source_path"], MAX_VALIDATOR_SOURCE_BYTES).decode("utf-8")
+                        item = compare_semantic_request(request, source, entrypoint=semantic["entrypoint"])
+                    except TimeoutError:
+                        raise
+                    except Exception:
+                        item = _result("uncertain", "comparator", "validator_failure")
             finally:
                 if per_case_s:
                     signal.setitimer(signal.ITIMER_REAL, 0)
@@ -1261,7 +1337,7 @@ def main(argv: list[str]) -> int:
         return EXIT_USAGE
     mode, job_path, result_path = argv
     try:
-        job = _read_json(job_path, JOB_BYTES_LIMIT)
+        job = _read_job(job_path, mode)
         code = validate_job(job, mode)
     except (RunnerError, OSError, ValueError, UnicodeError, RecursionError, MemoryError):
         job, code = None, "invalid_job"

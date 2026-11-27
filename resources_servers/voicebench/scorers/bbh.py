@@ -31,7 +31,12 @@ def score(answer: str, metadata: dict[str, JsonValue], *, rng: random.Random) ->
     correct = prediction == expected
     return ScoringResult(
         reward=float(correct),
-        metrics={"correct": float(correct), "total": 1.0, "parse_failure": float(failed)},
+        metrics={
+            "correct": float(correct),
+            "correct_parsed": float(correct and not failed),
+            "total": 1.0,
+            "parse_failure": float(failed),
+        },
         details={
             "category": category,
             "source_id": source_id,

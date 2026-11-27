@@ -41,11 +41,11 @@ from typing import Any, cast
 
 import anyio
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, EpisodeId
-from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import STOP_TIMEOUT_S, AsyncSandbox, DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -66,13 +66,17 @@ LOG = logging.getLogger(__name__)
 # How long an open session lasts when its sandbox config sets no ttl_s. Past the sandbox's lifetime the
 # Environment Server that seeded it is gone or has given up on its close, so the session is closed here.
 DEFAULT_SESSION_LIFETIME_S = 86400.0
-# Ceiling on one sandbox stop, so a hung provider cannot hold a session lock or stall shutdown.
-STOP_TIMEOUT_S = 120.0
 # Wait before the next request retries an expired session whose stop failed. Without it every request would
 # retry the stuck session, and each retry can take up to STOP_TIMEOUT_S. An explicit close or shutdown retries at once.
 EXPIRY_RETRY_INTERVAL_S = 60.0
 # Sandbox stops that shutdown runs at once, so a server with thousands of open sessions does not flood the provider.
 SHUTDOWN_STOP_CONCURRENCY = 64
+
+
+class AgentRunCloseSessionRequest(BaseModel):
+    """Close an agent-run sandbox using the request's session cookie."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 @dataclass
@@ -119,7 +123,8 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         """Start and prepare the task sandbox for ``session_id`` and return the agent's working directory.
 
         Register the sandbox in ``_session_id_to_sandbox`` as soon as it exists, so a failed preparation can
-        still stop it.
+        still stop it. A ``CheckpointedSandboxSessionResourcesServer`` creates it with ``new_task_sandbox`` instead,
+        which registers it there and for checkpoints.
         """
 
     def _forget_task_sandbox_state(self, session_id: str) -> None:
@@ -281,12 +286,23 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         )
 
     async def close_resources_session(
-        self, request: Request, body: ResourcesCloseSessionRequest
+        self, request: Request, body: ResourcesCloseSessionRequest | AgentRunCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
-        """Stop the session's task sandbox unless verify already did, and fence later seeds.
+        """Stop the session's sandboxes after an episode or a cookie-scoped agent run.
 
         A failed stop raises without fencing, and keeps the sandbox so a retried close stops it.
+        Cookie-scoped close cannot close an episode session, which requires its explicit identity.
         """
+        if isinstance(body, AgentRunCloseSessionRequest):
+            session_id = request.session[SESSION_ID_KEY]
+            async with self._locked_task_session(session_id) as record:
+                if record.seed is not None or self._task_session_fences.get(session_id) is not None:
+                    raise ResourcesSessionConflictError("An episode session requires its explicit close request")
+                await self._stop_session_sandboxes(session_id)
+                self._task_sessions.pop(session_id, None)
+                self._open_task_sessions.pop(session_id, None)
+                request.session.pop(SESSION_ID_KEY, None)
+                return ResourcesCloseSessionResponse(resources_session_id=session_id)
         session_id = body.resources_session_id
         async with self._locked_task_session(session_id) as record:
             fenced_episode = self._task_session_fences.get(session_id)
@@ -314,10 +330,18 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
             except TimeoutError:
                 # A claim that was never released must not keep close, expiry and shutdown from stopping it.
                 LOG.warning("Session %s claimed its task sandbox and never released it; stopping it here", session_id)
+        await self._stop_unclaimed_task_sandbox(session_id)
+
+    async def _stop_unclaimed_task_sandbox(self, session_id: str) -> None:
+        """Stop the task sandbox once no verify holds a claim on it; ``_stop_task_sandbox`` waits for that first.
+
+        A subclass that serialises stops with other work takes its lock here, not around ``_stop_task_sandbox``:
+        ``_release_task_sandbox``, which ends the claim and so the wait, would need the same lock.
+        """
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
             # Forget the sandbox only once it stopped, so a failed stop can be retried.
-            await _stop(sandbox)
+            await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             self._session_id_to_sandbox.pop(session_id, None)
         self._forget_task_sandbox_state(session_id)
 
@@ -353,7 +377,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         """Stop an owned verifier, retaining its handle when the provider cannot confirm cleanup."""
         sandbox = self._verifier_sandboxes.get(session_id)
         if sandbox is not None:
-            await _stop(sandbox)
+            await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             self._verifier_sandboxes.pop(session_id, None)
 
     async def verify_task_sandbox_session[ResponseT: BaseVerifyResponse](
@@ -449,7 +473,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         # Restore ownership before awaiting the provider, including for legacy consumers that popped it.
         self._session_id_to_sandbox[session_id] = sandbox
         try:
-            await _stop(sandbox)
+            await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             self._session_id_to_sandbox.pop(session_id, None)
             self._forget_task_sandbox_state(session_id)
         except BaseException as error:
@@ -460,13 +484,3 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
             record = self._task_sessions.get(session_id)
             if record is not None and record.release_done is not None:
                 record.release_done.set()
-
-
-async def _stop(sandbox: AsyncSandbox) -> None:
-    """Stop a sandbox within ``STOP_TIMEOUT_S``, even while the request that owns it is being cancelled.
-
-    A client that disconnects cancels its request handler, and every later await in it, so an unshielded
-    cleanup stop would never run and the sandbox would outlive every reference to it.
-    """
-    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
-        await sandbox.stop()

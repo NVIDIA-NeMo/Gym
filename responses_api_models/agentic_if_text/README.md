@@ -1,5 +1,9 @@
 # Recorded single-turn text model adapter
 
+The default benchmark profile now uses Gym's standard `vllm_model`; see
+[`config.yaml`](../../benchmarks/agentic_if_realworld/config.yaml). This adapter
+remains available through `raw_receipt.yaml` for the earlier transport.
+
 This adapter serves the real-world IF benchmark's frozen adaptive delivery
 protocol. It sends the exact one-user-message wrapper, requests streamed usage,
 records bounded transport attempts privately, and rejects native actions and

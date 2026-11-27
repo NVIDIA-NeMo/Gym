@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Sandbox image for visual coding in OpenCode sandbox sessions (configs/visual_coding_opencode.yaml). The model's shell
-# has a Python image toolkit: Pillow, NumPy, SciPy and OpenCV. OpenCode is preinstalled under /opt/opencode/bin, so a
-# sandbox that reaches only the model server can run it. visual_coding_opencode.yaml pins that binary's SHA-256, and
-# the build checks it, so a new OpenCode version here needs a new pin in both places.
+# has a Python image toolkit: Pillow, NumPy, SciPy, OpenCV and Matplotlib (models often plot crops or profiles to
+# inspect them). OpenCode is preinstalled under /opt/opencode/bin, so a sandbox that reaches only the model server can
+# run it. visual_coding_opencode.yaml pins that binary's SHA-256, and the build checks it, so a new OpenCode version
+# here needs a new pin in both places.
 #
 # The image also carries OpenCode's plugin dependencies (/opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz).
 # opencode_agent always configures a plugin, and OpenCode 1.17.11 then installs @opencode-ai/plugin from npm at each
@@ -42,7 +43,8 @@ RUN pip install --no-cache-dir \
     "pillow==13.0.0" \
     "numpy==2.5.4" \
     "scipy==1.18.1" \
-    "opencv-python-headless==5.0.0.93"
+    "opencv-python-headless==5.0.0.93" \
+    "matplotlib==3.11.2"
 
 # One thread per numeric library, so parallel tasks on one host do not oversubscribe its CPUs.
 ENV OMP_NUM_THREADS=1 \

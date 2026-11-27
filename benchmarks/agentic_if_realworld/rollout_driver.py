@@ -14,7 +14,10 @@ from pathlib import Path
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core import JUDGE_FAILED
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
+from nemo_gym.verification import judge_provider_stopped
 from resources_servers.agentic_if_realworld.benchmark.core import (
     Dataset,
     digest,
@@ -29,13 +32,24 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
 from resources_servers.agentic_if_realworld.benchmark.registry import private_path
 from resources_servers.agentic_if_realworld.benchmark.runner import run_cell
 from resources_servers.agentic_if_realworld.benchmark.scoring import validate_judge_config
-from resources_servers.agentic_if_realworld.benchmark.transport import delivered
+from resources_servers.agentic_if_realworld.benchmark.transport import (
+    RetryableTransportError,
+    delivered,
+    gym_response_completion,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 
 
+class DeferredJudgeError(RetryableTransportError):
+    """The selected answer is journaled and its judge request can be retried."""
+
+    failure_kind = JUDGE_FAILED
+
+
 async def run_rollout_collection(rollout_collection_config, global_config_dict) -> None:
+    from aiohttp import ClientResponseError
     from omegaconf import OmegaConf
 
     from nemo_gym.client import get_response_json, raise_for_status
@@ -57,8 +71,32 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
     validate_judge_config(resource["judge_endpoint"], resource["judge_model"])
     if not os.environ.get(resource["judge_api_key_env"]):
         raise ValueError(f"{resource['judge_api_key_env']} is not set")
-    model = global_config_dict["policy_model"]["responses_api_models"]["agentic_if_text"]
-    reasoning_effort = model.get("reasoning_effort")
+    models = global_config_dict["policy_model"]["responses_api_models"]
+    if len(models) != 1:
+        raise ValueError("Select one policy model server")
+    model_type, model = next(iter(models.items()))
+    raw_receipt = model_type == "agentic_if_text"
+    if not raw_receipt and model_type != "vllm_model":
+        raise ValueError("The seeded adaptive profile requires vllm_model; use native.yaml for other clients")
+    if not raw_receipt and resource.get("response_source") != "gym_response":
+        raise ValueError("Standard model clients require response_source=gym_response")
+    if not raw_receipt:
+        agent = global_config_dict["agentic_if_realworld_agent"]["responses_api_agents"]["simple_agent"]
+        if (
+            model.get("max_num_tries") != 1
+            or model.get("refit_output_budget_to_window", True)
+            or model.get("refit_output_budget_to_prompt", False)
+            or model.get("sampling_overrides")
+            or agent.get("max_model_retries", 2) != 0
+        ):
+            raise ValueError(
+                "Adaptive delivery requires single-attempt policy calls without budget refitting or sampling overrides"
+            )
+    reasoning_effort = (
+        model.get("reasoning_effort")
+        if raw_receipt
+        else (model.get("chat_template_kwargs") or {}).get("reasoning_effort")
+    )
     if reasoning_effort not in (None, "max"):
         raise ValueError("Policy reasoning effort must be null or max")
     dataset = Dataset(resource["dataset_dir"], synthetic=resource["synthetic"])
@@ -66,11 +104,18 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         source_preflight(resource["split_registry_path"], resource["ground_truth_path"], directory=dataset.directory)
     directory = private_path(Path(resource["receipt_dir"]))
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    settings = {
-        "policy": {
+    if raw_receipt:
+        policy = {
             **{k: model[k] for k in ["endpoint", "model", "api_key_env"]},
             "reasoning_effort": reasoning_effort,
-        },
+        }
+    else:
+        # Gym's own listen address can change when servers restart; it is not a generation setting.
+        policy_config = OmegaConf.create({key: value for key, value in model.items() if key not in {"host", "port"}})
+        recursively_hide_secrets(policy_config)
+        policy = {"model_type": model_type, "config": OmegaConf.to_container(policy_config, resolve=True)}
+    settings = {
+        "policy": policy,
         "judge": {
             k: resource[k]
             for k in [
@@ -111,7 +156,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
     )
     by_id = {r["task_id"]: r for r in rows}
     output = private_path(Path(config.output_jsonl_fpath))
-    if output.exists() and not config.resume_from_cache:
+    published_before = output.exists()
+    if published_before and not config.resume_from_cache:
         raise ValueError("Existing rollout output requires explicit resume or a new run directory")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = (directory / ".lock").open("a")
@@ -148,7 +194,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         if not snapshot_path.exists():
             # JSON is valid YAML; reuse the atomic private receipt writer.
             write(snapshot_path, OmegaConf.to_container(snapshot, resolve=True))
-        results, failures, validated_results = [], [], {}
+        # failures halt admission; deferred (receipted transport) failures wait for a resume while other tasks run.
+        results, failures, deferred, validated_results = [], [], [], {}
         writing_failed = False
         # Each task keeps its own journal and receipts, so tasks run concurrently (sequential by default).
         slots = asyncio.Semaphore(config.num_samples_in_parallel or 1)
@@ -165,13 +212,53 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     max_output_tokens=cap,
                     metadata={"seed": str(seed), "receipt_id": receipt_id},
                 )
-                completions = helper.run_examples([attempt], route_failures_to_sidecar=True)
+                path = directory / "model" / (receipt_id + ".json")
+                if not raw_receipt:
+                    attempt["responses_create_params"]["metadata"]["extra_body"] = json.dumps({"seed": seed})
+                    if path.exists():
+                        raise ValueError("Existing model receipt requires reconciliation")
+                    request = {
+                        **dataset.request(prepared["task_id"]),
+                        "seed": seed,
+                        "max_tokens": cap,
+                        "temperature": 0.7,
+                    }
+                    receipt = {
+                        "status": "started",
+                        "response_format": "gym_responses_v1",
+                        "request_source": "frozen_logical_request",
+                        "request_body": request,
+                        "request_sha256": judge.sha(request),
+                        "responses_create_params": copy.deepcopy(attempt["responses_create_params"]),
+                        "raw_attempts": [],
+                    }
+                    write(path, receipt)
+                completions = helper.run_examples([attempt], route_failures_to_sidecar=True, retry_requests=False)
                 try:
                     request_row, agent_result = await next(iter(completions))
                     rollout = {**request_row, **agent_result}
                 finally:
                     await completions.aclose()
-                path = directory / "model" / (receipt_id + ".json")
+                if not raw_receipt:
+                    from nemo_gym.core import NeMoGymResponse
+
+                    if "response" in rollout:
+                        response = NeMoGymResponse.model_validate(rollout["response"])
+                        response_path = path.with_suffix(".response.json")
+                        write(response_path, rollout["response"])
+                        receipt.update(
+                            status="generated",
+                            dispatch_status="response_received",
+                            terminal=bool(response.error)
+                            or (response.metadata or {}).get("nemo_gym_context_window_exceeded") == "true",
+                            response=gym_response_completion(response),
+                            raw_attempts=[{"path": str(response_path), "sha256": digest(response_path)}],
+                        )
+                    else:
+                        receipt.update(
+                            status="delivery_error", dispatch_status="unknown", reason="missing_gym_response"
+                        )
+                    write(path, receipt)
                 if not path.exists():
                     # Failed /run may have dispatched upstream: never automatically regenerate.
                     raise ValueError("Missing model receipt; reconcile ambiguous agent dispatch")
@@ -183,9 +270,13 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     complete = True
                 except (ValueError, TypeError, KeyError):
                     canonical, complete = None, False
-                if complete and (
-                    "response" not in rollout
-                    or (rollout["response"].get("metadata") or {}).get("receipt_id") != receipt_id
+                if (
+                    complete
+                    and raw_receipt
+                    and (
+                        "response" not in rollout
+                        or (rollout["response"].get("metadata") or {}).get("receipt_id") != receipt_id
+                    )
                 ):
                     raise ValueError("Complete delivery missing trusted Gym projection; reconcile receipt")
                 return {
@@ -220,7 +311,19 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     _max_num_tries=1,
                 )
                 try:
-                    await raise_for_status(response)
+                    try:
+                        await raise_for_status(response)
+                    except ClientResponseError as error:
+                        if error.status in (401, 403):
+                            raise judge_provider_stopped(
+                                f"Judge credentials rejected (HTTP {error.status}) for {identifier}",
+                                failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+                                operation="/verify",
+                            ) from error
+                        if error.status != 503 or cached_only or validate_only:
+                            raise
+                        detail = (getattr(error, "response_content", None) or b"").decode(errors="replace")[:1000]
+                        raise DeferredJudgeError(f"/verify returned 503 for {identifier}: {detail}") from error
                     result = await get_response_json(response)
                     result.pop("cached_judge_only", None)
                     result.pop("validate_judge_cache", None)
@@ -276,6 +379,9 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         except Exception:
                             writing_failed = True
                             raise
+                except DeferredJudgeError as error:
+                    LOGGER.error("Task %s deferred to a resume: %r", identifier, error)
+                    deferred.append(error)
                 except (Exception, asyncio.CancelledError) as error:
                     LOGGER.error("Task %s failed: %r", identifier, error)
                     failures.append(error)
@@ -290,8 +396,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             completed = False
             try:
                 await asyncio.gather(*(collect(row) for row in rows))
-                if failures:
-                    raise failures[0]
+                if failures or deferred:
+                    raise (failures or deferred)[0]
                 write_reports(staged_output, results, dataset)
                 write(
                     staged_output.with_suffix(".run.json"),
@@ -305,8 +411,12 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                 )
                 completed = True
             finally:
+                # A resume that did not reach every task keeps the published rows it would drop; otherwise the
+                # settled rows are published, so one deferred task never hides the rest of the run.
+                keep_published = published_before and len(results) + len(deferred) < len(rows)
+                publish = completed or not (writing_failed or keep_published)
                 try:
-                    if completed or (not config.resume_from_cache and not writing_failed):
+                    if publish:
                         write_reports(staged_output, results, dataset)
                         await write_aggregate_metrics(staged_output, results, client)
                 finally:
@@ -315,8 +425,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         os.fsync(stream.fileno())
                     finally:
                         stream.close()
-                # A rejected resume preserves published artifacts; fresh interruptions retain settled rows.
-                if completed or (not config.resume_from_cache and not writing_failed):
+                if publish:
                     staged_output.replace(output)
                     for report in Path(pending).glob("*.json"):
                         report.replace(output.parent / report.name)

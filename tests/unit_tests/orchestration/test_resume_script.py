@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.orchestration.executors.slurm.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     CHAIN_END_JOURNAL_NAME,
     DRIVER_FAILURE_NAME,
@@ -250,7 +250,7 @@ def _run_prologue(
         # Explicit installed-runtime boundary: host PATH below intentionally has no Gym installation.
         code = (
             f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[3])!r}); "
-            "from nemo_gym.orchestration.recovery import continuation_admission; "
+            "from nemo_gym.eval.recovery.continuation import continuation_admission; "
             f"print('__GYM_CONTINUATION:' + continuation_admission({str(tmp_path)!r}, "
             f"{resume.max_retries}, {_walltime_to_seconds(resume.max_walltime) if resume.max_walltime else None!r}, sys.argv[1], sys.argv[2], sys.argv[3]))"
         )
@@ -323,11 +323,11 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
 @pytest.mark.parametrize("exit_code,continues", [("75:0", True), ("76:0", False)])
 @pytest.mark.parametrize("max_retries", [0, 3])
 def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, monkeypatch, exit_code, continues, max_retries):
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     monkeypatch.setenv("SLURM_JOB_ID", "100")
     # Real saved outcomes and untouched pending inputs, not an exit-code-only permission token.
-    prepare_managed(tmp_path, "missing" if continues else "healthy", n=2)
+    save_store_run(tmp_path, "missing" if continues else "healthy", n=2)
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=max_retries), "FAILED", exit_code=exit_code)
     assert result.returncode == (0 if continues else 1), result.stdout
     assert ("REACHED_WORK" in result.stdout) is continues
@@ -524,8 +524,9 @@ def test_only_a_definite_refusal_of_the_follow_up_is_a_typed_stop(tmp_path, repl
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_recovery_resubmits_a_run_whose_follow_up_the_scheduler_refused(tmp_path):
-    from nemo_gym.orchestration.recovery import RecoveryAction, decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.decision import RecoveryAction
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     # The segment's prologue took its follow-up claim, and the scheduler refused the submission.
     job = write_job_dir(tmp_path, n=2, results=[ident(0, reward=1.0)], failures=[])
@@ -550,8 +551,8 @@ def test_a_follow_up_submission_without_a_definite_reply_stays_unknown_and_logs_
 
 
 def test_inspection_names_a_chain_stopped_on_a_refused_follow_up(tmp_path):
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit"
@@ -1003,7 +1004,7 @@ def test_a_failure_without_scheduler_infrastructure_cause_stops_and_keeps_its_el
 
 
 def test_the_prologue_carries_the_scheduler_cause_capability():
-    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+    from nemo_gym.orchestration.executors.slurm.resume_script import SCHEDULER_CAUSE_MARKER
 
     assert SCHEDULER_CAUSE_MARKER in render_resume_prologue(ResumeConfig(max_retries=1)).splitlines()
 
@@ -1053,7 +1054,11 @@ def test_manual_follower_without_predecessor_cannot_claim_a_fresh_chain(tmp_path
 def test_collector_preserves_unknown_budget_even_with_apparently_complete_counters(tmp_path):
     import json
 
-    from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence, decide_from_collected
+    from nemo_gym.eval.recovery.evidence import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+    )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -1085,7 +1090,10 @@ def test_manual_reset_cannot_erase_malformed_spent_counters(tmp_path, name):
 def test_collector_binds_dynamic_followup_claim_set_and_contents(tmp_path, mutation):
     import json
 
-    from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence
+    from nemo_gym.eval.recovery.evidence import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+    )
 
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -1298,8 +1306,8 @@ def test_a_finished_run_clears_the_provisional_line(tmp_path):
 
 
 def test_inspection_names_a_continuation_that_died_before_its_guard(tmp_path):
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     (job / INCOMPLETE_MARKER_NAME).write_text(_provisional_line("777") + "\n")
@@ -1467,8 +1475,8 @@ def test_a_cancelled_follow_up_keeps_a_deliberate_stop_and_replaces_a_provisiona
 
 
 def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = "Follow-up 777 was cancelled before it started (job 100 ended TIMEOUT); the chain stopped."
@@ -1481,9 +1489,9 @@ def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
 
 
 def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_path):
-    from nemo_gym.orchestration.executors.resume_script import CREDENTIALS_REJECTED_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import CREDENTIALS_REJECTED_REASON
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {CREDENTIALS_REJECTED_REASON}"
@@ -1496,9 +1504,9 @@ def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_pa
 
 
 def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_path):
-    from nemo_gym.orchestration.executors.resume_script import PROTOCOL_VIOLATION_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import PROTOCOL_VIOLATION_REASON
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {PROTOCOL_VIOLATION_REASON}"
@@ -1511,9 +1519,9 @@ def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_p
 
 
 def test_inspection_names_a_chain_stopped_on_an_exhausted_grading_quota(tmp_path):
-    from nemo_gym.orchestration.executors.resume_script import QUOTA_EXHAUSTED_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import QUOTA_EXHAUSTED_REASON
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {QUOTA_EXHAUSTED_REASON}"
@@ -1535,10 +1543,10 @@ _MLFLOW_CONFIG = "mlflow_tracking_uri: http://tracking.example\nmlflow_experimen
 
 def _finished_run(tmp_path, monkeypatch, case="healthy", config=_MLFLOW_CONFIG, receipt="current") -> None:
     """A managed run of two rollouts as its last segment left it: Store, saved config, aggregate and export receipt."""
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     monkeypatch.setenv("SLURM_JOB_ID", "100")
-    prepare_managed(tmp_path, case, n=2)
+    save_store_run(tmp_path, case, n=2)
     artifacts = tmp_path / "artifacts"
     (artifacts / "rollouts_resolved_config.yaml").write_text(config)
     (artifacts / "rollouts_aggregate_metrics.json").write_text("[]\n")
@@ -2220,7 +2228,7 @@ def _timeout_on_job_path() -> bool:
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.skipif(not _timeout_on_job_path(), reason="coreutils timeout not installed")
 def test_stalled_allocation_accounting_is_cut_off_and_the_chain_continues(tmp_path, monkeypatch):
-    monkeypatch.setattr("nemo_gym.orchestration.executors.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
+    monkeypatch.setattr("nemo_gym.orchestration.executors.slurm.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
     (tmp_path / ".gym_job_chain").write_text("100\n")
 
     started = time.monotonic()
@@ -2242,7 +2250,7 @@ def test_stalled_allocation_accounting_is_cut_off_and_the_chain_continues(tmp_pa
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.skipif(not _timeout_on_job_path(), reason="coreutils timeout not installed")
 def test_stalled_allocation_accounting_does_not_hold_up_the_end_of_the_chain(tmp_path, monkeypatch):
-    monkeypatch.setattr("nemo_gym.orchestration.executors.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
+    monkeypatch.setattr("nemo_gym.orchestration.executors.slurm.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
     _segment_finishing_the_run(tmp_path, monkeypatch)
     driver = f"{_FINISHES_THE_RUN}; ( exit 0 )"
 
@@ -2304,3 +2312,26 @@ def test_jobs_that_record_at_once_write_each_row_once(tmp_path):
         ("150", 0),
     ]
     assert not (tmp_path / JOB_ALLOCATIONS_LOCK_NAME).exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "driver, exit_code, notice",
+    [
+        pytest.param(_FINISHES_THE_RUN, 0, "the run is complete", id="run-complete"),
+        pytest.param(
+            f"( exit {NO_ELIGIBLE_RETRY_EXIT} )",
+            NO_ELIGIBLE_RETRY_EXIT,
+            "no task is eligible for another attempt",
+            id="nothing-eligible-for-retry",
+        ),
+    ],
+)
+def test_the_cancel_notice_says_why_the_chain_ended(tmp_path, monkeypatch, driver, exit_code, notice):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", driver=driver, sentinel_id="998")
+
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    assert f"Cancelled this chain's queued sentinel 998: {notice}." in result.stdout
+    assert f"Cancelled this chain's queued follow-up 999: {notice}." in result.stdout
+    assert ("the run is complete" in result.stdout) == (exit_code == 0)

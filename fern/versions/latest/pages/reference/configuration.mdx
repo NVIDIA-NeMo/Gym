@@ -243,6 +243,33 @@ A call that sets its own limit uses that limit and not the budget. Set the budge
 without a time limit, as before. Model connection retries are separate: `connection_retry_timeout_s`
 on a model client stays unset by default.
 
+### Optional Limits on Waits
+
+These settings add bounds without changing existing defaults. When unset, they keep the corresponding client's or
+provider's behavior, including existing finite timeouts. Set a limit above the longest time the wait can legitimately
+take, because a limit that is too short ends good work and changes what a run measures.
+
+| Setting | Where | What it bounds |
+|---|---|---|
+| `request_timeout_seconds`, `max_connection_retries`, `connection_retry_timeout_s` | `base_model`, `inference_provider` and `switchyard_model` configs (`vllm_model` and `openai_model` have their own) | Each HTTP attempt to the endpoint (not the whole call), the number of connection-error attempts (`N` allows N, so `1` means no retry; HTTP-status retries are counted separately), and the time spent retrying connection errors. A timed-out attempt is retried like any transport error; a timeout while reading the response body is not resent. None of these is a deadline for the whole call. |
+| `verify_timeout_seconds` | `gym eval reverify` config | Each `/verify` and `/aggregate_metrics` call, including its retries. A call that runs out fails the pass, as a lost outcome does, and is not resent. |
+| `runner_timeout_seconds` | `harness_exa_search` config | The harness command in its sandbox. |
+| `external_judge_wait_timeout_seconds`, `external_judge_request_timeout_seconds` | `proof_judge` and `proof_verification` configs | The wait for an external judge server (`JUDGE_SERVER_ARGS`), and each request to it (4 hours by default, as before). |
+| `server_ready_timeout_seconds` | `local_vllm_model` config | Startup, while the launched vLLM server is not yet answering. |
+| `model_server_wait_timeout_seconds` | `local_vllm_model_proxy` config | Startup, while the referenced `local_vllm_model` server is not up, and its config request. |
+| `prepare_timeout_seconds` | `gym eval prepare` config | Installing a dataset's `prepare_dependencies`, and each prepare script that runs in an isolated environment (`prepare_project`). A prepare script that runs in the Gym process itself cannot be interrupted. |
+
+Commands that Gym runs on a Slurm login host over SSH take four environment variables, read when the connection
+opens. Each is a positive whole number, and a bad value is an error:
+
+- `NEMO_GYM_SSH_CONNECT_TIMEOUT_S` is `ssh -o ConnectTimeout`, the limit on the connect and the handshake.
+- `NEMO_GYM_SSH_SERVER_ALIVE_INTERVAL_S` and `NEMO_GYM_SSH_SERVER_ALIVE_COUNT_MAX` make ssh probe a quiet link and
+  drop it after that many unanswered probes.
+- `NEMO_GYM_SSH_COMMAND_TIMEOUT_S` limits each ssh or rsync command from start to finish, including the remote reader
+  that recovery and status runs on the login host. A command still running at the limit is killed, which ends its
+  remote shell as an interruption does. Set it above the longest copy you expect and above the reader's bound (see
+  `NEMO_GYM_REMOTE_READER_TIMEOUT_S`, which can reach four hours).
+
 ### Listen Backlog
 
 `uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them
@@ -326,6 +353,20 @@ use".
 With checkpointing on, `/run` is never resent, so a reset connection in a dead worker's queue fails that episode
 attempt. Prefer enabling the setting only on the servers that need it, such as the model server.
 
+### Partial-Rollout Checkpoints (`checkpoint`)
+
+Checkpointing is off unless the top-level `checkpoint` block sets `enabled: true`.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Turn on the checkpoint participants and control routes of every server. |
+| `control_auth_token` | none | Bearer token required on every `/ng-control/v1/checkpoint` route. Required when `enabled` is true. |
+| `lease_grace_seconds` | `600` | How long past a control call's deadline a server stays closed without hearing from the controller before it resumes on its own. |
+| `state_dir` | none | Absolute directory where servers record external state their checkpoints keep, such as sandbox snapshots, so a release can delete it after a crash too. Required by servers that checkpoint sandboxes. One per job and its restarts, on a filesystem every restart can read and whose `flock` holds across nodes (on Lustre, mount with `-o flock`). |
+
+See [Make a Resources Server Checkpointable](/main/environment-tutorials/checkpointable-resources-server) and
+[Make a Harness Checkpointable](/main/agent-server/checkpointable-harness).
+
 ### Model Server Fields
 
 ```yaml
@@ -362,7 +403,7 @@ default) when any harness will do. When it is set, [`--agent-type`](/reference/c
 refuses to substitute an agent that is not listed. Declare it on every config that writes this server's
 block — server configs are self-contained, so a config written from scratch does not inherit it.
 
-**Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, `other` (see `Domain`)
+**Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `asr`, `e2e`, `rlhf`, `other` (see `Domain`)
 
 ### Agent Server Fields
 
@@ -445,6 +486,17 @@ wandb_name: my-run
 wandb_api_key: your-wandb-key
 ```
 
+### Credentials on the Head Server's Config Route
+
+**`head_server_serve_credentials`** — Whether the head server's `/global_config_dict_yaml` route serves credential values.
+
+- **Default:** `false` — every non-empty string under a credential-shaped key (`*api_key*`, `*secret*`, `*password*`, `*credential*`, `*authorization*`, `*cookie*`, `token`, `*_token`, and a `*-key` / `*_key` header inside a `*headers` mapping, such as `x-litellm-key`) is served as `****`, interpolations included, and the password in any URL's user info is masked. Empty and unset (`???`) values stay visible, and so does every other setting, so clients can still route and read flags.
+- **Why:** anything that can reach the head server can read this route, including an agent sandbox that shares its network namespace.
+- **Effect on servers:** none. Gym-launched servers read their unmasked configuration from their environment, not from this route.
+- **When to set `true`:** only for a client that fetches credentials from the route itself. This requires the boolean `true`; quoted strings such as `"false"` or `"true"` do not enable it.
+
+Masking follows static config references to their source values, including shared header mappings and URL passwords, while keeping ordinary headers and unrelated unresolved expressions intact. It inspects supported `oc.env`, `oc.select` and static-input `oc.decode` expressions without evaluating resolvers. Dynamic references, custom resolvers and runtime-backed decoding such as `oc.decode` of an environment value cannot be inspected safely, so the route refuses to serve those credential configs. Use static references or the supported expressions for credential values, and static references for header mappings.
+
 ### Multi-Node Configuration
 
 **`use_absolute_ip`** — Controls the default host servers bind to.
@@ -453,7 +505,7 @@ wandb_api_key: your-wandb-key
 - **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
 - **Effect:** When `default_host` is unset, resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost. If lookup fails or returns a loopback or unspecified address, configuration fails with guidance to set a reachable address.
 - **Explicit address:** `default_host` takes precedence over automatic lookup, whether `use_absolute_ip` is `true` or `false`. For example, `+default_host=192.0.2.20` selects that address without consulting hostname lookup. A server's own `host` setting still takes precedence over this shared default.
-- **Scoping:** `absolute_ip_server_types` (a list of server types: `responses_api_models`, `responses_api_agents`, `resources_servers`, `environment_servers`) limits the resolved address to those types. Every other server, and the head server whose `/global_config_dict_yaml` endpoint returns the merged configuration, keeps `127.0.0.1`; a server's own `host` still wins. Unset or `null` (the default) moves every server, the head included, as before. The list only scopes the resolved address: an explicit `default_host` applies to every server regardless.
+- **Scoping:** `absolute_ip_server_types` (a list of server types: `responses_api_models`, `responses_api_agents`, `resources_servers`, `environment_servers`) limits the resolved address to those types. Every other server, and the head server whose `/global_config_dict_yaml` endpoint returns the merged configuration (credentials masked; see below), keeps `127.0.0.1`; a server's own `host` still wins. Unset or `null` (the default) moves every server, the head included, as before. The list only scopes the resolved address: an explicit `default_host` applies to every server regardless.
 - **Harbor runs:** `gym eval run <target> --agent <agent>` sets `use_absolute_ip: true` and `absolute_ip_server_types: [responses_api_models]` by default when the harness declares that it calls the model from inside the sandbox (`calls_model_from_sandbox = True` on its agent class, read from the agent's entrypoint source) or its configuration sets `sandbox_model_base_url`: the model server advertises the node's address, the head server, the agent server and the environment server stay on loopback. An explicit config file or command-line setting can override either default (`++absolute_ip_server_types=null` exposes every server). Oracle validation and host-side harnesses do not enable it.
 
 **`sidecar`** — Optional block that starts a local HTTP/2 PING proxy so requests to NVCF endpoints survive the 340 second idle limit.

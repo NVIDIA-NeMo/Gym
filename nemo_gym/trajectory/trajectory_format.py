@@ -356,6 +356,7 @@ def project_trajectory_v1(trajectory: dict[str, Any], *, restore_native_ids: boo
         invocation.pop("agent_instance", None)
     for call in result.get("model_calls", []):
         call.pop("agent_instance", None)
+        call.pop("agent_kind", None)
         call.pop("clock_domain", None)
     if "gaps" in result:
         result["gaps"] = _project_gaps_v1(result["gaps"], trajectory.get("tool_calls", []))

@@ -2,8 +2,8 @@
 
 Evaluation-only support for [THUDM/LVBench](https://github.com/THUDM/LVBench),
 **not LongVideoBench**: single-turn video multiple-choice QA without
-benchmark-specific system prompts. An agentic setting is planned as a separate
-change; the verifier already accepts `setting: agentic` cohorts.
+benchmark-specific system prompts. The agentic setting runs OpenCode with
+video tools in a sandbox that the server lends each episode.
 
 ## Inputs and configuration
 
@@ -22,12 +22,17 @@ revision, explicit media inventory, output cohort and provenance receipts.
 | Setting | Config | Required cohort variable | Agent |
 | --- | --- | --- | --- |
 | Single-turn | `configs/lvbench_single_turn.yaml` | `lvbench_cohort_manifest` | `simple_agent`, one step |
+| Agentic | `configs/lvbench_agentic.yaml` | `lvbench_agentic_cohort_manifest` (and `lvbench_agentic_video_roots`) | `opencode_agent` in a lent sandbox |
 
 Compose the config with a `policy_model` such as the stock `vllm_model`, then
 use standard Gym run/eval/aggregate commands. The config runs `simple_agent`
 through a `single_agent_turn_legacy` Environment Server. Rows carry the video
 as a `data:` or `file://` URL; see
 [single-turn inputs](../video_mcqa/README.md#single-turn-inputs).
+The agentic config runs the stock `opencode_agent` with `watch_video` and
+`view_image` through the same Environment Server; its rows bind the original
+video file, and it needs a sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`). See the
+shared [agentic setting](../video_mcqa/README.md#agentic-setting).
 
 ## Scores
 
@@ -45,7 +50,10 @@ an additional video-type breakdown. Category scores are not macro-averaged.
 
 The prompt asks for a boxed letter, and the default `boxed_only_v1` policy
 scores an unboxed answer as 0, unlike upstream's bare-letter answers, so these
-scores are not comparable to official LVBench results.
+scores are not comparable to official LVBench results. For bare-letter answers,
+prepare the rows with `--prompt lvbench` and a `llm_extraction_v1` cohort, and
+run `configs/lvbench_single_turn_llm_extraction.yaml`; see
+[answer extraction](../video_mcqa/README.md#answer-extraction-by-a-judge-model).
 
 Reference scorer: `lvbench/metrics/compute_accuracy.py` at official commit
 `518df47219862534dad39fa1373b4e7c862a4cd5`. Reference annotation snapshot:

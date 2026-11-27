@@ -21,6 +21,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -403,14 +404,14 @@ class PoolAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, PoolSession):
             raise TypeError("Expected PoolSession")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Pool activation must use its seeded rollout route")
+            raise AgentSessionConflictError("Pool activation must use its seeded rollout route")
         if state.session.closing:
-            raise HTTPException(409, "Pool session is closing")
+            raise AgentSessionConflictError("Pool session is closing")
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._activate(state, state.activation_request))
         elif state.activation_request != body:
-            raise HTTPException(409, "Pool sessions support one activation; retries must use the same input")
+            raise AgentSessionConflictError("Pool sessions support one activation; retries must use the same input")
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
 

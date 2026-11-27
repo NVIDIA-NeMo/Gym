@@ -93,16 +93,20 @@ if not persona_asset_path.is_file():
         raise RuntimeError(
             "Could not determine an NGC organization. Set NGC_CLI_ORG or run `ngc config set`, then rerun."
         )
+    print(f"  {locale}: downloading persona dataset...", flush=True)
     _download_persona_asset(
         ngc_executable=ngc_executable,
         locale=locale,
         managed_assets_path=managed_assets_path,
     )
+else:
+    print(f"  {locale}: using cached persona dataset", flush=True)
 
 rows = []
 for probe in known_probes():
     if (probe, locale) in UNSUPPORTED_PROBE_LOCALES:
         continue
+    print(f"  {locale}: generating {probe}", flush=True)
     [row] = materialize_episode_inputs(
         locale=locale,
         num_rows=1,
@@ -208,6 +212,7 @@ def _download_persona_asset(*, ngc_executable: Path, locale: str, managed_assets
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr or ""
             raise RuntimeError(f"Failed to download Nemotron-Personas: {stderr.strip() or exc}") from exc
+        print(f"  {locale}: verifying downloaded persona dataset...", flush=True)
         downloaded_assets = list(Path(download_dir).rglob(f"{locale}.parquet"))
         if len(downloaded_assets) != 1:
             raise RuntimeError(
@@ -306,7 +311,8 @@ def prepare(
     with tempfile.TemporaryDirectory(prefix="usersim-materialize-") as working_dir:
         models_path = Path(working_dir) / "models.toml"
         models_path.write_text(_models_config())
-        for locale in locales:
+        for index, locale in enumerate(locales, 1):
+            print(f"UserSim [{index}/{len(locales)}] {locale}: starting", flush=True)
             resolved_path = _materialize_locale(
                 locale,
                 executable=executable,
@@ -318,6 +324,7 @@ def prepare(
             resolved_rows.extend(
                 (locale, json.loads(line)) for line in resolved_path.read_text().splitlines() if line.strip()
             )
+            print(f"UserSim [{index}/{len(locales)}] {locale}: complete", flush=True)
 
     tasks = []
     task_ids: set[str] = set()
@@ -371,7 +378,7 @@ def _materialize_locale(
         subprocess.run(
             command,
             check=True,
-            capture_output=True,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
             env={

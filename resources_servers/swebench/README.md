@@ -66,3 +66,13 @@ Data: ?
 Dependencies
 - nemo_gym: Apache 2.0
 ?
+
+## Partial-rollout checkpoints
+
+With a top-level `checkpoint:` block and a sandbox provider that can snapshot (OpenSandbox), episode sessions take part
+in partial-rollout checkpoints: a commit snapshots each task sandbox, a restore forks it, and `/verify` grades the patch
+it captured once (`checkpoint_verify = "replay"`). On any other provider the server runs `restart_only`. Golden-patch
+grading (`is_verifying_golden_patch`) seeds no episode sessions and has nothing to checkpoint.
+
+Settings: `sandbox_checkpoint.parallelism`, `.snapshot_attempts` and `.snapshot_retry_delay_s`; a server that exports
+its sessions needs `checkpoint.state_dir`. See "Make a Resources Server Checkpointable" in the docs.

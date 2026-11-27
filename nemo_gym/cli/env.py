@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import sys
 import traceback
 from functools import cache
@@ -27,6 +28,7 @@ from shutil import rmtree
 from subprocess import Popen
 from tempfile import TemporaryDirectory
 from time import time
+from types import FrameType
 from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import rich
@@ -84,7 +86,7 @@ from nemo_gym.environment.validation import (
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
 from nemo_gym.server_runtime.server_status import StatusCommand
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
-    RunHelper,
+    ServerSupervisor,
     _configured_servers,
     _resolve_server_dir,
 )
@@ -204,7 +206,7 @@ def prefetch(
         print(f"Pre-warming venv for: {dir_path}")
 
         # Run only the setup (venv creation + dep install) — no server start.
-        # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
+        # Serial execution reduces uv cache size (same reasoning as dry_run in ServerSupervisor.start).
         setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
         process = run_command(setup_cmd, dir_path, server_name=top_level_path)
         returncode = process.wait()
@@ -241,9 +243,30 @@ def run(
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    rh = RunHelper()
-    rh.start(global_config_dict_parser_config)
-    rh.run_forever()
+    supervisor = ServerSupervisor()
+    terminated = False
+
+    def _on_sigterm(signum: int, frame: FrameType | None) -> None:
+        nonlocal terminated
+        terminated = True
+        raise KeyboardInterrupt
+
+    # Slurm ends a job with SIGTERM (scancel, the time limit). Python's default action exits without unwinding,
+    # which leaves the servers running and the config file, with its API keys, on disk. Here and not in
+    # `ServerSupervisor.start()`: a trainer calls that off the main thread, where a handler cannot be set.
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        supervisor.start(global_config_dict_parser_config)
+        # When a server uses Ray, the start runs Ray's init, which replaces the handler with one that exits with
+        # status 15. That one unwinds too, so a SIGTERM during the rest of the start still shuts everything down.
+        signal.signal(signal.SIGTERM, _on_sigterm)
+        supervisor.run_forever()
+    except KeyboardInterrupt:
+        if not terminated:
+            raise
+    if terminated:
+        # As a SIGTERM kill would, so a stopped job never looks successful: `run_forever` returns after Ctrl-C.
+        sys.exit(128 + signal.SIGTERM)
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover

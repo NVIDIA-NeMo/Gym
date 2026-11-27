@@ -82,7 +82,10 @@ the one that passed, else the last one tried; `null` for a sentinel step), `stat
 `timed_out`, `exit` (as in `step_exits`), `duration_s`, `exception_class` (the class named on the last traceback line, e.g.
 `AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`; `null` when there is none) and the last
 `output_tail_chars` characters (default 2000; 0 keeps none, negative values are rejected) of `stdout_tail`
-and `stderr_tail`. The per-environment
+and `stderr_tail`. A provider-confirmed execution OOM records `exception_class: MemoryLimitExceeded`,
+`returncode: null` and `exit: unknown`; it does not invent a traceback or process exit code. The original
+OOM event remains in the response's failure report even if another interpreter subsequently passes.
+The per-environment
 pass bits and error text of SciCode-Verified's OR grading stay in `step_environment_results` /
 `step_environment_errors`; the record adds the execution details of the decisive run. The tails contain model-generated output and tracebacks, so the flag is off by
 default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. With
@@ -141,6 +144,15 @@ gym eval run --no-serve \
     --num-repeats 1 \
     --temperature 0.0
 ```
+
+## Sandbox memory limits
+
+A provider-confirmed sandbox OOM while executing generated code fails that
+grading attempt. SciCode retains its existing rule: a sub-step passes if any
+configured interpreter passes it. Dependency and test-data preflight runs
+separately; setup OOM, unconfirmed termination and other infrastructure failures
+remain incomplete. Exit code 137 or text mentioning OOM alone is insufficient.
+Reference solutions must be qualified with the same image, test data and limits.
 
 ## Tests
 

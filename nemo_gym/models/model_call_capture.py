@@ -36,11 +36,11 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
-from nemo_gym.core.correlation import CorrelationPathError, resolve
+from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
@@ -61,7 +61,7 @@ from nemo_gym.models.token_capture.protocols import (
     installed_lineage_store,
     installed_token_sink,
 )
-from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON, CallIdentity, ModelRef, agent_kind_of
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
@@ -265,16 +265,14 @@ class CaptureStore:
         return exchanges, invalid_count
 
 
+# Request-state key under which the capture middleware leaves the agent instance the stripped prefix named.
+AGENT_INSTANCE_STATE_KEY = "nemo_gym_agent_instance"
+
 _OBSERVED_PATHS = {
     "/v1/responses": "responses",
     "/v1/chat/completions": "chat",
     "/v1/messages": "messages",
 }
-
-
-# A client may declare its persisted session ID for exact correlation with an AgentInvocation.
-# It is correlation evidence, not authentication; absence is fail-safe.
-_CLIENT_SESSION_HEADER = b"x-session-id"
 
 
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
@@ -646,6 +644,7 @@ def _record(
     *,
     verifier_invocation_id: Optional[str] = None,
     client_session_id: Optional[str] = None,
+    agent_instance: Optional[str] = None,
     client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
@@ -691,6 +690,9 @@ def _record(
             exchange["verifier_invocation_id"] = verifier_invocation_id
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
+        if agent_instance is not None:
+            exchange["agent_instance"] = agent_instance
+            exchange["agent_kind"] = agent_kind_of(agent_instance)
         if execution is not None:
             exchange.update(execution)
             if execution["local_response_reason"] == "context_length_exceeded":
@@ -744,7 +746,9 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
     try:
         # A disconnected caller must not cancel the write before it reaches the ledger.
         await asyncio.shield(
-            ledger.record_failure(context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
+            ledger.record_failure(
+                context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON, identity=context.identity
+            )
         )
     except Exception:
         logger.exception(
@@ -779,6 +783,7 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
+        allow_system_suffix: bool = False,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -786,6 +791,8 @@ class _CaptureMiddleware:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        # Every capture record names the serving model server from this server's own configuration.
+        self._model_ref = ModelRef(name=model_server_name) if model_server_name else None
         self._assistant_message_header: bytes | None = (
             assistant_message_header.lower() if assistant_message_header else None
         )
@@ -799,6 +806,7 @@ class _CaptureMiddleware:
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
         self._parent_resolution_mode = parent_resolution_mode
+        self._allow_system_suffix = allow_system_suffix
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -815,6 +823,7 @@ class _CaptureMiddleware:
 
         path = scope.get("path", "")
         rollout_from_path: Optional[str] = None
+        agent_instance: Optional[str] = None
         token_capture_requested = False
         capture_prefix = ""
         try:
@@ -829,10 +838,13 @@ class _CaptureMiddleware:
         if resolved is not None and resolved[0].capture_key is not None:
             correlation, rest = resolved
             rollout_from_path = correlation.capture_key
+            agent_instance = correlation.agent_instance
             token_capture_requested = correlation.token_capture
             capture_prefix = path[: len(path) - len(rest)]
             path = rest
             scope = scope_with_routed_path(scope, path)
+            # Handlers that build their own capture context (context measurement) need the stripped name.
+            scope["state"][AGENT_INSTANCE_STATE_KEY] = agent_instance
 
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
@@ -852,18 +864,6 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
-        if (
-            capture_wanted
-            and self._parent_resolution_mode == "source_history"
-            and dialect is not None
-            and dialect not in ("responses", "chat")
-        ):
-            await Response(
-                content='{"detail":"Source-history capture currently requires Responses or Chat"}',
-                status_code=422,
-                media_type="application/json",
-            )(scope, receive, send)
-            return
         if token_capture_requested and dialect is None and token_sink is not None:
             marked_incomplete = False
             response_started = False
@@ -874,7 +874,9 @@ class _CaptureMiddleware:
                     return
                 marked_incomplete = True
                 try:
-                    await token_sink.mark_incomplete(rollout_from_path, "")
+                    await token_sink.mark_incomplete(
+                        rollout_from_path, "", identity=CallIdentity(agent_instance, self._model_ref)
+                    )
                     logger.warning(
                         f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
                         f"{method} {path} {reason}. Declare the exact request on the model server only if its "
@@ -925,10 +927,11 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        request_state["nemo_gym_model_call_identity"] = {"rollout_id": rollout_id, "model_call_id": model_call_id}
         verifier_invocation_id = _unique_request_header(
             scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
         )
-        client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        session_id = client_session_id(scope)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
             if self._assistant_message_header is not None
@@ -951,7 +954,10 @@ class _CaptureMiddleware:
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
                 parent_resolution_mode=self._parent_resolution_mode,
+                allow_system_suffix=self._allow_system_suffix,
                 admitted_at=time.time(),
+                agent_instance=agent_instance,
+                model_ref=self._model_ref,
             )
             sink_token = set_token_sink(capture_context)
             attach_capture_context(capture_context)
@@ -1029,7 +1035,7 @@ class _CaptureMiddleware:
                     defer_response = terminal is not None
                     if terminal is not None:
                         state["stream_terminal"] = terminal
-                if defer_response or not message.get("more_body", False):
+                if state["streaming"] and (defer_response or not message.get("more_body", False)):
                     deferred_response_messages.append(dict(message))
                     return
             await send(message)  # forward unchanged -> streaming is preserved
@@ -1061,7 +1067,8 @@ class _CaptureMiddleware:
                     self._model_server_name,
                     bytes(request_body),
                     verifier_invocation_id=verifier_invocation_id,
-                    client_session_id=client_session_id,
+                    client_session_id=session_id,
+                    agent_instance=agent_instance,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
@@ -1139,7 +1146,8 @@ class _CaptureMiddleware:
                     model_server_name,
                     request_bytes,
                     verifier_invocation_id=verifier_invocation_id,
-                    client_session_id=client_session_id,
+                    client_session_id=session_id,
+                    agent_instance=agent_instance,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
@@ -1270,6 +1278,9 @@ def install_model_call_capture(
         external_staging=external_staging,
         parent_resolution_mode=(
             capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
+        ),
+        allow_system_suffix=(
+            capture_settings.token_id_capture.allow_system_suffix if capture_settings is not None else False
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,

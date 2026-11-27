@@ -6,19 +6,19 @@ import hashlib
 import json
 import os
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
-    CollectedEvidence,
-    decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _provider_failures, _resumable_run, _sbatch_env
+from tests.helpers.recovery_store_runs import collect_isolated, save_store_run
+from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
@@ -26,87 +26,6 @@ from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as run
 
 def saved_bytes(job):
     return {str(p.relative_to(job)): hashlib.sha256(p.read_bytes()).hexdigest() for p in job.rglob("*") if p.is_file()}
-
-
-def prepare_managed(job, case, n=1):
-    artifacts = job / "artifacts"
-    artifacts.mkdir(parents=True, exist_ok=True)
-    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(n)]
-    source = job / "source.jsonl"
-    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
-
-    def prepare():
-        inputs = json.loads(json.dumps(rows))
-        return inputs, RunManifest.create(source, inputs, {}, {}).model_copy(update={"max_rollout_attempts": 3})
-
-    output = artifacts / "rollouts.jsonl"
-    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
-        for index in range(n):
-            row = dict(rows[index])
-            selected_case = case if index == 0 else "healthy"
-            if selected_case == "missing":
-                continue
-            if selected_case in ("infra", "exhausted", "reset"):
-                attempts = 3 if selected_case == "exhausted" else 2
-                for attempt in range(attempts):
-                    row = dict(rows[index])
-                    store.allocate_attempt(row)
-                    failure = json.loads(_provider_failures(index, attempt + 1, 3).splitlines()[-1])
-                    store.record_outcome(row | failure)
-                continue
-            store.record_dispatch(row)
-            if selected_case in ("healthy", "wrong", "prior_reservation", "duplicate_history"):
-                store.record_outcome(row | {"reward": 0.0 if selected_case == "wrong" else 1.0})
-                if selected_case in ("prior_reservation", "duplicate_history"):
-                    store.allocate_attempt(row)
-                    if selected_case == "duplicate_history":
-                        store.record_outcome(row | {"reward": 0.0})
-            elif selected_case in ("judge", "judge_then_reservation"):
-                store.record_outcome(
-                    row
-                    | {
-                        "_ng_failure_class": "judge_failed",
-                        "failure_kind": "judge_failed",
-                        "response": {
-                            "status": "completed",
-                            "output": [
-                                {
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "status": "completed",
-                                    "content": [{"type": "output_text", "text": "synthetic saved answer"}],
-                                }
-                            ],
-                        },
-                    }
-                )
-                if selected_case == "judge_then_reservation":
-                    store.allocate_attempt(row)
-            elif selected_case == "final_zero":
-                store.record_outcome(
-                    row
-                    | {
-                        "_ng_failure_class": "agent_run_error",
-                        "failure_kind": "model_context_limit",
-                        "_ng_failure_terminal": True,
-                        "_ng_failure_counts_as_zero": True,
-                    }
-                )
-            elif selected_case == "unknown_kill":
-                store.record_outcome(row | {"_ng_failure_class": "kill_shaped", "_ng_omitted_rollout": True})
-            else:
-                raise AssertionError(selected_case)
-    if case == "reset":
-        with RolloutStore.start_or_resume(output, prepare, resume=True, resubmit=True):
-            pass
-    return output
-
-
-def collect(job):
-    result = subprocess.run(
-        ["/usr/bin/python3", "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
-    )
-    return CollectedEvidence.model_validate_json(result.stdout)
 
 
 def decide(c):
@@ -131,9 +50,9 @@ def decide(c):
     ],
 )
 def test_authoritative_store_selects_saved_outcomes_and_budgets(tmp_path, case, action, state, attempts):
-    prepare_managed(tmp_path, case)
+    save_store_run(tmp_path, case)
     before = saved_bytes(tmp_path)
-    raw = collect(tmp_path)
+    raw = collect_isolated(tmp_path)
     assert decide(raw).action.value == "stop"  # unsupported remote-reader bridge remains explicit
     selected = select_managed_evidence(raw, tmp_path)
     result = decide(selected)
@@ -165,7 +84,7 @@ def test_actual_local_slurm_executor_keeps_budget_and_never_regenerates_saved_an
     from nemo_gym.orchestration.submit import recover
 
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, case, n=2)
+    save_store_run(job, case, n=2)
     before = saved_bytes(job / "artifacts")
     result = recover(*_handle(job))
     assert result.decision.action.value == action
@@ -205,8 +124,8 @@ def test_actual_local_slurm_executor_keeps_budget_and_never_regenerates_saved_an
     ],
 )
 def test_changed_history_between_collector_and_reader_stops(tmp_path, name):
-    prepare_managed(tmp_path, "healthy")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "healthy")
+    raw = collect_isolated(tmp_path)
     path = tmp_path / "artifacts" / name
     path.write_bytes((path.read_bytes() if path.exists() else b"") + b"\n")
     after = select_managed_evidence(raw, tmp_path)
@@ -214,8 +133,8 @@ def test_changed_history_between_collector_and_reader_stops(tmp_path, name):
 
 
 def test_manifest_changed_during_store_read_stops(tmp_path, monkeypatch):
-    prepare_managed(tmp_path, "healthy")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "healthy")
+    raw = collect_isolated(tmp_path)
     original = RolloutStore.read
 
     def changing(*args, **kwargs):
@@ -230,33 +149,35 @@ def test_manifest_changed_during_store_read_stops(tmp_path, monkeypatch):
 
 
 def test_missing_saved_attempt_cap_is_not_replaced_by_process_defaults(tmp_path):
-    prepare_managed(tmp_path, "infra")
+    save_store_run(tmp_path, "infra")
     path = tmp_path / "artifacts/rollouts_manifest.json"
     payload = json.loads(path.read_text())
     payload["max_rollout_attempts"] = None
     path.write_text(json.dumps(payload))
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     assert selected.managed_selection is None
     assert "attempt cap" in selected.managed_reader_error
     assert decide(selected).action.value == "stop"
 
 
 def test_superseded_journal_is_not_parsed_by_the_consumer(tmp_path):
-    prepare_managed(tmp_path, "healthy")
+    save_store_run(tmp_path, "healthy")
     (tmp_path / "artifacts/rollouts_attempts.jsonl").write_text("{}\n")
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     assert selected.managed_selection is None
     assert "superseded" in selected.managed_reader_error
     assert decide(selected).action.value == "stop"
 
 
 def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm
     from nemo_gym.orchestration.executors.connection import Connection, LocalConnection
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
     from nemo_gym.orchestration.submit import recover
 
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, "healthy", n=2)
+    save_store_run(job, "healthy", n=2)
 
     class RemoteTransport(Connection):
         # Execute the exact serialized commands locally, but expose the SSH capability boundary.
@@ -269,7 +190,9 @@ def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin
         def write_text(self, remote, content, *, private=False):
             raise AssertionError("no dispatch")
 
-    monkeypatch.setattr(slurm, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda hostname: RemoteTransport())
     result = recover(*_handle(job))
     assert result.decision.action.value == "stop" and result.dispatched is None
     assert "authoritative Store reader" in result.decision.reason
@@ -279,19 +202,19 @@ def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin
 @pytest.mark.parametrize("other", ["missing", "different-run"])
 def test_reader_cannot_bind_collected_evidence_to_another_local_path(tmp_path, other):
     job = tmp_path / "job"
-    prepare_managed(job, "healthy")
-    raw = collect(job)
+    save_store_run(job, "healthy")
+    raw = collect_isolated(job)
     different = tmp_path / other
     if other == "different-run":
-        prepare_managed(different, "wrong")
+        save_store_run(different, "wrong")
     selected = select_managed_evidence(raw, different)
     assert selected.managed_selection is None
     assert decide(selected).action.value == "stop"
 
 
 def test_managed_selection_never_materializes_a_whole_rollout_file(tmp_path, monkeypatch):
-    prepare_managed(tmp_path, "healthy")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "healthy")
+    raw = collect_isolated(tmp_path)
     original = type(tmp_path).read_bytes
 
     def bounded(path):
@@ -305,11 +228,39 @@ def test_managed_selection_never_materializes_a_whole_rollout_file(tmp_path, mon
     assert decide(selected).action.value == "noop"
 
 
+def _select_counting_resolves(job):
+    raw = collect_isolated(job)
+    calls = Counter()
+    resolve = type(job).resolve
+
+    def counting(path, *args, **kwargs):
+        calls[path.name] += 1
+        return resolve(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(type(job), "resolve", counting)
+        return select_managed_evidence(raw, job), calls
+
+
+def test_managed_selection_resolves_paths_per_file_not_per_record(tmp_path):
+    # Path.resolve walks the filesystem, so one call per selected record is slow for large runs on shared storage.
+    calls = {}
+    for n in (2, 12):
+        job = tmp_path / f"run-{n}"
+        save_store_run(job, "exhausted", n=n)
+        selected, calls[n] = _select_counting_resolves(job)
+        assert selected.managed_reader_error is None
+        assert decide(selected).counts == {"exhausted": 1, "scored": n - 1}
+        assert sorted(row["_line"] for row in selected.results) == list(range(n - 1))
+        assert [row["_line"] for row in selected.failures] == [2]
+    assert calls[2] == calls[12]
+
+
 @pytest.mark.parametrize("reader", ["managed", "collector"])
 def test_snapshot_hash_memory_is_bounded_on_large_sparse_file(tmp_path, reader):
     import tracemalloc
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "large.jsonl"
     size = 256 << 20
@@ -346,7 +297,7 @@ def collector_hash():
 def test_hashing_rejects_mid_read_file_mutation(tmp_path, monkeypatch, reader, mutation):
     import builtins
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20))
@@ -413,7 +364,7 @@ async def test_actual_collection_native_outcomes_reach_managed_recovery(runner_c
     runner_config.output_jsonl_fpath = str(tmp_path / "artifacts/rollouts.jsonl")
     await produce(runner_config, monkeypatch)
     before = saved_bytes(tmp_path)
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     result = decide(selected)
     assert selected.managed_reader_error is None
     assert result.action.value == "stop"
@@ -450,7 +401,7 @@ async def test_actual_collection_native_outcomes_reach_managed_recovery(runner_c
     ],
 )
 def test_managed_canonical_final_zero_does_not_override_explicit_cause(tmp_path, kind, selected_kind, expected):
-    prepare_managed(tmp_path, "final_zero")
+    save_store_run(tmp_path, "final_zero")
     path = tmp_path / "artifacts/rollouts_failures.jsonl"
     row = json.loads(path.read_text())
     row["_ng_failure_class"] = "model_policy_response_timeout"
@@ -466,19 +417,19 @@ def test_managed_canonical_final_zero_does_not_override_explicit_cause(tmp_path,
             }
         }
     path.write_text(json.dumps(row) + "\n")
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     assert selected.managed_reader_error is None
     assert decide(selected).evidence[0].state.value == expected
 
 
 def test_managed_terminal_infrastructure_is_not_a_model_zero(tmp_path):
-    prepare_managed(tmp_path, "final_zero")
+    save_store_run(tmp_path, "final_zero")
     path = tmp_path / "artifacts/rollouts_failures.jsonl"
     row = json.loads(path.read_text())
     row["_ng_failure_class"] = "provider_unavailable"
     row["failure_kind"] = None
     path.write_text(json.dumps(row) + "\n")
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     assert decide(selected).action.value == "stop"
     assert decide(selected).evidence[0].state.value == "unknown"
 
@@ -492,7 +443,7 @@ def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_pat
     import builtins
     import os
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20))
@@ -532,7 +483,7 @@ def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_pat
 
 @pytest.mark.parametrize("reader", ["managed", "collector"])
 def test_an_unchanged_file_gets_the_same_digest_from_both_readers(tmp_path, reader):
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20) + b"tail")
@@ -547,7 +498,7 @@ def test_public_cli_fails_acceptance_without_resubmitting_a_complete_store(tmp_p
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, "healthy", n=2)
+    save_store_run(job, "healthy", n=2)
     before = saved_bytes(job)
     result = subprocess.run(
         [

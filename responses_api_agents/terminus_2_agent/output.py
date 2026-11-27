@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -133,13 +134,14 @@ def trajectory_to_responses(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
             output_items.append(fc.model_dump())
 
         for i, result in enumerate(results):
-            call_id = (
-                tool_calls[i].get("tool_call_id", f"call_{uuid4().hex[:8]}")
-                if i < len(tool_calls)
-                else f"call_{uuid4().hex[:8]}"
-            )
+            if i >= len(tool_calls):
+                # A step whose reply ran no command (Terminus could not parse it) still has an observation: the
+                # feedback Terminus sends back. No call is pending for it, so it is the next user turn, not a result.
+                feedback = NeMoGymEasyInputMessage(role="user", content=result.get("content", ""), type="message")
+                output_items.append(feedback.model_dump())
+                continue
             fco = NeMoGymFunctionCallOutput(
-                call_id=call_id,
+                call_id=tool_calls[i].get("tool_call_id", f"call_{uuid4().hex[:8]}"),
                 output=result.get("content", ""),
                 type="function_call_output",
                 id=f"fco_{uuid4().hex[:8]}",

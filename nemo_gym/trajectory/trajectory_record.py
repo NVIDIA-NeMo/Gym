@@ -113,6 +113,7 @@ class TrajectoryResponseMetadata(ObservationModel):
 class TrajectoryModelCall(ObservationModel):
     model_call_id: Optional[str] = None
     agent_instance: Optional[str] = Field(default=None, min_length=1)
+    agent_kind: Optional[str] = Field(default=None, min_length=1)
     clock_domain: Optional[str] = Field(default=None, min_length=1)
     client_session_id: Optional[str] = None
     client_assistant_message_id: Optional[str] = None

@@ -28,7 +28,7 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgentConfig,
     _sandbox_prepare_command,
 )
-from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH, OPENCODE_RELEASE_SHA256, OPENCODE_VERSION
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.tests.test_continuation import activate, close, install_artifact_runner, start
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
@@ -41,7 +41,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
 
 
 PIN = "ab" * 32
-RUNTIME = "/tmp/nemo-gym-opencode-runtime-1.17.11"
+RUNTIME = f"/tmp/nemo-gym-opencode-runtime-{OPENCODE_VERSION}"
 EXPORT_DIR = "/owner/exports"
 # Distinctive text of each sandbox step, to find its command.
 PLUGIN_CHECK = 'for path in "$@"'
@@ -80,7 +80,7 @@ def record(sandbox):
         return await run(command, **kwargs)
 
     sandbox.exec.side_effect = exec_
-    sandbox.disconnect.side_effect = lambda: events.append("disconnect")
+    sandbox.disconnect.side_effect = lambda **_: events.append("disconnect")
     return events
 
 
@@ -168,7 +168,17 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
     response, closed = await episode(agent, sandbox)
     directory = sandbox.directory
     install = events[index(events, "install_opencode_runtime.sh")]
-    assert shlex.split(install) == ["bash", f"{directory}/install_opencode_runtime.sh", RUNTIME, "1.17.11", "", "", ""]
+    digests = " ".join(f"{arch}={digest}" for arch, digest in OPENCODE_RELEASE_SHA256[OPENCODE_VERSION].items())
+    assert shlex.split(install) == [
+        "bash",
+        f"{directory}/install_opencode_runtime.sh",
+        RUNTIME,
+        OPENCODE_VERSION,
+        "",
+        "",
+        "",
+        digests,
+    ]
     assert index(events, "install_opencode_runtime.sh") == 1
     for marker in (PLUGIN_CHECK, EXPORT_SESSION, EVENT_LOG, PINNED_COPY, IMPORT_CHECK, "NG_OPENCODE_SKIP_RIPGREP"):
         assert not any(marker in event for event in events)
@@ -580,6 +590,17 @@ async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_pa
     assert params["env"]["XDG_CACHE_HOME"] == f"{directory}/cache"
 
 
+async def test_ripgrep_download_lets_the_installer_go_on_without_rg(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_ripgrep_download = True
+    events = record(sandbox)
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    assert events[index(events, "install_opencode_runtime.sh")].startswith(
+        "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1 bash "
+    )
+
+
 async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directory(setup, tmp_path):
     agent, sandbox = setup
     agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/opencode-plugin-dependencies.tar.gz"
@@ -598,8 +619,10 @@ async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directo
     assert positional(events[unpack]) == [f"{directory}/config/.pinned-opencode", f"{directory}/config/opencode"]
     params, _ = launch_config(sandbox)
     assert params["env"]["XDG_CONFIG_HOME"] == f"{directory}/config"
-    # Without a pinned rg the installer keeps its best-effort ripgrep install.
-    assert not any(event.startswith("NG_OPENCODE_SKIP_RIPGREP") for event in events)
+    # Without a pinned rg the installer installs ripgrep itself and fails without it.
+    assert not any(
+        event.startswith(("NG_OPENCODE_SKIP_RIPGREP", "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD")) for event in events
+    )
 
 
 def test_a_dependency_archive_that_leaves_its_folder_refuses_the_seed(setup, tmp_path):
@@ -842,7 +865,7 @@ async def test_path_prefix_reaches_the_installer_and_every_opencode_process(setu
     events = record(sandbox)
     response, closed = await episode(agent, sandbox)
     assert response.status == "completed"
-    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-1] == prefix
+    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-2] == prefix
     assert f"PATH={shlex.quote(prefix)}:$PATH\n" in launch_config(sandbox)[0]["setup"]
     for marker in (IMPORT, EXPORT_SESSION):
         assert f"PATH={shlex.quote(prefix)}:$PATH\n" in events[index(events, marker)], marker

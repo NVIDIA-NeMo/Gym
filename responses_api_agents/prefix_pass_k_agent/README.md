@@ -26,10 +26,43 @@ renders mirror the captured harness exactly, because the candidate reads them.
 | `interpreter` | none | e.g. `[bash, -c]`: run each command in a fresh interpreter, as mini-swe-agent does, so `BASH_ENV` is sourced |
 | `exec_env` | UTF-8 locale | variables exported before every command |
 | `commit_worktree` | false | commit the working tree before grading, for verifiers that grade committed work only (DeepSWE) |
+| `outcome_policy` | commit-specific shared stage policy | only `fail` and `count_as_zero`; controls required-commit failures independently of attribution |
 | `record_git_state` | false | record whether HEAD moved and how many files are staged or untracked before grading |
 | `uncommit_worktree` | false | before grading, fold commits, staged edits and new files back into unstaged edits, for verifiers that grade `git diff` (SWE-bench Verified) |
 | `offline` | false | before the replay, make hostnames unresolvable in the sandbox, for traces captured with no network (SWE-bench Pro); grading runs in the resources server's own sandbox and stays online |
 | `replay_through_target` | false | gold check, below |
+
+## Required-commit outcomes
+
+When `commit_worktree` is enabled, a failed required commit never contributes a stale verifier score. Later
+Git mutations are skipped, and verification is still attempted to release the resources server's sandbox.
+
+The `outcome_policy` uses Gym's shared `StageOutcomePolicyConfig`. Preparing the commit belongs to `verification`;
+a forwarded typed failure keeps its known originating stage. Defaults count `git_worktree_commit_rejected` as
+zero/unmasked with a `model` attribution convention; provider and transport failures are ungraded/masked. The kind
+records the observed nonzero Git exit, not proof of model responsibility. Action and attribution are independently
+configurable. The result saves `failure_outcome_action`, `failure_outcome_attribution`, and the structured
+`_ng_failure_id` / `_ng_failure_events` report, including preserved provider event IDs and explicit causes.
+
+To leave a rejected commit ungraded and classify its responsibility as unknown:
+
+```yaml
+outcome_policy:
+  by_stage:
+    verification:
+      by_failure_kind:
+        git_worktree_commit_rejected: fail
+  classification:
+    by_stage:
+      verification:
+        by_failure_kind:
+          git_worktree_commit_rejected: unknown
+```
+
+Only `fail` and `count_as_zero` are supported at this boundary. Configuring `retry` or `verify` fails validation;
+commit preparation does not inherit the shared verifier retry or agent OOM counting defaults. Success keeps the
+verifier's measured reward. These settings apply to the required-commit boundary, not failures while replaying
+or generating candidate commands.
 
 ## Validating a pool
 
@@ -43,7 +76,8 @@ A pass@K of 0 is more often a broken replay than a weak model.
 ## Per-rollout diagnostics
 
 Every rollout row also carries `forwards`, `unparsed_forwards`, `truncated_forwards` (unparsed forwards cut off at
-`max_tokens`), `context_overflow`, `exec_errors` (a command the sandbox failed to run at all; it aborts the attempt and masks the sample),
+`max_tokens`), `context_overflow`, `exec_errors` (command execution failures; replay/generation failures abort and mask the sample,
+while required-commit failures follow `outcome_policy`),
 `submitted`, and `prefix_observations_compared` / `prefix_observations_identical` (replay fidelity against the captured
 observations).
 

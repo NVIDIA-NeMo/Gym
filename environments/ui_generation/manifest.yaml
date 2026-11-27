@@ -1,0 +1,28 @@
+name: ui_generation
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: coding
+description: Single-turn front-end UI generation. An LLM judge reads only the fenced code of the answer and scores
+  prompt adherence and quality from 0 to 4, with the task's reference answer as a guideline; the reward is the
+  quality score divided by 4.
+modality: text
+licensing: Apache-2.0
+authors:
+- titu1994
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: ui_generation
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/ui_generation/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

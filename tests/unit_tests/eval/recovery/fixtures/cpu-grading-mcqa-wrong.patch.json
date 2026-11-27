@@ -1,0 +1,24 @@
+{
+  "base": "cpu-grading-mcqa-healthy.json",
+  "set": [
+    [["results", 0, "reward"], 0.0],
+    [["results", 0, "_ng_collected_grading_binding"], "d2344f1de10ad0fa29d32141ed3ed11604956c7b750da61220058a046e18a0b3"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "invocation_id"], "verify-ab2903bec7464a6db0b3e823f97139a4"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "operation_id"], "grade-8ec7e3fbe0f24568a1a9c6996f968acf"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "result_binding_sha256"], "d2344f1de10ad0fa29d32141ed3ed11604956c7b750da61220058a046e18a0b3"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "model_call_id"], "8784a581752a4c78ac27943129b0b037"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "operation_id"], "91d3b56409a240b3bc3f85cc96bacfa9"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "final_attempt_id"], "91d3b56409a240b3bc3f85cc96bacfa9-1"],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "rollouts_jsonl_fpath"], "71b4969646a163202783b44f3b24e4c21a1572099f325636775eca719e1fe15c"],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "resolved_config_yaml_fpath"], "00a2dea0f48452357e8935e3b1833760f71291314bfb162a21f66da54870a68b"],
+    [["quality", "observed_runtime", "row_elapsed_s", "sum_observed"], 0.06689201097469777],
+    [["quality", "observed_request_effort", "request_elapsed_ms", "sum_observed"], 1.1075789807364345],
+    [["source_digests", "rollouts.jsonl"], "71b4969646a163202783b44f3b24e4c21a1572099f325636775eca719e1fe15c"],
+    [["source_digests", "rollouts_resolved_config.yaml"], "00a2dea0f48452357e8935e3b1833760f71291314bfb162a21f66da54870a68b"],
+    [["source_digests", "rollouts_aggregate_metrics.json"], "5698e1e2db0afa2fa1f7b5d99df75f2d3c8ea520411c0073ec47d4ebc3af4d58"],
+    [["source_digests", "quality_summary.json"], "13975437d6e7260a33e4d467732c7a004a42d44217ddaa26b17d24470893cf64"],
+    [["source_digests", "rollouts_manifest.json"], "433b90b18a57058891c2ff943114952689bcc2bb2993af2d911c96bf1fa4eb72"],
+    [["source_digests", "rollouts_coverage.json"], "1ea77d82a18f6b1a286ce7ca4add56b84c94e20504243e7473dc0a6c97de7d20"],
+    [["source_job_identity", 2], 30320900]
+  ]
+}

@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GDPVal with OpenHands in place of Stirrup: same resources server, judges and multi-stage driver as config.yaml.
+# OpenHands (the Software Agent SDK in openhands_agent) runs in the task sandbox the resources server lends it and
+# reaches the task tools (finish, abandon_task_finish, web_search, fetch_web_page) over MCP. The rows use the
+# harness-neutral prompt. See "Run another harness" in README.md for the run command.
+# A successful finish or abandon_task_finish ends the run (finish_tool_names), and OpenHands' own finish is not
+# offered. A reply without a tool call, timeout or max_iterations can still end the run without submitting.
+# The resources server collects the files when the run ends.
+config_paths:
+  - benchmarks/gdpval/config.yaml
+
+# Drop the Stirrup agent; the environment server below runs OpenHands instead.
+gdpval_stirrup_agent: null
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      allowed_agents: [openhands_agent]
+      expose_tools_over_mcp: true
+
+gdpval_openhands_agent:
+  responses_api_agents:
+    openhands_agent:
+      entrypoint: app.py
+      description: GDPVal professional deliverable tasks with OpenHands in place of Stirrup
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      # Concurrent runs, as Stirrup's concurrency. Keep it at least the environment server's
+      # max_concurrent_episodes: an episode beyond it waits with its sandbox started and its deadline running.
+      concurrency: 32
+      # The OpenHands run, inside the environment server's default_episode_timeout_seconds (18,000) and the
+      # sandbox's ttl_s (21,600), with room for the runtime install before it and the judge after it.
+      timeout: 10800
+      max_iterations: 250
+      condenser: true
+      llm_settings:
+        # OpenHands otherwise sends reasoning_effort: high to models it believes support it.
+        reasoning_effort: null
+        # Per model call, in seconds; the model server retries transient failures.
+        timeout: 600
+      finish_tool_names: [finish, abandon_task_finish]
+      # OpenHands stops each MCP tool call after 300 s, its own fixed limit, so a web call that runs longer (each step
+      # of a search or fetch can take up to 180 s) returns a tool error to the model. 300 is the maximum: this setting
+      # can only lower that limit, and a larger value fails config validation.
+      mcp_tool_timeout_seconds: 300
+      # The first seed builds the runtime on the agent server's host with uv and uploads it to the sandbox.
+      sandbox_install_timeout_seconds: 1200
+      session_close_timeout_seconds: 90
+      datasets:
+        - name: gdpval
+          type: benchmark
+          jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark_harness_neutral.jsonl
+          prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+          prepare_script: benchmarks/gdpval/prepare_harness_neutral.py
+          num_repeats: 1
+
+gdpval_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: gdpval_openhands_agent
+      resources_tool_transports: [mcp]

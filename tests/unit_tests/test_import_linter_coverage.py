@@ -91,6 +91,22 @@ def test_every_module_is_in_a_layer() -> None:
     )
 
 
+def test_the_orchestration_contract_checks_every_module_and_excepts_only_the_cli_entrypoint() -> None:
+    """The contract's source is every module under nemo_gym and its exceptions are its whole list.
+
+    A new package is checked without being listed. Narrowing the source to a list would leave a new package
+    unchecked, and a longer exception list would let an import of orchestration through.
+    """
+    contracts = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["importlinter"]["contracts"]
+    [contract] = [c for c in contracts if c["name"] == "only the CLI entrypoint imports orchestration"]
+    assert contract["source_modules"] == ["nemo_gym.*"]
+    assert contract["forbidden_modules"] == ["nemo_gym.orchestration"]
+    assert set(contract["ignore_imports"]) == {
+        "nemo_gym.cli.main -> nemo_gym.orchestration.**",
+        "nemo_gym.orchestration.** -> nemo_gym.orchestration.**",
+    }
+
+
 def test_every_module_kept_outside_the_layers_exists() -> None:
     assert not set(OUTSIDE_THE_LAYERS) - _top_level_names()
 

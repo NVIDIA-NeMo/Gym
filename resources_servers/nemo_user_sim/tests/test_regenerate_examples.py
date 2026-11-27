@@ -32,7 +32,7 @@ def _prepared(locale: str, language: str) -> dict:
             "conversation_language": language,
             "usersim_config": {"locale": locale},
             "trajectory_id": f"prepared-{locale}",
-            "usersim_provenance": json.dumps({"code_sha": "e6282672a5e5", "nemotron_personas_version": "0.0.2"}),
+            "usersim_provenance": json.dumps({"code_sha": "c91d9b2d9daa", "nemotron_personas_version": "0.0.2"}),
         },
     }
 
@@ -53,7 +53,7 @@ def test_regenerate_uses_the_prepared_row_of_the_example_locale(order: tuple[str
     assert row["persona_name"] == "Avery"
     assert row["trajectory_id"] == "example-tool-calling"
     assert json.loads(row["usersim_provenance"]) == {
-        "code_sha": "e6282672a5e5",
+        "code_sha": "c91d9b2d9daa",
         "nemotron_personas_version": "synthetic",
     }
 

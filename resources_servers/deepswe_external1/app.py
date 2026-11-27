@@ -21,7 +21,6 @@ from time import monotonic
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-import anyio
 from fastapi import Request
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
@@ -293,11 +292,11 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
     async def _release_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> bool:
         """Stop a golden- or null-validation sandbox, which no session owns, and say whether it stopped.
 
-        The stop is shielded and bounded, so a cancelled request still stops it instead of leaving it to ``ttl_s``.
+        ``AsyncSandbox.stop`` is shielded and bounded, so a cancelled request still stops it instead of leaving it to
+        ``ttl_s``.
         """
         try:
-            with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
-                await sandbox.stop()
+            await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             return True
         except Exception:
             logger.exception("Could not release %s sandbox for %s", phase, task_id)

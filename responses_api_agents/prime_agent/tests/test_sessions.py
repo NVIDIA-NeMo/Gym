@@ -3,11 +3,14 @@
 """Prime Agent sessions: seed refusals, request mapping, and real supervised runs of a fake Prime Agent CLI."""
 
 import asyncio
+import hashlib
+import io
 import json
 import os
 import shlex
 import shutil
 import sys
+import tarfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,7 +28,36 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.prime_agent.app import PrimeAgent, PrimeAgentConfig
-from responses_api_agents.prime_agent.sandbox import CLI, PRIME_AGENT_VERSION, PrimeSession
+from responses_api_agents.prime_agent.sandbox import CLI, PRIME_AGENT_VERSION, PRIME_RELEASE_PACKAGES, PrimeSession
+
+
+# The Prime dependencies of the 0.7.0 release manifests, written out so a stale constant in sandbox.py fails here.
+R2_RELEASE = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0"
+RELEASE_DEPENDENCIES = {
+    "prime-agent": {
+        "@earendil-works/pi-agent-core": f"{R2_RELEASE}/prime-agent-core-0.7.0.tgz",
+        "@earendil-works/pi-ai": f"{R2_RELEASE}/prime-agent-ai-0.7.0.tgz",
+        "@earendil-works/pi-tui": f"{R2_RELEASE}/prime-agent-tui-0.7.0.tgz",
+        "chalk": "^5.5.0",
+    },
+    "prime-agent-ai": {"chalk": "^5.6.2"},
+    "prime-agent-core": {"@earendil-works/pi-ai": f"{R2_RELEASE}/prime-agent-ai-0.7.0.tgz", "typebox": "^1.1.24"},
+    "prime-agent-tui": {"chalk": "^5.5.0"},
+}
+
+
+def release_archive(path: Path, name: str) -> Path:
+    content = json.dumps({"name": name, "dependencies": RELEASE_DEPENDENCIES[name]}).encode()
+    member = tarfile.TarInfo("package/package.json")
+    member.size = len(content)
+    with tarfile.open(path, "w:gz") as archive:
+        archive.addfile(member, io.BytesIO(content))
+    return path
+
+
+def release_dependencies(path: str) -> dict[str, str]:
+    with tarfile.open(path) as archive:
+        return json.load(archive.extractfile("package/package.json"))["dependencies"]
 
 
 FAKE_PRIME = r"""
@@ -81,7 +113,40 @@ class LocalSandbox:
     async def exec(self, command, *, cwd=None, timeout_s=30, env=None):
         argv = shlex.split(command)
         if len(argv) > 1 and argv[1].endswith("/install_prime_runtime.sh"):
-            assert argv[3] == PRIME_AGENT_VERSION and argv[8].endswith("/python.tar.gz") and len(argv) == 11
+            assert argv[3] == PRIME_AGENT_VERSION and argv[8].endswith("/python.tar.gz")
+            assert len(argv[11:]) % 2 == 0
+            for path, checksum in [(argv[6], argv[7]), *zip(argv[11::2], argv[12::2])]:
+                assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == checksum
+            # npm installs the uploaded archives the rewritten manifests name, including core's transitive pi-ai.
+            staged = {Path(path).name: path for path in [argv[6], *argv[11::2]]}
+            assert set(staged) == {
+                "prime-agent.tgz",
+                "prime-agent-ai.tgz",
+                "prime-agent-core.tgz",
+                "prime-agent-tui.tgz",
+                "runtime-package.json",
+                "runtime-package-lock.json",
+                "runtime-python-constraints.txt",
+                "runtime-python-build-constraints.txt",
+                "runtime-profile.txt",
+                "uv.tar.gz",
+            }
+            manifest = json.loads(Path(staged["runtime-package.json"]).read_text())
+            assert manifest["dependencies"] == {"prime-agent": f"file:{staged['prime-agent.tgz']}"}
+            locked = json.loads(Path(staged["runtime-package-lock.json"]).read_text())
+            assert locked["lockfileVersion"] == 3
+            assert "node_modules/prime-agent/node_modules/@earendil-works/pi-ai" in locked["packages"]
+            assert len(Path(staged["runtime-profile.txt"]).read_text().strip()) == 64
+            assert release_dependencies(staged["prime-agent.tgz"]) == {
+                "@earendil-works/pi-agent-core": f"file:{staged['prime-agent-core.tgz']}",
+                "@earendil-works/pi-ai": f"file:{staged['prime-agent-ai.tgz']}",
+                "@earendil-works/pi-tui": f"file:{staged['prime-agent-tui.tgz']}",
+                "chalk": "^5.5.0",
+            }
+            assert release_dependencies(staged["prime-agent-core.tgz"]) == {
+                "@earendil-works/pi-ai": f"file:{staged['prime-agent-ai.tgz']}",
+                "typebox": "^1.1.24",
+            }
             node = Path(argv[2]) / "bin" / "node"
             node.parent.mkdir(parents=True, exist_ok=True)
             node.write_text(f"#!{sys.executable}\n" + FAKE_PRIME)
@@ -98,7 +163,7 @@ class LocalSandbox:
                 await process.wait()
         return SandboxExecResult(stdout.decode(errors="replace"), stderr.decode(errors="replace"), process.returncode)
 
-    async def disconnect(self):
+    async def disconnect(self, **_):
         self.disconnected = True
 
     async def stop(self):
@@ -219,18 +284,37 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20, expire: bo
     prime = agent(timeout=timeout, thinking="high", models_config={"providers": {"private": host_provider}})
     asset = tmp_path / "asset.tgz"
     asset.write_bytes(b"asset")
-    # The agent server downloads Node.js, the release package and the kernel's Python and uv; the fake installer
-    # stands in for all of them.
-    with patch(
-        "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=asset)
-    ) as download:
+    releases = {f"{name}-0.7.0.tgz": release_archive(tmp_path / f"{name}.tgz", name) for name in RELEASE_DEPENDENCIES}
+
+    async def fetch(url, **_):
+        return releases.get(url.rsplit("/", 1)[1], asset)
+
+    # The agent server downloads Node.js, the four release archives and the kernel's Python and uv; the fake
+    # installer stands in for the runtime they would install.
+    with (
+        patch(
+            "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(side_effect=fetch)
+        ) as download,
+        patch.dict(
+            "responses_api_agents.prime_agent.sandbox.UV_SHA256",
+            {arch: hashlib.sha256(asset.read_bytes()).hexdigest() for arch in ("x86_64", "aarch64")},
+        ),
+    ):
         await state.install(timeout=10)
     arch = os.uname().machine
     assert [call.args[0].rsplit("/", 1)[1] for call in download.await_args_list] == [
         f"node-v22.23.2-linux-{'arm64' if arch == 'aarch64' else 'x64'}.tar.gz",
-        "prime-agent-0.7.0.tgz",
         f"uv-{arch}-unknown-linux-musl.tar.gz",
         f"cpython-3.13.12%2B20260310-{arch}-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "prime-agent-0.7.0.tgz",
+        "prime-agent-ai-0.7.0.tgz",
+        "prime-agent-core-0.7.0.tgz",
+        "prime-agent-tui-0.7.0.tgz",
+    ]
+    # The release archives come from GitHub and are checked against their pinned digests before the rewrite.
+    assert [(call.args[0], call.kwargs["sha256"]) for call in download.await_args_list[3:]] == [
+        (f"https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.0/{name}-0.7.0.tgz", checksum)
+        for name, checksum in PRIME_RELEASE_PACKAGES.items()
     ]
     if expire:
         assert await state.session.expire(timeout=10, reason="stopped")
@@ -336,3 +420,28 @@ async def test_timeout_before_any_model_reply_is_a_classified_failure(tmp_path):
     response, _, _, _, _ = await activate(tmp_path, "silent", timeout=3)
     assert response.status == "failed"
     assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "unknown"}
+
+
+@pytest.mark.asyncio
+async def test_install_rejects_an_unverified_uv_archive_before_installing(tmp_path: Path) -> None:
+    workdir = tmp_path / "task"
+    workdir.mkdir()
+    runtime = tmp_path / "runtime"
+    state = PrimeSession(
+        request=seed(workdir=str(workdir)),
+        provider_name="local",
+        sandbox_id="task",
+        runtime=str(runtime),
+        session=SandboxSession(
+            sandbox=LocalSandbox(), session_dir=str(tmp_path / "session"), workdir=str(workdir), harness="Prime Agent"
+        ),
+    )
+    corrupt = tmp_path / "unverified-uv.tar.gz"
+    corrupt.write_bytes(b"an archive that does not match the official release checksum")
+    with patch(
+        "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=corrupt)
+    ) as download:
+        with pytest.raises(RuntimeError, match="uv.*checksum mismatch"):
+            await state.install(timeout=5)
+    assert not runtime.exists()
+    assert all("PrimeIntellect-ai/prime-agent" not in call.args[0] for call in download.await_args_list)

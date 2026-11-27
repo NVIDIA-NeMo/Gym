@@ -211,7 +211,8 @@ def test_both_projections_keep_gold_evidence_and_source_metadata_private(benchma
         assert "video_binding" not in row
     else:
         assert row["video_binding"]["source"] == "/data/original.mp4"
-        assert "video/shapes.mp4" in visible and "/data/original.mp4" not in visible
+        assert row["video_binding"]["sandbox_path"] == "video/shapes.mp4"
+        assert "Video: /testbed/video/shapes.mp4" in visible and "/data/original.mp4" not in visible
         assert "tools" not in row["responses_create_params"]
 
 
@@ -223,6 +224,7 @@ def test_both_projections_keep_gold_evidence_and_source_metadata_private(benchma
         {"sandbox_path": "/absolute.mp4"},
         {"sandbox_path": "../escape.mp4"},
         {"sandbox_path": "."},
+        {"sandbox_path": "video\\shapes.mp4"},
     ],
 )
 def test_agentic_requires_safe_explicit_media(updates) -> None:
@@ -257,3 +259,16 @@ def test_subset_validation_rejects_missing_axes_and_multivalued_non_capability()
         validate_subsets("lvbench", {"domain": ("x", "y"), "task_type": ("reasoning",)})
     with pytest.raises(ValueError, match="single-line"):
         validate_subsets("lvbench", {"domain": (" x",), "task_type": ("reasoning",)})
+
+
+@pytest.mark.parametrize("root", ["relative", "/testbed/../etc"])
+def test_agentic_sandbox_root_is_an_absolute_directory(root) -> None:
+    with pytest.raises(ValueError, match="sandbox_root"):
+        prepare_dataset(
+            [v1_record()],
+            benchmark="videomme_v1",
+            dataset_revision=REVISION,
+            media=media(source="/data/video.mp4", sandbox_path="video/shapes.mp4"),
+            setting="agentic",
+            sandbox_root=root,
+        )

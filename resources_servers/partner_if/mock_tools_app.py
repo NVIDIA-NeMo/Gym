@@ -33,6 +33,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFences,
     ReverifyMode,
     SimpleResourcesServer,
@@ -265,7 +266,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
         if row is None or contract_hash(contract) != contract_hash(
             GradingContract.model_validate(row["verifier_metadata"]["partner_if"])
         ):
-            raise HTTPException(409, "Task contract does not match the configured snapshot")
+            raise ResourcesSessionConflictError("Task contract does not match the configured snapshot")
         return row
 
     def _session_lock(self, session_id: str | None) -> asyncio.Lock:
@@ -282,10 +283,10 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
             self._sandboxes is not None
             and body.task_data.get("tool_backend", row["tool_backend"]) != row["tool_backend"]
         ):
-            raise HTTPException(409, "Task tool backend does not match the configured snapshot")
+            raise ResourcesSessionConflictError("Task tool backend does not match the configured snapshot")
         async with self._session_lock(identifier):
             if identifier in self._fences:
-                raise HTTPException(409, "Session is closed")
+                raise ResourcesSessionConflictError("Session is closed")
             episode = self._episodes.get(identifier)
             if episode is None:
                 # A start that fails or is cancelled stops its own sandbox, so a failed seed leaves nothing behind.
@@ -294,7 +295,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
                     seed=body, task=contract.task_id, tools=frozenset(self._tools[contract.task_id]), backend=backend
                 )
             elif episode.seed != body:
-                raise HTTPException(409, "Session ID belongs to another episode/task")
+                raise ResourcesSessionConflictError("Session ID belongs to another episode/task")
         request.session[SESSION_ID_KEY] = identifier
         return ResourcesSeedSessionResponse(resources_session_id=identifier)
 
@@ -322,10 +323,10 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
         async with self._session_lock(identifier):
             fenced_episode = self._fences.get(identifier)
             if fenced_episode is not None and fenced_episode != body.episode_id:
-                raise HTTPException(409, "Session belongs to another episode")
+                raise ResourcesSessionConflictError("Session belongs to another episode")
             episode = self._episodes.get(identifier)
             if episode and episode.seed.episode_id != body.episode_id:
-                raise HTTPException(409, "Session belongs to another episode")
+                raise ResourcesSessionConflictError("Session belongs to another episode")
             if episode is not None:
                 # A backend that fails to stop raises and keeps its episode, so a retried close stops it again.
                 await episode.backend.stop()
@@ -351,7 +352,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
             if episode is not None and tool_name not in episode.tools:
                 raise HTTPException(404, "Not a tool of this task")
             if episode is None:
-                raise HTTPException(409, "Session was not seeded or is closed")
+                raise ResourcesSessionConflictError("Session was not seeded or is closed")
             try:
                 output = await episode.backend.call(tool_name, body)
             except ToolCallError as error:
@@ -371,7 +372,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
         row = self._contract(contract)
         params = body.responses_create_params.model_dump(exclude_none=True)
         if _actor_input(params) != _actor_input(row["responses_create_params"]):
-            raise HTTPException(409, "Actor input differs from the configured task")
+            raise ResourcesSessionConflictError("Actor input differs from the configured task")
         identifier = request.session.get(SESSION_ID_KEY)
         async with self._session_lock(identifier):
             episode = self._episodes.get(identifier)

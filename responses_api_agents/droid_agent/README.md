@@ -73,7 +73,7 @@ when episodes can wait for one of the `concurrency` slots after seeding.
 
 Seed probes the sandbox's architecture, libc and AVX2 support, then downloads the matching npm
 package on the **Gym host**, into the owner-only `~/.cache/nemo_gym/droid/<version>/` cache. The
-package must match its npm `sha512` integrity. For 1.1.0 the integrity of each package is pinned in
+package must match its npm `sha512` integrity. For 1.1.0 and 1.12.1 the integrity of each package is pinned in
 [runtime.py](runtime.py); another version's integrity comes from the npm registry's metadata, and a
 version that npm does not publish is refused at seed. The
 package (about 150 MB) is uploaded to the sandbox in 1 MiB pieces, and
@@ -86,8 +86,17 @@ The task image needs bash, coreutils (`sha256sum`, `timeout`), `tar` and `gzip`,
 publishes no musl build, so an image with musl and no glibc, such as Alpine, is refused at seed. A
 glibc image that also carries musl's loader is served. A root image without bash gets it
 from `apt-get`; any other image without bash is refused at seed. The image needs no Python or Node.
-Installation needs about 500 MB free under `/tmp` (the package and the unpacked binary), and the
-installed runtime keeps about 325 MB.
+With Droid 1.1.0, installation needs about 500 MB free under `/tmp` (the package and the unpacked
+binary), and the installed runtime keeps about 325 MB. Droid 1.12.1 needs about 30 MB more to
+install, and its runtime keeps about 345 MB.
+
+The image needs no `ps`. Droid runs `ps -o ppid= -p <pid>` once per `Execute` call, and without an
+answer it reports most foreground calls as `Error: Command terminated by signal: SIGKILL`, even
+ones that finished. Slim images such as `python:3.13-slim` ship without procps, so the installer
+writes a `ps` that answers this one call from `/proc` into the runtime's `fallback-bin` directory,
+and the adapter appends that directory to Droid's `PATH`. The image's own `ps` is used when it has
+one. In an image without one, the model's shell commands find this `ps` too: it fails any other
+call with a message that the image has no procps. Nothing is installed into the task image.
 
 ## Requests and settings
 
@@ -154,7 +163,8 @@ A failed response's `error.message` is Droid's error message, or what ended the 
 as the failure reason.
 
 Droid's terminal stream-json `type: error` event carries only a message, so the classifier matches
-the message grammar Droid 1.1.0 wrote in runs against a scripted model server. Tool-result errors,
+the model-error grammar Droid 1.1.0 and 1.12.1 wrote in runs against a scripted model server and,
+for Droid 1.1.0's repetition stop, in real model runs. Tool-result errors,
 assistant text and stderr are not model-failure evidence, even when their text matches this grammar:
 
 | Error event message | `ng_agent_outcome` |
@@ -162,10 +172,18 @@ assistant text and stderr are not model-failure evidence, even when their text m
 | the HTTP status, a space, then the error body's message (`429 rate limited`) | `model_request_error` with that status |
 | exactly `Connection error.` (a refused or reset connection) | `model_transport_error` |
 | exactly Droid's compaction-does-not-fit message (after a `context_length_exceeded` rejection) | `model_context_limit` |
+| exactly `LLM output entered an exact repetition cycle` (Droid 1.1.0) | `agent_invalid_output` |
 | anything else | `unknown` |
 
 Another `droid_version` may word these differently, so its failures are reported as `unknown`. The
 Environment Server's outcome policy then decides whether to verify or retry.
+
+Droid 1.1.0 checks each model response's streamed text and thinking for an exact repeated cycle and
+resamples such a response once. Its repetition stop ends the run with `LLM output entered an exact
+repetition cycle` when the resample repeats too, or when the run has already resampled three times.
+With `temperature: 0` in `sampling_overrides`, the resample decodes greedily again and seldom
+escapes the cycle. The response stays `failed` with that message, and the default outcome policy
+verifies its partial work as the model's result.
 
 Session identity, the single activation, retries, close and its retry window follow the shared
 agent-session contract. `SandboxSession` runs Droid through the shared `harness_runner.sh` under the
@@ -200,21 +218,8 @@ tool call started a subagent (its own transcript stays in Droid's private sessio
 
 ## Limits
 
-- In some container images, Droid kills its own foreground shell commands: the `Execute` call returns
-  `Error: Command terminated by signal: SIGKILL`, whatever the command, while background `Execute`
-  calls run. The adapter reports these calls as failed tools with Droid's message as the output.
-  Models can still finish tasks by running commands in the background, but scores on an affected
-  pairing understate the harness. Seen so far:
-
-  | Pairing | Sandbox | Affected tasks |
-  | --- | --- | --- |
-  | Terminal-Bench 2.1 | Resources-owned Docker 28.1.1 | every foreground call in log-summary-date-ranges, openssl-selfsigned-cert and cancel-async-tasks (images that ship Python); configure-git-webserver (Ubuntu 24.04 without Python) ran normally |
-  | Terminal-Bench 2.1 | Resources-owned OpenSandbox | circuit-fibsqrt and regex-chess: the runs that failed had repeated SIGKILLed calls |
-  | reasoning_gym | agent-owned Enroot 3.4.1, `python:3.13-slim` | every foreground call |
-
-  Foreground calls ran normally on a bare host. Droid 0.251.0, 1.0.0, 1.1.0 and 1.2.0 behave the
-  same; running as non-root, with a TTY or without seccomp did not change it. The trigger in the
-  image is not identified, so check a new pairing's smoke for SIGKILLed `Execute` results.
+- The fallback `ps` answers the one call Droid 1.1.0 and 1.12.1 make. When you add a Droid version,
+  check a smoke run on an image without procps for `Execute` results that report SIGKILL.
 - Droid is distributed under Factory's proprietary terms (`UNLICENSED` on npm). The adapter
   downloads the published binary at seed; it vendors nothing.
 - Glibc Linux sandboxes only (x86-64 or arm64).

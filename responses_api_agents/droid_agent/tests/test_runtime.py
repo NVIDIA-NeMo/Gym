@@ -129,8 +129,9 @@ def test_unsupported_platforms_are_named(probe, message):
     assert isinstance(error.value, AgentSeedRejectedError) is (len(probe.splitlines()) == 4)
 
 
-def test_default_version_has_pinned_integrity_for_every_target():
-    assert {target for version, target in runtime.PINNED_INTEGRITY if version == "1.1.0"} == runtime.TARGETS
+@pytest.mark.parametrize("version", ["1.1.0", "1.12.1"])
+def test_tested_versions_have_pinned_integrity_for_every_target(version):
+    assert {target for pinned, target in runtime.PINNED_INTEGRITY if pinned == version} == runtime.TARGETS
 
 
 @pytest.mark.asyncio

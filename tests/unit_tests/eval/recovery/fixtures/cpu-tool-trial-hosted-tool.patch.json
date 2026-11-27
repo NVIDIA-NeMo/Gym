@@ -1,0 +1,28 @@
+{
+  "base": "cpu-tool-trial-healthy.json",
+  "set": [
+    [["results", 0, "_ng_collected_grading_binding"], "7b72b5fbc89f9a87c75b3298777051cce90c7199c541cfb5b21531f812751b2c"],
+    [["results", 0, "response", "output"], [{"type": "function_call", "status": null}, {"type": "function_call_output", "status": null}, {"type": "mcp_call", "status": "completed"}, {"type": "message", "role": "assistant", "status": "completed"}]],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "invocation_id"], "verify-125dc87ec34f482284a1788495b27497"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "operation_id"], "grade-0e0b0f00b5cf4118bcf88d61ef564de9"],
+    [["results", 0, "ng_trial_observations", "verifier_invocations", 0, "grading_operations", 0, "result_binding_sha256"], "7b72b5fbc89f9a87c75b3298777051cce90c7199c541cfb5b21531f812751b2c"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "model_call_id"], "5f6101b52a094dfda38c959eb5c28e32"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "operation_id"], "f98f6a5e137d4bf894aa6b80ca7cec57"],
+    [["results", 0, "ng_trial_observations", "model_calls", 0, "response_metadata", "model_operations", 0, "final_attempt_id"], "f98f6a5e137d4bf894aa6b80ca7cec57-1"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "model_call_id"], "93857ef7e95846ecb1d31b74e27f8b13"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "response_metadata", "model_operations", 0, "operation_id"], "362eb6e324b149d5b278ee0c3041c819"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "response_metadata", "model_operations", 0, "final_attempt_id"], "362eb6e324b149d5b278ee0c3041c819-1"],
+    [["results", 0, "ng_trial_observations", "model_calls", 1, "output_items"], [{"type": "mcp_call", "status": "completed", "name": "remote_tool"}, {"type": "message", "role": "assistant", "status": "completed"}]],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "rollouts_jsonl_fpath"], "3ad00a002e5463e8fc23fc0954a9ae6618ca34dbc3327e97e5029e7ab32e35c1"],
+    [["quality", "provenance", "rollout_artifact_digests", 0, "resolved_config_yaml_fpath"], "634f5ece4c0a3af410e5f4e0c8a2be9952471d8bfe187859a7e02d9cc38d8deb"],
+    [["quality", "observed_runtime", "row_elapsed_s", "sum_observed"], 0.0779204280115664],
+    [["quality", "observed_request_effort", "request_elapsed_ms", "sum_observed"], 2.09339102730155],
+    [["source_digests", "rollouts.jsonl"], "3ad00a002e5463e8fc23fc0954a9ae6618ca34dbc3327e97e5029e7ab32e35c1"],
+    [["source_digests", "rollouts_resolved_config.yaml"], "634f5ece4c0a3af410e5f4e0c8a2be9952471d8bfe187859a7e02d9cc38d8deb"],
+    [["source_digests", "rollouts_aggregate_metrics.json"], "ebe48276a0cd6f957a975529c6cf6a1e333de69445fb0e21424f237b59b2fbed"],
+    [["source_digests", "quality_summary.json"], "6aebd39f3c3a95a93695ff3caa3dcc29c0f617bf4b232c803bca999cd703d4a0"],
+    [["source_digests", "rollouts_manifest.json"], "ea0cc09b523396f03984bfe4458bd9d7bab138138610ed36d9fb32dbc92134dc"],
+    [["source_digests", "rollouts_coverage.json"], "971b25ef9cf8a8322e3931be9acb1c5b7b3d1eec69445011ccc006f156872b7e"],
+    [["source_job_identity", 2], 30320741]
+  ]
+}

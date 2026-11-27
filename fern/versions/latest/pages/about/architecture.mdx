@@ -32,6 +32,17 @@ This gives you flexibility to integrate with your existing models and agents:
 - **Use a built-in agent** — NeMo Gym includes some native agents, e.g. general-purpose multi-step tool calling, as well as built-in integrations with external harnesses like OpenHands.
 - **Train with any model endpoint** — The Model Server standardizes different LLM endpoints behind the Responses API and provides token IDs and log probabilities needed for RL training.
 
+## Why Separate Servers
+
+Many agent frameworks run the agent, its tools, and the model client in one process. NeMo Gym runs each component as its own server instead, for these reasons:
+
+- **Isolated dependencies.** Each server runs in its own virtual environment, built from that server's own dependency file. An agent harness and a resources server can depend on conflicting library versions without breaking each other. See [Per-server runtime files](/reference/configuration#per-server-runtime-files).
+- **Independent scaling.** Each server runs its own worker processes, so a resources server that runs expensive verification can get more of them without changing the agent or model server. Gym servers run on CPU by default and can be deployed on different nodes from the GPUs that train the model. See [Deployment Topology](/infrastructure/deployment-topology).
+- **Reuse across evaluation and training.** The same agent, resources server, and model server serve `gym eval run` and every supported training framework. Changing the trainer or the model doesn't require changing the environment.
+- **HTTP boundaries that match training frameworks.** Training frameworks already serve their policy model through an OpenAI-compatible HTTP endpoint, and the model server calls it the same way it calls any other provider. Episodes reach Gym over HTTP too, so evaluation and training submit work the same way. See [Integrate RL Frameworks](/contribute/rl-framework-integration).
+
+You still start everything with one command: `gym env start` launches each server and waits until all of them are ready. The servers then talk to each other over async HTTP through a shared, pooled client built for high concurrency. See [Communication](#communication).
+
 ## How an Agent Runs a Task in NeMo Gym Environments
 
 Each task attempt is an *episode*. Rollout collection sends every episode to an Environment Server. An Environment Server that drives agent sessions, such as `single_agent_turn`, runs it in this order, and the resulting trajectory is called a *rollout*:
@@ -111,6 +122,14 @@ Gym servers communicate over async HTTP (aiohttp) with:
 - **Connection pooling** via a singleton aiohttp client for high-concurrency workloads
 
 Sandbox execution and file transfer are not Gym HTTP calls. They use the configured sandbox provider's transport, such as HTTP, gRPC, a Docker CLI, or a local subprocess.
+
+## Distributing Heavy Work
+
+Some servers do work too heavy for their own processes, such as running generated code, compilers, or test suites, or scoring rollouts with a judge or reward model. A server can move that work elsewhere. None of these options changes how servers talk to each other: that is always HTTP.
+
+- **Sandboxes.** The [Sandbox API](/infrastructure/sandbox) runs work in isolated environments with the CPU, memory, and GPU the server requests. Remote providers, such as a Kubernetes cluster or a cloud service, run those sandboxes on their own machines rather than on the server's host. Use sandboxes when the work needs isolation or its own runtime.
+- **Inference endpoints.** A server that needs a model, such as an [LLM judge](/build-verifiers/verification-patterns/llm-as-judge), calls a [model server](/model-server) by name instead of loading the model itself. The model server can front an inference provider or a dedicated vLLM deployment on its own GPUs, so the calling server stays light.
+- **Ray.** For CPU-heavy work that needs neither isolation nor a model, a server can opt into Ray and spread the work across nodes as Ray tasks. Gym starts or joins a Ray cluster only for servers that opt in, and installs and runs without Ray otherwise. See [Scale CPU-Heavy Work with Ray](/infrastructure/scale-cpu-work-with-ray).
 
 ## Where the Code Lives
 

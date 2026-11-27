@@ -109,7 +109,12 @@ def entrypoint_to_run(task: HarborTask, *, compose_managed: bool = False) -> lis
 
 def entrypoint_script(argv: list[str], runtime: str = ENTRYPOINT_DIR) -> str:
     """The ``run.sh`` that marks the start, runs ``argv`` with Harbor's arguments and records the exit status."""
-    command = shlex.join([*argv, *ENTRYPOINT_ARGS])
+    # A bare shell interprets its next argument as a script filename unless given -c.
+    # Script and compound entrypoints still receive Harbor's arguments unchanged.
+    if len(argv) == 1 and posixpath.basename(argv[0]) in _SHELLS:
+        command = shlex.join([argv[0], "-c", shlex.join(ENTRYPOINT_ARGS)])
+    else:
+        command = shlex.join([*argv, *ENTRYPOINT_ARGS])
     return f"touch {runtime}/started\n{command}\nstatus=$?\nprintf '%s' \"$status\" > {runtime}/exit\n"
 
 

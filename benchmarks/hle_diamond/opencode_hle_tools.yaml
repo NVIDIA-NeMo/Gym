@@ -1,0 +1,69 @@
+# OpenCode preset with upstream's two web tools on upstream's sandbox: opencode_reference.yaml (the HLE-Diamond
+# reference image, Python 3.11.16 with upstream's twelve pinned packages and a shell, under the egress policy of
+# docs/evaluation-with-tools.md, network_access model_and_tools) with the Tavily tools replaced by
+# resources_servers/hle_web_tools, which exposes exactly web_search and web_fetch over MCP behind the upstream
+# docs/blocklist.json (all seven rule families, query and fetch refusals, content re-checks) with Tavily as the
+# search and extraction backend. The Environment Server seeds the web_tools server for every episode and grants
+# its MCP tools to the agent (the agent's tool_servers); the sandbox reaches only the model server and that
+# server (the judge servers and the Environment Server are pinned to loopback: config.yaml, judge_openai.yaml
+# and the end of this file). This is the preset that follows upstream's protocol
+# (sections 1-3) on every point Gym controls; benchmarks/hle_diamond/README.md > Sandboxed agents (with tools)
+# > Upstream web tools carries the fidelity table, requirement by requirement, against upstream commit
+# 22ed3074b1e7b134bcbc09028d0ba320839b0655.
+#
+# The agent keeps the reference preset's name (hle_diamond_opencode_reference_agent): the agent IS the reference
+# agent, the tool server is what differs, and sandbox_docker_local.yaml therefore refuses to compose with this
+# preset unless HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted is exported (see that file). Not a
+# benchmark of its own (no dataset redeclared), exactly like opencode_search.yaml: selectable with --benchmark,
+# not listed.
+config_paths:
+- benchmarks/hle_diamond/opencode_reference.yaml
+# The Tavily tool server of opencode_search.yaml is not started: web_tools is the only tool server.
+tavily: null
+web_tools:
+  resources_servers:
+    hle_web_tools:
+      entrypoint: app.py
+      domain: agent
+      description: Upstream HLE web_search and web_fetch tools behind docs/blocklist.json (Tavily backend)
+      expose_tools_over_mcp: true
+      tavily_api_key: ${oc.env:TAVILY_API_KEY}
+      verified: false
+hle_diamond_opencode_reference_agent:
+  responses_api_agents:
+    opencode_agent:
+      tool_servers:
+      - type: resources_servers
+        name: web_tools
+      # Only what the reference protocol allows (no SageMath, Lean or /opt/science/README.md), and the two tools
+      # by the names OpenCode shows the model (<grant>_<tool>). Any note is extra prompt text upstream's model
+      # never saw; the README states it next to every number.
+      system_prompt: |
+        Direct internet access is disabled on this machine: no downloads and no package installation. External information is available only through the web_search and web_fetch tools of the web_tools server (web_tools_web_search and web_tools_web_fetch).
+        Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
+# The judge, on this preset only, as upstream's hle_eval/run_judge_results.py runs it on every point Gym controls:
+# - the judge's [question] is the bare dataset question. prompts/opencode.yaml folds the answer-format instruction
+#   after the question in the one user message, so the regex cuts it off (first capture group; no match leaves
+#   the text whole, so a bare question passes through unchanged);
+# - the judge call is capped at 4096 output tokens (upstream: max_completion_tokens=4096). A reply cut off by
+#   the cap is not retried: with no label it scores 0 (truncated_judge_output, plus no_verdict, or
+#   unparseable_judge_output when the cut falls in the reasoning), and a label written before the cut counts.
+#   Upstream's structured parse raises on a length finish, so the row stays unjudged (wrong in that pass)
+#   until the judge is rerun.
+# The judge server itself stays on loopback on every preset (config.yaml pins its host, judge_openai.yaml its
+# judge model's): absolute_ip_server_types moves every Resources server to the routable address so the sandbox
+# can reach web_tools, and a server's own host wins over that.
+hle_diamond_equivalence_llm_judge_resources_server:
+  resources_servers:
+    equivalence_llm_judge:
+      question_extract_regex: '^(.*?)\n\nYour response should be in the following format:'
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 4096
+# The Environment Server stays on loopback too: an explicit default_host moves every server that sets no host of
+# its own to that address, and the sandbox must reach only the model server and web_tools. Only the collector
+# calls its /run, from the Gym host.
+hle_diamond_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      host: 127.0.0.1

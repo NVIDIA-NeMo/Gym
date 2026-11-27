@@ -65,7 +65,7 @@ def describe_error(error: BaseException) -> list[dict[str, object]]:
 def write_inputrc(state_dir: str) -> str:
     """Write a readline file that keeps the task's own settings and turns bracketed paste off.
 
-    OpenHands 1.59.0's subprocess terminal leaves the bracketed-paste escape codes that bash 5.1 and later
+    OpenHands 1.62.0's subprocess terminal leaves the bracketed-paste escape codes that bash 5.1 and later
     print around each command in the tool output the model reads.
     """
     lines = []
@@ -78,6 +78,54 @@ def write_inputrc(state_dir: str) -> str:
     path = f"{state_dir}/inputrc"
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def mcp_config(servers: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    """OpenHands MCP server settings for the episode's grants, by grant name."""
+    return {
+        name: {
+            "url": server["url"],
+            "transport": "http",
+            "headers": dict(server.get("headers") or {}),
+            "timeout": server.get("timeout"),
+        }
+        for name, server in servers.items()
+    }
+
+
+def check_required_mcp(servers: dict[str, dict[str, object]], *, finish_tool_names: list[str]) -> None:
+    """Check required grants and discover a task finish tool before removing OpenHands' own finish.
+
+    OpenHands skips unreachable servers with a warning, so probe optional grants too when they may supply finish.
+    """
+    probed = mcp_config(
+        {name: server for name, server in servers.items() if server.get("required") or finish_tool_names}
+    )
+    offered: set[str] = set()
+    if probed:
+        from openhands.sdk.mcp import MCPServer, create_mcp_tools
+
+    for name, server in probed.items():
+        required = bool(servers[name].get("required"))
+        try:
+            with create_mcp_tools({name: MCPServer(**server)}, timeout=60) as client:
+                if required and not client.tools:
+                    raise RuntimeError("it offers no tools")
+                offered.update(tool.name for tool in client.tools)
+        except Exception as error:
+            if required:
+                raise RuntimeError(f"Required MCP server {name} did not connect: {error}") from error
+    if finish_tool_names and not offered.intersection(finish_tool_names):
+        raise RuntimeError(f"No MCP grant offers a tool in finish_tool_names {finish_tool_names}")
+
+
+def finished_by_task_tool(event: object, finish_tool_names: list[str]) -> bool:
+    """Whether ``event`` is a successful result of one of the task's finish tools."""
+    return (
+        getattr(event, "kind", None) == "ObservationEvent"
+        and getattr(event, "tool_name", None) in finish_tool_names
+        and not getattr(getattr(event, "observation", None), "is_error", True)
+    )
 
 
 def _write_json(path: str, payload: dict[str, object]) -> None:
@@ -121,6 +169,15 @@ def main(argv: list[str]) -> int:
             events.flush()
 
     conversation = None
+    finish_tool_names = list(config.get("finish_tool_names") or [])
+
+    def end_on_task_finish(event: object) -> None:
+        # A successful task finish ends the run, as OpenHands' own finish would.
+        if conversation is not None and finished_by_task_tool(event, finish_tool_names):
+            from openhands.sdk.conversation.state import ConversationExecutionStatus
+
+            conversation.state.execution_status = ConversationExecutionStatus.FINISHED
+
     exit_code = 1
     try:
         import openhands.sdk
@@ -149,9 +206,14 @@ def main(argv: list[str]) -> int:
         condenser = (
             get_default_condenser(llm.model_copy(update={"usage_id": "condenser"})) if config["condenser"] else None
         )
+        servers = config.get("mcp_servers") or {}
+        check_required_mcp(servers, finish_tool_names=finish_tool_names)
         agent = Agent(
             llm=llm,
             tools=tools,
+            mcp_config=mcp_config(servers),
+            # With task finish tools, OpenHands' own finish would end the run without submitting the work.
+            include_default_tools=["ThinkTool"] if finish_tool_names else ["FinishTool", "ThinkTool"],
             agent_context=AgentContext(system_message_suffix=config.get("system_message_suffix")),
             system_prompt_kwargs={"cli_mode": True},
             condenser=condenser,
@@ -160,7 +222,7 @@ def main(argv: list[str]) -> int:
             agent=agent,
             workspace=config["workdir"],
             persistence_dir=config["state_dir"],
-            callbacks=[record],
+            callbacks=[record, end_on_task_finish],
             max_iteration_per_run=config["max_iterations"],
             visualizer=None,
             delete_on_close=False,

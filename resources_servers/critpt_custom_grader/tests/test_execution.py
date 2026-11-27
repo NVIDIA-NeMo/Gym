@@ -267,6 +267,13 @@ def test_job_deadline_budget_counts_every_awaited_bound():
     assert make_policy(job_timeout_s=float(expected), **fields).effective_job_timeout_s() == expected
     with pytest.raises(ValidationError):
         make_policy(job_timeout_s=expected - 1.0, **fields)
+    # With semantic validators configured, a job uploads the validation module and the validator source as well.
+    semantic = expected + 2 * (3 + 5)
+    assert execution._SEMANTIC_JOB_TRANSFERS == 2
+    assert policy.minimum_job_timeout_s(semantic_validators=True) == semantic == 590
+    assert policy.effective_job_timeout_s(semantic_validators=True) == semantic
+    explicit = make_policy(job_timeout_s=float(expected), **fields)
+    assert explicit.effective_job_timeout_s(semantic_validators=True) == expected
 
 
 # --- job flow ----------------------------------------------------------------------------------- #
@@ -394,16 +401,28 @@ async def test_passing_candidate_scores_one_and_cleans_all_domains():
     assert sorted(provider.closed) == sorted(provider.sandboxes) and len(provider.closed) == 3
 
 
-async def test_transfer_budget_matches_the_transfers_a_job_performs():
-    grader, provider = make_grader(happy_script())
+@pytest.mark.parametrize("semantic, comparator_transfers, total_transfers", [(False, 11, 27), (True, 13, 29)])
+async def test_transfer_budget_matches_the_transfers_a_job_performs(semantic, comparator_transfers, total_transfers):
+    task = make_task()
+    registry = {}
+    if semantic:
+        fields = task.model_dump(mode="json")
+        fields["semantic_validator"] = {"id": "synthetic"}
+        task = TaskData.model_validate(fields)
+        registry = {"synthetic": {"source": "def validate(**kwargs):\n    return True\n"}}
+    ScriptedProvider.reset()
+    provider = ScriptedProvider(happy_script())
+    grader = Grader(make_policy(), provider=provider, spec=make_spec(), semantic_validators=registry)
     provider.upload_file = Mock(wraps=provider.upload_file)
     provider.download_file = Mock(wraps=provider.download_file)
-    assert (await grader.grade(make_task(), CANDIDATE)).reward == 1.0
+    assert (await grader.grade(task, CANDIDATE)).reward == 1.0
     per_domain = {domain: result_reads(provider, domain) for domain in DOMAINS}  # the size probes
     for transfer in provider.upload_file.call_args_list + provider.download_file.call_args_list:
         per_domain[provider.sandboxes[transfer.args[0].sandbox_id]["domain"]] += 1
-    assert per_domain == {"reference": 8, "comparator": 11, "candidate": 8}
-    assert sum(per_domain.values()) == execution._JOB_TRANSFERS
+    assert per_domain == {"reference": 8, "comparator": comparator_transfers, "candidate": 8}
+    # Only a job for a task that selects a validator uploads the validation module and the validator source.
+    budget = execution._JOB_TRANSFERS + (execution._SEMANTIC_JOB_TRANSFERS if semantic else 0)
+    assert sum(per_domain.values()) == total_transfers == budget
 
 
 @pytest.mark.parametrize("code", runner.SOURCE_ERROR_CODES)
@@ -1202,7 +1221,7 @@ async def test_a_failed_create_stops_the_job_and_creates_nothing_after_it():
 
 async def test_a_job_past_its_deadline_is_unscorable_and_every_domain_is_stopped(monkeypatch):
     candidate_run, entered = entered_hang()
-    monkeypatch.setattr(ExecutionPolicy, "effective_job_timeout_s", lambda self: 2.0)
+    monkeypatch.setattr(ExecutionPolicy, "effective_job_timeout_s", lambda self, **_: 2.0)
     grader, provider = make_grader({**happy_script(), ("exec", "candidate"): candidate_run})
     result = await grader.grade(make_task(), CANDIDATE)
     assert entered.is_set()  # the deadline fell inside the candidate run, after every domain was created

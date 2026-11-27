@@ -1,0 +1,27 @@
+name: visgym_maze_smoke
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: games
+description: Deterministic visgym adapter qualification tasks, not a published leaderboard suite.
+modality: multimodal
+licensing: Apache-2.0
+authors:
+  - Aroshan Ghias
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+resources_server: visgym
+agent_server: visgym_agent
+model_server: policy_model
+datasets:
+  - name: visgym_maze_smoke
+    type: benchmark
+    jsonl_fpath: benchmarks/visgym_maze_smoke/data/visgym_maze_smoke_benchmark.jsonl
+    prepare_script: benchmarks/visgym_maze_smoke/prepare.py
+    num_repeats: 1
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active

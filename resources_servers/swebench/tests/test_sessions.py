@@ -16,7 +16,9 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
-from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.testing import FakeSandboxProvider, fake_sandbox
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
@@ -29,9 +31,8 @@ from resources_servers.swebench.tests.test_app import VERIFY_BODY
 PATCH = "diff --git a/chart.js b/chart.js\n--- a/chart.js\n+++ b/chart.js\n@@ -1 +1 @@\n-bug\n+fixed\n"
 
 
-def _sandbox() -> MagicMock:
-    sandbox = MagicMock()
-    sandbox._handle = SandboxHandle(sandbox_id="task-box", provider_name="test-provider", raw=None)
+def _sandbox(provider: FakeSandboxProvider | None = None) -> AsyncSandbox:
+    sandbox = fake_sandbox("task-box", provider=provider)
 
     async def execute(command, **kwargs):
         output = "/testbed\n" if command == "pwd" else "seed-head\n" if command == "git rev-parse HEAD" else PATCH
@@ -40,7 +41,6 @@ def _sandbox() -> MagicMock:
     sandbox.exec = AsyncMock(side_effect=execute)
     sandbox.upload = AsyncMock()
     sandbox.serialize = AsyncMock(return_value={"sandbox_id": "task-box", "provider": "test-provider"})
-    sandbox.stop = AsyncMock()
     return sandbox
 
 
@@ -81,8 +81,13 @@ def session_server(monkeypatch: pytest.MonkeyPatch):
         return_value=SimpleNamespace(repo="repo", base_commit="base", instance_id="task")
     )
 
+    verifiers = [verifier]
+
     async def create(test_spec, *, test_assets=(), task_session_id=None, verifier_session_id=None):
-        sandbox = verifier if verifier_session_id is not None else task
+        if verifier_session_id is not None and verifiers[-1].provider.closed:
+            # A retry gets a new verifier, as a real create does, on the same provider so the test counts its stops.
+            verifiers.append(_sandbox(provider=verifier.provider))
+        sandbox = verifiers[-1] if verifier_session_id is not None else task
         if task_session_id is not None:
             server._session_id_to_sandbox[task_session_id] = sandbox
         if verifier_session_id is not None:
@@ -119,7 +124,47 @@ def test_episode_seed_over_http_reuses_sandbox_and_accepts_caller_assigned_task_
         assert closed.status_code == 200, closed.text
         assert client.post("/close_session", json=_close().model_dump(mode="json")).json() == closed.json()
         assert client.post("/seed_session", json=body).status_code == 409
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("fail_first_stop", [False, True])
+def test_agent_run_cookie_close_releases_bare_handle_and_retries_failed_stop(session_server, fail_first_stop):
+    server, task, _, _ = session_server
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        seeded = client.post("/seed_session", json=_seed().task_data)
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["sandbox_handle"] == "task-box"
+        owner_cookies = dict(client.cookies)
+        session_id = next(iter(server._session_id_to_sandbox))
+        if fail_first_stop:
+            task.provider.on_close.side_effect = [RuntimeError("Provider unavailable"), None]
+            assert client.post("/close_session", json={}).status_code == 500
+            assert server._session_id_to_sandbox[session_id] is task
+            assert dict(client.cookies) == owner_cookies
+        closed = client.post("/close_session", json={})
+        assert closed.status_code == 200, closed.text
+        assert closed.json() == {"resources_session_id": session_id}
+        assert not server._session_id_to_sandbox
+        assert not server._task_sessions
+        # A caller retrying an acknowledged close may still hold the old cookie.
+        client.cookies.update(owner_cookies)
+        assert client.post("/close_session", json={}).status_code == 200
+        assert task.provider.on_close.await_count == (2 if fail_first_stop else 1)
+
+
+def test_cookie_close_cannot_bypass_explicit_episode_identity(session_server):
+    server, task, _, _ = session_server
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/close_session", json={}).status_code == 409
+        assert client.post("/close_session", json={"resources_session_id": "session"}).status_code == 422
+        assert client.post("/close_session", json={"unrelated": True}).status_code == 422
+        task.provider.on_close.assert_not_awaited()
+        owner_cookies = dict(client.cookies)
+        assert client.post("/close_session", json=_close().model_dump(mode="json")).status_code == 200
+        client.cookies.update(owner_cookies)
+        assert client.post("/close_session", json={}).status_code == 409
+    task.provider.on_close.assert_awaited_once()
 
 
 @pytest.mark.parametrize("field", ["episode_id", "task_id", "task_data"])
@@ -139,7 +184,7 @@ def test_conflicting_http_seed_does_not_replace_existing_session(session_server,
         assert client.post("/seed_session", json=body).status_code == 200
         assert client.post("/close_session", json=_close().model_dump(mode="json")).status_code == 200
     server._create_sandbox.assert_awaited_once()
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
 
 
 def test_invalid_task_is_rejected_before_creating_sandbox(session_server):
@@ -217,7 +262,7 @@ async def test_unknown_close_fences_late_seed_and_rejects_another_episode(sessio
 async def test_failed_handoff_retains_failed_cleanup_for_close_retry(session_server):
     server, task, _, _ = session_server
     task.serialize.side_effect = RuntimeError("handoff failed")
-    task.stop.side_effect = [RuntimeError("stop failed"), None]
+    task.provider.on_close.side_effect = [RuntimeError("stop failed"), None]
     with pytest.raises(RuntimeError, match="handoff failed"):
         await server.seed_session(_request(), _seed())
     assert server._session_id_to_sandbox["session"] is task
@@ -226,18 +271,18 @@ async def test_failed_handoff_retains_failed_cleanup_for_close_retry(session_ser
     await server.close_resources_session(_request(), _close())
     assert not server._session_id_to_sandbox
     assert not server._task_sessions
-    assert task.stop.await_count == 2
+    assert task.provider.on_close.await_count == 2
 
 
 async def test_failed_seed_can_retry_after_failed_cleanup(session_server):
     server, task, _, _ = session_server
     task.serialize.side_effect = [RuntimeError("handoff failed"), {"sandbox_id": "retry-box"}]
-    task.stop.side_effect = [RuntimeError("stop failed"), None, None]
+    task.provider.on_close.side_effect = [RuntimeError("stop failed"), None, None]
     with pytest.raises(RuntimeError, match="handoff failed"):
         await server.seed_session(_request(), _seed())
     result = await server.seed_session(_request(), _seed())
     assert result.sandbox_access.connection.descriptor == {"sandbox_id": "retry-box"}
-    assert task.stop.await_count == 2
+    assert task.provider.on_close.await_count == 2
     assert server._create_sandbox.await_count == 2
     await server.close_resources_session(_request(), _close())
 
@@ -247,7 +292,7 @@ async def test_cancelled_seed_stops_task_before_exposing_access(session_server):
     task.serialize.side_effect = asyncio.CancelledError
     with pytest.raises(asyncio.CancelledError):
         await server.seed_session(_request(), _seed())
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
     assert not server._task_sessions
     assert not server._session_id_to_sandbox
 
@@ -266,7 +311,7 @@ async def test_invalid_workdir_stops_task_before_handoff(session_server, pwd_res
     task.exec.return_value = pwd_result
     with pytest.raises(RuntimeError, match="workdir"):
         await server.seed_session(_request(), _seed())
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
     task.serialize.assert_not_awaited()
     assert not server._task_sessions
 
@@ -274,7 +319,7 @@ async def test_invalid_workdir_stops_task_before_handoff(session_server, pwd_res
 async def test_close_failure_keeps_session_and_does_not_fence(session_server):
     server, task, _, _ = session_server
     await server.seed_session(_request(), _seed())
-    task.stop.side_effect = [RuntimeError("stop failed"), None]
+    task.provider.on_close.side_effect = [RuntimeError("stop failed"), None]
     with pytest.raises(RuntimeError, match="stop failed"):
         await server.close_resources_session(_request(), _close())
     assert server._task_session_fences.get("session") is None
@@ -293,7 +338,7 @@ async def test_close_cleanup_survives_anyio_cancellation(session_server):
         await anyio.sleep(0)
         stopped = True
 
-    task.stop.side_effect = stop
+    task.provider.on_close.side_effect = stop
     with anyio.CancelScope() as scope:
         scope.cancel()
         # The caller has already acquired ownership of cleanup; cancellation must not interrupt provider stop.
@@ -310,11 +355,11 @@ async def test_close_timeout_retains_owner_for_retry(session_server, monkeypatch
     async def blocked():
         await anyio.sleep_forever()
 
-    task.stop.side_effect = blocked
+    task.provider.on_close.side_effect = blocked
     with pytest.raises(TimeoutError):
         await server.close_resources_session(_request(), _close())
     assert server._session_id_to_sandbox["session"] is task
-    task.stop.side_effect = None
+    task.provider.on_close.side_effect = None
     await server.close_resources_session(_request(), _close())
 
 
@@ -322,7 +367,7 @@ async def test_verification_retry_reuses_patch_after_task_stop_failure(session_s
     server, task, verifier, grader = session_server
     await server.seed_session(_request(), _seed())
     body = mod.SWEBenchVerifyRequest.model_validate(VERIFY_BODY)
-    task.stop.side_effect = [RuntimeError("stop failed"), None]
+    task.provider.on_close.side_effect = [RuntimeError("stop failed"), None]
     with pytest.raises(RuntimeError, match="stop failed"):
         await server.verify(_request(), body)
     assert server._task_sessions["session"].capture == PATCH
@@ -335,7 +380,7 @@ async def test_verification_retry_reuses_patch_after_task_stop_failure(session_s
     assert "session" not in server._session_id_to_sandbox
     assert await server.verify(_request(), body) == result
     grader.assert_awaited_once()
-    verifier.stop.assert_awaited_once()
+    verifier.provider.on_close.assert_awaited_once()
     await server.close_resources_session(_request(), _close())
     assert not server._task_sessions
 
@@ -370,8 +415,8 @@ async def test_verifier_failure_releases_verifier_and_can_retry_saved_patch(sess
     assert server._task_sessions["session"].capture == PATCH
     assert "session" not in server._verifier_sandboxes
     assert (await server.verify(_request(), body)).model_patch == PATCH
-    task.stop.assert_awaited_once()
-    assert verifier.stop.await_count == 2
+    task.provider.on_close.assert_awaited_once()
+    assert verifier.provider.on_close.await_count == 2
     await server.close_resources_session(_request(), _close())
 
 
@@ -387,7 +432,7 @@ async def test_close_waits_for_verification_and_keeps_failed_verifier_teardown(s
         return {"completed": True, "resolved": True}
 
     grader.side_effect = grade
-    verifier.stop.side_effect = [RuntimeError("stop failed"), RuntimeError("stop still failed"), None]
+    verifier.provider.on_close.side_effect = [RuntimeError("stop failed"), RuntimeError("stop still failed"), None]
     async with asyncio.timeout(2):
         verification = asyncio.create_task(
             server.verify(_request(), mod.SWEBenchVerifyRequest.model_validate(VERIFY_BODY))
@@ -409,7 +454,7 @@ async def test_close_waits_for_verification_and_keeps_failed_verifier_teardown(s
 async def test_shutdown_stops_abandoned_task_and_retains_failure(session_server):
     server, task, _, _ = session_server
     await server.seed_session(_request(), _seed())
-    task.stop.side_effect = [RuntimeError("shutdown stop failed"), None]
+    task.provider.on_close.side_effect = [RuntimeError("shutdown stop failed"), None]
     await server.shutdown()
     assert server._session_id_to_sandbox["session"] is task
     await server.shutdown()
@@ -424,7 +469,7 @@ def test_flat_seed_response_is_preserved(session_server):
         assert result.status_code == 200, result.text
         assert result.json() == {"sandbox_handle": "task-box"}
         assert all(record.seed is None for record in server._task_sessions.values())
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
 
 
 def _extraction_result(task: MagicMock, result: SandboxExecResult) -> None:
@@ -440,8 +485,17 @@ def _extraction_result(task: MagicMock, result: SandboxExecResult) -> None:
 
 
 def _start_through_the_real_create_sandbox(server, monkeypatch: pytest.MonkeyPatch, box: MagicMock) -> None:
-    """Run the real ``_create_sandbox`` (the fixture stubs it) against a provider-level fake ``box``."""
+    """Run the real ``_create_sandbox`` (the fixture stubs it) against a provider-level fake ``box``.
+
+    ``box`` stands in for the task sandbox too, which the real path registers through ``new_task_sandbox``.
+    """
     server._create_sandbox = type(server)._create_sandbox.__get__(server)
+
+    def task_sandbox(session_id: str, spec: object) -> MagicMock:
+        server._session_id_to_sandbox[session_id] = box
+        return box
+
+    object.__setattr__(server, "new_task_sandbox", task_sandbox)
     server._make_test_spec.return_value = SimpleNamespace(
         repo="repo", base_commit="base", instance_id="task", instance_image_key="image:key"
     )
@@ -496,11 +550,11 @@ def test_agent_run_seed_cannot_replace_an_episode_session(session_server):
         flat = client.post("/seed_session", json=_seed().task_data)
         assert flat.status_code == 409, flat.text
         assert "agent-run seed cannot replace an episode session" in flat.text
-        task.stop.assert_not_awaited()
+        task.provider.on_close.assert_not_awaited()
         server._create_sandbox.assert_awaited_once()
         assert client.post("/close_session", json=_close().model_dump(mode="json")).status_code == 200
         assert not server._session_id_to_seed_head
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
 
 
 async def test_failed_flat_seed_stops_the_task_sandbox(session_server):
@@ -509,7 +563,7 @@ async def test_failed_flat_seed_stops_the_task_sandbox(session_server):
     task.exec.return_value = SandboxExecResult(return_code=1, stdout="", stderr="no cwd")
     with pytest.raises(RuntimeError, match="workdir"):
         await server.seed_session(_request(), mod.SWEBenchSeedSessionRequest.model_validate(VERIFY_BODY))
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
     assert not server._session_id_to_sandbox and not server._session_id_to_seed_head
 
 
@@ -524,7 +578,7 @@ def test_http_verify_after_expiry_is_masked_as_expired(session_server, monkeypat
         clock[0] += 18000 + 1  # the fixture's sandbox_config.ttl_s
         # The next session call closes the abandoned one.
         assert client.post("/seed_session", json=_seed(session_id="next").model_dump(mode="json")).status_code == 200
-        task.stop.assert_awaited_once()
+        task.provider.on_close.assert_awaited_once()
         client.cookies.clear()
         client.cookies.update(cookies)
         server._create_sandbox.reset_mock()
@@ -542,14 +596,14 @@ async def test_task_sandbox_that_fails_to_start_stays_owned_for_a_close_retry(se
     server, _, _, _ = session_server
     box = _sandbox()
     box.start_with_setup = AsyncMock(side_effect=RuntimeError("provider create failed"))
-    box.stop.side_effect = [RuntimeError("stop failed"), None]
+    box.provider.on_close.side_effect = [RuntimeError("stop failed"), None]
     _start_through_the_real_create_sandbox(server, monkeypatch, box)
     with pytest.raises(RuntimeError, match="provider create failed"):
         await server.seed_session(_request(), _seed())
     # The failed stop leaves the registered sandbox for the retried close.
     assert server._session_id_to_sandbox["session"] is box
     await server.close_resources_session(_request(), _close())
-    assert box.stop.await_count == 2
+    assert box.provider.on_close.await_count == 2
     assert not server._session_id_to_sandbox and not server._task_sessions
 
 
@@ -562,11 +616,11 @@ async def test_verifier_sandbox_that_fails_to_start_is_stopped(session_server, m
     body = mod.SWEBenchVerifyRequest.model_validate(VERIFY_BODY)
     with pytest.raises(RuntimeError, match="verifier create failed"):
         await server.verify(_request(), body)
-    box.stop.assert_awaited_once()
+    box.provider.on_close.assert_awaited_once()
     assert not server._verifier_sandboxes
     grader.assert_not_awaited()
     # The patch was saved before the task sandbox stopped, so the retry grades it without a task sandbox.
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
     server._create_sandbox = AsyncMock(side_effect=lambda *a, **k: _sandbox())
     result = await server.verify(_request(), body)
     assert result.reward == 1 and result.model_patch == PATCH
@@ -583,7 +637,7 @@ async def test_extraction_error_is_masked_released_and_replayed(session_server):
     assert first.mask_sample is True and first.failure_kind == "verifier_error"
     assert first.failure_reason == "Failed to extract the model patch from the agent sandbox"
     assert first.model_patch is None and first.model_patch_sha256 is None
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
     assert grader.await_args.kwargs["pred"]["model_patch"] == ""
     assert await server.verify(_request(), body) == first
     grader.assert_awaited_once()
@@ -645,7 +699,7 @@ def test_flat_seeded_session_is_verified_from_its_own_sandbox(session_server):
         assert result["reward"] == 1 and result["mask_sample"] is False and result["model_patch"] == PATCH
         assert grader.await_args.kwargs["pred"]["model_patch"] == PATCH
         assert task.exec.await_args_list[-1].args[0].endswith("cd /testbed && git --no-pager diff --cached seed-head")
-        task.stop.assert_awaited_once()
+        task.provider.on_close.assert_awaited_once()
         # The task sandbox is consumed: a second verify is masked as lost, not scored 0.
         again = client.post("/verify", json=VERIFY_BODY).json()
         assert again["mask_sample"] is True and again["failure_kind"] == SESSION_LOST
@@ -654,7 +708,7 @@ def test_flat_seeded_session_is_verified_from_its_own_sandbox(session_server):
 
 def test_a_failed_task_stop_after_capture_still_grades_a_flat_seeded_session(session_server):
     server, task, _, grader = session_server
-    task.stop.side_effect = [RuntimeError("stop failed"), None]
+    task.provider.on_close.side_effect = [RuntimeError("stop failed"), None]
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=_seed().task_data).status_code == 200
         graded = client.post("/verify", json=VERIFY_BODY)
@@ -662,7 +716,7 @@ def test_a_failed_task_stop_after_capture_still_grades_a_flat_seeded_session(ses
         assert graded.json()["reward"] == 1 and graded.json()["mask_sample"] is False
         grader.assert_awaited_once()
         assert server._session_id_to_sandbox, "the unconfirmed stop keeps the sandbox for shutdown to retry"
-    assert task.stop.await_count == 2 and not server._session_id_to_sandbox
+    assert task.provider.on_close.await_count == 2 and not server._session_id_to_sandbox
 
 
 async def test_a_git_failure_in_the_agents_repository_is_its_graded_zero_not_a_masked_row(session_server):
@@ -674,7 +728,7 @@ async def test_a_git_failure_in_the_agents_repository_is_its_graded_zero_not_a_m
     result = await server.verify(_request(), mod.SWEBenchVerifyRequest.model_validate(VERIFY_BODY))
     assert result.reward == 0 and result.mask_sample is False
     assert grader.await_args.kwargs["pred"]["model_patch"] == ""
-    task.stop.assert_awaited_once()
+    task.provider.on_close.assert_awaited_once()
 
 
 async def test_flat_seed_records_the_workdir_so_verify_does_not_ask_the_agents_sandbox_for_it(session_server):
@@ -690,9 +744,9 @@ async def test_a_failed_flat_seed_keeps_its_own_error_when_the_cleanup_stop_fail
     server, task, _, _ = session_server
     task.exec.side_effect = None
     task.exec.return_value = SandboxExecResult(return_code=1, stdout="", stderr="no cwd")
-    task.stop.side_effect = [RuntimeError("provider close failed"), None]
+    task.provider.on_close.side_effect = [RuntimeError("provider close failed"), None]
     with pytest.raises(RuntimeError, match="workdir"):
         await server.seed_session(_request(), mod.SWEBenchSeedSessionRequest.model_validate(VERIFY_BODY))
     assert server._session_id_to_sandbox, "the failed stop keeps the handle for a retry"
     await server.shutdown()
-    assert task.stop.await_count == 2 and not server._session_id_to_sandbox
+    assert task.provider.on_close.await_count == 2 and not server._session_id_to_sandbox

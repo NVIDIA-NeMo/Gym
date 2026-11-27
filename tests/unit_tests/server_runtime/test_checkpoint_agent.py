@@ -40,6 +40,7 @@ from nemo_gym.server_runtime._checkpoint.control import (
 from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.participant_workers import COORDINATOR_SOCKET_ENV
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 from tests.unit_tests.server_runtime.test_checkpoint_resources import SEED
 
 
@@ -1600,11 +1601,27 @@ async def test_a_slot_is_given_back_after_the_work_and_its_wait_ends_at_the_dead
         assert not slot.locked()
         await slot.acquire()
         with pytest.raises(TimeoutError):
-            async with running.slot(slot, deadline=asyncio.get_running_loop().time() + 0.05):
+            async with running.slot(slot, deadline=time.monotonic() + 0.05):
                 pass
         slot.release()
 
     assert not slot.locked()
+
+
+def test_a_slot_wait_holds_its_monotonic_deadline_on_an_event_loop_clock_ahead_of_monotonic() -> None:
+    async def main() -> bool:
+        participant = AgentSessionParticipant(Hooks())
+        episode_id = EpisodeId(rollout_id="r")
+        participant.open_session("s", episode_id)
+        slot = asyncio.Semaphore(1)
+        await slot.acquire()
+        asyncio.get_running_loop().call_later(0.05, slot.release)
+        async with participant.activation("s", episode_id) as running:
+            async with running.slot(slot, deadline=time.monotonic() + 120):
+                held = slot.locked()
+        return held and not slot.locked()
+
+    assert run_on_clock_ahead_loop(main())
 
 
 @pytest.mark.parametrize("wait", ["queued", "awaiting_model"])

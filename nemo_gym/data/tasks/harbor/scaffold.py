@@ -52,6 +52,8 @@ num_repeats = 1
 # Scale every task's [agent] and [verifier] timeout_sec, and its cpus, memory_mb and storage_mb.
 timeout_multiplier = 1.0
 resource_multiplier = 1.0
+# Scale the verifier budgets alone, on top of timeout_multiplier.
+# verifier_timeout_multiplier = 1.0
 
 # Per-task overrides use Harbor's own [environment] fields; `env` merges over the task's own.
 # [gym.tasks."{task}".environment]

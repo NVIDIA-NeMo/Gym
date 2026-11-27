@@ -228,14 +228,14 @@ def _distribution(commit: str | None) -> SimpleNamespace:
 def test_installed_revision_ignores_the_superseded_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
     distributions = {
         "nemo-usersim": _distribution("a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"),
-        "usersim": _distribution("e6282672a5e5359bccbed20f42753c3054dd6209"),
+        "usersim": _distribution("c91d9b2d9daaff4f749a8401e8213be5b481f982"),
     }
     monkeypatch.setattr(usersim_app.metadata, "distribution", distributions.__getitem__)
     monkeypatch.setattr(
         usersim_app.metadata, "packages_distributions", lambda: {"usersim": ["nemo-usersim", "usersim"]}
     )
 
-    assert installed_usersim_revision() == "e6282672a5e5"
+    assert installed_usersim_revision() == "c91d9b2d9daa"
 
 
 @pytest.mark.parametrize("distributions", [{}, {"usersim": _distribution(None)}])

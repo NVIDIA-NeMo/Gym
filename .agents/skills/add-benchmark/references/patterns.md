@@ -46,7 +46,7 @@ elif is_nemo_gym_fastapi_entrypoint(__file__):
     app = MyServer.run_webserver()  # noqa: F401
 ```
 
-### Subprocess execution server (e.g. `code_gen`)
+### Subprocess execution server with Ray (e.g. `evalplus`)
 
 ```python
 from asyncio import Semaphore, get_running_loop
@@ -71,6 +71,8 @@ class MyVerifyResponse(BaseVerifyResponse):
     # ... benchmark-specific result fields
 
 class MyServer(SimpleResourcesServer):
+    # Required for any server that uses Ray: Gym starts Ray only for servers that declare it.
+    ray_enabled = True
     config: MyConfig
 
     def model_post_init(self, context):
@@ -105,6 +107,7 @@ class MyServer(SimpleResourcesServer):
 - Guard optional nested fields: `(body.verifier_metadata or {}).get("key", default)`
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` in async context.
+- A server that uses Ray must declare `ray_enabled = True` on the class its entrypoint runs and request `nemo-gym[ray]` in its own `pyproject.toml`; otherwise Gym doesn't start Ray for it and Ray calls fail with "Ray has not been started yet". For isolated code execution, use the Sandbox API instead of Ray.
 
 ---
 
@@ -407,7 +410,7 @@ Handle these edge cases:
 
 ## Subprocess Execution with Ray
 
-For benchmarks that compile/run code:
+For benchmarks that compile/run code. Ray is optional: declare `ray_enabled = True` on the server class and add `nemo-gym[ray]` to the server's `pyproject.toml` dependencies, as in the subprocess execution server above. Without the declaration, Ray calls fail with "Ray has not been started yet". For isolated execution, prefer the Sandbox API (`nemo_gym.sandbox`).
 
 ```python
 import ray

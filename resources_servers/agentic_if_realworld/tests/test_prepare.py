@@ -77,9 +77,12 @@ def test_prepare_and_real_collation_keep_adjacent_files_private(preparation, mon
         configs,
         metrics,
     )
-    for name in ["prepared_prepare.jsonl", "prepared_metrics.json"]:
-        generated = link / name
-        assert generated.is_file() and generated.resolve() == private / name
+    metrics_path = link / "prepared_metrics.json"
+    assert metrics_path.is_file() and metrics_path.resolve() == private / "prepared_metrics.json"
+    generated = tmp_path / "collated/prepared/example/prepared_prepare.jsonl"
+    assert generated.read_bytes() == (tmp_path / "collated/example.jsonl").read_bytes()
+    assert not (link / "prepared_prepare.jsonl").exists()
+    assert [json.loads(line) for line in target.open()] == dataset.prepared()
     rows = [json.loads(line) for line in (tmp_path / "collated/example.jsonl").open()]
     assert [{key: row[key] for key in dataset.prepared()[0]} for row in rows] == dataset.prepared()
     assert all(path.is_symlink() or path.is_dir() for path in link.parent.iterdir())

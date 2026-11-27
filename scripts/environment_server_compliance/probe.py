@@ -45,7 +45,11 @@ POLICY_MODEL = {
     }
 }
 # Config the agent's default one leaves unset, which its seed requires; values as benchmarks pin them.
-CONFIG_OVERRIDES = {"claude_code_agent": {"claude_code_version": "2.1.261"}}
+CONFIG_OVERRIDES = {
+    "claude_code_agent": {"claude_code_version": "2.1.261"},
+    # The probe sandbox is the CI host, which has no rg; the probe runs no grep or glob.
+    "opencode_agent": {"sandbox_ripgrep_download": True},
+}
 # Config flags only the operator may set, such as accepting a licence; without them the agent is not probed.
 OPERATOR_OPT_INS = {"pool_agent": "accept_pool_eula"}
 SANDBOX_REFUSAL = "does not support sandbox access"

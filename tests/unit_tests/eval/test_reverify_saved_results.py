@@ -18,21 +18,25 @@ from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_rout
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for
-from nemo_gym.eval.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
-from nemo_gym.orchestration.recovery import (
-    COLLECT_SCRIPT,
-    CollectedEvidence,
+from nemo_gym.eval.recovery.decision import (
     IdentityState,
     RecoveryAction,
-    decide_from_collected,
-    decide_recovery,
+)
+from nemo_gym.eval.recovery.evidence import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+)
+from nemo_gym.eval.recovery.grading import (
     reverification_cause,
     saved_row_evidence,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.rows import decide_recovery
+from nemo_gym.eval.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
 from nemo_gym.rollouts.rollout_records import logical_rollout_id, rejudge_predecessor_id
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.orchestration.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, scored
+from tests.unit_tests.eval.recovery.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, scored
 
 
 ANSWER = {
@@ -273,10 +277,10 @@ def test_the_recover_outcome_names_the_reverify_part_of_a_mixed_resubmit() -> No
 # --- completion: settled into the source run ---------------------------------------------------------------------
 
 
-def _run(tmp_path: Path, outcomes: list[dict], *, not_started: int = 0) -> Path:
+def _run(tmp_path: Path, outcomes: list[dict], *, not_started: int = 0, task_fields: dict | None = None) -> Path:
     """A managed run with one rollout per outcome, each recorded as its attempt 0, and ``not_started`` more."""
     rows = [
-        {"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}}
+        {"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}, **(task_fields or {})}
         for i in range(len(outcomes) + not_started)
     ]
     source = tmp_path / "source.jsonl"
@@ -462,10 +466,91 @@ async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
-async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(tmp_path, verifier) -> None:
+@pytest.mark.parametrize("task_mask", [False, True])
+async def test_rejudgment_keeps_superseded_grade_only_in_prior_observations(tmp_path, verifier, task_mask):
+    from nemo_gym.rollouts.rollout_records import REJUDGED_OBSERVATIONS_KEY
+
+    archived = {"correctness": False, "verdict": "no", "library_reward": 0.0}
+    row = verify_transport_masked() | archived | {"instance_config": {"source": "archive", "mask_sample": True}}
+    task_fields = {"instance_config": {"source": "archive", "mask_sample": True}} if task_mask else {}
+    output = _run(tmp_path, [row], task_fields=task_fields)
+    (identity,) = due_judge_failures(output)
+    verifier["grade"] = lambda request: {
+        k: v for k, v in request.items() if k not in archived and k != "instance_config"
+    } | {
+        "reward": 1.0,
+        "judge_evaluations": [{"verdict_label": "Judgement: yes"}],
+    }
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    saved = _selected(output)[0][identity]
+    assert saved["reward"] == 1 and saved["judge_evaluations"] == [{"verdict_label": "Judgement: yes"}]
+    assert saved["instance_config"] == task_fields.get("instance_config", {"source": "archive"})
+    assert archived.keys().isdisjoint(saved)
+    assert saved[REJUDGED_OBSERVATIONS_KEY]["instance_config"]["mask_sample"] is True
+    assert {k: saved[REJUDGED_OBSERVATIONS_KEY][k] for k in archived} == archived
+
+
+@pytest.mark.parametrize("initial", ["judge_unparsed", "judge_failed"])
+@pytest.mark.parametrize("structured", [False, True], ids=["line", "json"])
+async def test_rejudged_abstention_stops_retries_on_the_saved_attempt(tmp_path, verifier, initial, structured):
+    row = ungraded(0) | {"reward": 0.0, "mask_sample": True, "evaluation_completed": False, "correctness": None}
+    if initial == "judge_failed":
+        row.update(_ng_failure_class="judge_failed", _ng_failure_id="judge-outage", failure_kind="judge_failed")
+    else:
+        row.update(grading_status="judge_unparsed", failure_kind="judge_unparseable")
+    output = _run(tmp_path, [row])
+    (identity,) = due_judge_failures(output)
+    attempts = RolloutStore.read(output).manifest.next_attempt.copy()
+    evaluation = {"verdict_label": "Judgement: unresolved"}
+    if structured:
+        evaluation["judgment"] = {
+            "verdict": "unresolved",
+            "reason_code": "conflicting_reference",
+            "evidence": "The reference contradicts itself.",
+        }
+    verifier["grade"] = lambda request: request | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "evaluation_completed": True,
+        "failure_kind": None,
+        "grading_status": "judge_unresolved",
+        "verdict": "unresolved",
+        "correctness": None,
+        "judge_evaluations": [evaluation],
+    }
+
+    for settled in (1, 0, 0):
+        assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == settled
+
+    selected, store = _selected(output)  # Reopen from the source run.
+    saved = selected[identity]
+    assert saved["response"] == row["response"] and saved["_ng_attempt_index"] == 0
+    assert saved["grading_status"] == "judge_unresolved" and saved["judge_evaluations"] == [evaluation]
+    assert saved["correctness"] is None and saved["mask_sample"] is True and store.settled(saved)
+    assert store.manifest.next_attempt == attempts and not store.manifest.pending_rejudge
+    assert due_judge_failures(output) == [] and verifier["posted"] == [("rs", "/verify")]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {},
+        {
+            "grading_status": "judge_unparsed",
+            "verdict": "unresolved",
+            "correctness": None,
+            "failure_kind": "judge_unparseable",
+            "evaluation_completed": False,
+            "judge_evaluations": [{"verdict_label": None}],
+        },
+    ],
+)
+async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(
+    tmp_path, verifier, outcome
+) -> None:
     output = _run(tmp_path, [verify_transport_masked()])
     before = output.read_bytes()
-    verifier["grade"] = lambda json: json | {"reward": 0.0, "mask_sample": True}
+    verifier["grade"] = lambda json: json | {"reward": 0.0, "mask_sample": True} | outcome
 
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
 
@@ -658,7 +743,11 @@ async def test_a_pairwise_result_with_a_game_lacking_its_verdict_is_replaced_who
 async def test_a_rejudgment_that_again_lacks_a_game_verdict_settles_once_and_the_gate_still_counts_it(
     tmp_path, verifier
 ) -> None:
-    from nemo_gym.orchestration.recovery import _scored_fault, reverification_cause, saved_row_evidence
+    from nemo_gym.eval.recovery.grading import (
+        reverification_cause,
+        saved_row_evidence,
+    )
+    from nemo_gym.eval.recovery.trials import _scored_fault
 
     output = _run(tmp_path, [pairwise_partial()])
     (identity,) = due_judge_failures(output)

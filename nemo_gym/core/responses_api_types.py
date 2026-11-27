@@ -1406,20 +1406,29 @@ NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
 ]
 
 
+# Outer tool-call keys that agents replay from a model response but that carry no meaning in a request:
+# - "name" duplicates the nested function.name or custom.name.
+# - "index" is a position in a streamed response, which some providers also return on non-streaming tool calls.
+_REDUNDANT_OUTER_TOOL_CALL_KEYS = ("name", "index")
+
+
 def _strip_outer_tool_call_names(value: Any) -> Any:
-    """Copy tool calls carrying a redundant outer name and remove only that field."""
+    """Copy tool calls carrying a redundant outer key and remove only those keys.
+
+    Every other unknown key stays a validation error, so provider state an agent needs to replay is never dropped.
+    """
     if not isinstance(value, list):
         return value
 
     normalized = None
     for index, tool_call in enumerate(value):
-        if not isinstance(tool_call, dict) or "name" not in tool_call:
+        if not isinstance(tool_call, dict) or tool_call.keys().isdisjoint(_REDUNDANT_OUTER_TOOL_CALL_KEYS):
             continue
         if normalized is None:
             normalized = list(value)
-        normalized_tool_call = dict(tool_call)
-        del normalized_tool_call["name"]
-        normalized[index] = normalized_tool_call
+        normalized[index] = {
+            key: field for key, field in tool_call.items() if key not in _REDUNDANT_OUTER_TOOL_CALL_KEYS
+        }
 
     return value if normalized is None else normalized
 
@@ -1437,6 +1446,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
     reasoning: str | None
+    # Provider-signed thinking (LiteLLM's Anthropic `thinking_blocks`), replayed verbatim.
+    thinking_blocks: List[Dict[str, Any]]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -1582,28 +1593,44 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
-        """Drop ``provider_specific_fields`` from replayed assistant history.
+    def drop_harness_message_hints(cls, value: Any) -> Any:
+        """Drop ``provider_specific_fields`` and ``cache_control`` from message history.
 
-        litellm's ``Message.model_dump()`` emits that key on every assistant turn
-        (holding response fields it does not model, such as ``refusal``), and
-        harnesses built on litellm replay the dump verbatim. It carries nothing
-        a model server needs, and the strict message schema would reject it.
+        litellm's ``Message.model_dump()`` emits ``provider_specific_fields`` on every
+        assistant turn (holding response fields it does not model, such as ``refusal``),
+        and harnesses built on litellm replay the dump verbatim. Harnesses such as NOOA
+        also mark messages and content parts with Anthropic ``cache_control`` prompt-caching
+        hints. Neither carries anything an OpenAI-compatible model server needs, and the
+        strict message schema would reject both.
         """
         if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
             return value
-        # Copy only when some message carries the key, so a clean request is not rebuilt.
+        # Copy only when some message carries a hint, so a clean request is not rebuilt.
         if not any(
-            isinstance(message, dict) and "provider_specific_fields" in message for message in value["messages"]
+            isinstance(message, dict)
+            and (
+                "provider_specific_fields" in message
+                or "cache_control" in message
+                or (
+                    isinstance(message.get("content"), list)
+                    and any(isinstance(part, dict) and "cache_control" in part for part in message["content"])
+                )
+            )
+            for message in value["messages"]
         ):
             return value
         value = value.copy()
-        value["messages"] = [
-            {k: v for k, v in message.items() if k != "provider_specific_fields"}
-            if isinstance(message, dict)
-            else message
-            for message in value["messages"]
-        ]
+        messages = []
+        for message in value["messages"]:
+            if isinstance(message, dict):
+                message = {k: v for k, v in message.items() if k not in ("provider_specific_fields", "cache_control")}
+                if isinstance(message.get("content"), list):
+                    message["content"] = [
+                        {k: v for k, v in part.items() if k != "cache_control"} if isinstance(part, dict) else part
+                        for part in message["content"]
+                    ]
+            messages.append(message)
+        value["messages"] = messages
         return value
 
     messages: List[NeMoGymChatCompletionMessageParam]

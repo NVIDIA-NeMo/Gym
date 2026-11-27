@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Original prompt for the synthetic example. For an evaluation that requires the CritPt authors' system text,
+# supply an external prompt_config as documented in ../README.md. This file does not reproduce that text.
+system: |-
+  Solve the supplied mathematical programming problem. Explain your reasoning and use the available tools to
+  check calculations when useful. Follow the problem's definitions, output types and precision requirements.
+  Submit a self-contained implementation of the requested Python function through the finish tool.
+
+user: |-
+  {problem}
+
+  ```python
+  {code_template}
+  ```
+
+  ## Execution environment
+
+  The code_exec tool accepts a Bash command in its cmd field and returns the exit code, stdout and stderr.
+  Commands run in an offline Linux sandbox with Python 3.13, NumPy, SciPy, SymPy and Matplotlib installed.
+  The working directory is /sandbox. Files persist for this task, but each command starts a fresh shell.
+  The sandbox has four CPUs and 8 GiB of memory. Each command has a 300-second deadline; output capture is
+  bounded and long output is truncated. Do not install packages or access the internet.
+
+  You have at most 50 model-response turns, including responses that do not call a tool.
+
+  ## Submission
+
+  Call finish once when ready, with reason explaining why you are finishing, derivation containing your
+  reasoning, and answer containing the completed Python code template. Follow the template's import rules.
+  The submitted answer must run on its own; files created with code_exec are not included in the submission.
+  A normal completion or exhausted turn budget without an accepted answer scores zero. You cannot ask the
+  user for help.

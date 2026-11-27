@@ -154,6 +154,9 @@ class TokenCaptureSettings(BaseModel):
     # Fingerprints match assistant content; source_history matches committed source
     # prefixes and starts a root without a parent when no unique match exists.
     parent_resolution: ParentResolutionMode = "fingerprint"
+    # Requires an RL worker that verifies tokenized prefix stability before splicing.
+    # Keep disabled when serving with workers that only verify message boundaries.
+    allow_system_suffix: bool = False
     # A custom sink normally needs a resolver over the same backend namespace.
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.
@@ -211,6 +214,10 @@ class TokenCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenCaptureConfig":
         block = self.token_id_capture
+        if block.allow_system_suffix and block.parent_resolution != "source_history":
+            raise ValueError("allow_system_suffix requires parent_resolution=source_history")
+        if block.allow_system_suffix and block.external_staging_backend != "vllm_worker":
+            raise ValueError("allow_system_suffix requires external_staging_backend=vllm_worker")
         # dynamo_worker is NeMo RL's vLLM engine behind Dynamo's frontend; the dialect measures through a chat call.
         if block.parent_resolution == "source_history" and (
             not block.external_staging or block.external_staging_backend not in ("vllm_worker", "dynamo_worker")

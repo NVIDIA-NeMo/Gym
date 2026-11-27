@@ -385,7 +385,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             raise HTTPException(400, f"Tool {tool_name!r} is not available in this task")
         gym = session.gyms.get(gym_name)
         if gym is None or session.verifier_results is not None:
-            raise HTTPException(409, "The task's gym servers are no longer running")
+            raise ResourcesSessionConflictError("The task's gym servers are no longer running")
         try:
             result = await gym.client.call_tool(tool_name, arguments, headers=gym.headers)
         except GymUnavailableError as error:
@@ -409,7 +409,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                 verifier_results=[],
             )
         if body.task_id != session.task.task_id:
-            raise HTTPException(409, "The verify request names another task than the session")
+            raise ResourcesSessionConflictError("The verify request names another task than the session")
         if session.verifier_results is None:
 
             async def run_sql(verifier: DatabaseStateVerifier) -> Dict[str, Any]:

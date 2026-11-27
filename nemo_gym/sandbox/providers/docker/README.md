@@ -132,7 +132,7 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
 | Step | Docker command |
 |---|---|
 | Create | `docker run -d --name nemo-gym-<uuid> --label nemo-gym.sandbox=1 --init [flags] --entrypoint <sh> <image> -c <keepalive>` |
-| Exec | `docker exec [-w cwd] [--env…] [--user…] <name> <shell> -c <command>` |
+| Exec | `docker exec [-w cwd] [--env…] [--user…] <name> <shell> -c <command>`; an argument list as `... <name> <program> <args...>` |
 | PTY session | `docker exec -i [-t] [-w cwd] [--env…] --env NEMO_GYM_PTY_SESSION=<id> [--user…] <name> <shell> -c <launcher> <pid file> <fallback pid file> <program>`, the client under a host pty |
 | Upload | `mkdir -p <parent>` (via exec), then `docker cp <src> <name>:<dst>` |
 | Download | `docker cp <name>:<src> <local>` |

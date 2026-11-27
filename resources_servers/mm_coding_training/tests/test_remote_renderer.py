@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Provider receipt, cleanup and candidate/infra classification regressions."""
 
+import asyncio
 import io
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import anyio
 import pytest
 from PIL import Image
 
-from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox.testing import FakeSandboxProvider
 from resources_servers.mm_coding_training.remote_renderer import RemoteRenderer, image_uri
 from resources_servers.mm_coding_training.tests.test_app import png, request
 from resources_servers.mm_coding_training.tests.test_app import server as server
@@ -104,29 +107,27 @@ def test_empty_or_unsupported_image_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_cancelled_render_still_stops_the_sandbox() -> None:
-    import asyncio
-
-    import anyio
-
-    box = AsyncMock()
-    running, stopped = asyncio.Event(), []
+    provider = FakeSandboxProvider()
+    running = asyncio.Event()
 
     async def hang(*args, **kwargs):
         running.set()
         await asyncio.Event().wait()
 
-    async def stop():
+    async def slow_close() -> None:
+        # A close that has to await, so a stop the cancelled request reaches would never finish.
         await asyncio.sleep(0)
-        stopped.append(True)
 
-    box.exec.side_effect, box.stop.side_effect = hang, stop
-    with patch("resources_servers.mm_coding_training.remote_renderer.AsyncSandbox", return_value=box):
+    provider.exec = hang  # type: ignore[method-assign]
+    provider.on_close.side_effect = slow_close
+    sandbox = lambda _config, spec: AsyncSandbox(provider, spec, owns_provider=False)  # noqa: E731
+    with patch("resources_servers.mm_coding_training.remote_renderer.AsyncSandbox", side_effect=sandbox):
         # A client disconnect cancels the verify request through an anyio task group.
         async with anyio.create_task_group() as requests:
             requests.start_soon(renderer().render, "chart2code", "x")
             await running.wait()
             requests.cancel_scope.cancel()
-    assert stopped == [True]
+    assert provider.closed == ["fake-1"]
 
 
 @pytest.mark.asyncio

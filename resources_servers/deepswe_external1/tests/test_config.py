@@ -41,7 +41,9 @@ def test_readme_collation_produces_rows_routable_by_the_documented_runtime(tmp_p
             target = tmp_path / original.name
             shutil.copyfile(original, target)
             dataset.jsonl_fpath = target
-    paths = TrainDataProcessor()._collate_samples_single_type("example", configs, task_data_validation="error")
+    paths = TrainDataProcessor()._collate_samples_single_type(
+        "example", configs, output_dir=tmp_path / "prepared", task_data_validation="error"
+    )
     rows = [json.loads(line) for path in paths for line in path.read_text().splitlines()]
     assert len(rows) == 5
     runtime = config_for("gym env start")

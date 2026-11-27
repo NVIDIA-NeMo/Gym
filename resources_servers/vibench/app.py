@@ -58,6 +58,7 @@ from shlex import quote
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional
 
+import anyio
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -819,7 +820,10 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
     async def _release(self, session: _BuildSession) -> None:
         await self._release_sandbox(session)
-        await asyncio.to_thread(shutil.rmtree, session.scratch_dir, ignore_errors=True)
+        # Shielded like the stop, so a close that a disconnect cancels still removes the scratch files and then,
+        # with no await left, its record and fence.
+        with anyio.CancelScope(shield=True):
+            await asyncio.to_thread(shutil.rmtree, session.scratch_dir, ignore_errors=True)
 
     async def shutdown(self) -> None:
         for session_id, session in list(self._sessions.items()):

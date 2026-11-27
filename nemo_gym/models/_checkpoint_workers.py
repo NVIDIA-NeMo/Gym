@@ -36,6 +36,7 @@ from nemo_gym.models._checkpoint import (
     PolicyGate,
     _Ticket,
     covers,
+    delete_disconnected_calls,
     export_model_records,
     import_model_records,
     merge_reports,
@@ -309,7 +310,11 @@ class PolicyWorkerLink(WorkerLink):
 
     async def open_local(self, body: dict[str, Any]) -> None:
         self.adopt(body)
+        disconnected = self.gate.take_disconnected()
         self.gate.open()
+        # The gate holds this worker's view of the shared capture ledger.
+        if disconnected and self.gate.ledger is not None:
+            await asyncio.to_thread(delete_disconnected_calls, self.gate.ledger, disconnected)
 
     def mark_local(self, episode_ids: list[EpisodeId]) -> None:
         super().mark_local(episode_ids)

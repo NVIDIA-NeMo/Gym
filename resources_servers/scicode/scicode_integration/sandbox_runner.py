@@ -10,6 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import PROVIDER_OOM_KILLED, NgFailureEvent, observe_failure
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config, resolve_provider_metadata
 
 
@@ -23,8 +24,8 @@ class ScicodeSandboxConfig(BaseModel):
     ready_timeout_secs: float = Field(default=300, gt=0)
 
 
-_DRIVER = """import hashlib, json, pathlib, sys
-from runner import preflight_grading_interpreter, run_substep
+_PREFLIGHT = """import hashlib, json, pathlib
+from runner import preflight_grading_interpreter
 request = json.loads(pathlib.Path("/tmp/scicode-request.json").read_text())
 error = preflight_grading_interpreter(request["python_executable"], timeout_secs=60)
 if error:
@@ -37,6 +38,11 @@ if request["test_data_md5"]:
         digest = hashlib.file_digest(stream, "md5").hexdigest()
     if digest != request["test_data_md5"].lower():
         raise RuntimeError("SciCode sandbox test data checksum mismatch")
+"""
+
+_DRIVER = """import json, pathlib
+from runner import run_substep
+request = json.loads(pathlib.Path("/tmp/scicode-request.json").read_text())
 result = run_substep(pathlib.Path("/tmp/scicode-program.py").read_text(),
                      request["timeout_secs"], request["python_executable"],
                      output_tail_chars=request["output_tail_chars"])
@@ -54,7 +60,7 @@ async def run_sandbox_substep(
     test_data_md5: str | None,
     output_tail_chars: int,
 ) -> dict:
-    """Preserve subprocess grading semantics; propagate sandbox failures without scoring them."""
+    """Score confirmed execution OOM as a failed step; propagate inconclusive sandbox failures."""
     global_config = get_global_config_dict()
     provider = resolve_provider_config(config.provider, global_config)
     request = dict(
@@ -74,6 +80,7 @@ async def run_sandbox_substep(
         files={
             "/tmp/runner.py": Path(__file__).with_name("runner.py").read_text(),
             "/tmp/scicode-driver.py": _DRIVER,
+            "/tmp/scicode-preflight.py": _PREFLIGHT,
             "/tmp/scicode-program.py": program,
             "/tmp/scicode-request.json": json.dumps(request),
         },
@@ -81,10 +88,28 @@ async def run_sandbox_substep(
     sandbox = AsyncSandbox(provider=provider, spec=spec)
     try:
         await sandbox.start()
-        execution = await sandbox.exec(
-            f"{shlex.quote(python_executable)} /tmp/scicode-driver.py",
-            timeout_s=timeout_secs + 120,
+        preflight = await sandbox.exec(
+            f"{shlex.quote(python_executable)} /tmp/scicode-preflight.py",
+            timeout_s=120,
         )
+        if preflight.error_type or preflight.return_code != 0:
+            raise RuntimeError(f"SciCode sandbox preflight failed: {(preflight.stderr or '')[-2000:]}")
+        try:
+            execution = await sandbox.exec(
+                f"{shlex.quote(python_executable)} /tmp/scicode-driver.py",
+                timeout_s=timeout_secs + 120,
+            )
+        except NgFailureEvent as exc:
+            if exc.failure_kind != PROVIDER_OOM_KILLED:
+                raise
+            observe_failure(exc)
+            return {
+                "passed": False,
+                "error": "Generated code exceeded the sandbox memory limit",
+                "returncode": None,
+                "exit_unknown": True,
+                "exception_class": "MemoryLimitExceeded",
+            }
         if execution.error_type or execution.return_code != 0:
             raise RuntimeError(
                 f"SciCode sandbox infrastructure failure ({sandbox.sandbox_id}, "

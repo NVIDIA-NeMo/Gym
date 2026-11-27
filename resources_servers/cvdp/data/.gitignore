@@ -3,3 +3,7 @@
 *train_prepare.jsonl
 *validation_prepare.jsonl
 *example_prepare.jsonl
+heavy_workspaces/
+cvdp_v1.1.0_agentic_heavy_code_generation_public/
+cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial*.jsonl
+cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial*.json

@@ -1374,7 +1374,7 @@ class TestAgentPinDiscoveryCollateRollout:
         assert err is None, err
         monkeypatch.chdir(tmp_path)
         paths = TrainDataProcessor()._collate_samples_single_type(
-            type="benchmark", server_instance_configs=[rs_instance]
+            type="benchmark", server_instance_configs=[rs_instance], output_dir=tmp_path / "prepared"
         )
         rows = [json.loads(line) for line in open(paths[0])]
         assert rows[0]["task_source"] == "shared_rs"

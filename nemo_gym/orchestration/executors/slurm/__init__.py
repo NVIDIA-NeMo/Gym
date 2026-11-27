@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The Slurm executor for Pyxis-enabled clusters: ``SlurmExecutor``.
+
+Its parts, each in its own module:
+
+- ``executor``: render a run's job scripts, submit them with sbatch and record the submission;
+- ``chain``: recovery of a run's auto-resume chain (``recovery_evidence``, ``resubmit``), mixed into the executor;
+- ``judge_job``: judge-only jobs that grade a run's saved answers again (``reverify_judge_failures``), mixed in too;
+- ``reader``: the remote Store reader both of them read a run through;
+- ``scheduler``: the Slurm commands they share;
+- ``script``: render a benchmark's sbatch script, and ``resume_script``: the auto-resume prologue and epilogue it
+  includes for a resumable job;
+- ``lustre_md_stats``: read the per-phase Lustre metadata counters a job records with ``lustre_md_stats: true``.
+
+Only Slurm implements resubmit today, so these parts are Slurm code with no scheduler-agnostic interface between
+them; the executor capabilities give resubmit its seam when a second scheduler needs one.
+"""
+
+from typing import TYPE_CHECKING
+
+from nemo_gym._public_api import lazy_exports
+
+
+if TYPE_CHECKING:
+    from nemo_gym.orchestration.executors.slurm.executor import SlurmExecutor
+
+# Loaded on first use, so `gym eval lustre-stats` can import its reader without the whole executor.
+__getattr__, __dir__ = lazy_exports(__name__, {"SlurmExecutor": "executor"})
+__all__ = ["SlurmExecutor"]

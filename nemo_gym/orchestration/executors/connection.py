@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -71,8 +73,36 @@ class LocalConnection(Connection):
         remote.write_text(content, encoding="utf-8")
 
 
+# Optional bounds on the SSH layer, read when a connection is created. Each is a positive number of seconds (the count
+# is a number of probes), and unset, as by default, leaves the matching limit to ssh and the operating system.
+SSH_CONNECT_TIMEOUT_ENV = "NEMO_GYM_SSH_CONNECT_TIMEOUT_S"  # ssh -o ConnectTimeout: the TCP connect and the handshake
+SSH_SERVER_ALIVE_INTERVAL_ENV = (
+    "NEMO_GYM_SSH_SERVER_ALIVE_INTERVAL_S"  # ssh -o ServerAliveInterval: probe a quiet link
+)
+SSH_SERVER_ALIVE_COUNT_ENV = "NEMO_GYM_SSH_SERVER_ALIVE_COUNT_MAX"  # ssh -o ServerAliveCountMax: unanswered probes
+SSH_COMMAND_TIMEOUT_ENV = "NEMO_GYM_SSH_COMMAND_TIMEOUT_S"  # each ssh or rsync command Gym runs, start to finish
+
+
+def _positive_int_from_env(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive whole number, got {raw!r}")
+    return value
+
+
 class SSHConnection(Connection):
-    """Single SSH master connection; copy and all commands reuse the same socket."""
+    """Single SSH master connection; copy and all commands reuse the same socket.
+
+    The environment variables above bound a connection that hangs: a login host that never answers the connect, a link
+    that goes quiet, or a command that never finishes, the remote reader included. A command that runs out of its time
+    raises RuntimeError.
+    """
 
     _OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"]
     _MASTER_TIMEOUT = 10  # seconds to wait for the control socket to appear
@@ -81,6 +111,16 @@ class SSHConnection(Connection):
 
     def __init__(self, hostname: str) -> None:
         self._hostname = hostname
+        self._opts = list(self._OPTS)
+        for env_name, option in (
+            (SSH_CONNECT_TIMEOUT_ENV, "ConnectTimeout"),
+            (SSH_SERVER_ALIVE_INTERVAL_ENV, "ServerAliveInterval"),
+            (SSH_SERVER_ALIVE_COUNT_ENV, "ServerAliveCountMax"),
+        ):
+            value = _positive_int_from_env(env_name)
+            if value is not None:
+                self._opts += ["-o", f"{option}={value}"]
+        self._command_timeout_s = _positive_int_from_env(SSH_COMMAND_TIMEOUT_ENV)
         self._socket = Path(tempfile.mktemp(prefix="gym-ssh-", suffix=".sock"))
         self._master: subprocess.Popen | None = None
 
@@ -90,7 +130,7 @@ class SSHConnection(Connection):
         self._master = subprocess.Popen(
             [
                 "ssh",
-                *self._OPTS,
+                *self._opts,
                 "-o",
                 "ControlMaster=yes",
                 "-o",
@@ -126,12 +166,13 @@ class SSHConnection(Connection):
         )
 
     def _ssh_opts(self) -> list[str]:
-        return [*self._OPTS, "-o", "ControlMaster=no", "-o", f"ControlPath={self._socket}"]
+        return [*self._opts, "-o", "ControlMaster=no", "-o", f"ControlPath={self._socket}"]
 
     def copy(self, local: Path, remote: Path) -> None:
         _checked(
             ["ssh", *self._ssh_opts(), self._hostname, "mkdir", "-p", str(remote)],
             context=f"mkdir -p {self._hostname}:{remote}",
+            timeout_s=self._command_timeout_s,
         )
         _checked(
             [
@@ -144,6 +185,7 @@ class SSHConnection(Connection):
                 f"{self._hostname}:{remote}",
             ],
             context=f"rsync to {self._hostname}:{remote}",
+            timeout_s=self._command_timeout_s,
         )
 
     def run(self, commands: list[str]) -> str:
@@ -154,6 +196,7 @@ class SSHConnection(Connection):
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input=script,
             context=f"ssh commands on {self._hostname}",
+            timeout_s=self._command_timeout_s,
         )
 
     def run_with_input_held(self, commands: list[str]) -> str:
@@ -161,6 +204,7 @@ class SSHConnection(Connection):
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input="\n".join(commands) + "\n",
             context=f"ssh commands on {self._hostname}",
+            timeout_s=self._command_timeout_s,
         )
 
     def write_text(self, remote: Path, content: str, *, private: bool = False) -> None:
@@ -177,24 +221,78 @@ class SSHConnection(Connection):
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input=script,
             context=f"writing {remote} on {self._hostname}",
+            timeout_s=self._command_timeout_s,
         )
 
     def close(self) -> None:
-        subprocess.run(
-            ["ssh", *self._ssh_opts(), "-O", "exit", self._hostname],
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                ["ssh", *self._ssh_opts(), "-O", "exit", self._hostname],
+                capture_output=True,
+                timeout=self._command_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            pass  # The master is stopped below.
         self._socket.unlink(missing_ok=True)
         if self._master:
             # The master detaches into the background once it is up; a foreground ssh still running was stopped
             # before that, and would detach later with nothing left to close it.
             if self._master.poll() is None:
                 self._master.terminate()
-            self._master.wait()
+            try:
+                self._master.wait(timeout=self._command_timeout_s)
+            except subprocess.TimeoutExpired:
+                self._master.kill()
+                self._master.wait()
 
 
-def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> str:
-    result = subprocess.run(cmd, input=input, text=True, capture_output=True)
+def _run_stopping_group_on_timeout(
+    cmd: list[str], *, input: str | None, timeout_s: float
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run(capture_output=True, text=True, timeout=timeout_s)``, but an expiry kills the command's whole
+    process group, so what it started (an ssh ProxyCommand, an rsync helper) does not outlive the error."""
+    with subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+            try:
+                process.communicate(timeout=5)  # Reap the child and collect what the pipes still hold.
+            except subprocess.TimeoutExpired:
+                pass  # A process outside the group holds the pipes; the caller's error must not wait for it.
+            raise
+        except BaseException:
+            # An interruption stops the group too: it is in its own session, so the terminal's SIGINT never reached it.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+            process.wait()
+            raise
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+
+def _checked(cmd: list[str], *, input: str | None = None, context: str = "", timeout_s: float | None = None) -> str:
+    # errors="replace": a log can hold bytes that are not UTF-8, and one of them must not fail the whole read.
+    try:
+        if timeout_s is None:
+            result = subprocess.run(cmd, input=input, text=True, capture_output=True, errors="replace")
+        else:
+            result = _run_stopping_group_on_timeout(cmd, input=input, timeout_s=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        label = f" ({context})" if context else ""
+        raise RuntimeError(f"Command timed out after {timeout_s} s{label}:\n  {' '.join(cmd)}") from exc
     if result.returncode != 0:
         label = f" ({context})" if context else ""
         raise RuntimeError(
@@ -218,33 +316,97 @@ def _read_stderr_forwarding_progress(stream, output: dict[str, str]) -> None:
     output["stderr"] = "".join(lines)
 
 
-def _checked_holding_input(cmd: list[str], *, input: str, context: str = "") -> str:
+def _reap_in_background(process: subprocess.Popen, threads: list[threading.Thread]) -> None:
+    """Reap a stopped command and close its pipes once the threads using them are done, without delaying the caller.
+
+    Closing a pipe while a thread still reads or writes it would block on that thread, which is the overrun the
+    deadline exists to prevent, so the close waits for each thread (they end because the command was killed)."""
+
+    def reap() -> None:
+        for thread in threads:
+            thread.join()
+        process.wait()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    threading.Thread(target=reap, daemon=True).start()
+
+
+def _checked_holding_input(cmd: list[str], *, input: str, context: str = "", timeout_s: float | None = None) -> str:
     """Like ``_checked``, but stdin stays open until the command exits, so its EOF on the far end means that this
     process or its connection is gone. The commands must end the remote shell themselves (``exit``).
 
     Progress lines on the command's stderr (``READER_PROGRESS_PREFIX``) reach this process's stderr while it runs;
-    stdout is returned whole, as before."""
-    with subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    ) as process:
-        output: dict[str, str] = {}
-        readers = [
-            threading.Thread(target=lambda: output.__setitem__("stdout", process.stdout.read()), daemon=True),
-            threading.Thread(target=_read_stderr_forwarding_progress, args=(process.stderr, output), daemon=True),
-        ]
-        for reader in readers:
-            reader.start()
+    stdout is returned whole, as before. A command still running after `timeout_s` seconds is killed, which closes its
+    stdin and ends the remote shell as any other interruption does, and raises RuntimeError; None sets no limit."""
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+
+    def remaining_s() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def timed_out() -> RuntimeError:
+        label = f" ({context})" if context else ""
+        return RuntimeError(f"Command timed out after {timeout_s} s{label}:\n  {' '.join(cmd)}")
+
+    # With a limit, the command leads its own process group, so that expiry also stops what it started (an SSH
+    # ProxyCommand keeps the output pipes open after ssh itself is gone).
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=timeout_s is not None,
+    )
+
+    def stop() -> None:
+        try:
+            if timeout_s is None:
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+
+    output: dict[str, str] = {}
+
+    def write_input() -> None:
+        # A command that does not read its stdin blocks this write; the caller's deadline still applies.
         try:
             process.stdin.write(input)
             process.stdin.flush()
-            for reader in readers:
-                reader.join()
-            returncode = process.wait()
-        except BaseException:
-            process.kill()
-            raise
-        finally:
-            process.stdin.close()
+        except (BrokenPipeError, ValueError, OSError):
+            pass  # The command ended or was stopped; its exit status and stderr report it.
+
+    threads = [
+        threading.Thread(target=write_input, daemon=True),
+        threading.Thread(target=lambda: output.__setitem__("stdout", process.stdout.read()), daemon=True),
+        threading.Thread(target=_read_stderr_forwarding_progress, args=(process.stderr, output), daemon=True),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        # The writer ends once the input is delivered; the readers end when the command and its descendants close
+        # their output.
+        for thread in threads:
+            thread.join(remaining_s())
+        if any(thread.is_alive() for thread in threads):
+            raise timed_out()
+        returncode = process.wait(timeout=remaining_s())
+    except subprocess.TimeoutExpired as exc:
+        stop()
+        _reap_in_background(process, threads)
+        raise timed_out() from exc
+    except BaseException:
+        stop()
+        _reap_in_background(process, threads)
+        raise
+    # A finished command's pipes are closed here. A stopped one is closed by _reap_in_background.
+    for stream in (process.stdin, process.stdout, process.stderr):
+        stream.close()
     if returncode != 0:
         label = f" ({context})" if context else ""
         raise RuntimeError(

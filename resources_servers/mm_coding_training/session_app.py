@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from pydantic import Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
@@ -22,6 +22,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
     observe_programmatic_grading,
 )
@@ -165,10 +166,10 @@ class SessionCodingTrainingServer(CodingTrainingServer):
     def _replayed_answer(self, body: CodingRequest) -> RetainedAnswer:
         source = body.source_artifact
         if source is None or len(source.encode()) > self.config.max_source_bytes:
-            raise HTTPException(409, "Reverification needs a bounded retained source artifact")
+            raise ResourcesSessionConflictError("Reverification needs a bounded retained source artifact")
         sha = hashlib.sha256(source.encode()).hexdigest()
         if sha != body.source_sha256 or source_binding(body, sha) != body.source_binding_sha256:
-            raise HTTPException(409, "Retained source does not match the task and policy-response binding")
+            raise ResourcesSessionConflictError("Retained source does not match the task and policy-response binding")
         # An empty, SHA-bound source is the receipt for a measured absent/invalid final file.
         # None means no receipt was saved, so a lost session still cannot be graded.
         return RetainedAnswer(request_fingerprint(body), source or None)
@@ -181,7 +182,7 @@ class SessionCodingTrainingServer(CodingTrainingServer):
             if verification.is_live:
                 seeded = self._tasks.get(session_id)
                 if seeded is None or seeded.task != body.task:
-                    raise HTTPException(409, "Verification does not match the seeded task")
+                    raise ResourcesSessionConflictError("Verification does not match the seeded task")
                 if not self.response_is_measurable(body):
                     result = self.new_result(body)
                     result.mask_sample, result.failure_kind = True, VERIFIER_ERROR
@@ -200,7 +201,7 @@ class SessionCodingTrainingServer(CodingTrainingServer):
             else:
                 answer = self._replayed_answer(body)
             if answer.fingerprint != request_fingerprint(body):
-                raise HTTPException(409, "Verification retry changed the original request")
+                raise ResourcesSessionConflictError("Verification retry changed the original request")
             verification.retain(answer)
             if answer.verdict is not None:
                 return answer.verdict.model_copy(deep=True)

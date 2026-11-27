@@ -22,7 +22,7 @@ from typing import Any
 from nemo_gym.package_info import __version__
 
 
-E2B_SDK_CONSTRAINT = "e2b>=2.46.0,<3.0.0"
+E2B_SDK_CONSTRAINT = "e2b>=2.46.0,<2.51.0"
 _INTEGRATION = f"nemo-gym/{__version__}"
 _CONFIGURED_SDK_MODULES: dict[int, Any] = {}
 _CONFIGURE_LOCK = threading.Lock()
@@ -60,10 +60,14 @@ def _configure_async_http() -> None:
         http2: bool = True,
         *,
         for_streaming: bool = False,
+        http_version: str | None = None,
+        retry_connect: bool = True,
     ) -> GymAiohttpTransport:
         # aiohttp speaks HTTP/1.1; the E2B endpoints support it. Streamed and
         # regular requests share Gym's globally configured connection pool.
-        del http2, for_streaming
+        # E2B 2.62+ passes http_version and retry_connect=False (health probes);
+        # GymAiohttpTransport never retries connections, so both already hold.
+        del http2, for_streaming, http_version, retry_connect
         proxy = config.proxy
         if proxy is not None:
             proxy_url = str(proxy.url if isinstance(proxy, httpx.Proxy) else proxy)

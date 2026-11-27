@@ -20,11 +20,14 @@ The main server process sets these variables before uvicorn starts its workers, 
 import sys
 from os import environ, getenv
 
-from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME
 
 
 def _has_injected_global_config_env() -> bool:
-    return getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
+    return (
+        getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
+        or getenv(NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME) is not None
+    )
 
 
 # These environment variables are the ONLY environment variables that Gym uses. Please do not set these, they are only used here to pass information

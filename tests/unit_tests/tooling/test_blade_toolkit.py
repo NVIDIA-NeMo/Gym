@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 CLAUDE_SKILLS = (
     "add-benchmark",
     "gh-stack",
+    "nemo-gym-analyzing-results",
     "nemo-gym-blade-analysis",
     "nemo-gym-debugging",
     "nemo-gym-docs",
@@ -30,10 +31,16 @@ CLAUDE_SKILLS = (
     "nemo-gym-reward-profiling",
 )
 CODEX_COMPATIBILITY_LINKS = (
+    "nemo-gym-analyzing-results",
     "nemo-gym-blade-analysis",
     "nemo-gym-debugging",
     "nemo-gym-pivot-datasets",
     "nemo-gym-pr-checks-and-labels",
+    "nemo-gym-reward-profiling",
+)
+# Skills prepared for the NVIDIA skills catalog live in skills/; .agents/skills only links to them.
+CATALOG_SKILLS = (
+    "nemo-gym-analyzing-results",
     "nemo-gym-reward-profiling",
 )
 TOOLKIT = REPO_ROOT / ".agents/skills/nemo-gym-blade-analysis/scripts/blade_toolkit.py"
@@ -42,11 +49,21 @@ TOOLKIT = REPO_ROOT / ".agents/skills/nemo-gym-blade-analysis/scripts/blade_tool
 def test_agent_specific_skill_paths_resolve_to_canonical_skills():
     for skill in CLAUDE_SKILLS:
         canonical_skill = REPO_ROOT / ".agents/skills" / skill
+        assert (canonical_skill / "SKILL.md").is_file()
         assert (REPO_ROOT / ".claude/skills" / skill).resolve() == canonical_skill.resolve()
 
     for skill in CODEX_COMPATIBILITY_LINKS:
         canonical_skill = REPO_ROOT / ".agents/skills" / skill
+        assert (canonical_skill / "SKILL.md").is_file()
         assert (REPO_ROOT / ".codex/skills" / skill).resolve() == canonical_skill.resolve()
+
+
+def test_catalog_skills_live_in_skills_dir():
+    for skill in CATALOG_SKILLS:
+        link = REPO_ROOT / ".agents/skills" / skill
+        assert link.is_symlink()
+        assert link.resolve() == (REPO_ROOT / "skills" / skill).resolve()
+        assert (REPO_ROOT / "skills" / skill / "SKILL.md").is_file()
 
 
 def test_make_shallow_keeps_only_high_level_metric_tables(tmp_path):

@@ -223,8 +223,8 @@ volumes are ephemeral: stopping the collection deletes its managed data.
 
 For existing data, supply `volume_sources={source: relative_shared_path}`. Keys
 are resolved absolute bind source paths or Compose named-volume keys; values
-are existing directories beneath the configured shared root. These directories
-are preserved on cleanup. Local bind data is not uploaded automatically.
+are directories beneath the configured shared root. A directory that does not
+exist yet is created at seed. These directories are preserved on cleanup. Local bind data is not uploaded automatically.
 Read-only mounts remain read-only.
 
 ## Optional Gym-specific extensions
@@ -264,6 +264,6 @@ users, CPU and memory limits, labels, default-network aliases, TCP endpoints,
 shared volumes, health checks, and all three required dependency conditions:
 `service_started`, `service_healthy`, and `service_completed_successfully`.
 
-Unsupported requirements fail explicitly, including builds, custom networks,
-unsupported network modes, restart policies, optional dependencies,
+Unsupported requirements fail explicitly, including builds, network isolation options,
+unsupported network modes, optional dependencies,
 `user:group`, fixed published ports, host IP bindings, and volume drivers or unsupported mount options.

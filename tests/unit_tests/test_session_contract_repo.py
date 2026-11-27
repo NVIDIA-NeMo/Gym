@@ -57,13 +57,17 @@ def test_agents_serve_sessions_through_the_base_hooks() -> None:
 def test_resources_servers_close_through_the_base_route() -> None:
     """The base serves /close_session before subclass routes, so a server's own registration never runs."""
     violations = []
-    # A shared base class, such as SandboxSessionResourcesServer, can serve the close for its subclasses.
-    closing_bases = {
+    # A shared base class, such as SandboxSessionResourcesServer, can serve the close for its subclasses,
+    # including through a subclass of its own, such as CheckpointedSandboxSessionResourcesServer.
+    classes = [cls for path in _sources("resources_servers") for cls in _classes(path)]
+    closing_bases = {cls.name for cls in classes if "close_resources_session" in _methods(cls)}
+    while inherited := {
         cls.name
-        for path in _sources("resources_servers")
-        for cls in _classes(path)
-        if "close_resources_session" in _methods(cls)
-    }
+        for cls in classes
+        if cls.name not in closing_bases
+        and any(isinstance(base, ast.Name) and base.id in closing_bases for base in cls.bases)
+    }:
+        closing_bases |= inherited
     for path in _sources("resources_servers"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -105,4 +109,72 @@ def test_resources_servers_close_through_the_base_route() -> None:
                 violations.append(
                     f"{_location(path, cls)} accepts an episode seed but does not override close_resources_session"
                 )
+    assert not violations, "\n".join(violations)
+
+
+# Calls that build an HTTP refusal, by name, and the position of their status argument.
+_REFUSALS = {"HTTPException": 0, "StarletteHTTPException": 0, "Response": 1, "JSONResponse": 1}
+
+
+def _is_409(status: ast.expr | None) -> bool:
+    if isinstance(status, ast.Attribute) and status.attr == "value":
+        status = status.value
+    if isinstance(status, ast.Constant):
+        return status.value == 409
+    # A named status, such as ``status.HTTP_409_CONFLICT`` or ``HTTPStatus.CONFLICT``.
+    name = status.attr if isinstance(status, ast.Attribute) else getattr(status, "id", None)
+    return name in {"HTTP_409_CONFLICT", "CONFLICT"}
+
+
+def _plain_409s(path: Path) -> list[tuple[ast.Call, str | None]]:
+    """Each call in ``path`` that builds a plain 409 refusal, with the name of the function that encloses it."""
+    found = []
+
+    def visit(node: ast.AST, function: str | None) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function = node.name
+        if isinstance(node, ast.Call):
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+            if name in _REFUSALS:
+                position = _REFUSALS[name]
+                status = node.args[position] if len(node.args) > position else None
+                status = status or next((kw.value for kw in node.keywords if kw.arg == "status_code"), None)
+                if _is_409(status):
+                    found.append((node, function))
+        for child in ast.iter_child_nodes(node):
+            visit(child, function)
+
+    visit(ast.parse(path.read_text()), None)
+    return found
+
+
+# 409s that refuse something other than a session request, by file and enclosing function (``None`` for the file).
+_NOT_SESSION_CONFLICTS = {
+    # A comparison cohort or group that received conflicting members.
+    ("resources_servers/genrm_compare/app.py", "verify"),
+    ("resources_servers/genrm_compare/app.py", "_resolve_verify_cohort"),
+    # A worker reserved by another deployment.
+    ("resources_servers/osworld/worker.py", "create_container"),
+    # The tool runner inside the task sandbox, which answers its own protocol and cannot import Gym.
+    ("resources_servers/partner_if/tool_runner.py", None),
+}
+
+
+def test_session_refusals_raise_the_conflict_errors() -> None:
+    """A 409 from a server or agent is a session conflict, so it raises the error that names one.
+
+    The check reads 409s written as a literal or a named status. A status computed at runtime is not checked.
+    """
+    violations = []
+    for directory, error in (
+        ("resources_servers", "ResourcesSessionConflictError"),
+        ("responses_api_agents", "AgentSessionConflictError"),
+    ):
+        for path in _sources(directory):
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            if (relative, None) in _NOT_SESSION_CONFLICTS:
+                continue
+            for node, function in _plain_409s(path):
+                if (relative, function) not in _NOT_SESSION_CONFLICTS:
+                    violations.append(f"{_location(path, node)} answers a plain 409; raise {error} instead")
     assert not violations, "\n".join(violations)

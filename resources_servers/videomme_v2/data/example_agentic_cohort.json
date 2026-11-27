@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "dataset_revision": "0000000000000000000000000000000000000000",
+  "setting": "agentic",
+  "answer_policy": "boxed_only_v1",
+  "task_ids": [
+    "videomme_v2:example-1",
+    "videomme_v2:example-2",
+    "videomme_v2:example-3",
+    "videomme_v2:example-4",
+    "videomme_v2:example-5"
+  ],
+  "num_repeats": 1
+}

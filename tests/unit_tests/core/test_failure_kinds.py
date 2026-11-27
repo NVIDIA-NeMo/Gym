@@ -42,6 +42,7 @@ class TestNamingConvention:
             "model_",
             "transport_",
             "agent_",
+            "git_",
             "environment_",
             "judge_",
             "verifier_",

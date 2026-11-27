@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG OPENCODE_IMAGE
+FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS plugin-dependencies
+WORKDIR /build/opencode
+# Reuse Gym's pinned OpenCode 1.17.11 plugin dependency set.
+COPY resources_servers/visual_coding_opencode/sandbox_image/opencode/package.json \
+     resources_servers/visual_coding_opencode/sandbox_image/opencode/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund \
+    && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+        --mode=u+rwX,go+rX,go-w --hard-dereference --format=gnu \
+        -cf /tmp/plugin-dependencies.tar package.json package-lock.json node_modules \
+    && gzip -n -9 -c /tmp/plugin-dependencies.tar > /opencode-1.17.11-plugin-dependencies.tar.gz
+
+FROM ${OPENCODE_IMAGE}
+USER root
+COPY --from=plugin-dependencies /opencode-1.17.11-plugin-dependencies.tar.gz /opt/cli/
+RUN test "$(/opt/cli/opencode --version)" = "1.17.11" \
+    && chmod 644 /opt/cli/opencode-1.17.11-plugin-dependencies.tar.gz \
+    && sha256sum /opt/cli/opencode /opt/cli/opencode-1.17.11-plugin-dependencies.tar.gz

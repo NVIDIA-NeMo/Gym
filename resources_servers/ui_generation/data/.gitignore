@@ -1,0 +1,4 @@
+# Rows converted from your own task files with environments/ui_generation/prepare.py; keep them out of git.
+*train.jsonl
+*validation.jsonl
+*_prepare.jsonl

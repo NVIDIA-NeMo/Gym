@@ -120,6 +120,14 @@ class StopReason(str, Enum):
     ERROR = "error"
 
 
+class ErrorCause(str, Enum):
+    """Why a loop that ended with ``StopReason.ERROR`` failed, recorded as ``error_cause``."""
+
+    MODEL_CALL_FAILED = "model_call_failed"
+    CONTEXT_OVERFLOW = "context_overflow"
+    TOOL_ABORTED = "tool_aborted"
+
+
 class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -409,6 +417,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         max_time_seconds = self.config.max_time_seconds
         started_at = time.monotonic()
         stop_reason = StopReason.ERROR
+        error_cause: Optional[ErrorCause] = None
 
         # Check max_steps at the TOP so we never start a turn past the limit.
         while max_steps is None or step < max_steps:
@@ -449,6 +458,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     step,
                 )
                 stop_reason = StopReason.ERROR
+                error_cause = ErrorCause.MODEL_CALL_FAILED
                 break
             except Exception as e:
                 if self.config.truncate_on_overflow and self._is_context_overflow_error(e):
@@ -464,6 +474,9 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         continue
                 logger.error("Model call failed on step %d: %s: %s", step, type(e).__name__, e)
                 stop_reason = StopReason.ERROR
+                error_cause = (
+                    ErrorCause.CONTEXT_OVERFLOW if self._is_context_overflow_error(e) else ErrorCause.MODEL_CALL_FAILED
+                )
                 break
 
             output = model_response.output
@@ -541,6 +554,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     )
                     if aborted:
                         stop_reason = StopReason.ERROR
+                        error_cause = ErrorCause.TOOL_ABORTED
 
                 if done or aborted:
                     break
@@ -583,6 +597,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     )
                     aborted = True
                     stop_reason = StopReason.ERROR
+                    error_cause = ErrorCause.TOOL_ABORTED
                     break
 
             if done or aborted:
@@ -627,6 +642,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             "stop_reason": stop_reason.value,
             "steps": str(step),
         }
+        if error_cause is not None:
+            last_model_response.metadata["error_cause"] = error_cause.value
         if tool_call_error_status:
             # Keep explicit provenance for stateless reverification without
             # adding fields to the shared Responses API tool-output type.

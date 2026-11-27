@@ -267,6 +267,16 @@ Each key becomes one gauge: `coverage/scored` is `gym.run.coverage.scored`, and 
 
 A key is recorded only when the run reports it. An unknown count is left out rather than recorded as 0: an aggregation of shards without attempt history, for example, has no `gym.run.coverage.expected`.
 
+### Tool Metrics and Spans
+
+When a rollout's trajectory is a v2 record (see [Rollout Evidence](/main/observability/rollout-evidence)), the collection driver reads the tool executions the harness recorded; nothing is measured again.
+
+- `gym.tool.calls_total` counts executions by `nemo.gym.tool.name` and `nemo.gym.tool.status`.
+- `gym.tool.duration_ms` records each measured duration, with `nemo.gym.tool.timing_boundary` saying what it measures (`executor`, `lifecycle`, `transcript` or `event_receipt`). A boundary without a duration records nothing, so a missing measurement never reads as 0 ms.
+- With a trace exporter and the `rollout` span group on, each execution with both recorded endpoints becomes a `gym.tool` span under the rollout's dispatch span, or under its parent tool's span (the nearest ancestor with a span, when its parent has no endpoints). The span takes the boundary closest to the execution itself and carries the full tool name, the boundary, the timing source and `nemo.gym.tool.clock_domain`. An `unknown` clock domain means the endpoints come from the harness's own clock, which may be skewed against Gym's.
+
+Tool names are free-form, so the metrics keep the first 64 names a process sees, up to 128 characters each, and count the rest as `other`; a missing name is `unknown`. Spans keep every name.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.
@@ -276,6 +286,24 @@ RSS counts every resident page mapped by every process and can double-count page
 Host usage is `total - available`, matching the memory the operating system cannot make available without swapping. Host totals describe the whole node, not only Gym processes; compare them with summed server PSS to separate Gym footprint from training, inference, Ray, and system pressure.
 
 Descendants remain attributed while they stay in the server's Linux process tree. Detached or reparented processes and remote Ray actors are not included.
+
+The same profiler reports CPU, with the same switch and the same process trees:
+
+| Metric | Type | Attributes | Meaning |
+| --- | --- | --- | --- |
+| `gym.server.cpu.time_total` | Counter | server name and type, `cpu.mode` (`user`, `system`) | CPU seconds a server and its descendants used, such as the sandbox, unpacking and harness children that do the real work. Use `rate()` for cores in use. See below for how processes that exit between samples are counted. |
+| `gym.host.cpu.logical` | Gauge | | Logical CPUs on the host. |
+| `gym.host.cpu.physical` | Gauge | | Physical CPU cores on the host. |
+| `gym.host.cpu.allowed` | Gauge | | CPUs the supervisor's main thread may run on (its CPU affinity). Under Slurm or a container cpuset that is usually the allocation; compare summed `rate(gym.server.cpu.time_total)` with it. |
+
+Each process's CPU time includes the children it waited for (`cutime` and `cstime` in `/proc/<pid>/stat`), so a short command that starts and exits between two samples is counted once its parent waits for it. Processes are tracked by pid and start time, and time a child already reported, or a process that drops out of a single walk, is not counted again. The counter is a lower bound where an exited process's time cannot reach a process still in the tree:
+
+- A process whose parent does not wait for it, because the parent ignores `SIGCHLD` or exits first, can be undercounted by up to its whole CPU time. Once reparented outside the tree, it is no longer counted.
+- The time the server's root process uses after the last sample before it exits is lost.
+
+The exception is a child subreaper inside the server's tree (`PR_SET_CHILD_SUBREAPER`). The CritPt grader's runner is one under the `local` sandbox provider, where it runs as a descendant of the resources server and adopts the orphans of the code it grades. An orphan that a sample sees after its adoption, or sees missing but still running, is counted once. When an orphan and its old parent both exit between the same two samples, the time the orphan had already reported moves onto the old parent's nearest running ancestor rather than onto the subreaper that waited for it, so the subreaper counts it again. The counter then runs ahead by up to that time per such orphan until that ancestor exits: its held time passes up to the subreaper, which takes it back from its later CPU time.
+
+The rollout driver of a `--no-serve` run is not a supervisor-managed server and is not included; its own `process.cpu.time` covers it.
 
 Compare these series with `http.server.active_requests`, which requires traces, while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
 

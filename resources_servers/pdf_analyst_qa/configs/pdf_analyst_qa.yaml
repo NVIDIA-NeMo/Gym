@@ -1,0 +1,26 @@
+pdf_analyst_qa_resources_server:
+  resources_servers:
+    pdf_analyst_qa:
+      entrypoint: app.py
+      allowed_agents: [opencode_agent]
+      domain: agent
+      verified: false
+      description: Synthetic document QA with selected read-only PDF workspaces
+      document_image: ${pdf_analyst_qa_document_image}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      sandbox_provider: sandbox
+      mounted_documents:
+        mount_root: /mnt/s3-data/data
+        prefix: ${pdf_analyst_qa_document_prefix}
+      command_timeout_s: 600
+      rollout_timeout_s: ${pdf_analyst_qa_agent_timeout_s}
+      sandbox_ttl_s: 4500
+      cleanup_timeout_s: 60
+      max_active_sandboxes: 32
+      sandbox_queue_timeout_s: 120
+      sandbox_cpu: 2
+      sandbox_memory_mib: 8192
+      sandbox_disk_gib: 24
+      sandbox_ready_timeout_s: 180

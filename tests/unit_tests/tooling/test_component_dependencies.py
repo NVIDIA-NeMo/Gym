@@ -164,3 +164,23 @@ def test_component_lock_check_rejects_standalone_policy_drift(monkeypatch: pytes
     _, code, message = component_locks.check_project(scorer, update=False)
     assert code == 1
     assert "Shared uv policy differs" in message
+
+
+@pytest.mark.parametrize(
+    ("update", "upgrade", "flag"),
+    [(False, False, ["--check"]), (True, False, []), (True, True, ["--upgrade"])],
+)
+def test_component_lock_modes_pass_the_matching_uv_flag(
+    monkeypatch: pytest.MonkeyPatch, update: bool, upgrade: bool, flag: list[str]
+) -> None:
+    from scripts import component_locks
+
+    commands = []
+
+    def run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(component_locks.subprocess, "run", run)
+    component_locks.check_project(ROOT, update=update, upgrade=upgrade)
+    assert commands == [["uv", "lock", "--project", str(ROOT), *flag]]

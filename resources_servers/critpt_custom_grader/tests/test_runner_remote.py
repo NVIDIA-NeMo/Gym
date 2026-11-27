@@ -563,11 +563,8 @@ def test_delivered_keyword_inputs_are_parsed_in_limited_worker(tmp_path):
         }
     )
     policy = execution.ExecutionPolicy(
-        snapshot="synthetic-input",
-        os_user="sandbox",
-        owner_id="input",
-        journal_dir=str(tmp_path / "journal"),
         workdir=str(tmp_path),
+        memory_limit_mib=2048,
         suite_timeout_s=60,
         cpu_time_limit_s=60,
         max_processes=32,
@@ -662,10 +659,6 @@ def budget_job(tmp_path, statement, cases, outcomes, **settings):
         }
     )
     policy = execution.ExecutionPolicy(
-        snapshot="synthetic-budget",
-        os_user="sandbox",
-        owner_id="budget",
-        journal_dir=str(tmp_path / "journal"),
         suite_timeout_s=60,
         compare_timeout_s=60,
         cpu_time_limit_s=60,
@@ -814,7 +807,7 @@ def test_serialized_compare_job_cap_is_inclusive_and_strict(tmp_path, extra_byte
         assert run.result == {
             "version": 1,
             "mode": "compare",
-            "nonce": "",  # The oversized file is rejected before parsing or nonce extraction.
+            "nonce": "",  # The oversized job names no semantic validator: it is rejected before nonce extraction.
             "status": "runner_error",
             "code": "invalid_job",
             "timed_out_case": None,

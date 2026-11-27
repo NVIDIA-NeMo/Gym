@@ -30,7 +30,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, RequestFailureLog
-from nemo_gym.server_runtime import MCPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.trajectory import SandboxObservation, ToolCallObservation
 from responses_api_agents.openhands_agent import app
 from responses_api_agents.openhands_agent import sandbox as adapter
@@ -93,7 +93,17 @@ def mcp_grant(*, required):
 @pytest.mark.parametrize(
     "instance,body,reason",
     [
-        (agent(), seed(tool_accesses=[mcp_grant(required=True)]), "required tool grants: task_tools"),
+        (
+            agent(),
+            seed(
+                tool_accesses=[
+                    DirectHTTPToolAccess(
+                        name="task_tools.direct_http", required=True, base_url="http://resources:8080"
+                    )
+                ]
+            ),
+            "only over MCP",
+        ),
         (agent(), seed(borrowed=False), "sandbox_access or a configured sandbox_provider"),
         (agent(), seed(workdir="relative"), "workdir"),
         (agent(), seed(workdir="/tmp/nemo-gym-openhands-sessions/x"), "workdir"),
@@ -245,6 +255,10 @@ async def test_an_owned_sandbox_expires_and_carries_provider_and_session_labels(
 
 
 MODEL_HOST_ONLY = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.5"}]}
+MODEL_AND_TOOL_HOSTS = {
+    "defaultAction": "deny",
+    "egress": [{"action": "allow", "target": "10.0.0.5"}, {"action": "allow", "target": "resources"}],
+}
 
 
 @pytest.mark.asyncio
@@ -253,8 +267,10 @@ MODEL_HOST_ONLY = {"defaultAction": "deny", "egress": [{"action": "allow", "targ
     [
         ("inherit", [], None),
         ("model_only", [], MODEL_HOST_ONLY),
-        # OpenHands keeps no tool grants, so an optional grant's host stays closed.
-        ("model_and_tools", [mcp_grant(required=False)], MODEL_HOST_ONLY),
+        # model_only keeps an optional grant's host closed; model_and_tools opens it for the MCP grant.
+        ("model_only", [mcp_grant(required=False)], MODEL_HOST_ONLY),
+        ("model_and_tools", [mcp_grant(required=False)], MODEL_AND_TOOL_HOSTS),
+        ("model_and_tools", [mcp_grant(required=True)], MODEL_AND_TOOL_HOSTS),
     ],
 )
 async def test_network_access_limits_an_owned_sandbox_to_the_model_host(
@@ -377,8 +393,8 @@ async def test_activation_routes_every_model_call_through_the_rollout_prefixed_m
         input=[{"role": "system", "content": "System"}, {"role": "user", "content": "Build it"}],
         metadata={"agent_timeout_sec": "60"},
     )
-    prompt, system = instance._validate_request(body)
-    response = await instance._activate(state, body, prompt=prompt, system=system)
+    prompt, system, sampling = instance._validate_request(body)
+    response = await instance._activate(state, body, prompt=prompt, system=system, sampling=sampling)
     runner_input = execute.await_args.args[0]
     assert runner_input["prompt"] == "Build it"
     assert runner_input["system_message_suffix"] == "Configured\n\nSystem"
@@ -536,8 +552,6 @@ async def test_missing_result_is_a_runner_failure(monkeypatch):
 @pytest.mark.parametrize(
     "fields",
     [
-        {"temperature": 0.5},
-        {"max_output_tokens": 100},
         {"tools": [{"type": "function", "name": "f", "parameters": {}, "strict": False}]},
         {"metadata": {"other": "x"}},
         {"metadata": {"agent_timeout_sec": "60", "other": "x"}},
@@ -555,7 +569,52 @@ def test_unsupported_request_controls_are_rejected(fields):
 @pytest.mark.parametrize("metadata", [{}, {"agent_timeout_sec": "60"}])
 def test_empty_or_timeout_only_metadata_is_accepted(metadata):
     body = NeMoGymResponseCreateParamsNonStreaming(input="Build it", metadata=metadata)
-    assert agent()._validate_request(body) == ("Build it", "")
+    assert agent()._validate_request(body) == ("Build it", "", {})
+
+
+def test_request_sampling_becomes_the_runs_llm_settings():
+    instance = agent(llm_settings={"temperature": 0.0, "reasoning_effort": None})
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it", temperature=0.6, top_p=0.9, max_output_tokens=512)
+    prompt, system, sampling = instance._validate_request(body)
+    assert sampling == {"temperature": 0.6, "top_p": 0.9, "max_output_tokens": 512}
+    llm = instance._runner_input(session_state(), prompt=prompt, system=system, sampling=sampling)["llm"]
+    # The request wins over the configured setting; the adapter's connection fields still win over both.
+    assert (llm["temperature"], llm["top_p"], llm["max_output_tokens"], llm["reasoning_effort"]) == (
+        0.6,
+        0.9,
+        512,
+        None,
+    )
+    assert llm["num_retries"] == 0 and llm["api_key"] == "gym"
+
+
+def test_runner_input_carries_the_mcp_grants_and_finish_tools():
+    instance = agent(finish_tool_names=["finish", "abandon_task_finish"], mcp_tool_timeout_seconds=1.2345)
+    state = session_state()
+    state.request = seed(
+        tool_accesses=[
+            MCPToolAccess(
+                name="gdpval_resources_server",
+                required=True,
+                connection={
+                    "transport": "streamable_http",
+                    "url": "http://resources:8080/mcp",
+                    "headers": {"x-nemo-gym-mcp-session": "token"},
+                },
+            )
+        ]
+    )
+    runner_input = instance._runner_input(state, prompt="p", system="")
+    assert runner_input["mcp_servers"] == {
+        "gdpval_resources_server": {
+            "url": "http://resources:8080/mcp",
+            "headers": {"x-nemo-gym-mcp-session": "token"},
+            "required": True,
+            "timeout": 1235,
+        }
+    }
+    assert runner_input["finish_tool_names"] == ["finish", "abandon_task_finish"]
+    assert instance._runner_input(session_state(), prompt="p", system="")["mcp_servers"] == {}
 
 
 def test_runner_input_carries_the_configured_limits_and_lets_llm_settings_choose_the_api_mode():
@@ -579,10 +638,11 @@ async def test_retry_shares_the_activation_and_rejects_a_changed_body(monkeypatc
     response.model_copy.return_value = response
     activate = AsyncMock(return_value=response)
     monkeypatch.setattr(app.OpenHandsAgent, "_activate", activate)
-    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it", temperature=0.6, top_p=0.9, max_output_tokens=512)
     assert await instance.responses(request(), body) is response
     assert await instance.responses(request(), body) is response
     assert activate.await_count == 1
+    assert activate.await_args.kwargs["sampling"] == {"temperature": 0.6, "top_p": 0.9, "max_output_tokens": 512}
     for changed_request, changed_body in [
         (request(), NeMoGymResponseCreateParamsNonStreaming(input="Changed")),
         (request(rollout="other"), body),
