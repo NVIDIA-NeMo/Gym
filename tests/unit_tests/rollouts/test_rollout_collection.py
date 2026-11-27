@@ -10691,6 +10691,70 @@ class TestDisableAggregationAndCallerTaskIndex:
 
 
 class TestRolloutAggregationHelper:
+    @pytest.mark.parametrize("unfinished", [False, True])
+    async def test_adaptive_repeat_report_from_saved_store(self, tmp_path, empty_global_config, unfinished):
+        from nemo_gym.rollouts.repeat_stopping import STOP_ON_SUCCESS_REASON, STOP_ON_SUCCESS_THRESHOLD_KEY
+        from nemo_gym.rollouts.rollout_recovery import RunManifest
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+
+        # Fan-out can give one agent repeat indices that start above zero.
+        planned = [
+            {
+                TASK_INDEX_KEY_NAME: task,
+                ROLLOUT_INDEX_KEY_NAME: repeat + 3,
+                AGENT_REF_KEY_NAME: {"name": "agent"},
+                STOP_ON_SUCCESS_THRESHOLD_KEY: 0.8,
+            }
+            for task in range(2)
+            for repeat in range(3)
+        ]
+        source = tmp_path / "source.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in planned))
+        output = tmp_path / "rollouts.jsonl"
+        manifest = RunManifest.create(source, planned, {}, {})
+        with RolloutStore.start_or_resume(output, lambda: (planned, manifest), resume=False) as store:
+            for row in store.pending():
+                task, repeat = row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
+                if task == 0 and repeat == 5:
+                    store.record_omission(row, STOP_ON_SUCCESS_REASON)
+                    continue
+                if unfinished and task == 1:
+                    if repeat == 5:
+                        continue
+                    result = {"_ng_failure_class": "agent_run_error"} if repeat == 3 else {"execute_only": True}
+                else:
+                    result = {"reward": 0.8 if (task, repeat) == (0, 4) else 0.2}
+                store.record_dispatch(row)
+                store.record_outcome(row | result)
+
+        metrics_path = await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(output),
+                output_jsonl_fpath=str(output),
+                merge_shards=False,
+                disable_health_check=True,
+            )
+        )
+        (entry,) = orjson.loads(metrics_path.read_bytes())
+        assert entry["sampling_policy"] == {"metric": "reward", "stop_on_success_threshold": 0.8}
+        assert entry["repeat_level_metrics"] == []
+        assert "mean/reward" not in entry["agent_metrics"]
+        solved, other = entry["group_level_metrics"]
+        assert (solved["first_successful_repeat"], solved["performed_rollouts"], solved["skipped_after_success"]) == (
+            2,
+            2,
+            1,
+        )
+        assert entry["agent_metrics"]["adaptive_repeat/planned_rollouts"] == 6
+        if unfinished:
+            assert other["status"] == "unresolved"
+            assert (other["failed_rollouts"], other["unscored_rollouts"], other["unobserved_rollouts"]) == (1, 1, 1)
+            assert entry["key_metrics"] == {}
+        else:
+            assert other["status"] == "budget_exhausted"
+            assert other["first_successful_repeat"] is None
+            assert entry["key_metrics"] == {"adaptive_repeat/success_within_budget": 0.5}
+
     """End-to-end shape of `ng_aggregate_rollouts`: glob â†’ load â†’ sort â†’ aggregate."""
 
     async def test_run_from_config_full_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

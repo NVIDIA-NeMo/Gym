@@ -63,6 +63,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.rollouts.repeat_stopping import STOP_ON_SUCCESS_THRESHOLD_KEY
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -81,6 +82,7 @@ from nemo_gym.rollouts.rollout_records import (
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
+    read_records,
     rejudge_predecessor_id,
     resolve_rollout_owner,
     resolve_rollout_path,
@@ -744,7 +746,13 @@ def check_saved_patch_replay(
 
 
 # Collection identity is retained for grouping and cache resume, never sent to /verify.
-_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY, RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME)
+_IDENTITY_KEYS = (
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    NG_RESULT_TYPE_KEY,
+    RUN_ID_KEY,
+    ATTEMPT_INDEX_KEY_NAME,
+    STOP_ON_SUCCESS_THRESHOLD_KEY,
+)
 
 
 def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: bool = False) -> Dict:
@@ -1349,7 +1357,9 @@ def _load_reverified_results(
     with output_fpath.open("rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-    if identity_sources and any(key not in r for r in results for key in _IDENTITY_KEYS):
+    if identity_sources and any(
+        key not in r for r in results for key in _IDENTITY_KEYS if key != STOP_ON_SUCCESS_THRESHOLD_KEY
+    ):
         stamps_by_key, source_keys = _source_identity_stamps(identity_sources)
         for r in results:
             for key, value in stamps_by_key.get((r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]), {}).items():
@@ -1862,13 +1872,20 @@ class RolloutReverificationHelper(BaseModel):
         # prefix, before output preparation can unlink or append any source.
         force_warning: Optional[str] = None
         output_name_prefix = ""
+        materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
+        if not config.disable_aggregation and materialized_inputs_jsonl_fpath.is_file():
+            first = next(read_records(materialized_inputs_jsonl_fpath), {})
+            if STOP_ON_SUCCESS_THRESHOLD_KEY in first:
+                raise ConfigError(
+                    "Reverification cannot compute fixed-repeat metrics for an adaptively sampled run. "
+                    "Set +disable_aggregation=true to reverify the observed answers."
+                )
         if config.input_format != "atif":
             force_warning = await _guard_reverify_mode(config)
             if force_warning:
                 print(force_warning)
                 output_name_prefix = "unsafe_"
 
-        materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
         identity_sources: Tuple[Path, ...] = ()
         if config.input_format == "atif":
             assert config.atif_manifest_jsonl_fpath is not None

@@ -1682,6 +1682,11 @@ COMMANDS = {
                 quote=True,
             ),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
+            _value_flag(
+                "stop-on-success-threshold",
+                "stop_on_success_threshold",
+                "Stop later repeats for a task and agent when its verified reward reaches this value.",
+            ),
             _bool_flag(
                 "interleave-repeats",
                 "interleave_repeats",

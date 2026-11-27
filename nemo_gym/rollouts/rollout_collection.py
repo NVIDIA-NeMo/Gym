@@ -143,6 +143,14 @@ from nemo_gym.rollouts.model_calls import (
     observability_enabled_from_config,
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
+from nemo_gym.rollouts.repeat_admission import RepeatAdmission
+from nemo_gym.rollouts.repeat_metrics import adaptive_repeat_entries
+from nemo_gym.rollouts.repeat_stopping import (
+    STOP_ON_SUCCESS_REASON,
+    STOP_ON_SUCCESS_THRESHOLD_KEY,
+    is_verified_success,
+    repeat_group,
+)
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
 from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf
 from nemo_gym.rollouts.rollout_records import (
@@ -1160,7 +1168,13 @@ def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, An
 
     result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
     result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-    for key in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+    for key in (
+        AGENT_REF_KEY_NAME,
+        TASK_SOURCE_KEY_NAME,
+        SKILLS_REF_KEY_NAME,
+        ATTEMPT_INDEX_KEY_NAME,
+        STOP_ON_SUCCESS_THRESHOLD_KEY,
+    ):
         if key in row:
             result[key] = row[key]
     if ROLLOUT_ID_KEY_NAME in row:
@@ -2376,6 +2390,12 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Useful for mean@k."
         ),
     )
+    stop_on_success_threshold: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+        strict=True,
+        description="Stop later independent repeats of a task and agent once its verified reward reaches this threshold.",
+    )
     num_repeats_add_seed: Union[bool, Dict[str, bool]] = Field(
         default=False,
         description=(
@@ -2466,6 +2486,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
+        if self.stop_on_success_threshold is not None and (
+            self.count_missing_rollouts_as_zero or self.count_failure_classes_as_zero
+        ):
+            raise ValueError("Adaptive repeat aggregation needs observed verifier rewards; disable zero imputation.")
         nr = self.num_repeats
         if isinstance(nr, int):
             if nr < 1:
@@ -3037,6 +3061,13 @@ def _aggregation_error_entry(
             "http_status": getattr(exc, "status", None) or response_status,
         },
     }
+
+
+def _write_aggregate_entries(output_fpath: Path, entries: List[Dict]) -> Path:
+    export_metrics(flatten_aggregate_metrics(entries))
+    metrics_fpath = aggregate_metrics_path_for(output_fpath)
+    metrics_fpath.write_bytes(orjson.dumps(entries, option=orjson.OPT_INDENT_2))
+    return metrics_fpath
 
 
 def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
@@ -3796,17 +3827,25 @@ class _DispatchReservations:
 class _BoundedCompletionIterator:
     """Completion-order iterator with a bounded set of resident asyncio tasks."""
 
-    def __init__(self, awaitables: Iterator, *, max_resident_tasks: int, total: int):
+    def __init__(
+        self,
+        awaitables: Iterator | Callable[[], Awaitable | None],
+        *,
+        max_resident_tasks: int,
+        total: int,
+        repeat_policy: RepeatAdmission | None = None,
+    ):
         if max_resident_tasks < 1:
             raise ValueError("max_resident_tasks must be >= 1")
 
-        self._awaitables = iter(awaitables)
+        self._next_awaitable = awaitables if callable(awaitables) else functools.partial(next, iter(awaitables), None)
+        self._repeat_policy = repeat_policy
+        self._skipped = 0
         self._max_resident_tasks = max_resident_tasks
         self._remaining = total
         self._pending: set[asyncio.Task] = set()
         self._ready: list[asyncio.Task] = []
         self._lock = asyncio.Lock()
-        self._started = False
         self._closed = False
         self._progress = tqdm(
             desc="Collecting rollouts",
@@ -3823,6 +3862,11 @@ class _BoundedCompletionIterator:
         return self
 
     def __next__(self):
+        if self._repeat_policy is not None and self._skipped != self._repeat_policy.skipped:
+            newly_skipped = self._repeat_policy.skipped - self._skipped
+            self._remaining -= newly_skipped
+            self._progress.update(newly_skipped)
+            self._skipped = self._repeat_policy.skipped
         if self._remaining <= 0:
             self._progress.close()
             raise StopIteration
@@ -3831,9 +3875,8 @@ class _BoundedCompletionIterator:
         return self._next_completed()
 
     def _admit(self) -> bool:
-        try:
-            awaitable = next(self._awaitables)
-        except StopIteration:
+        awaitable = self._next_awaitable()
+        if awaitable is None:
             return False
 
         self._pending.add(asyncio.create_task(awaitable))
@@ -3848,9 +3891,8 @@ class _BoundedCompletionIterator:
             if self._closed:
                 raise asyncio.CancelledError
 
-            if not self._started:
-                self._started = True
-                self._fill()
+            # Settling the previous result may have made another repeat eligible.
+            self._fill()
 
             if not self._ready:
                 if not self._pending:
@@ -4561,6 +4603,12 @@ executions → not run again (left to recovery)
                 self.resolve_task_sources(direct_source_rows, identity_client.global_config_dict)
             if environment_server_client is not None:
                 self._stamp_environment_server_agent_refs(input_rows, environment_server_client.global_config_dict)
+            for row in input_rows:
+                # Only the collector can opt a run into adaptive sampling.
+                if config.stop_on_success_threshold is None:
+                    row.pop(STOP_ON_SUCCESS_THRESHOLD_KEY, None)
+                else:
+                    row[STOP_ON_SUCCESS_THRESHOLD_KEY] = config.stop_on_success_threshold
             validate_batch(input_rows)
             manifest = RunManifest.create(
                 _resolve_under_cwd_or_install(config.input_jsonl_fpath),
@@ -4599,6 +4647,31 @@ executions → not run again (left to recovery)
         )
         results = store.selected("success") if config.retain_results_in_memory else []
         rows = store.inputs_for(results)
+
+        threshold = config.stop_on_success_threshold
+        resume_omissions = []
+        if threshold is not None and not store.started_fresh:
+            # The success may have landed just before the job stopped writing its omissions.
+            # Always group by the original input: a result also names the resolved environment server.
+            first_success = {}
+            for record in store.selected_records("success").values():
+                saved = record.read()
+                if is_verified_success(saved, threshold):
+                    (source,) = store.inputs_for([saved])
+                    key = repeat_group(source)
+                    index = source[ROLLOUT_INDEX_KEY_NAME]
+                    first_success[key] = min(index, first_success.get(key, index))
+            resume_omissions = [
+                dict(row)
+                for row in store.planned_inputs()
+                if (winner := first_success.get(repeat_group(row))) is not None
+                and row[ROLLOUT_INDEX_KEY_NAME] > winner
+                and store.disposition(row) == "unknown"
+            ]
+            input_rows = [row for row in input_rows if repeat_group(row) not in first_success]
+        repeat_policy = (
+            RepeatAdmission(_round_robin_by_agent(input_rows), repeat_group) if threshold is not None else None
+        )
 
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
@@ -4743,7 +4816,7 @@ executions → not run again (left to recovery)
         agent_samples: Dict[str, Dict[str, Any]] = {}
         agent_complete_tasks: List[asyncio.Task] = []
         completion_servers_by_agent: Mapping[str, list[str]] = {}
-        if not config.disable_aggregation:
+        if not config.disable_aggregation and config.stop_on_success_threshold is None:
             completion_servers_by_agent = _environment_servers_by_agent(identity_client.global_config_dict)
             agent_expected_keys, agent_samples = self._agent_completion_plan(
                 input_rows if store.started_fresh else _iter_jsonl(config.materialized_jsonl_fpath),
@@ -4856,6 +4929,19 @@ executions → not run again (left to recovery)
             if owned_token_source is not None:
                 output_files.push_async_callback(owned_token_source.close)
             output_files.enter_context(store)
+
+            def record_skipped_repeats(siblings: list[dict]) -> None:
+                # Keep earlier evidence on resume. A skip reserves a sidecar slot in the same
+                # journal as any other omission, but never sends a request or assigns a score.
+                skipped = [row.copy() for row in siblings if store.disposition(row) == "unknown"]
+                store.record_dispatches(skipped)
+                for sibling in skipped:
+                    sibling.pop("reward", None)
+                    store.record_omission(sibling, STOP_ON_SUCCESS_REASON)
+                    settle_rollout(sibling, sibling)
+
+            if resume_omissions:
+                record_skipped_repeats(resume_omissions)
             output_files.push_async_callback(_cancel_and_join, agent_complete_tasks)
 
             def write_final_status() -> None:
@@ -4931,6 +5017,7 @@ executions → not run again (left to recovery)
                 drain_margin_s=config.drain_margin_s,
                 dispatch_reservation_interval_s=config.dispatch_reservation_interval_s,
                 latency_tracker=latency_tracker,
+                **({"repeat_policy": repeat_policy} if repeat_policy is not None else {}),
                 **({"run_timing": run_timing} if run_timing is not None else {}),
             )
             if hasattr(dispatches, "aclose"):
@@ -4944,6 +5031,8 @@ executions → not run again (left to recovery)
                     result = _native_episode_record(row, result)
                 if isinstance(result, dict) and result.get(NG_DISPATCH_DRAINED_KEY):
                     # This is a scheduling decision, not a dispatched attempt.
+                    if repeat_policy is not None:
+                        repeat_policy.settle(row, solved=False)
                     completed_count += 1
                     counts_left[self._dispatch_name(row)] -= 1
                     identity = {
@@ -5133,6 +5222,11 @@ executions → not run again (left to recovery)
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
+                if repeat_policy is not None:
+                    skipped = repeat_policy.settle(row, solved=is_verified_success(result, threshold))
+                    record_skipped_repeats(skipped)
+                    counts_left[dispatch_name] -= len(skipped)
+                    completed_count += len(skipped)
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
@@ -5151,7 +5245,7 @@ executions → not run again (left to recovery)
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
 
                 agent_name = dispatch_name
-                if not no_result:
+                if not no_result and config.stop_on_success_threshold is None:
                     # An infrastructure failure is not a score of zero, and not a sample either.
                     metrics = agent_name_to_metrics[agent_name]
                     numeric = {
@@ -5198,7 +5292,7 @@ executions → not run again (left to recovery)
                     # Use tqdm.write here so we can print properly with tqdm being used.
                     tqdm.write(print_str)
 
-                    if get_exporters():
+                    if get_exporters() and config.stop_on_success_threshold is None:
                         step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
                         for agent_name, metrics in agent_name_to_metrics.items():
                             scored = agent_name_to_metric_counts[agent_name]["reward"]
@@ -5360,6 +5454,11 @@ executions → not run again (left to recovery)
                 "Resume it; the aggregate is written when the run completes."
             )
             aggregate_metrics_fpath = None
+        elif config.stop_on_success_threshold is not None:
+            entries = await asyncio.to_thread(
+                adaptive_repeat_entries, [(store, persisted_results)], config.stop_on_success_threshold
+            )
+            aggregate_metrics_fpath = _write_aggregate_entries(output_fpath, entries)
         else:
             print("Computing aggregate metrics")
             if config.count_failure_classes_as_zero:
@@ -5626,13 +5725,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics, first_error = await self._aggregate_entries(results, rows)
 
-        metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
-
-        export_metrics(metrics_to_log)
-
-        # Write single file with all agents
-        metrics_fpath = aggregate_metrics_path_for(output_fpath)
-        metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+        metrics_fpath = _write_aggregate_entries(output_fpath, all_agent_metrics)
 
         if raise_on_error and first_error is not None:
             raise first_error
@@ -6092,6 +6185,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
+        repeat_policy: RepeatAdmission | None = None,
         typed_outcomes: bool = False,
         validate_results: bool = False,
         on_dispatch: Optional[Callable[[Dict], None]] = None,
@@ -6144,7 +6238,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
         self._validate_agent_pairings(direct_agent_examples, server_client.global_config_dict)
         # Resolve every agent-routed row before dispatch, so an unroutable agent fails the run instead of one future.
-        if interleave_by_agent:
+        if interleave_by_agent and repeat_policy is None:
             examples = _round_robin_by_agent(examples)
         servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
         server_for_agent = {
@@ -6234,6 +6328,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_span_context = None
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
+                    if STOP_ON_SUCCESS_THRESHOLD_KEY in request_body:
+                        request_body = {
+                            key: value for key, value in request_body.items() if key != STOP_ON_SUCCESS_THRESHOLD_KEY
+                        }
                     dispatch_span = (
                         _dispatch_span(row, self._dispatch_name(row), server_name=server_name)
                         if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
@@ -6383,7 +6481,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             # before admission must not leave an unawaited request coroutine.
             return await count_resident(_post_subroutine(row), observer)
 
-        awaitables = map(observed_post if observer is not None else _post_subroutine, examples)
+        post = observed_post if observer is not None else _post_subroutine
+        if repeat_policy is not None:
+
+            def next_eligible():
+                row = repeat_policy.take()
+                return post(row) if row is not None else None
+
+            return _BoundedCompletionIterator(
+                next_eligible,
+                max_resident_tasks=max_resident_tasks if max_resident_tasks is not None else max(1, len(examples)),
+                total=len(examples),
+                repeat_policy=repeat_policy,
+            )
+
+        awaitables = map(post, examples)
         if max_resident_tasks is not None:
             return _BoundedCompletionIterator(awaitables, max_resident_tasks=max_resident_tasks, total=len(examples))
 
@@ -7042,6 +7154,23 @@ class RolloutAggregationHelper(BaseModel):
                 shard_digests[shard_path] = (f.tell(), digest.hexdigest())
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
+        # The saved plan includes wholly unobserved tasks and omissions. A flat export alone
+        # cannot supply their denominators or distinguish independent runs that reuse indices.
+        if any(STOP_ON_SUCCESS_THRESHOLD_KEY in row for row in legacy_results):
+            raise ConfigError(
+                "Adaptive repeat aggregation requires the original run manifest and materialized inputs."
+            )
+        thresholds = {next(history.planned_inputs(), {}).get(STOP_ON_SUCCESS_THRESHOLD_KEY) for history in histories}
+        if legacy_paths:
+            thresholds.add(None)
+        if len(thresholds) > 1:
+            raise ConfigError("Aggregate runs with the same independent-repeat sampling policy and threshold.")
+        adaptive_threshold = next(iter(thresholds), None)
+        if adaptive_threshold is not None and (
+            config.count_missing_rollouts_as_zero or config.count_failure_classes_as_zero
+        ):
+            raise ConfigError("Adaptive repeat aggregation needs observed verifier rewards; disable zero imputation.")
+
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
         results.sort(key=lambda r: (r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)))
 
@@ -7187,9 +7316,17 @@ class RolloutAggregationHelper(BaseModel):
         if config.count_missing_rollouts_as_zero:
             print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
         scored = sorted(results + counted, key=_rollout_order_key)
-        aggregate_metrics_fpath = await helper._call_aggregate_metrics(
-            scored, scored, output_fpath, raise_on_error=False
-        )
+        if adaptive_threshold is not None:
+            entries = await asyncio.to_thread(
+                adaptive_repeat_entries,
+                [(history, history_results[history.manifest.run_id]) for history in histories],
+                adaptive_threshold,
+            )
+            aggregate_metrics_fpath = _write_aggregate_entries(output_fpath, entries)
+        else:
+            aggregate_metrics_fpath = await helper._call_aggregate_metrics(
+                scored, scored, output_fpath, raise_on_error=False
+            )
         if batch_tracker is not None:
             batch_tracker.write_status(
                 batch_completed_rows,

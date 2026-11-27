@@ -1043,6 +1043,9 @@ def _configuration_identity(
         references(selected[name])
     # Collection overrides may themselves contain DictConfig/ListConfig values.
     collection = {key: _plain(value) for key, value in config.items() if key not in _COLLECTION_OPTIONS}
+    # Preserve the identity of fixed-repeat runs saved before adaptive sampling was introduced.
+    if collection.get("stop_on_success_threshold") is None:
+        collection.pop("stop_on_success_threshold", None)
     context["_collection_identity"] = safe(_normalize_runtime_references(collection))
     capture = raw.get("token_id_capture", {})
     context["_capture_identity"] = {key: value for key, value in capture.items() if key != "dir"}
@@ -1182,6 +1185,7 @@ _SEMANTIC_KEYS = frozenset(
         "limit",
         "task_ids",
         "num_repeats",
+        "stop_on_success_threshold",
         "num_repeats_add_seed",
         # agent and policy model identity, and its served window
         "agent_name",
