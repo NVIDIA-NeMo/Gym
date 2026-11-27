@@ -326,7 +326,8 @@ the adapter copies back (`events_exclude`). Pi's raw stdout in the session direc
 ## Results and limits
 
 Responses retain thinking text, tool calls/results, and Pi-reported usage, including cached
-input tokens. Model limits and timeouts preserve gradable partial work after successful agent close.
+input tokens. Pi splits each call's prompt into uncached input, cache reads and cache writes; input tokens count
+all three, and cached input tokens count the cache reads. Model limits and timeouts preserve gradable partial work after successful agent close.
 Reported provider errors retain partial output and a classified cause for the Environment Server to decide grading and episode retries; independent runtime failures remain execution errors;
 they must not be reported as incorrect solutions. When Pi's overflow recovery, including its recovery of a `length`
 reply cut below the output cap, fails on its compaction call, the run is reported as a provider error with an

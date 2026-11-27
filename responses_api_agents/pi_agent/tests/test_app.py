@@ -353,6 +353,42 @@ class TestParsePiEvents:
         # Pi writes cacheRead=0 when the backend reported no cache details, so zero is not a measurement.
         assert parse_pi_events(lines)[1]["cached_tokens"] == expected
 
+    @pytest.mark.parametrize(
+        ("usage", "expected"),
+        [
+            # Pi 0.80.2's usage for Chat Completions calls. Its `input` is prompt_tokens minus the cache reads and
+            # the cache writes, so every prompt token is in exactly one of the three counts.
+            # A call that read a cached prefix and wrote the rest (endpoint: prompt_tokens 1325, cached_tokens
+            # 1132, cache_write_tokens 190), as Pi recorded it.
+            (
+                {"input": 3, "output": 129, "cacheRead": 1132, "cacheWrite": 190, "totalTokens": 1454},
+                {"input_tokens": 1325, "output_tokens": 129, "cached_tokens": 1132},
+            ),
+            # A first call that wrote its prompt to the cache (prompt_tokens 1322, cached_tokens 0,
+            # cache_write_tokens 1319). Pi writes cacheRead 0, which is not a measurement.
+            (
+                {"input": 3, "output": 33, "cacheRead": 0, "cacheWrite": 1319, "totalTokens": 1355},
+                {"input_tokens": 1322, "output_tokens": 33, "cached_tokens": None},
+            ),
+            # A call that read its whole prefix and wrote nothing.
+            (
+                {"input": 3, "output": 5, "cacheRead": 4414, "cacheWrite": 0, "totalTokens": 4422},
+                {"input_tokens": 4417, "output_tokens": 5, "cached_tokens": 4414},
+            ),
+            # A usage record without cacheWrite.
+            (
+                {"input": 3, "output": 5, "cacheRead": 4414, "totalTokens": 4422},
+                {"input_tokens": 4417, "output_tokens": 5, "cached_tokens": 4414},
+            ),
+        ],
+    )
+    def test_prompt_tokens_include_cache_reads_and_writes(self, usage, expected) -> None:
+        usage = {**usage, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+        _, parsed = parse_pi_events(_msg_end("assistant", [{"type": "text", "text": "ok"}], usage=usage))
+        assert parsed == expected
+        # Pi's own total counts every prompt token once.
+        assert parsed["input_tokens"] + parsed["output_tokens"] == usage["totalTokens"]
+
     def test_user_messages_ignored(self) -> None:
         line = _msg_end("user", [{"type": "text", "text": "hi"}])
         assert parse_pi_events(line)[0] == []
