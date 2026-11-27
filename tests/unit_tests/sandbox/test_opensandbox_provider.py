@@ -2049,6 +2049,123 @@ async def test_exec_refuses_an_argument_list_it_cannot_send_without_a_shell(
     assert commands.run_calls[0][0] == "su -s /bin/sh -c id agent"
 
 
+def _launch_failure_commands(reported_at: str, message: str) -> SimpleNamespace:
+    """The SDK's command service for a command execd could not start, as each exec path learns of it.
+
+    The streamed path gets execd's message as a ``CommandExecError`` without an exit code. The background path gets
+    it in the command status with exit code 255, and may also get it at the submit, inside the controller's
+    ``RuntimeError`` envelope.
+    """
+    error = None
+    if reported_at == "stream":
+        error = SimpleNamespace(name="CommandExecError", value=message)
+    elif reported_at == "submit":
+        error = SimpleNamespace(
+            name="RuntimeError", value="error running commands failed to start commands: " + message
+        )
+    execution = SimpleNamespace(
+        id="exec-unstarted", logs=SimpleNamespace(stdout=[], stderr=[]), error=error, exit_code=None, complete=None
+    )
+    return SimpleNamespace(
+        run=AsyncMock(return_value=execution),
+        get_command_status=AsyncMock(return_value=SimpleNamespace(running=False, exit_code=255, error=message)),
+        get_background_command_logs=AsyncMock(return_value=SimpleNamespace(content="", cursor=None)),
+    )
+
+
+@pytest.mark.parametrize("reported_at", ["stream", "submit", "status"])
+@pytest.mark.parametrize(
+    "message, return_code",
+    [
+        ('exec: "nosuch-program": executable file not found in $PATH', 127),
+        ("fork/exec /nosuch/dir/program: no such file or directory", 127),
+        ("fork/exec /opt/plainfile/x: not a directory", 127),
+        ("fork/exec /opt/plainfile: permission denied", 126),
+        # execd adds its credential hint to a permission error when it switches the user.
+        (
+            "fork/exec /opt/plainfile: permission denied (switching to uid=1000 gid=0 requires "
+            "CAP_SETUID/CAP_SETGID, which this sandbox may not have — check the server's docker.drop_capabilities "
+            "configuration; dropping these capabilities makes every identity switch fail)",
+            126,
+        ),
+        ("fork/exec /opt/notaprogram: exec format error", 126),
+    ],
+)
+async def test_exec_reports_an_argument_list_whose_program_cannot_be_started_as_a_command_failure(
+    monkeypatch: pytest.MonkeyPatch, reported_at: str, message: str, return_code: int
+) -> None:
+    provider, handle, _ = _argv_provider(monkeypatch, background_exec=reported_at != "stream")
+    handle.raw.commands = _launch_failure_commands(reported_at, message)
+
+    with RequestFailureLog.capture() as log:
+        result = await provider.exec(handle, ["program", "argument"], timeout_s=2)
+        assert not log.reply_report(None).events
+
+    # A shell's exit status for the same program, as shell text gives: a retry on another sandbox cannot help.
+    assert (result.return_code, result.error_type, result.stderr) == (return_code, None, message)
+
+
+@pytest.mark.parametrize("background_exec", [False, True])
+@pytest.mark.parametrize(
+    "command, message",
+    [
+        # Shell text: execd could not start the sandbox's shell, which says nothing about the command.
+        ("program argument", 'exec: "bash": executable file not found in $PATH'),
+        ("program argument", "fork/exec /usr/bin/bash: permission denied"),
+        # An argument list that could not be started for a reason other than its program.
+        (["program"], "fork/exec /usr/bin/program: resource temporarily unavailable"),
+        (["program"], "fork/exec /usr/bin/program: operation not permitted (switching to uid=1000 gid=1000)"),
+        (["program"], "argv requires a non-empty executable"),
+        (["program"], "start failed: fork/exec /usr/bin/program: permission denied"),
+        (
+            ["program"],
+            "fork/exec /usr/bin/program: permission denied\nfork/exec /usr/bin/program: too many open files",
+        ),
+    ],
+)
+async def test_exec_gives_a_shells_exit_status_only_for_the_program_of_an_argument_list(
+    monkeypatch: pytest.MonkeyPatch, background_exec: bool, command: Any, message: str
+) -> None:
+    provider, handle, _ = _argv_provider(monkeypatch, background_exec=background_exec)
+    handle.raw.commands = _launch_failure_commands("status" if background_exec else "stream", message)
+
+    if background_exec:
+        result = await provider.exec(handle, command, timeout_s=2)
+        assert (result.return_code, result.error_type, result.stderr) == (255, None, message)
+    else:
+        with pytest.raises(NgFailureEvent) as failure:
+            await provider.exec(handle, command, timeout_s=2)
+        assert failure.value.failure_kind == "provider_command_outcome_unknown"
+
+
+@pytest.mark.parametrize("background_exec", [False, True])
+async def test_exec_keeps_the_exit_status_of_a_program_that_prints_execds_launch_message(
+    monkeypatch: pytest.MonkeyPatch, background_exec: bool
+) -> None:
+    printed = "fork/exec /opt/plainfile: permission denied"
+    provider, handle, _ = _argv_provider(monkeypatch, background_exec=background_exec)
+    # A program that ran and exited 255: execd reports its exit status, and the program's own output is the logs.
+    execution = SimpleNamespace(
+        id="exec-ran",
+        logs=SimpleNamespace(stdout=[], stderr=[SimpleNamespace(text=printed)]),
+        error=None if background_exec else SimpleNamespace(name="CommandExecError", value="255"),
+        exit_code=None if background_exec else 255,
+        complete=None,
+    )
+    handle.raw.commands = SimpleNamespace(
+        run=AsyncMock(return_value=execution),
+        get_command_status=AsyncMock(
+            return_value=SimpleNamespace(running=False, exit_code=255, error="exit status 255")
+        ),
+        get_background_command_logs=AsyncMock(return_value=SimpleNamespace(content=printed, cursor=None)),
+    )
+
+    result = await provider.exec(handle, ["program"], timeout_s=2)
+
+    assert (result.return_code, result.error_type) == (255, None)
+    assert printed in (result.stdout if background_exec else result.stderr)
+
+
 @pytest.mark.parametrize(
     "installed, sends_argv", [("0.1.15", False), ("1.1.0", True), ("1.2.0", True), ("1.1.2.dev20261020", True)]
 )

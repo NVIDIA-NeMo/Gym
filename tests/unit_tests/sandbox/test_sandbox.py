@@ -156,6 +156,45 @@ async def test_opensandbox_runs_an_argument_list_without_the_sandbox_shell() -> 
         await sandbox.stop()
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("RUN_OPENSANDBOX_TESTS") != "1", reason="Set RUN_OPENSANDBOX_TESTS=1 for live tests"
+)
+@pytest.mark.parametrize("background_exec", [True, False])
+async def test_opensandbox_reports_a_program_it_cannot_start_with_a_shells_exit_status(background_exec: bool) -> None:
+    """execd's own launch messages for an argument list's program read as 127 (not found) or 126 (not executable)."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox.providers.opensandbox.provider import ARGV_SDK_REQUIREMENT, _sdk_sends_argv
+
+    if not _sdk_sends_argv():
+        pytest.skip(f"Running an argument list on OpenSandbox needs {ARGV_SDK_REQUIREMENT}")
+    config_path = Path(__file__).parents[3] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
+    config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)["sandbox"]
+    config["opensandbox"]["create"].update(retries=0, timeout_s=180, request_timeout_s=180)
+    config["opensandbox"]["operations"].update(
+        retries=0, background_poll_interval_s=1, background_exec=background_exec
+    )
+    sandbox = AsyncSandbox({"opensandbox": config["opensandbox"]})
+    try:
+        async with asyncio.timeout(300):
+            await sandbox.start(SandboxSpec(image="python:3.13-slim", ttl_s=300, ready_timeout_s=120))
+            for command, return_code in [
+                (["nosuch-program"], 127),
+                (["/nosuch/dir/program"], 127),
+                (["/etc/hostname/program"], 127),
+                (["/etc/hostname"], 126),
+                (["/etc"], 126),
+            ]:
+                result = await sandbox.exec(command, timeout_s=30)
+                assert (result.return_code, result.error_type) == (return_code, None), (command, result)
+            # The same programs as shell text, where the sandbox's shell reports them.
+            assert (await sandbox.exec("nosuch-program", timeout_s=30)).return_code == 127
+            assert (await sandbox.exec("/etc/hostname", timeout_s=30)).return_code == 126
+    finally:
+        await sandbox.stop()
+
+
 def _has_module(module_name: str) -> bool:
     try:
         return importlib.util.find_spec(module_name) is not None

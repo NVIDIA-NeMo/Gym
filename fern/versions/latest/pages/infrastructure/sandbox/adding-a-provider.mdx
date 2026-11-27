@@ -83,8 +83,9 @@ New provider implementations must follow this lifecycle and failure contract:
   as installed and configured. `exec()` then also receives `command` as a `list[str]`. Run it as the process's argv,
   never join it into shell text, and raise `SandboxExecArgvUnsupportedError` before running anything for an option
   you can honor only through a shell. Report a program that cannot be started as a command failure with a shell's
-  exit status (`127` not found, `126` not executable), as Docker, Apptainer and Local do. `AsyncSandbox.exec`
-  refuses a list for a provider without the capability; `SandboxProvider.exec` itself keeps `command: str`.
+  exit status (`127` not found, `126` not executable), as Docker, Apptainer, Local and OpenSandbox do.
+  `AsyncSandbox.exec` refuses a list for a provider without the capability; `SandboxProvider.exec` itself keeps
+  `command: str`.
 
 OpenSandbox implements this contract. See [Required provider migrations](./index#required-provider-migrations)
 for the built-in providers that must adopt it in follow-up changes.

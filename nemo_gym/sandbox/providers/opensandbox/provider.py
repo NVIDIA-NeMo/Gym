@@ -205,6 +205,18 @@ _CONTAINER_EXITED = re.compile(
 # https://github.com/opensandbox-group/OpenSandbox/blob/c9df3df530464b9ae2a7580856f6b9bd52b507cc/components/execd/pkg/runtime/command.go#L265-L277
 _ROOT_LAUNCH_REFUSAL = re.compile(r"fork/exec [^\r\n]+: operation not permitted(?: \(switching to uid=0\b[^\r\n]*\))?")
 
+# execd's messages for the program of an argument list that it cannot start. It looks a bare name up on PATH itself
+# and starts a path through os/exec, whose error names the path and the reason. The program is not found (a shell's
+# exit status 127), or it is found and cannot be executed (126); execd adds its credential hint to a permission error
+# when it switches the user. Any other reason, such as a process that could not be created, is not the program's.
+_PROGRAM_NOT_FOUND = re.compile(
+    r'exec: "[^\r\n]+": executable file not found in \$PATH'
+    r"|fork/exec [^\r\n]+: (?:no such file or directory|not a directory)"
+)
+_PROGRAM_NOT_EXECUTABLE = re.compile(
+    r"fork/exec [^\r\n]+: (?:permission denied(?: \(switching to uid=[^\r\n]*\))?|exec format error)"
+)
+
 
 def _inspect_oom_evidence(inspect: str) -> str | None:
     """Read only the current user container state from OpenSandbox inspect text."""
@@ -648,8 +660,8 @@ def _execution_outcome(
     )
 
 
-def _root_launch_refusal(execution: Any, *, uid: int | None) -> SandboxExecResult | None:
-    """Recognize execd's pre-launch refusal, never user stdout/stderr or exception prose."""
+def _launch_failure_message(execution: Any) -> str | None:
+    """execd's message for a command it could not start, never user stdout/stderr or exception prose."""
     error = getattr(execution, "error", None)
     message = getattr(error, "value", None)
     name = getattr(error, "name", None)
@@ -659,15 +671,35 @@ def _root_launch_refusal(execution: Any, *, uid: int | None) -> SandboxExecResul
         message = message.removeprefix(prefix)
     elif name != "CommandExecError":
         return None
-    if (
-        uid == 0
-        and getattr(execution, "exit_code", None) is None
-        and isinstance(message, str)
-        and _ROOT_LAUNCH_REFUSAL.fullmatch(message)
-    ):
+    if getattr(execution, "exit_code", None) is not None or not isinstance(message, str):
+        return None
+    return message
+
+
+def _root_launch_refusal(execution: Any, *, uid: int | None) -> SandboxExecResult | None:
+    """Recognize execd's pre-launch refusal to switch to root."""
+    message = _launch_failure_message(execution)
+    if uid == 0 and message is not None and _ROOT_LAUNCH_REFUSAL.fullmatch(message):
         # 125 is a non-process sentinel: there was no child to return an exit status.
         return SandboxExecResult(None, message, 125, error_type="user_switch_unavailable")
     return None
+
+
+def _unstartable_program(command: str | list[str], message: object) -> SandboxExecResult | None:
+    """The command failure for an argument list whose program execd could not start, with a shell's exit status.
+
+    ``message`` is execd's launch failure message. None for shell text, where the program execd could not start is
+    the sandbox's shell and not the command's, and for a launch that failed for another reason.
+    """
+    if isinstance(command, str) or not isinstance(message, str):
+        return None
+    if _PROGRAM_NOT_FOUND.fullmatch(message):
+        return_code = 127
+    elif _PROGRAM_NOT_EXECUTABLE.fullmatch(message):
+        return_code = 126
+    else:
+        return None
+    return SandboxExecResult(stdout=None, stderr=message, return_code=return_code, error_type=None)
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -3410,7 +3442,11 @@ class OpenSandboxProvider:
         retries: int | None = None,
         on_stdout: Callable[[str], None] | None = None,
     ) -> SandboxExecResult:
-        """Run shell text or an argument list in an OpenSandbox sandbox; ``on_stdout`` receives stdout lines live."""
+        """Run shell text or an argument list in an OpenSandbox sandbox; ``on_stdout`` receives stdout lines live.
+
+        An argument list whose program execd cannot start is a command failure with a shell's exit status: 127 when
+        the program is not found, 126 when it cannot be executed.
+        """
         _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
         if not isinstance(command, str) and not _sdk_sends_argv():
             raise SandboxExecArgvUnsupportedError(
@@ -3492,6 +3528,8 @@ class OpenSandboxProvider:
             )
             if refusal := _root_launch_refusal(execution, uid=opts_kwargs.get("uid")):
                 return refusal
+            if unstarted := _unstartable_program(effective_command, _launch_failure_message(execution)):
+                return unstarted
             stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
             stderr_parts = [msg.text for msg in execution.logs.stderr]
             if execution.error is not None:
@@ -3752,6 +3790,8 @@ class OpenSandboxProvider:
         )
         if refusal := _root_launch_refusal(execution, uid=opts_kwargs.get("uid")):
             return refusal
+        if unstarted := _unstartable_program(command, _launch_failure_message(execution)):
+            return unstarted
         execution_id = getattr(execution, "id", None)
         if not execution_id:
             raise opensandbox_failure(
@@ -3975,6 +4015,8 @@ class OpenSandboxProvider:
             and _ROOT_LAUNCH_REFUSAL.fullmatch(message)
         ):
             return SandboxExecResult(None, message, 125, error_type="user_switch_unavailable")
+        if status.exit_code == 255 and (unstarted := _unstartable_program(command, getattr(status, "error", None))):
+            return unstarted
 
         # The execution has finished, so one call returns its whole buffer; the
         # cursor this endpoint reports back is the end offset rather than a
