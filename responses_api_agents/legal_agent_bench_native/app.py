@@ -8,7 +8,7 @@ import asyncio
 import json
 import shlex
 from dataclasses import dataclass
-from time import time
+from time import monotonic, time
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
@@ -36,7 +36,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config, upload_text
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, monotonic_timeout
 from resources_servers.legal_agent_bench.lab_harbor.completion import CompletionState
 from resources_servers.legal_agent_bench.lab_harbor.tools import get_all_tool_definitions
 
@@ -89,7 +89,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(
                 "Native LAB uses its own workspace tools; required tool grants are unsupported"
             )
-        deadline = asyncio.get_running_loop().time() + min(
+        deadline = monotonic() + min(
             self.config.agent_timeout_seconds, body.agent_timeout_sec or self.config.agent_timeout_seconds
         )
         access = body.sandbox_access
@@ -186,7 +186,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
         usage = None
         usage_missing = False
         finish_reason = "max_turns_exceeded"
-        deadline = state.deadline or (asyncio.get_running_loop().time() + self.config.agent_timeout_seconds)
+        deadline = state.deadline or (monotonic() + self.config.agent_timeout_seconds)
         model_response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=time(),
@@ -199,7 +199,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls if body.parallel_tool_calls is not None else True,
         )
         for _turn in range(self.config.max_turns):
-            remaining = deadline - asyncio.get_running_loop().time()
+            remaining = deadline - monotonic()
             if remaining <= 0:
                 finish_reason = "agent_timeout"
                 break
@@ -225,7 +225,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                         model_response = NeMoGymResponse.model_validate(await get_response_json(reply))
                         cookies.update({key: value.value for key, value in reply.cookies.items()})
             except TimeoutError:
-                if asyncio.get_running_loop().time() < deadline:
+                if monotonic() < deadline:
                     raise
                 usage_missing = True
                 finish_reason = "agent_timeout"
@@ -283,7 +283,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                 finish_reason = "no_tool_calls"
                 break
             for call in calls:
-                remaining = deadline - asyncio.get_running_loop().time()
+                remaining = deadline - monotonic()
                 if remaining <= 0:
                     finish_reason = "agent_timeout"
                     break
@@ -300,7 +300,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
                 output.append(item)
                 if finish_reason == "agent_timeout":
                     break
-            if finish_reason == "agent_timeout" or asyncio.get_running_loop().time() >= deadline:
+            if finish_reason == "agent_timeout" or monotonic() >= deadline:
                 finish_reason = "agent_timeout"
                 break
             if state.completion.finished:
@@ -355,7 +355,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
             )
 
         try:
-            async with asyncio.timeout_at(deadline):
+            async with monotonic_timeout(deadline):
                 await state.session.begin_activation(
                     session_dir=root, timeout=self.config.session_close_timeout_seconds
                 )
@@ -368,7 +368,7 @@ class LegalAgentBenchNativeAgent(SimpleResponsesAPIAgent):
             )
         except Exception as error:
             # The shared supervisor cannot launch with less than one centisecond left.
-            if isinstance(error, TimeoutError) and deadline - asyncio.get_running_loop().time() < 0.01:
+            if isinstance(error, TimeoutError) and deadline - monotonic() < 0.01:
                 # The agent budget excludes bounded cleanup. Joining close also fences
                 # staging that was still unwinding when the execution deadline expired.
                 try:

@@ -47,6 +47,7 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgentConfig,
     _sandbox_prepare_command,
     _session_opencode_config_error,
+    _slot,
 )
 from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.runtime import (
@@ -54,6 +55,8 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     UNRESTRICTED_IMAGE_ATTACHMENT,
 )
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -579,6 +582,35 @@ def test_session_close_stops_media_staging_before_releasing_the_sandbox(setup):
     # Staging belongs to the activation, so close stops it before giving the sandbox back.
     assert events[:2] == ["upload cancelled", "sandbox released"], events
     assert not sandbox.launch.called
+
+
+def test_slot_wait_holds_its_monotonic_deadline_on_an_event_loop_clock_ahead_of_monotonic():
+    async def main():
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        asyncio.get_running_loop().call_later(0.05, semaphore.release)
+        async with _slot(semaphore, deadline=monotonic() + 120):
+            return semaphore.locked()
+
+    assert run_on_clock_ahead_loop(main())
+
+
+def test_preparation_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(setup, monkeypatch):
+    agent, _ = setup
+
+    async def prepare(*args, **kwargs):
+        await asyncio.sleep(0)
+
+    reply = object()
+    state = MagicMock(spec=OpenCodeSandboxSession)
+    state.validated_input = None
+    state.system_instructions = None
+    state.prepare_activation = AsyncMock(side_effect=prepare)
+    monkeypatch.setattr(agent, "_session_response", AsyncMock(return_value=reply))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Inspect", metadata={"agent_timeout_sec": "30"})
+
+    assert run_on_clock_ahead_loop(agent._activate_agent_session_state(state, body, activation_id=1)) is reply
+    state.prepare_activation.assert_awaited_once()
 
 
 def test_first_activation_budget_bounds_media_staging(setup):

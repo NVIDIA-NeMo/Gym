@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""General helpers shared across nemo_gym: paths, decorators, text, process information, progress bars, and import
-compatibility."""
+"""General helpers shared across nemo_gym: paths, decorators, text, process information, progress bars, deadlines, and
+import compatibility."""
 
 # Public API
 from typing import TYPE_CHECKING
@@ -22,6 +22,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.utils.deadlines import monotonic_timeout
     from nemo_gym.utils.exception_inspection import bounded_text, explicit_causes
     from nemo_gym.utils.gym_commit import installed_gym_commit
     from nemo_gym.utils.http_deadline import get_within_deadline
@@ -54,6 +55,7 @@ _PUBLIC_API = {
     "is_nemo_gym_fastapi_entrypoint": "server_process",
     "is_nemo_gym_fastapi_worker": "server_process",
     "materialized_path_for": "path_utils",
+    "monotonic_timeout": "deadlines",
     "reachable_host": "network_policy",
     "resubmit_offset_path_for": "path_utils",
 }

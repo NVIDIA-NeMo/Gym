@@ -51,9 +51,9 @@ it as `checkpoint_pause_allowance_seconds` (default 3600) and the session root a
 harness is stopped and `run_with_checkpoint_pauses` returns `LaunchStopped` (or `LaunchFinished`, if the harness ended
 on its own first): on `LaunchStopped`, relaunch it, resuming its saved conversation.
 
-Take the agent's own concurrency slot with `activation.slot(semaphore, deadline=...)`: a checkpoint counts the waiting
-activation as parked, and the slot is given back on every path, including a retire or close while the activation is
-parked.
+Take the agent's own concurrency slot with `activation.slot(semaphore, deadline=...)`, where `deadline` is a
+`time.monotonic()` time: a checkpoint counts the waiting activation as parked, and the slot is given back on every
+path, including a retire or close while the activation is parked.
 
 On a provider whose snapshot keeps the sandbox's processes (`capabilities.snapshot_keeps`), create the session with
 `pause_mode="hold"`, and pass the same `pause_mode` to `SandboxSession.rebind` after a restore. The supervisor then
