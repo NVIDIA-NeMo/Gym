@@ -56,10 +56,7 @@ defaults:
   run:
     shell: bash -x -e -u -o pipefail {0}
 
-permissions:
-  id-token: write
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
@@ -67,51 +64,69 @@ concurrency:
 
 jobs:
   pre-flight:
-    if: github.event_name != 'workflow_dispatch'
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@v0.94.1
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
 
-  release:
-    needs: [pre-flight]
-    if: |
-      !cancelled() && !failure()
-      && !(needs.pre-flight.outputs.docs_only == 'true'
-           || needs.pre-flight.outputs.is_deployment_workflow == 'true')
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@v1.4.0
+  bump:
+    needs: pre-flight
+    if: needs.pre-flight.outputs.docs_only != 'true' && needs.pre-flight.outputs.is_deployment_workflow != 'true'
+    permissions:
+      contents: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_bump.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
     with:
-      release-ref: ${{ inputs.release-ref || github.sha }}
+      release-ref: ${{ github.sha }}
       python-package: nemo_gym
       library-name: NeMo-Gym
-      validate-only: ${{ github.event_name != 'workflow_dispatch' }}
-      dry-run: ${{ inputs.dry-run || false }}
-      version-bump-branch: ${{ inputs.version-bump-branch || github.ref_name }}
-      create-gh-release: ${{ inputs.create-gh-release || true }}
+      validate-only: true
+      release-environment: gym-release
+      packaging: uv
+
+  build-wheel:
+    needs: bump
+    permissions:
+      contents: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_test_wheel.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
+    with:
+      ref: ${{ github.sha }}
+      python-package: nemo_gym
       packaging: uv
       skip-test-wheel: true
-      wheel-content-ignore: "W002,W004,W009"
-      app-id: ${{ vars.BOT_ID }}
-      gh-release-use-changelog-builder: ${{ inputs.generate-changelog || false }}
+      wheel-content-ignore: W002,W004,W009
+
+  finalize:
+    needs: [bump, build-wheel]
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_finalize.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
+    with:
+      release-ref: ${{ github.sha }}
+      release-version: ${{ needs.bump.outputs.release-version }}
+      library-name: NeMo-Gym
+      pypi-name: ${{ needs.build-wheel.outputs.pypi-name }}
+      validate-only: true
+      release-environment: gym-release
       publish-docs: false
-      run-on-version-tag-only: ${{ github.ref_name != 'main' }}
-      gh-release-from-tag: ${{ inputs.gh-release-from-tag || '' }}
-      restrict-to-admins: true
-    secrets: inherit  # pragma: allowlist secret
 
   release-summary:
-    needs: [pre-flight, release]
-    if: ${{ !cancelled() }}
+    needs: [pre-flight, bump, build-wheel, finalize]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Result
+      - name: Check release validation
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          RESULTS: ${{ toJSON(needs) }}
+          SKIP_BUILD: ${{ needs.pre-flight.outputs.docs_only == 'true' || needs.pre-flight.outputs.is_deployment_workflow == 'true' }}
         run: |
-          FAILED_JOBS=$(gh run view $GITHUB_RUN_ID --repo ${{ github.repository }} --json jobs --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required")] | length')
-
-          if [ "${FAILED_JOBS:-0}" -eq 0 ]; then
-              echo "✅ All previous jobs completed successfully"
-              exit 0
-          else
-              echo "❌ Found $FAILED_JOBS failed job(s)"
-              gh run view $GITHUB_RUN_ID --repo ${{ github.repository }} --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required") | .name'
-              exit 1
+          if [[ "$EVENT" == workflow_dispatch ]]; then
+            echo "::error::Select main under 'Use workflow from' and enter the protected release branch as the version bump target."
+            exit 1
           fi
+          jq -e --argjson skip "$SKIP_BUILD" '
+            .["pre-flight"].result == "success" and
+            ([.bump, .["build-wheel"], .finalize] | all(.[]; .result == (if $skip then "skipped" else "success" end)))
+          ' <<< "$RESULTS"
