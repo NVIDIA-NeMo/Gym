@@ -33,17 +33,14 @@ on:
         description: Dry-run of code-freeze
         required: false
         default: true
+
+permissions: {}
+
 jobs:
   code-freeze:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_code_freeze.yml@bfdb5e35067fd8cd91ce21fca4eb1072ffd7ab8c # v1.4.2
-    with:
-      library-name: NeMo-Gym
-      python-package: nemo_gym
-      release-type: ${{ inputs.release-type }}
-      freeze-commit: ${{ inputs.freeze-commit }}
-      dry-run: ${{ inputs.dry-run }}
-      use-pat: true
-    secrets:
-      SLACK_WEBHOOK: ${{ secrets.SLACK_RELEASE_ENDPOINT }}
-      SLACK_WEBHOOK_ADMIN: ${{ secrets.SLACK_WEBHOOK_ADMIN }}
-      PAT: ${{ secrets.PAT }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require dispatch from main
+        run: |
+          echo "::error::Select main under 'Use workflow from' to run Code freeze."
+          exit 1
