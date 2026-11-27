@@ -905,6 +905,48 @@ def test_eval_run_writes_the_summary_for_a_model_run(tmp_path, monkeypatch, caps
     assert order == ["dispatch", "rows"]
 
 
+@pytest.mark.parametrize(
+    ("agent", "hinted"), [("opencode_agent", True), ("miniswe_sandboxed_agent", False)], ids=["has-limit", "no-limit"]
+)
+def test_eval_run_names_the_output_limit_flag_when_the_endpoint_refused_the_limit(
+    tmp_path, monkeypatch, capsys, agent, hinted
+):
+    """A rollout the endpoint refused because the harness asked for more output tokens than the model allows ends
+    `model_request_rejected`, ungraded; the run names the flag that lowers the limit, for a harness that has one."""
+    write_task(tmp_path / "ds" / "a")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+
+    def collect(target, tokens):
+        from nemo_gym.config.global_config import get_global_config_dict
+
+        rollouts = Path(get_global_config_dict().output_jsonl_fpath)
+        write_jsonl(rollouts, [])
+        # The failure row a harbor run saved for OpenCode's refused first request (a real run's message).
+        refused = result(
+            _ng_failure_class="model_request_rejected",
+            _ng_failure_legacy_class="environment_server_failed",
+            failure_kind="model_request_rejected",
+            _ng_failure_stage="agent",
+            _ng_failure_message="HTTP 400: litellm.BadRequestError: AzureException BadRequestError - max_tokens is "
+            "too large: 131072. This model supports at most 32768 completion tokens, whereas you provided 131072.",
+        )
+        write_jsonl(failures_path_for(rollouts), [{k: v for k, v in refused.items() if k != "reward"}])
+
+    monkeypatch.setattr(main_module, "dispatch", collect)
+    argv = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", agent, "--model-type", "vllm_model"]
+    argv += ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+    monkeypatch.setattr(sys, "argv", argv)
+    main_module.main()
+
+    summary = json.loads((tmp_path / "results/harbor/ds/rollouts_run_summary.json").read_text())
+    (entry,) = summary["tasks"]
+    assert (entry["status"], entry["failure_kind"]) == ("failed", "model_request_rejected")
+    out = capsys.readouterr().out
+    assert ("Run again with a lower limit: --max-output-tokens <n>." in out) is hinted
+    assert "Run summary written to" in out
+
+
 def test_eval_run_reads_the_selected_rows_inside_the_summary_guard(tmp_path, monkeypatch, capfd):
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 

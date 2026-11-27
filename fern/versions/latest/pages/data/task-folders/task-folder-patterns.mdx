@@ -134,6 +134,13 @@ and that has no `skills_dir`, when you set `task_mcp_grants: required` on the se
 [Configure the server](/main/agent-interactions/harbor#configure-the-server)). The server then grants the tools to the
 agent's session.
 
+To grade that the agent used the tool, not only what it saved, the example's server appends each `get_greeting` call
+to `/logs/agent/hello-tools-calls.jsonl`, and `tests/test.sh` requires a call for `NeMo Gym`. The log reaches
+`test.sh` because a harness that takes the task starts the `stdio` server in the sandbox, where shared verification
+runs. The agent runs as the same user as the server, so the log shows that the tool ran; it does not stop an agent
+that writes the log itself. `solution/solve.sh` starts the server as `task.toml` declares it and calls the tool with
+the `mcp` package the image installs.
+
 The example's Dockerfile has `RUN` and `COPY` lines, so prepare builds it. With `--sandbox docker`, Gym builds it into
 the local Docker daemon. With OpenSandbox, the image must be pushed to a registry, so set `builds.repository` (see
 [Harbor image builds](/main/reference/configuration#harbor-image-builds)).

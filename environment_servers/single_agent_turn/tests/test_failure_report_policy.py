@@ -4,13 +4,23 @@
 
 import pytest
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    AgentOutcomePolicyConfig,
+    report_rejected_request,
+)
 from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     MODEL_SERVER_QUEUE_TIMEOUT,
     FailureBoundary,
+    FailureEvent,
+    FailureReport,
     NgFailureEvent,
+    OutcomeAction,
     SandboxFailureDetails,
     failure_report_for,
 )
@@ -502,3 +512,56 @@ async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
         assert partial.failure_report["events"][failure.event_id]["failure_kind"] == PROVIDER_OOM_KILLED
         saved = SandboxObservation.model_validate_json(partial.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert saved.failure_id == failure.event_id
+
+
+@pytest.mark.parametrize(
+    "selects_rejection,action,graded",
+    [
+        pytest.param(True, None, False, id="default-policy-fails-the-rejection"),
+        pytest.param(True, OutcomeAction.VERIFY, True, id="override-grades-the-rejection"),
+        pytest.param(False, OutcomeAction.VERIFY, False, id="report-still-selecting-the-400-fails-closed"),
+    ],
+)
+async def test_a_rejected_request_follows_the_policy_once_its_report_selects_the_rejection(
+    selects_rejection, action, graded
+):
+    environment, client = _environment_server()
+    if action is not None:
+        environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(
+            by_failure_kind={**AgentOutcomePolicyConfig().by_failure_kind, MODEL_REQUEST_REJECTED: action}
+        )
+    # The Model Server's report selects the 400 the agent reclassified as a rejected request.
+    model_error = FailureEvent(
+        event_id="model-attempt",
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason="max_tokens is too large",
+        operation="model_request",
+        operation_id="model-operation",
+        attempt_id="model-operation-1",
+        http_status=400,
+    )
+    report = FailureReport(failure_id=model_error.event_id, events={model_error.event_id: model_error})
+    if selects_rejection:
+        report = report_rejected_request(report)
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        output=[],
+        error={"code": "server_error", "message": "Model HTTP 400: max_tokens is too large"},
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED).model_dump_json()},
+        failure_report=report.model_dump(mode="json"),
+    )
+    client.responses[2] = _Response(response)
+    if not graded:
+        del client.responses[4]
+    result = await environment.run_request(_request())
+    verifies = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
+    if graded:
+        assert result.failure is None and result.result.reward == 1.0
+        (verify,) = verifies
+        assert verify["response"]["failure_report"]["events"]["model-attempt"]["http_status"] == 400
+    else:
+        assert verifies == [] and result.result is None and result.failure.terminal is True
+        # A report that disagrees with the outcome names no cause; the rejection names itself.
+        assert result.failure.failure_kind == (MODEL_REQUEST_REJECTED if selects_rejection else None)

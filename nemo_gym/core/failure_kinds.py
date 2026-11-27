@@ -103,6 +103,55 @@ MODEL_POLICY_RESPONSE_TIMEOUT = "model_policy_response_timeout"
 MODEL_SERVER_QUEUE_TIMEOUT = "model_server_queue_timeout"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
+# The model endpoint refused the request because the run's own settings are invalid, such as an output limit above the
+# model's cap or a parameter the model does not accept: the configuration is at fault, so the attempt is not the model's
+# answer. On a task-folder run that sets ``forward_configuration_refusals``, an agent's ``report_outcome`` reports it for
+# an HTTP 400 whose message says so and does not name the context window (``reject_configuration_refusal``); every
+# other run reports that 400 as ``model_request_error``. It carries no HTTP status, so status rules do not apply to it.
+MODEL_REQUEST_REJECTED = "model_request_rejected"
+
+
+# Words a model endpoint's refusal uses when the prompt does not fit the context window: OpenAI's error code (also what
+# vllm_model propagates), "maximum context length" (OpenAI, vLLM), "context window" (Codex's wording), "context size"
+# (llama.cpp), vLLM's "maximum model length" for a decoder prompt, and Anthropic's "prompt is too long".
+_CONTEXT_WINDOW_PHRASES = (
+    "context_length_exceeded",
+    "context length",
+    "context window",
+    "context size",
+    "maximum model length",
+    "prompt is too long",
+    # vLLM's "max_tokens is too large: input length and max_tokens exceed the context": input and output together.
+    "exceed the context",
+)
+# How an endpoint refuses a request that the run's own settings make invalid, the same way on every call whatever the
+# conversation holds: an output limit above the model's cap (OpenAI and LiteLLM's "max_tokens is too large: N. This
+# model supports at most M completion tokens", Anthropic's "max_tokens: N > M, which is the maximum allowed number of
+# output tokens", vLLM's "max_tokens=N cannot be greater than max_model_len=M"), or a parameter or value the model does
+# not accept (OpenAI's "Unsupported parameter: ..." and "Unsupported value: '...' does not support ...", and vLLM's
+# "Unexpected ... Supported types are ...", which vllm_model also reads as an invalid request parameter).
+_CONFIGURATION_REFUSALS = (
+    re.compile(
+        r"\bmax_(?:completion_|output_|new_)?tokens\b.{0,200}?"
+        r"(?:is too large|supports at most|maximum allowed number of output tokens|cannot be greater than max_model_len)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"\bunsupported (?:parameter|value)\b", re.IGNORECASE),
+    re.compile(r"\bis not supported with this model\b", re.IGNORECASE),
+    re.compile(r"\bUnexpected [^.\n]{1,80}\. Supported (?:types|values) (?:are|is)\b"),
+)
+
+
+def is_configuration_refusal(message: str) -> bool:
+    """Whether a model endpoint's refusal ``message`` says the run's own settings are invalid.
+
+    An output limit above the model's cap, or a parameter or value the model does not accept, is refused on every call
+    whatever the conversation holds. A refusal that names the context window is the model's own limit, not this.
+    """
+    return any(pattern.search(message) for pattern in _CONFIGURATION_REFUSALS) and not any(
+        phrase in message.lower() for phrase in _CONTEXT_WINDOW_PHRASES
+    )
+
 
 # --- environment: one episode attempt ------------------------------------------------ #
 ENVIRONMENT_SERVER_FAILED = "environment_server_failed"
@@ -241,6 +290,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_SERVER_QUEUE_TIMEOUT,
         MODEL_CONTEXT_LIMIT,
+        MODEL_REQUEST_REJECTED,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,

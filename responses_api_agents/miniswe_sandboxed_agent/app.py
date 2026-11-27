@@ -553,6 +553,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         else "infrastructure_error",
                         detail=f"{type(exc).__name__}: {exc}",
                     )
+                    if isinstance(exc, TimeoutError) and not agent_started:
+                        LOGGER.warning(
+                            f"mini-SWE setup for session {seed.session_id} did not finish within "
+                            f"setup_timeout_sec={self.config.setup_timeout_sec}",
+                            exc_info=exc,
+                        )
                     if not isinstance(exc, TimeoutError):
                         failure = agent_route_failure(
                             exc, operation="harness.run", stage="agent" if agent_started else "seed"

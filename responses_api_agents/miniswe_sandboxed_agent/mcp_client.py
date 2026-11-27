@@ -5,9 +5,26 @@
 
 import asyncio
 import json
+import os
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
+
+
+# This directory is the venv with the MCP packages. Run by another interpreter (`python client.py`), the file reruns
+# under the venv's python before the imports below need them. That python is run by its own path, not its symlink
+# target, because the path is how it finds pyvenv.cfg. Comparing `sys.executable` allows one rerun, so a broken venv
+# fails on the import instead of looping. The whole file is compiled before this runs, so it must stay parseable by
+# older Pythons.
+_VENV = Path(__file__).resolve().parent
+_VENV_PYTHON = _VENV / "bin" / "python"
+if (
+    __name__ == "__main__"
+    and Path(sys.prefix).resolve() != _VENV
+    and Path(sys.executable) != _VENV_PYTHON
+    and _VENV_PYTHON.exists()
+):
+    os.execv(_VENV_PYTHON, [str(_VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 from httpx_aiohttp import HttpxAiohttpClient
 from mcp import ClientSession, StdioServerParameters

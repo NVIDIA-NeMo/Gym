@@ -11,19 +11,21 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 ## In this example
 
 - `task.toml` declares the `hello-tools` MCP server as a task requirement.
-- `environment/tools/server.py` implements a `get_greeting` tool.
+- `environment/tools/server.py` implements a `get_greeting` tool and logs each call to `/logs/agent/hello-tools-calls.jsonl`.
 - `environment/Dockerfile` installs the server and its dependencies in the task environment.
 - `instruction.md` asks the agent to use the tool and save its result.
-- `tests/test.sh` checks the saved result.
+- `tests/test.sh` checks that the server logged a `get_greeting` call for `NeMo Gym` and that its greeting was saved, so an agent that only writes the greeting scores 0. The log shows that the tool ran; it does not stop an agent that writes the log itself.
+- `solution/solve.sh` calls the tool over MCP, as an agent would, and saves the greeting.
 
 ## Run it
 
 ```bash
 gym eval run environments/hello_mcp_tool --agent miniswe_sandboxed_agent --sandbox docker \
-  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+  --model-type openai_model --model gpt-6.1-sol --model-url https://api.openai.com/v1 \
+  --model-api-key "$OPENAI_API_KEY"
 ```
 
-The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider.
+The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider. The command calls OpenAI's `gpt-6.1-sol` with the API key in `OPENAI_API_KEY`; any other OpenAI-compatible endpoint works too: set `--model`, `--model-url` (its base URL) and `--model-api-key`.
 
 ## Validate it
 
@@ -49,7 +51,7 @@ hello_mcp_tool [repeat 0]	oracle solved	1.0	1.2	public
 
 The task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
 
-Each command writes its results to its own folder: `results/harbor/validation/hello_mcp_tool/` for validate and `results/harbor/hello_mcp_tool/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what `tests/test.sh` wrote.
+Each command writes its results to its own folder: `results/harbor/validation/hello_mcp_tool/` for validate and `results/harbor/hello_mcp_tool/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what `tests/test.sh` wrote. `test-stdout.txt` also lists the `get_greeting` calls the server logged.
 
 ## Other examples
 

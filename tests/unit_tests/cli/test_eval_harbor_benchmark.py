@@ -64,6 +64,16 @@ class TestHarborBenchmarkConfig:
         )
         assert benchmark.agent.runs_in_sandbox
 
+    def test_the_benchmarks_own_harness_keeps_its_output_limit(self, tmp_path: Path) -> None:
+        """`--max-output-tokens` applies to a benchmark's own harness when its config declares a limit, as it does for
+        `--agent-type`."""
+        config = {
+            "harbor_target": "terminal_bench_4",
+            "config_paths": ["responses_api_agents/opencode_agent/configs/opencode_agent.yaml"],
+        }
+        assert harbor_benchmark(_benchmark(tmp_path, "opencode_tb", config)).agent.has_output_limit
+        assert not harbor_benchmark(_benchmark(tmp_path, "tb", _harbor_config())).agent.has_output_limit
+
     def test_a_config_without_a_target_composes_its_own_servers(self, tmp_path: Path) -> None:
         config = _harbor_config()
         config.pop("harbor_target")

@@ -18,6 +18,8 @@ opencode_agent:
 
       # Set this to the actual model context window; it is metadata, not an output-token limit.
       context_window: 262144
+      # max_output_tokens (default 131072) is the output limit OpenCode asks for on each model call. An endpoint whose
+      # model allows fewer refuses every call; set it within that cap (--max-output-tokens on a task-folder run).
       timeout: 10800
       sandbox_install_timeout_seconds: 600
       session_close_timeout_seconds: 60

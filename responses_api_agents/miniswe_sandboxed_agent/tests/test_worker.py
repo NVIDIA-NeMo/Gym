@@ -196,3 +196,34 @@ async def test_cancellation_during_native_cleanup_retains_trajectory(tmp_path, r
     assert outcome.reason == "cancelled"
     assert len(response.output) == 1
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "Submitted"
+
+
+async def _installed_harness(tmp_path, runner_factory):
+    async def query(params):
+        raise AssertionError("the model is not queried")
+
+    return await runner_factory(
+        context=HarnessContext(session_id="missing-python", instruction="inspect"),
+        config=MiniSWEConfig(),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path / "artifacts",
+    )
+
+
+async def test_cleanup_fails_when_the_agent_removed_the_installed_interpreter(tmp_path, runner_factory):
+    # After a successful setup a missing interpreter is the agent's doing: its marked descendants can no longer
+    # be found, so cleanup must not report success.
+    harness = await _installed_harness(tmp_path, runner_factory)
+    Path(harness.remote_directory, "venv/bin/python").unlink()
+    with pytest.raises(RuntimeError, match="process cleanup failed"):
+        await harness.close()
+
+
+async def test_cleanup_tolerates_a_missing_interpreter_when_setup_never_installed(tmp_path, runner_factory):
+    # Setup that stopped before the install has started no process, and must keep its own error.
+    harness = await _installed_harness(tmp_path, runner_factory)
+    Path(harness.remote_directory, "venv/bin/python").unlink()
+    harness._runtime_installed = False
+    await harness.close()
