@@ -64,6 +64,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
+    rollout_run_labels,
 )
 from nemo_gym.data.tasks.harbor.build_options import (
     _block_from_overrides,
@@ -1418,7 +1419,10 @@ def reward_profile():  # pragma: no cover
     # masked rollout did run, and is not a gap in the collection.
     measured_rows, measured_results, masked, _ = select_measured(rows, results)
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
-        measured_rows, measured_results, allow_partial_rollouts=config.allow_partial_rollouts
+        measured_rows,
+        measured_results,
+        allow_partial_rollouts=config.allow_partial_rollouts,
+        run_labels=rollout_run_labels(rows),
     )
 
     # Each agent carries its own coverage, never the run's. An agent whose every result was

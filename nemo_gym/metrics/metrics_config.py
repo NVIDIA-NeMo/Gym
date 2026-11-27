@@ -97,7 +97,7 @@ METRIC_EXCLUDED_NAMES = (
 
 
 def is_primary_metric(name: object) -> bool:
-    """Whether a metric name is a point estimate suitable for repeat aggregation and comparison."""
+    """Whether a metric name identifies a comparison point estimate rather than companion statistics."""
     return (
         isinstance(name, str)
         and name not in METRIC_EXCLUDED_NAMES

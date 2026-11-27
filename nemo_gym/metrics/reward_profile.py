@@ -43,6 +43,7 @@ from nemo_gym.config.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
+from nemo_gym.metrics.looping import looping_metrics
 from nemo_gym.metrics.metrics_config import (
     ACROSS_REPEATS_MARKER,
     COMPLETION_TOKEN_METRIC_NAMES,
@@ -176,7 +177,7 @@ class RewardProfiler:
                 rollout_info[k] = v
 
         for k, v in result.items():
-            if k.startswith("_") or k in {"reward", "response"}:
+            if k.startswith("_") or k in {"reward", "response", "is_looping"}:
                 continue
             if isinstance(v, bool):
                 rollout_info[k] = int(v)
@@ -411,7 +412,10 @@ class RewardProfiler:
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
         allow_partial_rollouts: bool = False,
+        *,
+        run_labels: dict[str, str] | None = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Profile measured results, retaining full-input run labels when provided."""
         aligned_rows_and_results = self.align_rows_and_results(
             rows, results, allow_partial_rollouts=allow_partial_rollouts
         )
@@ -424,7 +428,7 @@ class RewardProfiler:
         # one, so the detection must not introduce a new failure on unmatched (partial) rows.
         # Group by what ran each rollout, named the way aggregate metrics name it. Each label names
         # exactly one Environment Server, so two servers that front one agent stay separate.
-        labels = rollout_run_labels(rows)
+        labels = rollout_run_labels(rows) if run_labels is None else run_labels
 
         def _agent_name(row: Dict[str, Any]) -> Optional[str]:
             return labels.get(rollout_run_key(row))
@@ -456,7 +460,7 @@ class RewardProfiler:
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
             for k, v in result.items():
-                if k.startswith("_"):
+                if k.startswith("_") or k == "is_looping":
                     continue
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)
@@ -960,24 +964,25 @@ def coverage_by_agent(
     rows: List[Dict[str, Any]],
     results: List[Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
-    """Coverage for each agent, computed from that agent's own records.
+    """Coverage with the same run labels as the quality metrics.
 
     A run-wide coverage block copied onto every agent tells each of them how much *the run*
     masked, which reads as that agent's own loss. An agent that masked nothing would carry
     another agent's count.
 
-    Agents are keyed by name; an agent whose every result was masked still gets an entry,
+    A run whose every result was masked still gets an entry,
     so a caller can keep reporting it after the quality metrics drop it.
     """
-    agent_of_key = {
-        _rollout_key(row): (row.get("agent_ref") or {}).get("name")
-        for row in rows
-        if (row.get("agent_ref") or {}).get("name") is not None
-    }
+    labels = rollout_run_labels(rows)
+    label_by_rollout = {}
+    for row in rows:
+        key = rollout_run_key(row)
+        if key is not None:
+            label_by_rollout[_rollout_key(row)] = labels[key]
 
     per_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for vr in results:
-        name = agent_of_key.get(_rollout_key(vr))
+        name = label_by_rollout.get(_rollout_key(vr))
         if name is not None:
             per_agent[name].append(vr)
 
@@ -985,6 +990,7 @@ def coverage_by_agent(
     for name, records in per_agent.items():
         scored, masked = _partition_on_mask(records)
         agent_coverage = _coverage_metrics(records, scored, masked)
+        agent_coverage.update(looping_metrics(records))
         if agent_coverage:
             coverage[name] = agent_coverage
     return coverage
@@ -1273,6 +1279,7 @@ def compute_aggregate_metrics(
     # rows stay in `verify_responses` and are reported as coverage below.
     scored, masked = _partition_on_mask(verify_responses)
     coverage = _coverage_metrics(verify_responses, scored, masked)
+    coverage.update(looping_metrics(verify_responses))
 
     if not scored:
         # Every rollout was masked. Publishing means over an empty set would invent a

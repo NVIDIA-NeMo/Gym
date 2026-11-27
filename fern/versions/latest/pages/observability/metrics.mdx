@@ -105,6 +105,17 @@ The share of `full` rollouts is a live view, not the benchmark score. Scores lik
 per-task averages are computed from all rollouts at the end by `/aggregate_metrics` and can differ
 from it.
 
+### Severe Text Repetition
+
+```yaml
+assess_looping: true
+```
+
+This optional collection assessment defaults to false and is independent of health checks. It measures returned assistant/reasoning text before token rebuilding.
+Rows carry `is_looping` and `reasons`: true confirms severe repetition, false means checks finished, and null means unreadable text, limits or execution failure prevented assessment.
+`looping/rate` is flagged/assessed (absent when assessed is zero); `looping/coverage` is assessed/completed.
+Masked completed outputs are included; failed or imputed benchmark zeros are excluded. Aggregation pools counts before computing ratios.
+
 ### Startup Metrics
 
 The stage histogram carries `nemo.gym.server.name`, `nemo.gym.server.type`, `nemo.gym.startup.stage`, and `nemo.gym.server.worker`. Stages are contiguous, so one process's stages add up to the time from its start to the moment it accepts connections.

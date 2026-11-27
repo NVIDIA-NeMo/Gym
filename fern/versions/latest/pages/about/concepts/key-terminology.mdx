@@ -116,6 +116,14 @@ Other features use some of these words in their own senses and keep them:
 
 ### Evaluation
 
+**Looping assessment** records whether the episode's assistant and reasoning text contains severe repetition.
+Enable collection with `++assess_looping=true`; it defaults to false and is independent of health checks.
+`is_looping` is true for a confirmed witness, false after all supported checks finish, and null when text is
+unreadable or exceeds a size or work limit; `reasons` contains `repeated_text` for confirmed loops.
+This is also called severe text repetition detection; tool repetition is outside its scope.
+`looping/rate` divides flagged by assessed completed outputs, and `looping/coverage` divides assessed by completed
+outputs. Masked completed outputs remain in this population; imputed missing or failed benchmark zeros do not.
+
 | Term | Definition |
 | --- | --- |
 | **Evaluation** | Run an agent on tasks, score results, and measure performance. See [Evaluation](/about/concepts/evaluation) and the [Evaluate](/evaluation) workflow. |

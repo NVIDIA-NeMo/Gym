@@ -63,6 +63,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.metrics.looping import looping_metrics
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -809,7 +810,7 @@ def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: boo
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
     # Outcome identity belongs to the collected attempt, not the materialized input.
     # Keep it for aggregation and resume without sending it to /verify (see _IDENTITY_KEYS).
-    for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
+    for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY, "is_looping", "reasons"):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     return payload
@@ -983,7 +984,7 @@ def _run_verification_payloads(
                 key: value
                 for key, value in row.items()
                 if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY, AGENT_CONTEXT_KEY_NAME)
-                and key not in _IDENTITY_KEYS
+                and key not in (*_IDENTITY_KEYS, "is_looping", "reasons")
             }
             # Agent context belongs only to the agent, including when a flat row keeps it in task_data.
             # Filter at the shared HTTP boundary so native and ATIF inputs preserve the same separation.
@@ -1188,6 +1189,9 @@ async def _call_aggregate_metrics(
 
                 await raise_for_status(agg_response)
                 agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+                looping = looping_metrics(agent_result_list)
+                agg_result.agent_metrics.update(looping)
+                agg_result.key_metrics.update(looping)
         except TimeoutError as error:
             if not deadline.expired():
                 raise  # Not this limit: a transport error keeps its own type and message.
@@ -2049,7 +2053,7 @@ class RolloutReverificationHelper(BaseModel):
                 if "instance_config" in row:
                     # Preserve the materialized task's training mask when the verifier omits this field.
                     result.setdefault("instance_config", row["instance_config"])
-                for key in (AGENT_REF_KEY_NAME, *_IDENTITY_KEYS):
+                for key in (AGENT_REF_KEY_NAME, *_IDENTITY_KEYS, "is_looping", "reasons"):
                     if key in row:
                         result[key] = row[key]
                 # Keep task_source alongside agent_ref: aggregation routes with the same resolver

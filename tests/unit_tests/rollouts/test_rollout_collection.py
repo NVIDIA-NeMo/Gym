@@ -691,6 +691,7 @@ class TestRolloutCollection:
             max_resident_rollout_tasks=max_resident_tasks,
             disable_aggregation=True,
             disable_health_check=True,
+            assess_looping=True,
             dispatch_reservation_interval_s=0.0,
         )
         dispatched = []
@@ -708,11 +709,20 @@ class TestRolloutCollection:
             assert url_path == "/run"
             assert server_name == f"{json[AGENT_REF_KEY_NAME]['name']}_environment_server"
             dispatched.append(json)
-            return FakeResponse(200, {"response": {}, "reward": 1.0})
+            return FakeResponse(200, {"response": {"output": [{"content": "loop " * 600}]}, "reward": 1.0})
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta", "gamma"))
 
+        async def rewrite_response(row, result, **kwargs):
+            assert result["is_looping"] is True
+            result["response"] = {"output": []}
+
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "enrich_run_result", rewrite_response)
         await RolloutCollectionHelper().run_from_config(config)
+        saved = [orjson.loads(line) for line in Path(config.output_jsonl_fpath).read_bytes().splitlines()]
+        assert len(saved) == 8
+        assert all(row["is_looping"] is True and row["reasons"] == ["repeated_text"] for row in saved)
+        assert all(row["reward"] == 1.0 and row["response"] == {"output": []} for row in saved)
 
         def identity(row: dict) -> tuple[str, int, int, int]:
             extra_body = json.loads(row["responses_create_params"]["metadata"]["extra_body"])
@@ -4288,12 +4298,13 @@ class TestRolloutCollection:
         assert [row[TASK_INDEX_KEY_NAME] for row in rows] == [1, 2]
         assert all(row["reward"] == 0.0 for row in rows)
 
-        # Only identity travels; dataset fields are added later, and only those real rows carry.
+        # Dataset fields are added later; synthetic rows stay marked for exclusion.
         assert rows[0] == {
             TASK_INDEX_KEY_NAME: 1,
             ROLLOUT_INDEX_KEY_NAME: 0,
             "agent_ref": {"name": "my_agent"},
             "reward": 0.0,
+            NG_NO_PERSIST_KEY: True,
         }
 
         assert _missing_rollout_rows_counted_as_zero([tmp_path / "absent.jsonl"], [], set()) == []
