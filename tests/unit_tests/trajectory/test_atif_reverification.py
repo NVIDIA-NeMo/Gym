@@ -719,12 +719,14 @@ def test_observation_results_are_paired_by_source_call_id() -> None:
 @pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
 def test_a_claude_code_skill_call_round_trips_with_the_skill_text_in_its_result(fold_thinking: bool) -> None:
     # Claude Code sends the text a Skill call loads as a message after the call's result, and only its session
-    # transcript names the call. Its parser appends the text to the call's function_call_output, so trajectory.json
-    # keeps it as that call's observation result and reverification projects the same response back.
+    # transcript names the call; each stream event has the uuid of its transcript entry. Its parser appends the text
+    # to the call's function_call_output, so trajectory.json keeps it as that call's observation result and
+    # reverification projects the same response back.
     skill_text = "Base directory for this skill: /workspace/.claude/skills/calculator\n\n# Calculator"
     events = [
         {
             "type": "assistant",
+            "uuid": "u1",
             "message": {
                 "id": "m1",
                 "content": [
@@ -734,15 +736,22 @@ def test_a_claude_code_skill_call_round_trips_with_the_skill_text_in_its_result(
         },
         {
             "type": "user",
+            "uuid": "u2",
             "message": {
                 "content": [
                     {"type": "tool_result", "tool_use_id": "call-skill", "content": "Launching skill: calculator"}
                 ]
             },
         },
-        {"type": "user", "isSynthetic": True, "message": {"content": [{"type": "text", "text": skill_text}]}},
+        {
+            "type": "user",
+            "uuid": "u3",
+            "isSynthetic": True,
+            "message": {"content": [{"type": "text", "text": skill_text}]},
+        },
         {
             "type": "assistant",
+            "uuid": "u4",
             "message": {
                 "id": "m2",
                 "content": [
@@ -752,19 +761,18 @@ def test_a_claude_code_skill_call_round_trips_with_the_skill_text_in_its_result(
         },
         {
             "type": "user",
+            "uuid": "u5",
             "message": {"content": [{"type": "tool_result", "tool_use_id": "call-bash", "content": "Result: 14"}]},
         },
-        {"type": "assistant", "message": {"id": "m3", "content": [{"type": "text", "text": "14"}]}},
+        {"type": "assistant", "uuid": "u6", "message": {"id": "m3", "content": [{"type": "text", "text": "14"}]}},
         {"type": "result", "subtype": "success", "is_error": False, "usage": {"input_tokens": 3, "output_tokens": 3}},
     ]
     transcript = [
-        {
-            "type": "user",
-            "isMeta": True,
-            "sourceToolUseID": "call-skill",
-            "message": {"role": "user", "content": [{"type": "text", "text": skill_text}]},
-        }
+        {"type": event["type"], "uuid": event["uuid"], "sessionId": "session", "message": event["message"]}
+        for event in events
+        if event["type"] in ("assistant", "user")
     ]
+    transcript[2].update(isMeta=True, sourceToolUseID="call-skill")
     items, _ = parse_stream_json(
         "\n".join(json.dumps(event) for event in events), fold_thinking=fold_thinking, transcript_records=transcript
     )

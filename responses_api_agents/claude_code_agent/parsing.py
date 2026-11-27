@@ -15,6 +15,7 @@
 
 import json
 import logging
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple, Optional
 from uuid import uuid4
@@ -33,6 +34,9 @@ LOG = logging.getLogger(__name__)
 
 # Claude Code reports a model stop_reason "refusal" as an is_error result with subtype "success" and this text.
 USAGE_POLICY_REFUSAL = "appears to violate our Usage Policy"
+
+# The Claude Code tool that loads a skill. Gym keeps the text it loads in the call's result.
+SKILL_TOOL_NAME = "Skill"
 
 
 def _extract_text(content: list[Any]) -> str:
@@ -123,7 +127,7 @@ def transcript_calls(records: Iterable[Any]) -> dict[str, TranscriptCall]:
 
 
 class ToolResultAdditions(NamedTuple):
-    """The text Claude Code adds to one tool call's result, in transcript order."""
+    """The text Claude Code adds to one Skill call's result, in transcript order."""
 
     # Lines Claude Code appends to the tool result itself (``appendToToolResult``).
     result_lines: list[str]
@@ -131,8 +135,26 @@ class ToolResultAdditions(NamedTuple):
     messages: list[str]
 
 
-def tool_result_additions(records: Iterable[Any]) -> dict[str, ToolResultAdditions]:
-    """The text Claude Code adds to each tool call's result, by the call's id, read from its session transcript.
+# A transcript entry's agent: ("session", sessionId) for a session's main agent, ("agent", agentId) for a subagent.
+_Invocation = tuple[str, str]
+
+
+def _invocation(record: Mapping[str, Any]) -> Optional[_Invocation]:
+    """The agent whose transcript holds ``record``: its subagent (``agentId``), else its session's main agent.
+
+    None for an entry that names neither, and for a subagent entry (``isSidechain``) that does not name its subagent.
+    """
+    agent_id = record.get("agentId")
+    if isinstance(agent_id, str) and agent_id:
+        return "agent", agent_id
+    session_id = record.get("sessionId")
+    if record.get("isSidechain") is True or not isinstance(session_id, str) or not session_id:
+        return None
+    return "session", session_id
+
+
+def tool_result_additions(records: Iterable[Any]) -> dict[tuple[str, str], ToolResultAdditions]:
+    """The text Claude Code adds to each Skill call's result, read from its session and subagent transcripts.
 
     The Skill tool answers its call with ``Launching skill: <name>`` and then sends the skill's text ("Base
     directory for this skill: ..." and its SKILL.md) as a message of its own, which the model reads right after
@@ -141,35 +163,65 @@ def tool_result_additions(records: Iterable[Any]) -> dict[str, ToolResultAdditio
     one more such message: its ``appendToToolResult`` line (``compatibility: ...``) goes into the tool result
     itself, and its text, an instruction about that line, follows the skill's text. Claude Code does this only in
     some session modes, not by default for ``claude -p``; the parser handles it if it appears.
+
+    Returns the text by (the ``uuid`` of the transcript entry that holds the call's result, the call's id). Claude
+    Code writes that result to the stream with the same ``uuid``, so the key names one result of one agent. A call
+    id alone does not: Claude's own ids are unique, but through a model server the model makes them, and the main
+    agent and a subagent can both have a call ``functions.Skill:0``. So the text is joined only to a call of the
+    agent whose transcript holds it (a session's main agent, or one subagent), only when that call is a ``Skill``
+    call, and only when its id names one call and one result in that agent's transcript; otherwise it is left out.
+    Each entry is read once, by its ``uuid``, so an entry that appears twice adds its text once; an entry without a
+    ``uuid`` is not read.
     """
-    additions: dict[str, ToolResultAdditions] = {}
+    seen: set[str] = set()
+    tool_names: dict[tuple[_Invocation, str], list[Any]] = defaultdict(list)
+    result_entries: dict[tuple[_Invocation, str], list[str]] = defaultdict(list)
+    added: dict[tuple[_Invocation, str], ToolResultAdditions] = {}
     for record in records:
-        if not isinstance(record, Mapping) or record.get("type") != "user":
+        if not isinstance(record, Mapping):
             continue
-        call_id = record.get("sourceToolUseID")
+        uuid = record.get("uuid")
+        if not isinstance(uuid, str) or not uuid or uuid in seen:
+            continue
+        seen.add(uuid)
+        invocation = _invocation(record)
         message = record.get("message")
-        if not isinstance(call_id, str) or not call_id or not isinstance(message, Mapping):
+        if invocation is None or not isinstance(message, Mapping):
             continue
         content = message.get("content")
+        blocks = [b for b in content if isinstance(b, Mapping)] if isinstance(content, list) else []
+        if record.get("type") == "assistant":
+            for block in blocks:
+                if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                    tool_names[(invocation, block["id"])].append(block.get("name"))
+            continue
+        if record.get("type") != "user":
+            continue
+        for block in blocks:
+            if block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
+                result_entries[(invocation, block["tool_use_id"])].append(uuid)
+        call_id = record.get("sourceToolUseID")
+        if not isinstance(call_id, str) or not call_id:
+            continue
         if isinstance(content, str):
             texts = [content]
-        elif isinstance(content, list):
-            texts = [
-                b["text"]
-                for b in content
-                if isinstance(b, Mapping) and b.get("type") == "text" and isinstance(b.get("text"), str)
-            ]
         else:
-            texts = []
+            texts = [b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str)]
         texts = [text for text in texts if text.strip()]
         line = record.get("appendToToolResult")
         lines = [line] if isinstance(line, str) and line.strip() else []
         if not texts and not lines:
             continue
-        added = additions.setdefault(call_id, ToolResultAdditions([], []))
-        added.result_lines.extend(lines)
+        call_added = added.setdefault((invocation, call_id), ToolResultAdditions([], []))
+        call_added.result_lines.extend(lines)
         if texts:
-            added.messages.append("\n\n".join(texts))
+            call_added.messages.append("\n\n".join(texts))
+
+    additions: dict[tuple[str, str], ToolResultAdditions] = {}
+    for key, call_added in added.items():
+        results = result_entries.get(key, [])
+        if tool_names.get(key) == [SKILL_TOOL_NAME] and len(results) == 1:
+            additions[(results[0], key[1])] = call_added
     return additions
 
 
@@ -207,12 +259,12 @@ def parse_stream_json(
     transcripts, the stream's per-message usage is all there is, which on servers that send output only at the end
     of a message (vLLM) holds input alone. ``cached_tokens`` is None when no cache count was reported.
 
-    Text Claude Code adds to a tool call's result, such as the text of a skill the Skill tool loads, is appended
-    to that call's ``function_call_output`` after the tool's own result, a blank line apart
-    (:func:`tool_result_additions`). Claude Code sends the skill's text as a message after the result; keeping it in
-    the result adds no item to the output, so readers of the model's answer and of tool results stay as they were.
-    The transcript records link the text to its call, so without them it is left out. A call whose result never
-    arrived has no ``function_call_output``, so its text is left out too.
+    The text of a skill the Skill tool loads is appended to that call's ``function_call_output`` after the tool's
+    own result, a blank line apart (:func:`tool_result_additions`). Claude Code sends the skill's text as a message
+    after the result; keeping it in the result adds no item to the output, so readers of the model's answer and of
+    tool results stay as they were. The transcript records link the text to its call, and the result's stream event
+    to its transcript entry by ``uuid``, so without them, or when the link is ambiguous, the text is left out. A
+    call whose result never arrived has no ``function_call_output``, so its text is left out too.
 
     ``fold_thinking=True`` (eval default) prefixes each assistant message with the model's thinking as
     ``<think>...</think>`` text. Under training-token capture that must be off: Gym attributes the finished
@@ -349,6 +401,8 @@ def parse_stream_json(
             content = message.get("content") or []
             if not isinstance(content, list):
                 continue
+            # The transcript entry of this message has the same uuid, which ties a result to one agent's call.
+            event_uuid = event.get("uuid") if isinstance(event.get("uuid"), str) else None
 
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
@@ -369,7 +423,7 @@ def parse_stream_json(
                         type="function_call_output",
                         call_id=tool_id,
                         # The model read the added text once, so a repeated result does not repeat it.
-                        output=_with_additions(result_text, additions.pop(tool_id, None)),
+                        output=_with_additions(result_text, additions.pop((event_uuid, tool_id), None)),
                         status="completed",
                     )
                 )

@@ -1774,7 +1774,8 @@ class TestCaptureFriendlyTranscript:
 
 # A real Claude Code 2.1.292 run that loads the calculator skill (tests/fixtures/claude_code_skill_call.json says what
 # was shortened). The Skill tool answers "Launching skill: calculator"; the skill's text follows as a message that the
-# stream marks only isSynthetic and the transcript links to the call with sourceToolUseID.
+# stream marks only isSynthetic and the transcript links to the call with sourceToolUseID. Each stream event has the
+# uuid of its transcript entry.
 SKILL_RUN = json.loads((Path(__file__).parent / "fixtures" / "claude_code_skill_call.json").read_text())
 SKILL_ENTRY = next(entry for entry in SKILL_RUN["transcript"] if entry.get("sourceToolUseID"))
 SKILL_TEXT = SKILL_ENTRY["message"]["content"][0]["text"]
@@ -1946,20 +1947,24 @@ class TestLoadedSkillText:
     @pytest.mark.parametrize("fold_thinking", [True, False])
     def test_a_subagents_skill_text_stays_with_its_frames(self, fold_thinking: bool) -> None:
         # The same run inside a subagent: evaluation output keeps subagent frames, capture output leaves them out.
-        task = {"type": "tool_use", "id": "task", "name": "Task", "input": {"prompt": "compute 2 + 3 * 4"}}
-        events = [_event("assistant", message={"id": "resp_parent", "content": [task]})]
+        # The subagent's transcript entries name it (agentId), and its stream events the call that started it.
+        spawn = _tool_call("spawn-call", "task", message_id="resp_parent", name="Task")
+        spawned = _result("spawn-result", "task", "14", toolUseResult={"agentId": "child"})
+        child = [{**entry, "isSidechain": True, "agentId": "child"} for entry in SKILL_RUN["transcript"]]
+        events = [_streamed(spawn)]
         for event in SKILL_RUN["stream"]:
             if event["type"] in ("assistant", "user"):
                 events.append(json.dumps({**event, "parent_tool_use_id": "task"}))
-        events.append(
-            _event("user", message={"content": [{"type": "tool_result", "tool_use_id": "task", "content": "14"}]})
-        )
+        events.append(_streamed(spawned))
         items, _ = parse_stream_json(
-            "\n".join(events), fold_thinking=fold_thinking, transcript_records=SKILL_RUN["transcript"]
+            "\n".join(events), fold_thinking=fold_thinking, transcript_records=[spawn, spawned, *child]
         )
         if fold_thinking:
-            assert _results(items)[SKILL_CALL_ID] == [SKILL_RESULT]
-            assert _results(items)["task"] == ["14"]
+            assert _results(items) == {
+                SKILL_CALL_ID: [SKILL_RESULT],
+                "call_ns5MdHHKci6nSW1KCjoSrc6O": ["Result: 14"],
+                "task": ["14"],
+            }
         else:
             assert [item.call_id for item in items] == ["task", "task"]
             assert _results(items) == {"task": ["14"]}
@@ -2010,24 +2015,42 @@ class TestLoadedSkillText:
         )
 
 
-def _skill_call(*call_ids: str, message_id: str) -> str:
-    calls = [{"type": "tool_use", "id": call_id, "name": "Skill", "input": {"skill": call_id}} for call_id in call_ids]
-    return _event("assistant", message={"id": message_id, "content": calls})
+def _entry(kind: str, uuid: str, content, *, agent: str | None = None, message_id: str | None = None, **extra) -> dict:
+    """A transcript entry of the session's main agent, or of subagent ``agent``."""
+    message = {"role": kind, "content": content, **({"id": message_id} if message_id else {})}
+    entry = {"type": kind, "uuid": uuid, "sessionId": "session", "isSidechain": agent is not None, "message": message}
+    return {**entry, **({"agentId": agent} if agent else {}), **extra}
 
 
-def _launched(call_id: str) -> str:
-    result = {"type": "tool_result", "tool_use_id": call_id, "content": f"Launching skill: {call_id}"}
-    return _event("user", message={"content": [result]})
+def _streamed(entry: dict, *, parent: str | None = None) -> str:
+    """The stream-json event of a transcript entry: the same message and uuid, and for a subagent's entry the call
+    that started the subagent. The stream does not carry sourceToolUseID."""
+    return _event(
+        entry["type"],
+        message=entry["message"],
+        uuid=entry["uuid"],
+        session_id=entry["sessionId"],
+        parent_tool_use_id=parent,
+    )
 
 
-def _skill_entry(call_id: str, text: str, **extra) -> dict:
-    return {
-        "type": "user",
-        "isMeta": True,
-        "sourceToolUseID": call_id,
-        "message": {"role": "user", "content": text},
-        **extra,
-    }
+def _tool_call(uuid: str, call_id: str, *, message_id: str, name: str = "Skill", agent: str | None = None) -> dict:
+    block = {"type": "tool_use", "id": call_id, "name": name, "input": {"skill": call_id}}
+    return _entry("assistant", uuid, [block], agent=agent, message_id=message_id)
+
+
+def _result(uuid: str, call_id: str, text: str | None = None, *, agent: str | None = None, **extra) -> dict:
+    block = {"type": "tool_result", "tool_use_id": call_id, "content": text or f"Launching skill: {call_id}"}
+    return _entry("user", uuid, [block], agent=agent, **extra)
+
+
+def _loaded(uuid: str, call_id: str, text: str, *, agent: str | None = None, **extra) -> dict:
+    """The entry of the message that holds a loaded skill's text, linked to its call by sourceToolUseID."""
+    return _entry("user", uuid, text, agent=agent, isMeta=True, sourceToolUseID=call_id, **extra)
+
+
+def _stream_of(*entries: dict, parent: str | None = None) -> list[str]:
+    return [_streamed(entry, parent=parent) for entry in entries]
 
 
 class TestSkillTextInEdgeCases:
@@ -2038,21 +2061,24 @@ class TestSkillTextInEdgeCases:
         # Two Skill calls in one message, whose results come back in reverse order, then one whose result the stream
         # repeats, one whose text was never written (the run was cut off after its result) and one that never got
         # its result, so its text, though in the transcript, has no result to join.
-        stream = "\n".join(
-            [
-                _skill_call("a", "b", message_id="m1"),
-                _launched("b"),
-                _launched("a"),
-                _skill_call("c", message_id="m2"),
-                _launched("c"),
-                _launched("c"),
-                _skill_call("d", message_id="m3"),
-                _launched("d"),
-                _skill_call("e", message_id="m4"),
-            ]
-        )
-        transcript = [_skill_entry(call_id, f"text of {call_id}") for call_id in ("a", "b", "c", "e")]
-        items, _ = parse_stream_json(stream, fold_thinking=fold_thinking, transcript_records=transcript)
+        transcript = [
+            _tool_call("u1", "a", message_id="m1"),
+            _tool_call("u2", "b", message_id="m1"),
+            _result("u3", "b"),
+            _loaded("u4", "b", "text of b"),
+            _result("u5", "a"),
+            _loaded("u6", "a", "text of a"),
+            _tool_call("u7", "c", message_id="m2"),
+            _result("u8", "c"),
+            _loaded("u9", "c", "text of c"),
+            _tool_call("u10", "d", message_id="m3"),
+            _result("u11", "d"),
+            _tool_call("u12", "e", message_id="m4"),
+            _loaded("u13", "e", "text of e"),
+        ]
+        # The stream repeats c's result; e's call never got its result, so e's text was not streamed either.
+        stream = _stream_of(*transcript[:9], transcript[7], *transcript[9:12])
+        items, _ = parse_stream_json("\n".join(stream), fold_thinking=fold_thinking, transcript_records=transcript)
         assert _results(items) == {
             "b": ["Launching skill: b\n\ntext of b"],
             "a": ["Launching skill: a\n\ntext of a"],
@@ -2077,22 +2103,107 @@ class TestSkillTextInEdgeCases:
         # some session modes, not by default for ``claude -p``). It puts the message's appendToToolResult line into
         # the tool result itself and its text after the skill's text.
         transcript = [
-            _skill_entry("a", "Base directory for this skill: /skills/a\n\n# A"),
-            _skill_entry(
+            _tool_call("u1", "a", message_id="m1"),
+            _result("u2", "a"),
+            _loaded("u3", "a", "Base directory for this skill: /skills/a\n\n# A"),
+            _loaded(
+                "u4",
                 "a",
                 "An instruction about the compatibility line.",
                 appendToToolResult="compatibility: needs a VPN",
             ),
         ]
-        items, _ = parse_stream_json(
-            "\n".join([_skill_call("a", message_id="m1"), _launched("a")]), transcript_records=transcript
-        )
+        items, _ = parse_stream_json("\n".join(_stream_of(*transcript)), transcript_records=transcript)
         assert _results(items) == {
             "a": [
                 "Launching skill: a\n\ncompatibility: needs a VPN\n\nBase directory for this skill: /skills/a\n\n# A"
                 "\n\nAn instruction about the compatibility line."
             ]
         }
+
+
+def _skill_load(prefix: str, call_id: str, skill: str, *, agent: str | None = None) -> list[dict]:
+    """A Skill call, its result and the entry that holds the loaded text, ``text of <skill>``."""
+    return [
+        _tool_call(f"{prefix}-call", call_id, message_id=f"resp-{prefix}", agent=agent),
+        _result(f"{prefix}-result", call_id, f"Launching skill: {skill}", agent=agent),
+        _loaded(f"{prefix}-text", call_id, f"text of {skill}", agent=agent),
+    ]
+
+
+def _with_subagent(main: list[dict], child: list[dict]) -> tuple[str, list[dict]]:
+    """A run whose main agent writes ``main``, starts a subagent that writes ``child``, and answers."""
+    spawn = _tool_call("spawn-call", "spawn", message_id="resp-spawn", name="Agent")
+    spawned = _result("spawn-result", "spawn", "done", toolUseResult={"agentId": "child"})
+    answer = _entry("assistant", "main-answer", [{"type": "text", "text": "14"}], message_id="resp-answer")
+    stream = _stream_of(*main, spawn) + _stream_of(*child, parent="spawn") + _stream_of(spawned, answer)
+    # Claude Code writes the main agent's entries to the session's transcript and the subagent's to a file of its own.
+    return "\n".join(stream), [*main, spawn, spawned, answer, *child]
+
+
+class TestSkillTextBelongsToOneAgentsSkillCall:
+    """The text a transcript entry links to a call id joins only a Skill call of the same agent, once.
+
+    Through a model server the model makes the call ids, so they need not be unique: Kimi K2 (the kimi_k2 tool parser)
+    numbers them per conversation, and the main agent and a subagent can each load a skill as ``functions.Skill:0``.
+    """
+
+    @pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
+    def test_the_main_agent_and_a_subagent_each_get_their_own_skill_text(self, fold_thinking: bool) -> None:
+        call = "functions.Skill:0"
+        stream, transcript = _with_subagent(
+            _skill_load("main", call, "a"), _skill_load("child", call, "b", agent="child")
+        )
+        items, _ = parse_stream_json(stream, fold_thinking=fold_thinking, transcript_records=transcript)
+        if fold_thinking:
+            assert _results(items) == {
+                call: ["Launching skill: a\n\ntext of a", "Launching skill: b\n\ntext of b"],
+                "spawn": ["done"],
+            }
+        else:
+            # Capture output leaves the subagent's frames out, and its skill text with them.
+            assert _results(items) == {call: ["Launching skill: a\n\ntext of a"], "spawn": ["done"]}
+            assert "text of b" not in json.dumps([item.model_dump() for item in items])
+
+    @pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
+    def test_a_subagents_skill_text_does_not_join_the_main_agents_bash_call(self, fold_thinking: bool) -> None:
+        # An id two agents share need not name the same tool: here the main agent's Bash call and the subagent's
+        # Skill call are both call_0.
+        bash = [
+            _tool_call("main-call", "call_0", message_id="resp-main", name="Bash"),
+            _result("main-result", "call_0", "Result: 14"),
+        ]
+        stream, transcript = _with_subagent(bash, _skill_load("child", "call_0", "b", agent="child"))
+        items, _ = parse_stream_json(stream, fold_thinking=fold_thinking, transcript_records=transcript)
+        child = ["Launching skill: b\n\ntext of b"] if fold_thinking else []
+        assert _results(items) == {"call_0": ["Result: 14", *child], "spawn": ["done"]}
+
+    def test_text_linked_to_a_bash_call_is_left_out(self) -> None:
+        transcript = [
+            _tool_call("u1", "call_0", message_id="m1", name="Bash"),
+            _result("u2", "call_0", "Result: 14"),
+            _loaded("u3", "call_0", "Base directory for this skill: /skills/a"),
+        ]
+        items, _ = parse_stream_json("\n".join(_stream_of(*transcript)), transcript_records=transcript)
+        assert _results(items) == {"call_0": ["Result: 14"]}
+
+    def test_an_id_that_names_two_calls_of_one_agent_is_left_out(self) -> None:
+        # The main agent made two Skill calls with one id (a model that numbers its calls anew after a context
+        # compaction could). Which text follows which call is not certain, so neither result gets one.
+        call = "functions.Skill:0"
+        transcript = [*_skill_load("first", call, "a"), *_skill_load("second", call, "b")]
+        items, _ = parse_stream_json("\n".join(_stream_of(*transcript)), transcript_records=transcript)
+        assert _results(items) == {call: ["Launching skill: a", "Launching skill: b"]}
+
+    @pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
+    def test_an_entry_read_twice_adds_its_text_once(self, fold_thinking: bool) -> None:
+        # The same entries (same uuid) twice: the text entry repeated, and the whole transcript read again.
+        transcript = list(SKILL_RUN["transcript"])
+        transcript.insert(transcript.index(SKILL_ENTRY) + 1, dict(SKILL_ENTRY))
+        items, _ = parse_stream_json(
+            _capture_stream(SKILL_RUN), fold_thinking=fold_thinking, transcript_records=transcript + transcript
+        )
+        assert _results(items) == {SKILL_CALL_ID: [SKILL_RESULT], "call_ns5MdHHKci6nSW1KCjoSrc6O": ["Result: 14"]}
 
 
 @pytest.mark.parametrize(
@@ -2108,23 +2219,29 @@ class TestSkillTextInEdgeCases:
 )
 def test_tool_result_additions_read_the_text_linked_to_a_call(content, expected) -> None:
     records = [
-        {"type": "user", "sourceToolUseID": "call", "isMeta": True, "message": {"role": "user", "content": content}},
-        # A tool result names its assistant entry, not a call; an attachment is no message, including the skills
-        # Claude Code sends again after compacting the context; a compaction summary names no call.
-        {"type": "user", "sourceToolAssistantUUID": "a", "message": {"role": "user", "content": "Launching skill: x"}},
-        {"type": "attachment", "sourceToolUseID": "call", "attachment": {"type": "command_permissions"}},
+        _tool_call("call-entry", "call", message_id="m1"),
+        _result("result-entry", "call"),
+        {**_loaded("text-entry", "call", "unused"), "message": {"role": "user", "content": content}},
+        # An attachment is no message, including the skills Claude Code sends again after compacting the context; a
+        # compaction summary names no call; an entry without a uuid, or a subagent's entry that does not name its
+        # subagent, is not read.
+        {"type": "attachment", "uuid": "x1", "sessionId": "session", "sourceToolUseID": "call", "attachment": {}},
         {
             "type": "attachment",
+            "uuid": "x2",
+            "sessionId": "session",
             "sourceToolUseID": "call",
             "attachment": {"type": "invoked_skills", "skills": [{"name": "x", "content": "loaded text"}]},
         },
-        {"type": "user", "isCompactSummary": True, "message": {"role": "user", "content": "Summary: loaded text"}},
+        _entry("user", "x3", "Summary: loaded text", isCompactSummary=True),
+        {key: value for key, value in _loaded("x4", "call", "no uuid").items() if key != "uuid"},
+        {key: value for key, value in _loaded("x5", "call", "no agentId", agent="child").items() if key != "agentId"},
     ]
     additions = tool_result_additions(records)
     if expected is None:
         assert additions == {}
     else:
-        assert additions == {"call": ToolResultAdditions(result_lines=[], messages=expected)}
+        assert additions == {("result-entry", "call"): ToolResultAdditions(result_lines=[], messages=expected)}
 
 
 @pytest.mark.asyncio
