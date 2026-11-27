@@ -1430,6 +1430,8 @@ class _RunRecordWriter:
         # The kinds of the staged records not yet handed to the sink, in write order, and the rows settled so far.
         self._undelivered: List[str] = []
         self._settled = 0
+        # Merged captures of staged records, deleted once the shard is published.
+        self._captures_to_delete: List[CaptureSnapshot] = []
         with self._locked() as lock:
             if self._staging is None:
                 self.failures_fpath.unlink(missing_ok=True)
@@ -1598,6 +1600,15 @@ class _RunRecordWriter:
             self.sink(kind, orjson.loads(line))
         return fpath
 
+    @property
+    def staged(self) -> bool:
+        """Whether records still go to the staging folder, so they reach the run folder only when it is published."""
+        return self._staging is not None
+
+    def delete_capture_on_publish(self, snapshot: CaptureSnapshot) -> None:
+        """Delete a staged record's merged capture once the shard is published; never if it is not."""
+        self._captures_to_delete.append(snapshot)
+
     def row_settled(self) -> None:
         """Count one of the shard's rows as settled, whether it wrote a record or raised; end the shard after the last.
 
@@ -1686,6 +1697,9 @@ class _RunRecordWriter:
         self._staging = None
         if self._status is not None:
             self._status.status_fpath = self.status_fpath
+        captures, self._captures_to_delete = self._captures_to_delete, []
+        for snapshot in captures:
+            _start_capture_deletion(snapshot)
         try:
             self._deliver(staging)
         finally:
@@ -6570,9 +6584,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
         (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
         the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
-        enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
-        is merged and its row is written, or as its result is returned, and needs the payloads kept. With ``enrich_results`` the rows are dispatched as collection
-        dispatches them, on copies that name this call's run: results are validated, and under
+        enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file once it
+        is merged and its row is saved (with ``record_staging_dir``, once the shard is published; never for a row the
+        shard does not keep), or as its result is returned, and needs the payloads kept. With ``enrich_results`` the
+        rows are dispatched as collection dispatches them, on copies that name this call's run: results are
+        validated, and under
         ``route_failures_to_sidecar`` a failed `/run` comes back as the typed ``RolloutFailureRecord``, as
         ``run_outcomes`` returns it; rows without a rollout identity keep the plain dispatch. With ``enrich_results``
         off, results are exactly what `/run` returned.
@@ -6670,10 +6686,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     completed.row, record, rollout_latency_ms=completed.rollout_latency_ms, **options
                 )
                 _reflect_enrichment(completed.result, record)
-                writer.write(record)
-                if snapshot is not None:
-                    # Only once the row is saved: a cancel before the write would lose the capture with nothing saved.
-                    await asyncio.to_thread(clear_model_call_capture_after_snapshot, snapshot)
+                # Deleted only once the row is saved: never for a row the shard does not keep, and for a staged row
+                # only when its shard is published.
+                if writer.write(record) is not None and snapshot is not None:
+                    if writer.staged:
+                        writer.delete_capture_on_publish(snapshot)
+                    else:
+                        await asyncio.to_thread(clear_model_call_capture_after_snapshot, snapshot)
 
         else:
             returned_schema = trajectory_schema_version

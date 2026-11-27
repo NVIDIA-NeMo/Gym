@@ -23,6 +23,7 @@ A call is correlated by a /ng-rollout/<rollout_id>/v1/... base_url prefix, which
 """
 
 import asyncio
+import errno
 import fcntl
 import json
 import logging
@@ -139,6 +140,8 @@ _CLAIMS_SUFFIX = ".capture.claims"
 _CLAIM_APPEND_ATTEMPTS = 5
 # A claims lock is held for one read or one append; a reader that waits longer counts the claims as outstanding.
 _CLAIMS_LOCK_WAIT_S = 5.0
+# A claims file this process cannot create or write, as in an archived run: no call can claim there either.
+_READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
 
 
 def _pending_marker_rollout_id(name: str) -> Optional[str]:
@@ -297,7 +300,8 @@ class CaptureStore:
         The read and the unlink hold the claims file's lock, and an appender skips a deleted file, so a claim
         taken at any point stays visible. A lock still held after ``lock_wait_s`` keeps the file.
         ``while_locked`` runs under that lock before the check, so True means no call claimed or released while it
-        ran. It does not run if the lock is not taken.
+        ran. It does not run if the lock is not taken. Where this process cannot write (an archived run), nothing is
+        deleted: the claims are read under a shared lock, and a missing claims file counts as settled.
         """
         path = self.claims_path_for(rollout_id)
         for _ in range(_CLAIM_APPEND_ATTEMPTS):
@@ -306,6 +310,10 @@ class CaptureStore:
                 handle = path.open("r+b" if while_locked is None else "a+b")
             except FileNotFoundError:
                 return True
+            except OSError as error:
+                if error.errno not in _READ_ONLY_ERRNOS:
+                    raise
+                return self._claims_settled_read_only(rollout_id, lock_wait_s, while_locked)
             with handle:
                 if not _lock_within(handle, fcntl.LOCK_EX, lock_wait_s):
                     return False
@@ -325,6 +333,26 @@ class CaptureStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return while_locked is None and not self.has_pending(rollout_id, lock_wait_s=lock_wait_s)
+
+    def _claims_settled_read_only(
+        self, rollout_id: str, lock_wait_s: float, while_locked: Optional[Callable[[], None]]
+    ) -> bool:
+        """``delete_claims_if_settled`` for claims this process cannot write: a read under a shared lock."""
+        try:
+            handle = self.claims_path_for(rollout_id).open("rb")
+        except FileNotFoundError:
+            if while_locked is not None:
+                while_locked()
+            return True
+        with handle:
+            if not _lock_within(handle, fcntl.LOCK_SH, lock_wait_s):
+                return False
+            try:
+                if while_locked is not None:
+                    while_locked()
+                return not _has_outstanding_claim(handle.read())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def capture_identity(
         self, rollout_id: str, *, lock_wait_s: float = _CLAIMS_LOCK_WAIT_S

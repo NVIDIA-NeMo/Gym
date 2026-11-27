@@ -2703,6 +2703,20 @@ def build_file_resume(
 # ---------------------------------------------------------------------------
 
 
+async def _finish_despite_cancel(work: Awaitable[None]) -> None:
+    """Await ``work`` to its end even if this task is cancelled meanwhile, then raise the cancel."""
+    task = asyncio.ensure_future(work)
+    cancel: Optional[asyncio.CancelledError] = None
+    while not task.done():
+        try:
+            await asyncio.wait([task])
+        except asyncio.CancelledError as error:
+            cancel = error
+    if cancel is not None and (task.cancelled() or task.exception() is None):
+        raise cancel
+    task.result()
+
+
 async def run_rollout_collection(
     rollout_collection_config, global_config_dict: Mapping[str, Any]
 ) -> Optional[Path]:  # pragma: no cover
@@ -2800,6 +2814,22 @@ async def run_e2e_multistage(
             _attach_trajectory_record(row, result, schema_version=trajectory_schema_version)
         _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
+    async def save_rollout(
+        row: Dict[str, Any],
+        result: Dict[str, Any],
+        rollout_latency_ms: Optional[float],
+        on_result: RolloutResultSink,
+    ) -> None:
+        """Attach a finished rollout's evidence and save it. A cancel meanwhile is raised once it is saved."""
+
+        # The merge runs off the event loop, so without this a cancel there would drop a finished rollout unsaved
+        # and a resume would run it again.
+        async def save() -> None:
+            await attach_rollout_evidence(row, result, rollout_latency_ms)
+            on_result(row, result)
+
+        await _finish_despite_cancel(save())
+
     async def verify_cached(
         row: Dict[str, Any], semaphore: Any, server_client: Any, on_result: RolloutResultSink
     ) -> Tuple[Dict, Optional[Dict]]:
@@ -2833,8 +2863,7 @@ async def run_e2e_multistage(
         result[NG_RESULT_TYPE_KEY] = next(
             iter(server_client.global_config_dict[environment_server]["environment_servers"])
         )
-        await attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
-        on_result(row, result)
+        await save_rollout(row, result, (time.time() - started_at) * 1000, on_result)
         return row, result
 
     async def dispatch(
@@ -2861,8 +2890,7 @@ async def run_e2e_multistage(
                 completed.result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
             if completed.environment_server_type is not None:
                 completed.result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
-            await attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
-            on_result(completed.row, completed.result)
+            await save_rollout(completed.row, completed.result, completed.rollout_latency_ms, on_result)
             results.append((completed.row, completed.result))
 
         completions = helper._run_examples_with_metadata(

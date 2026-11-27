@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import orjson
 import pytest
 from omegaconf import OmegaConf
@@ -865,6 +867,34 @@ def test_merge_keeps_the_calls_it_read_when_the_claims_cannot_be_checked(tmp_pat
     assert len(record["ng_model_call_capture"]["calls"]) == 1
     assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["model_call_capture_pending"]
     assert "Could not check the capture claims" in caplog.text
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a read-only folder")
+@pytest.mark.parametrize("claims", ["missing", "settled", "outstanding"])
+def test_a_read_only_archive_is_pending_only_while_a_claim_is_outstanding(tmp_path, claims):
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("18-0", "call-1")
+    store.record("18-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    if claims != "outstanding":
+        store.clear_pending("18-0", "call-1")
+    if claims == "missing":
+        store.delete_claims("18-0")
+    files = sorted(tmp_path.iterdir())
+    for path in files:
+        path.chmod(0o444)
+    tmp_path.chmod(0o555)
+    try:
+        record = merge_model_call_capture_into_record({"_ng_task_index": 18, "_ng_rollout_index": 0}, [tmp_path])
+    finally:
+        tmp_path.chmod(0o755)
+
+    capture = record["ng_model_call_capture"]
+    assert len(capture["calls"]) == 1
+    expected = ["model_call_capture_pending"] if claims == "outstanding" else []
+    assert [gap["code"] for gap in capture.get("gaps", [])] == expected
+    assert sorted(tmp_path.iterdir()) == files
 
 
 def test_clearing_before_dispatch_removes_only_the_cleared_keys_pending_markers(tmp_path):

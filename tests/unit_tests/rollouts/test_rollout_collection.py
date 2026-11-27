@@ -17240,6 +17240,102 @@ class TestRunRecordWriter:
         assert at_write == [True]
         assert not CaptureStore(capture_dir).path_for(keys[0]).exists()
 
+    @pytest.mark.parametrize("record_omitted_rollouts", [False, True])
+    async def test_a_recorded_shard_keeps_the_capture_of_a_row_it_does_not_save(
+        self, tmp_path: Path, record_omitted_rollouts: bool
+    ) -> None:
+        from nemo_gym.models.model_call_capture import CaptureStore
+
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        keys = []
+        interrupted = {
+            NG_FAILURE_CLASS_KEY: "kill_shaped",
+            NG_NO_PERSIST_KEY: True,
+            "ng_agent_observations": {"source": "harness", "records": []},
+        }
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                keys.append(maybe_rollout_id_from_run_body(examples[0]))
+                TestEnrichRunResult._store_call(capture_dir, keys[0], "c1", "before the kill")
+                future = Future()
+                future.set_result(_CompletedRollout(row=examples[0], result=interrupted, rollout_latency_ms=1.0))
+                return iter([future])
+
+        [completion] = list(
+            Helper().run_examples(
+                [TestEnrichRunResult._row()],
+                record_output_dir=tmp_path / "run",
+                record_shard="s",
+                record_omitted_rollouts=record_omitted_rollouts,
+                delete_model_call_capture=True,
+            )
+        )
+        await completion
+
+        assert CaptureStore(capture_dir).path_for(keys[0]).exists() is not record_omitted_rollouts
+
+    async def test_a_staged_shard_deletes_its_captures_only_once_it_is_published(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import threading
+
+        from nemo_gym.models.model_call_capture import CaptureStore
+        from nemo_gym.rollouts import rollout_collection
+
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        keys = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    keys.append(maybe_rollout_id_from_run_body(row))
+                    TestEnrichRunResult._store_call(capture_dir, keys[-1], "c1", "first")
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=row, result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                    )
+                    futures.append(future)
+                return iter(futures)
+
+        deleted, both_deleted = [], threading.Event()
+        clear = rollout_collection.clear_model_call_capture_after_snapshot
+
+        def counted_clear(snapshot) -> None:
+            clear(snapshot)
+            deleted.append(snapshot.rollout_id)
+            if len(deleted) == 2:
+                both_deleted.set()
+
+        monkeypatch.setattr(rollout_collection, "clear_model_call_capture_after_snapshot", counted_clear)
+        rows = [TestEnrichRunResult._row("a"), {**TestEnrichRunResult._row("b"), TASK_INDEX_KEY_NAME: 4}]
+        first, second = list(
+            Helper().run_examples(
+                rows,
+                record_output_dir=tmp_path / "run",
+                record_shard="s",
+                record_staging_dir=tmp_path / "local",
+                delete_model_call_capture=True,
+            )
+        )
+        await first
+
+        # The first row is only staged: its capture stays until the shard reaches the run folder.
+        assert deleted == [] and all(CaptureStore(capture_dir).path_for(key).exists() for key in keys)
+        await second
+        assert (tmp_path / "run" / "rollouts-s.jsonl").exists()
+        assert await asyncio.to_thread(both_deleted.wait, 5)
+        assert not any(CaptureStore(capture_dir).path_for(key).exists() for key in keys)
+
     @pytest.mark.parametrize("scope_rollout_ids", [True, False])
     async def test_a_caller_with_unique_ids_can_keep_them_in_a_recorded_shard(
         self, tmp_path: Path, scope_rollout_ids: bool
