@@ -1,0 +1,43 @@
+{
+ "schema_version": 1,
+ "benchmark": "cgbench",
+ "dataset_source": "https://huggingface.co/datasets/CG-Bench/CG-Bench",
+ "dataset_revision": "aa63c0b7f74b5b43b5e0c1f012ea96bc9f460c57",
+ "setting": "single_turn",
+ "answer_policy": "cgbench_rule_v1",
+ "task_ids": [
+  "cgbench:fixture-1",
+  "cgbench:fixture-2"
+ ],
+ "task_subsets": {
+  "cgbench:fixture-1": {
+   "category": [
+    "Perception"
+   ],
+   "sub_category": [
+    "2D Spatial Perception"
+   ],
+   "domain": [
+    "GUI"
+   ],
+   "duration": [
+    "0-10m"
+   ]
+  },
+  "cgbench:fixture-2": {
+   "category": [
+    "Cognition"
+   ],
+   "sub_category": [
+    "Event Cognition"
+   ],
+   "domain": [
+    "News"
+   ],
+   "duration": [
+    "20-30m"
+   ]
+  }
+ },
+ "num_repeats": 1
+}

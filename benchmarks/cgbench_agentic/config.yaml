@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic CG-Bench full (12,129 questions, 1,219 videos, 5-8 options, long_acc without subtitles):
+# OpenCode answers each question in a sandbox lent by the cgbench resources server using
+# resources_servers/video_mcqa/sandbox_image (watch_video and view_image). Scored by cgbench_rule_v1 by default;
+# pass ++prepare_script_args.prompt=boxed ++prepare_script_args.answer_policy=boxed_only_v1 for boxed scoring, or
+# append resources_servers/cgbench/configs/cgbench_agentic_llm_extraction.yaml and prepare with
+# ++prepare_script_args.answer_policy=llm_extraction_v1 for judge-based extraction.
+# Needs VIDEO_MCQA_SANDBOX_IMAGE and OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY.
+config_paths:
+  - resources_servers/cgbench/configs/cgbench_agentic.yaml
+
+cgbench_agentic_source_dir: null
+cgbench_agentic_video_dir: ${cgbench_agentic_source_dir}/cg_videos_720p
+cgbench_agentic_cohort_manifest: benchmarks/cgbench_agentic/data/cgbench_agentic_cohort.json
+cgbench_agentic_video_roots:
+  - ${cgbench_agentic_video_dir}
+num_repeats: 1
+prepare_script_args:
+  source_dir: ${cgbench_agentic_source_dir}
+  video_dir: ${cgbench_agentic_video_dir}
+  num_repeats: ${num_repeats}
+
+cgbench_agentic_opencode:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+      - name: cgbench_agentic
+        type: benchmark
+        jsonl_fpath: benchmarks/cgbench_agentic/data/cgbench_agentic_benchmark.jsonl
+        prepare_script: benchmarks/cgbench_agentic/prepare.py
+        num_repeats: 1
