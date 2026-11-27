@@ -29,18 +29,20 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter, deque
+from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Sequence, TypeVar, Union
 
 import aiohttp
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -91,6 +93,101 @@ def _extract_judge_rating(judge_text: str) -> Optional[int]:
     return int(matches[-1]) if matches else None
 
 
+# reward_mode 'rubric' grades a row's rubric as finance_agent_v2's /verify does. Keep RubricJudgement,
+# aggregate_rubric_scores and the rubric judge methods in step with finance_agent_v2's, so a rubric
+# scores the same on either server.
+
+# Ceiling on the escalated judge output budget (see _judge_attempt).
+_JUDGE_MAX_OUTPUT_TOKENS_CAP = 32768
+# Failed-reply text kept per criterion for debugging; bounded because these ride
+# along in every rollout row.
+_MAX_FAILED_REPLY_SAMPLES = 3
+_FAILED_REPLY_SAMPLE_CHARS = 600
+
+
+class RubricJudgement(BaseModel):
+    """Per-criterion verdict plus everything needed to audit it.
+
+    ``score`` is None when the judge never produced enough parsable verdicts. That is
+    a judge failure, not a "not met": reward drops to 0.0 but ``judge_error`` is set
+    so those rows stay filterable.
+    """
+
+    criteria: str
+    operator: Optional[str] = None
+    # Upstream weights, recorded per criterion so Partial Credit can be recomputed
+    # from the rollout alone. Never shown to the judge; applied after grading.
+    severity: float = 1.0
+    must_pass: bool = False
+    score: Optional[int] = None
+    # Successful verdicts in call order.
+    votes: List[int] = Field(default_factory=list)
+    votes_for: int = 0
+    votes_against: int = 0
+    # False when the judge contradicted itself; aggregated into a disagreement rate.
+    unanimous: Optional[bool] = None
+    attempts_used: int = 0
+    parse_failures: int = 0
+    api_failures: int = 0
+    # One entry per successful vote, in the same order as ``votes``.
+    evidence: List[str] = Field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
+    # First few failed replies, clipped: a parse failure is only diagnosable from
+    # the raw text.
+    failed_reply_samples: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+def aggregate_rubric_scores(judgements: Sequence[RubricJudgement]) -> Dict[str, Any]:
+    """Aggregate per-criterion verdicts into Vals's Partial Credit and friends.
+
+    Partial Credit is the severity-weighted pass fraction, forced to 0.0 when any
+    ``must_pass`` criterion failed. Only an affirmative pass counts, so an unresolved
+    criterion weighs as a miss and gates like one; verify() flags those rows with
+    ``judge_error`` rather than dropping them, which would inflate broken runs.
+
+    Kept module-level and free of server state so stored verdicts can be rescored
+    offline through this exact code.
+    """
+    total = len(judgements)
+    passed = sum(1 for j in judgements if j.score == 1)
+    unresolved = sum(1 for j in judgements if j.score is None)
+
+    weight_total = sum(j.severity for j in judgements)
+    weight_passed = sum(j.severity for j in judgements if j.score == 1)
+    weighted_fraction = (weight_passed / weight_total) if weight_total else None
+
+    dealbreakers_total = sum(1 for j in judgements if j.must_pass)
+    dealbreakers_failed = sum(1 for j in judgements if j.must_pass and j.score != 1)
+
+    return {
+        "rubric_total": total,
+        "rubric_passed": passed,
+        "rubric_unresolved": unresolved,
+        "rubric_fraction": (passed / total) if total else None,
+        "rubric_all_pass": unresolved == 0 and passed == total,
+        "rubric_partial_credit": 0.0 if dealbreakers_failed else (weighted_fraction or 0.0),
+        "rubric_weighted_fraction": weighted_fraction,
+        "rubric_weight_total": weight_total,
+        "rubric_weight_passed": weight_passed,
+        "rubric_dealbreakers_total": dealbreakers_total,
+        "rubric_dealbreakers_failed": dealbreakers_failed,
+    }
+
+
+class _JudgeAttempt(NamedTuple):
+    """One judge call's outcome.
+
+    ``score`` None means retry; ``starved`` marks the failures a larger output budget
+    can fix (hit max_output_tokens or emitted nothing), which gates escalation.
+    """
+
+    score: Optional[int]
+    error: Optional[str]
+    reply: str
+    starved: bool
+
+
 class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for Finance SEC Search resource server."""
 
@@ -135,11 +232,39 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         default=100000,
         description="If the document is larger than this threshold characters, give a warning to the model to use char ranges.",
     )
-    reward_mode: Literal["binary", "scaled"] = Field(
+    reward_mode: Literal["binary", "scaled", "rubric"] = Field(
         default="binary",
         description="How judge ratings map to rewards. "
         "'binary': only [[2]] → 1.0, else 0.0. "
-        "'scaled': [[0]] → 0.0, [[1]] → 0.5, [[2]] → 1.0.",
+        "'scaled': [[0]] → 0.0, [[1]] → 0.5, [[2]] → 1.0. "
+        "'rubric': each criterion of the row's rubric is judged on its own, as finance_agent_v2 does, and the "
+        "reward is its Partial Credit: the severity-weighted share of criteria met, 0.0 if a must_pass one failed.",
+    )
+    rubric_judge_prompt_template: Optional[str] = Field(
+        default=None,
+        description="reward_mode 'rubric': inline rubric judge prompt template. Takes priority over "
+        "rubric_judge_prompt_template_fpath. Supports {question}, {generated_answer}, "
+        "{criterion} placeholders and grades one criterion per call.",
+    )
+    rubric_judge_prompt_template_fpath: str = Field(
+        default="prompt_templates/finance_sec_search_rubric_judge.yaml",
+        description="reward_mode 'rubric': fallback file path for the rubric judge prompt template.",
+    )
+    judge_required_successes: int = Field(
+        default=3,
+        description="reward_mode 'rubric': successful (parsed) judge verdicts needed per criterion before "
+        "voting. Keep odd so the majority cannot tie.",
+    )
+    judge_max_attempts: int = Field(
+        default=10,
+        description="reward_mode 'rubric': hard cap on judge calls per criterion. Whichever comes first, "
+        "judge_required_successes or this, ends the criterion. Falling short leaves the criterion "
+        "unresolved (score null).",
+    )
+    judge_max_concurrency: int = Field(
+        default=4,
+        description="reward_mode 'rubric': max concurrent judge calls per rollout, across criteria. "
+        "1 makes judging fully sequential.",
     )
     retrieval_max_output_tokens: Optional[int] = Field(
         default=None,
@@ -196,6 +321,12 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         description="Maximum allowed end_date for all date-filtered tools (web_search, edgar_search, etc.). "
         "When set, dates beyond this are clamped and omitted end_dates default to this value. "
         "Set to null (default) to disable clamping.",
+    )
+    cap_tool_dates_at_as_of_date: bool = Field(
+        default=False,
+        description="Cap the start_date and end_date of every sec_filing_search, edgar_search and web_search "
+        "call at the row's as_of_date (YYYY-MM-DD), as finance_agent_v2 does; max_end_date still applies. "
+        "A session keeps the as_of_date of its first seed. Off (default): a row's as_of_date is ignored.",
     )
     supplementary_tickers_fpath: Optional[str] = Field(
         default=None,
@@ -348,6 +479,9 @@ class WebSearchResponse(BaseModel):
     results: str = Field(description="JSON string with search results")
 
 
+_DatedToolRequest = TypeVar("_DatedToolRequest", FinanceAgentSearchRequest, EdgarSearchRequest, WebSearchRequest)
+
+
 class ParseHtmlPageRequest(BaseModel):
     """Request model for parse_html_page tool."""
 
@@ -361,6 +495,29 @@ class ParseHtmlPageResponse(BaseModel):
     results: str = Field(description="Status message about data storage operation")
 
 
+class FinanceAgentSeedSessionRequest(BaseSeedSessionRequest):
+    """Seed request: the row, of which only ``as_of_date`` is read."""
+
+    # Any type, so a row's as_of_date of any shape never fails a seed while cap_tool_dates_at_as_of_date is off.
+    as_of_date: Optional[Any] = Field(
+        default=None,
+        description="cap_tool_dates_at_as_of_date only: YYYY-MM-DD date the question is answered as of. "
+        "Null leaves tool dates uncapped.",
+    )
+
+
+def cap_tool_dates(args: Dict[str, Any], as_of_date: str) -> Dict[str, Any]:
+    """Return ``args`` with ``end_date`` and ``start_date`` no later than ``as_of_date`` (YYYY-MM-DD)."""
+    capped = dict(args)
+    end_date = capped.get("end_date")
+    if not isinstance(end_date, str) or not end_date or end_date > as_of_date:
+        capped["end_date"] = as_of_date
+    start_date = capped.get("start_date")
+    if isinstance(start_date, str) and start_date > as_of_date:
+        capped["start_date"] = as_of_date
+    return capped
+
+
 class FinanceAgentRunRequest(BaseRunRequest):
     """Run request with question and expected answer."""
 
@@ -371,7 +528,15 @@ class FinanceAgentRunRequest(BaseRunRequest):
 class FinanceAgentVerifyRequest(FinanceAgentRunRequest, BaseVerifyRequest):
     """Verify request for SEC search tasks."""
 
-    pass
+    # Any type, so a row's rubric of any shape never fails a request in the other reward modes, and
+    # excluded from model_dump(), so no response the other modes write carries it.
+    rubric: Optional[Any] = Field(
+        default=None,
+        exclude=True,
+        description="reward_mode 'rubric' only: JSON string of the row's rubric criteria, as finance_agent_v2 "
+        "reads it. Each entry has 'criteria' (the claim to grade), 'operator', and optionally 'modifiers' with "
+        "'severity' (weight) and 'category' ('must_pass' marks a dealbreaker).",
+    )
 
 
 class FinanceAgentVerifyResponse(BaseVerifyResponse):
@@ -380,6 +545,35 @@ class FinanceAgentVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     judge_rating: Optional[int] = None
     judge_text: Optional[str] = None
+
+
+class FinanceAgentRubricVerifyResponse(FinanceAgentVerifyResponse):
+    """Verify response for reward_mode 'rubric', with finance_agent_v2's rubric fields.
+
+    ``reward`` is Vals's Partial Credit: the severity-weighted pass fraction, forced
+    to 0.0 if any ``must_pass`` criterion failed.
+    """
+
+    # Full per-criterion record — the debugging trail and the disagreement signal.
+    rubric_judgements: Optional[List[RubricJudgement]] = None
+    rubric_total: Optional[int] = None
+    rubric_passed: Optional[int] = None
+    rubric_unresolved: Optional[int] = None
+    # Unweighted pass fraction.
+    rubric_fraction: Optional[float] = None
+    rubric_all_pass: Optional[bool] = None
+    # The reward, restated under its Vals name so the leaderboard metric is greppable.
+    rubric_partial_credit: Optional[float] = None
+    # Partial Credit before gating; the gap between the two is what the dealbreakers
+    # cost.
+    rubric_weighted_fraction: Optional[float] = None
+    rubric_weight_total: Optional[float] = None
+    rubric_weight_passed: Optional[float] = None
+    rubric_dealbreakers_total: Optional[int] = None
+    rubric_dealbreakers_failed: Optional[int] = None
+    # Set when scoring could not complete (no rubric, or an unresolved criterion), so
+    # a judge failure is filterable rather than read as a genuine miss.
+    judge_error: Optional[str] = None
 
 
 # ============================================================================
@@ -497,6 +691,8 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         # session_id -> {key -> parsed text content}; scoped by HTTP session cookie
         self._data_storage: Dict[str, Dict[str, str]] = {}
         self._session_start_times: Dict[str, float] = {}
+        # session_id -> the as_of_date its tool dates are capped at (cap_tool_dates_at_as_of_date).
+        self._as_of_dates: Dict[str, str] = {}
 
         # Inline template takes priority over file
         if self.config.judge_prompt_template:
@@ -505,6 +701,13 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             with open(self.config.judge_prompt_template_fpath, "r") as f:
                 data = yaml.safe_load(f)
             self._judge_prompt_template = data["judge_prompt_template"].strip()
+
+        if self.config.reward_mode == "rubric":
+            if self.config.rubric_judge_prompt_template:
+                self._rubric_judge_prompt_template = self.config.rubric_judge_prompt_template.strip()
+            else:
+                with open(self.config.rubric_judge_prompt_template_fpath, "r") as f:
+                    self._rubric_judge_prompt_template = yaml.safe_load(f)["rubric_judge_prompt_template"].strip()
 
         if self.config.retrieval_system_prompt:
             self._retrieval_system_prompt = self.config.retrieval_system_prompt.strip()
@@ -606,9 +809,39 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
         return None
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
-        """Reset per-question data storage for this session."""
+    def _capped_at_as_of_date(self, request: Request, body: _DatedToolRequest) -> _DatedToolRequest:
+        """``body`` with its dates capped at the session's as_of_date, when it has one."""
+        as_of_date = self._as_of_dates.get(request.session.get(SESSION_ID_KEY, ""))
+        if as_of_date is None:
+            return body
+        return body.model_copy(
+            update=cap_tool_dates({"start_date": body.start_date, "end_date": body.end_date}, as_of_date)
+        )
+
+    def _checked_as_of_date(self, value: Any) -> str:
+        """``value`` if it is a YYYY-MM-DD calendar date, which finance_agent_v2's seed also requires."""
+        if isinstance(value, str) and self._DATE_RE.match(value):
+            try:
+                date.fromisoformat(value)
+                return value
+            except ValueError:
+                pass
+        raise HTTPException(status_code=422, detail=f"as_of_date must be a YYYY-MM-DD date, got {value!r}")
+
+    async def seed_session(self, request: Request, body: FinanceAgentSeedSessionRequest) -> BaseSeedSessionResponse:
+        """Reset per-question data storage for this session.
+
+        With cap_tool_dates_at_as_of_date, the session's first seed also sets the date its tool calls are
+        capped at, and a later seed never moves it: the agent forwards any tool name the model emits, so the
+        model can reach this endpoint mid-rollout.
+        """
         session_id = request.session[SESSION_ID_KEY]
+        if (
+            self.config.cap_tool_dates_at_as_of_date
+            and body.as_of_date is not None
+            and session_id not in self._as_of_dates
+        ):
+            self._as_of_dates[session_id] = self._checked_as_of_date(body.as_of_date)
         self._data_storage[session_id] = {}
         self._session_start_times[session_id] = time.monotonic()
         logger.debug("seed_session: reset data storage for session %s", session_id)
@@ -1045,6 +1278,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         """
         if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
             return FinanceAgentSearchResponse(results=timeout_msg)
+        body = self._capped_at_as_of_date(request, body)
 
         company = await self._resolve_ticker(body.ticker)
 
@@ -1122,6 +1356,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 results=json.dumps({"error": "edgar_search is not available. edgar_search_mode is not set."})
             )
 
+        body = self._capped_at_as_of_date(request, body)
         return EdgarSearchResponse(results=await self._edgar_search_service.run(body.model_dump()))
 
     # ========================================================================
@@ -1410,6 +1645,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if not search_query or not search_query.strip():
             return WebSearchResponse(results=json.dumps({"error": "search_query is required and cannot be empty."}))
 
+        body = self._capped_at_as_of_date(request, body)
         try:
             _, end_date = self._validate_and_clamp_dates(None, body.end_date)
         except ValueError as e:
@@ -1468,7 +1704,382 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
         )
 
-    async def verify(self, request: Request, body: FinanceAgentVerifyRequest) -> FinanceAgentVerifyResponse:
+    # reward_mode 'rubric'
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_modifiers(entry: Dict[str, Any]) -> tuple[float, bool]:
+        """Read ``(severity, must_pass)`` off one rubric entry's ``modifiers``.
+
+        Defaults to ``(1.0, False)``, which degenerates to the unweighted mean for a
+        rubric without modifiers. A bad severity is coerced rather than raised — one malformed
+        weight should not discard a completed trajectory — and zero is excluded because
+        a zero-weight criterion still gates when it is a dealbreaker.
+        """
+        modifiers = entry.get("modifiers")
+        if not isinstance(modifiers, dict):
+            return 1.0, False
+        raw = modifiers.get("severity")
+        try:
+            severity = float(raw)
+        except (TypeError, ValueError):
+            severity = 1.0
+        if not severity > 0 or severity != severity or severity == float("inf"):
+            logger.warning("Rubric criterion has unusable severity %r — weighting it 1.0", raw)
+            severity = 1.0
+        return severity, modifiers.get("category") == "must_pass"
+
+    @classmethod
+    def _parse_rubric(cls, rubric: Optional[str]) -> List[Dict[str, Any]]:
+        """Parse the dataset's rubric JSON into criteria dicts with their weights.
+
+        Returns [] for anything unusable, which verify() treats as an unscorable dry
+        run rather than a zero.
+        """
+        if not rubric:
+            return []
+        try:
+            parsed = json.loads(rubric)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Rubric is not valid JSON — cannot score")
+            return []
+        if not isinstance(parsed, list):
+            logger.warning("Rubric JSON is %s, expected a list — cannot score", type(parsed).__name__)
+            return []
+
+        criteria: List[Dict[str, Any]] = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            text = entry.get("criteria")
+            if isinstance(text, str) and text.strip():
+                severity, must_pass = cls._parse_modifiers(entry)
+                criteria.append(
+                    {
+                        "criteria": text.strip(),
+                        "operator": entry.get("operator"),
+                        "severity": severity,
+                        "must_pass": must_pass,
+                    }
+                )
+        return criteria
+
+    @staticmethod
+    def _json_objects(text: str) -> List[str]:
+        """Return the top-level ``{...}`` spans of ``text``, in order.
+
+        Brace counting with string tracking, not a regex: the judge quotes the answer
+        verbatim, and finance answers carry LaTeX subscripts like ``EBITDAR_{WMT}``.
+        A ``{.*?}`` match ends at that inner brace and, since findall does not
+        backtrack, misaligns every later candidate.
+        """
+        spans: List[str] = []
+        depth = 0
+        start = -1
+        in_string = False
+        escaped = False
+        for i, ch in enumerate(text):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth:
+                depth -= 1
+                if depth == 0:
+                    spans.append(text[start : i + 1])
+        return spans
+
+    @classmethod
+    def _extract_score(cls, judge_text: str) -> Optional[int]:
+        """Pull the binary ``score`` out of a judge reply, or None if unusable.
+
+        Accepts a bare JSON object or one fenced in markdown, and scans candidate
+        objects from the end so a worked example quoted mid-reasoning cannot
+        outrank the judge's actual verdict. Only integer 0/1 counts — a string
+        ``"pass"`` or a float is a parse failure, because silently coercing those
+        would let a confused judge vote.
+        """
+        if not judge_text or not judge_text.strip():
+            return None
+
+        for blob in reversed(cls._json_objects(judge_text)):
+            try:
+                payload = json.loads(blob)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict) or "score" not in payload:
+                continue
+            score = payload["score"]
+            # bool is an int subclass in Python; True/False is not a verdict.
+            if isinstance(score, int) and not isinstance(score, bool) and score in (0, 1):
+                return score
+            return None
+        return None
+
+    @staticmethod
+    def _judge_reply_text(judge_response: NeMoGymResponse) -> str:
+        """Concatenate the visible text of a judge response."""
+        text = ""
+        for item in judge_response.output:
+            if getattr(item, "type", None) != "message":
+                continue
+            for part in getattr(item, "content", []) or []:
+                chunk = getattr(part, "text", None)
+                if isinstance(chunk, str):
+                    text += chunk
+        return text
+
+    async def _judge_attempt(self, prompt: str, budget_escalations: int) -> _JudgeAttempt:
+        """Make one judge call.
+
+        ``budget_escalations`` counts prior attempts that ran out of output budget;
+        each doubles ``max_output_tokens`` and stretches the timeout. Keyed to that
+        failure rather than the attempt number, because the ordinary failure is an
+        unparseable reply, which a bigger budget does not fix.
+        """
+        params = (
+            self.config.judge_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
+        ).model_copy(deep=True)
+        params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+
+        timeout = self.config.judge_call_timeout
+        if budget_escalations and params.max_output_tokens:
+            params.max_output_tokens = min(
+                params.max_output_tokens * 2**budget_escalations, _JUDGE_MAX_OUTPUT_TOKENS_CAP
+            )
+            if timeout is not None:
+                timeout *= min(2**budget_escalations, 4)
+
+        try:
+            response = await asyncio.wait_for(
+                self.server_client.post(
+                    server_name=self.config.judge_model_server.name,
+                    url_path="/v1/responses",
+                    json=params,
+                ),
+                timeout=timeout,
+            )
+            judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+        except Exception as e:  # noqa: BLE001
+            return _JudgeAttempt(None, f"judge call failed: {type(e).__name__}: {e}", "", False)
+
+        reply = self._judge_reply_text(judge_response)
+        score = self._extract_score(reply)
+        if score is not None:
+            return _JudgeAttempt(score, None, reply, False)
+
+        incomplete_reason = getattr(getattr(judge_response, "incomplete_details", None), "reason", None)
+        if incomplete_reason:
+            error = f"judge reply incomplete (incomplete_details.reason={incomplete_reason})"
+        elif not reply.strip():
+            error = "judge returned empty output"
+        else:
+            error = "judge reply had no integer 0/1 score"
+        starved = incomplete_reason == "max_output_tokens" or not reply.strip()
+        return _JudgeAttempt(None, error, reply, starved)
+
+    async def _judge_criterion(
+        self, question: str, generated_answer: str, criterion: Dict[str, Any]
+    ) -> RubricJudgement:
+        """Judge one criterion, voting over repeated calls.
+
+        Calls until ``judge_required_successes`` replies parse to a 0/1 or
+        ``judge_max_attempts`` is spent. Falling short leaves ``score`` None
+        (unresolved) — a judge failure, not a "not met".
+        """
+        prompt = (
+            self._rubric_judge_prompt_template.replace("{question}", question)
+            .replace("{generated_answer}", generated_answer)
+            .replace("{criterion}", criterion["criteria"])
+        )
+
+        record = RubricJudgement(
+            criteria=criterion["criteria"],
+            operator=criterion.get("operator"),
+            severity=criterion.get("severity", 1.0),
+            must_pass=criterion.get("must_pass", False),
+        )
+        needed = max(1, self.config.judge_required_successes)
+        last_error: Optional[str] = None
+        budget_escalations = 0
+
+        max_attempts = max(1, self.config.judge_max_attempts)
+        for attempt in range(max_attempts):
+            if len(record.votes) >= needed:
+                break
+            record.attempts_used += 1
+            result = await self._judge_attempt(prompt, budget_escalations)
+
+            if result.score is None:
+                last_error = result.error
+                if result.reply:
+                    record.parse_failures += 1
+                else:
+                    record.api_failures += 1
+                if result.starved:
+                    budget_escalations += 1
+                if len(record.failed_reply_samples) < _MAX_FAILED_REPLY_SAMPLES:
+                    record.failed_reply_samples.append(f"{result.error}: {result.reply[:_FAILED_REPLY_SAMPLE_CHARS]}")
+                logger.warning(
+                    "Rubric judge attempt %d failed (%s) for criterion: %.80s",
+                    record.attempts_used,
+                    result.error,
+                    criterion["criteria"],
+                )
+                # Between failures only, capped so a flaky judge cannot stretch one
+                # criterion past the rollout budget.
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(min(2**attempt, 8))
+                continue
+
+            record.votes.append(result.score)
+            payload = self._extract_json_payload(result.reply)
+            record.evidence.append(str(payload.get("extracted_evidence", ""))[:1000])
+            record.reasons.append(str(payload.get("reason", ""))[:1000])
+
+        record.votes_for = sum(record.votes)
+        record.votes_against = len(record.votes) - record.votes_for
+
+        if len(record.votes) < needed:
+            record.error = last_error or f"only {len(record.votes)}/{needed} successful judge verdicts"
+            logger.error(
+                "Criterion unresolved after %d attempts (%s): %.80s",
+                record.attempts_used,
+                record.error,
+                criterion["criteria"],
+            )
+            return record
+
+        record.score = 1 if record.votes_for * 2 > len(record.votes) else 0
+        record.unanimous = record.votes_for == 0 or record.votes_against == 0
+        if not record.unanimous:
+            logger.info(
+                "Judge disagreed %d-%d on criterion: %.80s",
+                record.votes_for,
+                record.votes_against,
+                criterion["criteria"],
+            )
+        return record
+
+    @classmethod
+    def _extract_json_payload(cls, judge_text: str) -> Dict[str, Any]:
+        """Return the scored JSON object from a reply, or {} if not found.
+
+        Mirrors _extract_score's last-object-wins scan so the recorded evidence
+        and reason come from the same object the verdict came from.
+        """
+        for blob in reversed(cls._json_objects(judge_text or "")):
+            try:
+                payload = json.loads(blob)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(payload, dict) and "score" in payload:
+                return payload
+        return {}
+
+    async def _verify_rubric(self, body: FinanceAgentVerifyRequest, question: str) -> FinanceAgentRubricVerifyResponse:
+        """Score the agent's answer against the row's rubric criteria, as finance_agent_v2's /verify does.
+
+        Each criterion is judged independently by majority vote, then aggregated into
+        Partial Credit, which becomes the reward. An unresolved criterion counts as not
+        passed and gates like one, but also sets ``judge_error`` so a judge outage never
+        reads as a model failure.
+        """
+        generated_answer = ""
+        for output_item in reversed(body.response.output):
+            if getattr(output_item, "type", None) == "function_call":
+                if getattr(output_item, "name", None) == "submit_final_result":
+                    # Arguments are model-authored, so nothing about their shape is
+                    # guaranteed. Anything that is not a string answer is treated as
+                    # no submission, which scores zero, rather than raising here.
+                    try:
+                        args = json.loads(getattr(output_item, "arguments", "{}"))
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    if isinstance(args, dict) and isinstance(args.get("final_result"), str):
+                        generated_answer = args["final_result"]
+                    break
+
+        criteria = self._parse_rubric(body.rubric)
+
+        # A genuine failure, not a judge failure. Return before spending on the judge.
+        # The score fields are written as explicit zeros rather than left unset, so
+        # this rollout counts in every mean the way it already counts in mean/reward.
+        if not generated_answer:
+            return FinanceAgentRubricVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                rubric_fraction=0.0,
+                rubric_all_pass=False,
+                rubric_partial_credit=0.0,
+                rubric_weighted_fraction=0.0,
+                rubric_total=len(criteria),
+            )
+
+        if not criteria:
+            return FinanceAgentRubricVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                judge_error="no usable rubric criteria — unlabeled dry run, not scorable",
+            )
+
+        if not self.config.judge_model_server:
+            return FinanceAgentRubricVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                rubric_total=len(criteria),
+                judge_error="no judge_model_server configured — cannot score the rubric",
+            )
+
+        # Criteria are independent; a question is ~9 criteria x 3-10 calls, so judge
+        # them concurrently but under a semaphore to spare the judge endpoint.
+        semaphore = asyncio.Semaphore(max(1, self.config.judge_max_concurrency))
+
+        async def judge_one(criterion: Dict[str, Any]) -> RubricJudgement:
+            async with semaphore:
+                return await self._judge_criterion(question, generated_answer, criterion)
+
+        judgements = await asyncio.gather(*(judge_one(c) for c in criteria))
+
+        scores = aggregate_rubric_scores(judgements)
+
+        judge_error = None
+        if scores["rubric_unresolved"]:
+            first = next(j for j in judgements if j.score is None)
+            judge_error = (
+                f"{scores['rubric_unresolved']}/{scores['rubric_total']} criteria unresolved (e.g. {first.error})"
+            )
+
+        logger.info(
+            "Rubric verdict: %d/%d passed, %d unresolved, %d/%d dealbreakers failed, partial_credit=%.3f",
+            scores["rubric_passed"],
+            scores["rubric_total"],
+            scores["rubric_unresolved"],
+            scores["rubric_dealbreakers_failed"],
+            scores["rubric_dealbreakers_total"],
+            scores["rubric_partial_credit"],
+        )
+
+        return FinanceAgentRubricVerifyResponse(
+            **body.model_dump(),
+            reward=scores["rubric_partial_credit"],
+            rubric_judgements=list(judgements),
+            **scores,
+            judge_error=judge_error,
+        )
+
+    async def verify(
+        self, request: Request, body: FinanceAgentVerifyRequest
+    ) -> Union[FinanceAgentVerifyResponse, FinanceAgentRubricVerifyResponse]:
         """Verify the agent's answer.
 
         Rating scale (reward depends on config.reward_mode):
@@ -1480,6 +2091,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if session_id:
             self._data_storage.pop(session_id, None)
             self._session_start_times.pop(session_id, None)
+            self._as_of_dates.pop(session_id, None)
 
         question = ""
         for msg in body.responses_create_params.input or []:
@@ -1487,6 +2099,16 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 content = getattr(msg, "content", None)
                 if isinstance(content, str):
                     question = content
+
+        if self.config.reward_mode == "rubric":
+            response = await self._verify_rubric(body, question)
+            if not response.rubric_unresolved:
+                return response
+            # The judge failed, not the policy, so the sample is masked as a binary-mode judge failure is.
+            # The reward stays finance_agent_v2's.
+            return response.model_copy(
+                update={"mask_sample": True, "failure_kind": JUDGE_FAILED, "failure_reason": response.judge_error}
+            )
 
         # Extract the model's answer from the submit_final_result tool call.
         # HARD GATE: we only accept answers submitted via submit_final_result.
@@ -1596,6 +2218,132 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         return FinanceAgentVerifyResponse(
             **body.model_dump(), reward=reward, judge_rating=rating, judge_text=judge_text
         )
+
+    # ------------------------------------------------------------------
+    # Aggregate metrics (reward_mode 'rubric')
+    # ------------------------------------------------------------------
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Rubric-level metrics on top of the RewardProfiler baseline.
+
+        Partial Credit alone cannot separate a genuine miss from a judge that never
+        answered, nor broad sloppiness from one tripped dealbreaker. So:
+
+        - ``rubric_weighted_fraction`` is Partial Credit before gating; the pair
+          prices what the dealbreakers cost.
+        - ``rubric_all_pass`` is the strict rate: every criterion met.
+        - ``criterion_pass_rate`` pools criteria, so rubric length does not skew it.
+        - ``judge_disagreement_rate`` is the share of resolved criteria the judge
+          contradicted itself on; a rise means a less decisive judge, not a worse model.
+        - the ``rubric/*`` counters keep judge failures out of the score.
+        """
+        if self.config.reward_mode != "rubric":
+            return super().compute_metrics(tasks)
+        rollouts = [r for task in tasks for r in task]
+        if not rollouts:
+            return {}
+
+        # Gave up: nothing was judged and the judge did not fail either. A
+        # pre-weighting rollout also carries no judgements, but it does carry a
+        # score, so a nonzero fraction rules it out — and one that scored zero
+        # belongs in the means at zero regardless of which bucket it lands in.
+        give_ups = [
+            r
+            for r in rollouts
+            if not r.get("rubric_judgements") and not r.get("judge_error") and not r.get("rubric_fraction")
+        ]
+
+        def _scores(field: str, zero: Any) -> List[Any]:
+            """Values of ``field`` across rollouts, scoring a give-up as ``zero``.
+
+            Scoring writes those zeros itself; rollouts collected before it did are
+            filled in here, so a give-up weighs in every mean the way it has always
+            weighed in mean/reward. Dropping it would score a run on the subset of
+            questions it managed to answer.
+            """
+            scored = [r[field] for r in rollouts if r.get(field) is not None]
+            return scored + [zero] * sum(1 for r in give_ups if r.get(field) is None)
+
+        fractions = _scores("rubric_fraction", 0.0)
+        all_pass_flags = [bool(flag) for flag in _scores("rubric_all_pass", False)]
+        partial_credits = _scores("rubric_partial_credit", 0.0)
+        weighted_fractions = _scores("rubric_weighted_fraction", 0.0)
+        # Scored rollouts only: one with no submission was never eligible to trip a
+        # dealbreaker, so counting it would dilute the rate.
+        gated = [r for r in rollouts if r.get("rubric_dealbreakers_total")]
+
+        criteria: List[Dict[str, Any]] = []
+        for r in rollouts:
+            for j in r.get("rubric_judgements") or []:
+                if isinstance(j, dict):
+                    criteria.append(j)
+
+        resolved = [j for j in criteria if j.get("score") is not None]
+        unresolved = len(criteria) - len(resolved)
+        # Only resolved criteria carry a meaningful unanimity flag.
+        contested = sum(1 for j in resolved if j.get("unanimous") is False)
+        judge_error_rollouts = sum(1 for r in rollouts if r.get("judge_error"))
+        no_submission = len(give_ups)
+
+        metrics: Dict[str, Any] = {
+            "rubric/rollouts": len(rollouts),
+            "rubric/criteria_total": len(criteria),
+            "rubric/criteria_resolved": len(resolved),
+            "rubric/criteria_unresolved": unresolved,
+            "rubric/rollouts_with_judge_error": judge_error_rollouts,
+            "rubric/rollouts_without_submission": no_submission,
+            "rubric/parse_failures": sum(int(j.get("parse_failures") or 0) for j in criteria),
+            "rubric/api_failures": sum(int(j.get("api_failures") or 0) for j in criteria),
+        }
+        if partial_credits:
+            metrics["mean/rubric_partial_credit"] = sum(partial_credits) / len(partial_credits)
+        if weighted_fractions:
+            metrics["mean/rubric_weighted_fraction"] = sum(weighted_fractions) / len(weighted_fractions)
+        if fractions:
+            metrics["mean/rubric_fraction"] = sum(fractions) / len(fractions)
+        if all_pass_flags:
+            metrics["mean/rubric_all_pass"] = sum(all_pass_flags) / len(all_pass_flags)
+        if gated:
+            # "Tripped", not "zeroed by": a rollout that failed everything would
+            # score 0.0 with or without the gate.
+            metrics["mean/rubric_dealbreaker_tripped"] = sum(
+                1 for r in gated if r.get("rubric_dealbreakers_failed")
+            ) / len(gated)
+            metrics["rubric/dealbreakers_total"] = sum(int(r.get("rubric_dealbreakers_total") or 0) for r in gated)
+            metrics["rubric/dealbreakers_failed"] = sum(int(r.get("rubric_dealbreakers_failed") or 0) for r in gated)
+        if resolved:
+            metrics["mean/criterion_pass_rate"] = sum(1 for j in resolved if j.get("score") == 1) / len(resolved)
+            metrics["mean/judge_disagreement_rate"] = contested / len(resolved)
+        if criteria:
+            metrics["rubric/mean_attempts_per_criterion"] = sum(
+                int(j.get("attempts_used") or 0) for j in criteria
+            ) / len(criteria)
+        return metrics
+
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Apply the full-run rubric scoring rules to each repeat's means."""
+        if self.config.reward_mode != "rubric":
+            return super().compute_repeat_metrics(tasks)
+        return {name: value for name, value in self.compute_metrics(tasks).items() if name.startswith("mean/")}
+
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Headline metrics: the usual mean/* plus judge-health counters.
+
+        The counters are promoted deliberately — a run whose judge failed on a
+        third of its criteria should not be read as a low score, and that is only
+        obvious if the failure count sits next to the score.
+        """
+        if self.config.reward_mode != "rubric":
+            return super().get_key_metrics(agent_metrics)
+        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        for k in (
+            "rubric/criteria_unresolved",
+            "rubric/rollouts_with_judge_error",
+            "rubric/rollouts_without_submission",
+            "rubric/dealbreakers_failed",
+        ):
+            if k in agent_metrics:
+                key[k] = agent_metrics[k]
+        return key
 
 
 def _configure_logging() -> None:
