@@ -371,7 +371,8 @@ async def test_a_failed_attempt_remains_unknown_after_a_successful_retry():
 
     llm = _make_llm()
     response = _mock_response(usage={"prompt_tokens": 10, "completion_tokens": 2})
-    with patch.object(llm, "_post_chat_completions", side_effect=[httpx.ReadTimeout("lost reply"), response]):
+    dropped = httpx.RemoteProtocolError("server disconnected without sending a response")
+    with patch.object(llm, "_post_chat_completions", side_effect=[dropped, response]):
         result = await llm.call.retry_with(wait=wait_none())(llm, prompt="question")
     assert result.usage.prompt_tokens == 10
     assert llm.calls_without_usage == 1
@@ -419,7 +420,9 @@ async def test_a_non_transient_status_fails_on_the_first_attempt(status_code, re
         pytest.param(httpx.ConnectError("connection refused"), id="refused"),
         pytest.param(httpx.ReadError("connection reset by peer"), id="reset"),
         pytest.param(httpx.RemoteProtocolError("server disconnected without sending a response"), id="dropped"),
-        pytest.param(httpx.ReadTimeout("timed out"), id="timeout"),
+        pytest.param(httpx.ConnectTimeout("connect timed out"), id="connect-timeout"),
+        pytest.param(httpx.WriteTimeout("write timed out"), id="write-timeout"),
+        pytest.param(httpx.PoolTimeout("no free connection"), id="pool-timeout"),
     ],
 )
 async def test_a_transient_failure_is_retried_within_the_wait_bound(failure, retry_sleeps):
@@ -454,6 +457,38 @@ async def test_a_transient_status_then_an_answer_returns_the_answer(retry_sleeps
         response = await llm.call(prompt="hello")
 
     assert response.content == "recovered"
+    assert client.post.await_count == 2
+    assert len(retry_sleeps) == 1
+
+
+async def test_a_read_timeout_is_not_sent_again(retry_sleeps):
+    llm = _make_llm()
+    client = AsyncMock()
+    client.post = AsyncMock(side_effect=httpx.ReadTimeout("timed out waiting for the reply"))
+
+    with patch("httpx.AsyncClient", return_value=client):
+        with pytest.raises(httpx.ReadTimeout):
+            await llm.call(prompt="hello")
+
+    assert client.post.await_count == 1
+    assert retry_sleeps == []
+
+
+async def test_a_malformed_json_reply_is_sent_again(retry_sleeps):
+    llm = _make_llm()
+    client = AsyncMock()
+    request = httpx.Request("POST", "http://localhost:8000/v1/chat/completions")
+    malformed = httpx.Response(status_code=200, content=b"{not json", request=request)
+    answer = httpx.Response(
+        status_code=200, json=_mock_response(content="recovered", id="chatcmpl-after-bad-json"), request=request
+    )
+    client.post = AsyncMock(side_effect=[malformed, answer])
+
+    with patch("httpx.AsyncClient", return_value=client):
+        response = await llm.call(prompt="hello")
+
+    assert response.content == "recovered"
+    assert llm.response_ids == ["chatcmpl-after-bad-json"]
     assert client.post.await_count == 2
     assert len(retry_sleeps) == 1
 

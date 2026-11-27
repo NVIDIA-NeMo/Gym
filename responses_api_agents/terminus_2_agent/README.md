@@ -117,7 +117,11 @@ Request `max_output_tokens` depends on the execution mode:
 The agent's `model_info.max_output_tokens` describes the model's output limit to Terminus in both modes; it is not a
 generation budget. Other sampling controls and model-server limits are unchanged.
 
-`model_timeout_sec` bounds each model call and `command_timeout_sec` each terminal command. `reasoning_effort` and
+`model_timeout_sec` bounds each model call and `command_timeout_sec` each terminal command. A model call is sent
+again, at most three attempts in all, only after HTTP 408, 425, 429 or 5xx, a connection error, or a reply that is not
+JSON. A call that times out waiting for its reply is not sent again, so it waits at most one `model_timeout_sec`; an
+agent session's run then ends with `model_transport_error`, and by default the Environment Server runs the episode
+again from the start. `reasoning_effort` and
 `max_thinking_tokens` must stay `null`: Harbor applies them only to the LiteLLM client it builds itself, which this
 agent replaces with Gym's Model Server client, so the agent refuses to start with either set. Set the request's
 `reasoning` instead.

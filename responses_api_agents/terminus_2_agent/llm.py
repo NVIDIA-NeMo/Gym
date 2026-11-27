@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # The sandbox runner imports this module with only Harbor installed, so it imports nemo_gym lazily.
+import json
 import re
 from typing import Any, cast
 
@@ -32,16 +33,31 @@ _RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] |
 
 _RETRYABLE_STATUS_CODES = frozenset({408, 425, 429})
 
+# Sent again: a request the model server never received in full, a connection that dropped (the model server cancels
+# the request of a client that disconnects), or a reply that is not JSON. A read timeout is not: unless every hop to
+# the engine passes the disconnect on, the first generation may still be running, and a resend could wait its whole
+# timeout again. The run ends with model_transport_error, and the Environment Server's outcome policy decides whether
+# to run the episode again.
+_RESENDABLE_ERRORS = (
+    httpx.ConnectTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+    json.JSONDecodeError,
+)
+
 
 def _is_transient_model_error(exc: BaseException) -> bool:
-    """Whether a failed model call may succeed when sent again: HTTP 408, 425, 429 or 5xx, or a transport error.
+    """Whether a failed model call may succeed when sent again: HTTP 408, 425, 429 or 5xx, or a resendable error.
 
-    Any other 4xx (400, 401, 403, 404, 413, 422, ...) fails the same way on every attempt.
+    Any other 4xx (400, 401, 403, 404, 413, 422, ...) fails the same way on every attempt. A read timeout is raised
+    on the first attempt (see ``_RESENDABLE_ERRORS``).
     """
     if isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
         return status_code in _RETRYABLE_STATUS_CODES or 500 <= status_code < 600
-    return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError))
+    return isinstance(exc, _RESENDABLE_ERRORS)
 
 
 _CONTEXT_LENGTH_ERROR_PHRASES = (
@@ -134,7 +150,8 @@ class NemoGymLLM(BaseLLM):
         )
 
     # The only retry layer for Terminus-2's model calls (StandaloneTerminus2 drops Harbor's): at most 3 attempts with
-    # at most 15 s between them, so a call waits at most 30 s beyond its request timeouts.
+    # at most 15 s between them, so a call waits at most 30 s beyond its request timeouts. A read timeout is raised on
+    # the first attempt, so a call waits at most one read timeout for its reply.
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=15),
