@@ -179,6 +179,10 @@ LOG = logging.getLogger(__name__)
 # Where the OpenCode runtime is installed in a sandbox, shared by its sessions; the version is appended.
 SANDBOX_RUNTIME_PREFIX = "/tmp/nemo-gym-opencode-runtime-"
 REPROMPT_SCRIPT = Path(__file__).with_name("reprompt_opencode.sh")
+# How long a run that timed out waits for the rest of OpenCode's output. A process that OpenCode started
+# can outlive it and keep the output pipes open, and an unbounded wait for the end of the output would
+# then hold the request for as long as that process runs.
+_TIMEOUT_DRAIN_SECONDS = 10.0
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 # Restore outcomes that are expected rather than faults: the checkpoint was taken before the launch's relay started,
@@ -1233,8 +1237,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                _, stderr = await proc.communicate()
+                # OpenCode can exit on its own as the timeout fires, and killing an exited process raises.
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                try:
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_DRAIN_SECONDS)
+                except asyncio.TimeoutError:
+                    # A process that OpenCode started still holds the output pipes open.
+                    stderr = b""
                 timed_out = True
                 LOG.warning("opencode timed out after %ss", timeout)
 
