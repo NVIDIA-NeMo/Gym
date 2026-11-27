@@ -11,5 +11,7 @@ timeout_sec = 3600
 timeout_sec = 600
 
 [environment]
+cpus = 2
+memory_mb = 16384
 docker_image = ${docker_image}
 workdir = "/app"
