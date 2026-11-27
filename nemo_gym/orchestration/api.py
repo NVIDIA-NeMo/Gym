@@ -37,6 +37,7 @@ from pydantic import (
 
 from nemo_gym.config.secret_utils import MASKED_VALUE, mask_url_passwords
 from nemo_gym.orchestration.executors.script_templates import bash_var
+from nemo_gym.telemetry.config import LOCAL_NODE_METRICS
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -45,19 +46,6 @@ class _StrictModel(BaseModel):
 
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# The node_exporter metrics the collector's local `metrics.jsonl` keeps by default: CPU time, load, memory, pressure
-# stall and network/InfiniBand byte totals, plus `up` to tell a filtered exporter from an unreachable one. The rest of
-# node_exporter's output (per-port InfiniBand error counters, systemd unit states, NFS mount statistics, hardware
-# sensors and the like) is node health rather than benchmark performance, and was about 90% of the file's bytes.
-LOCAL_NODE_METRICS = (
-    "up",
-    "node_cpu_seconds_total",
-    "node_load(1|5|15)",
-    "node_memory_(MemTotal|MemAvailable|MemFree|Cached|Buffers|Shmem|SwapTotal|SwapFree)_bytes",
-    "node_pressure_.*",
-    "node_network_(receive|transmit)_bytes_total",
-    "node_infiniband_port_data_(received|transmitted)_bytes_total",
-)
 # Canonical marker left on a resolved `env` value for `runtime:VAR` entries. Executors
 # (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
 # of a literal, so the value is picked up from the job's actual environment at run time.

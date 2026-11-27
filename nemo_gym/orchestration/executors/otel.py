@@ -43,7 +43,24 @@ from pathlib import Path
 import yaml
 
 from nemo_gym.orchestration.api import BaseModelServiceConfig, SubmitConfig
-from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
+from nemo_gym.telemetry.collector import (
+    COLLECTOR_FILE_SIGNALS as COLLECTOR_FILE_SIGNALS,
+)
+from nemo_gym.telemetry.collector import (
+    COLLECTOR_HEALTH_PORT as COLLECTOR_HEALTH_PORT,
+)
+from nemo_gym.telemetry.collector import (
+    NODE_METRICS_FILTER as NODE_METRICS_FILTER,
+)
+from nemo_gym.telemetry.collector import (
+    OTLP_GRPC_PORT as OTLP_GRPC_PORT,
+)
+from nemo_gym.telemetry.collector import (
+    OTLP_HTTP_PORT,
+    collector_document,
+    node_metrics_filter,
+)
+from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE as ROLLOUT_ID_ATTRIBUTE
 
 
 logger = logging.getLogger(__name__)
@@ -56,12 +73,6 @@ COLLECTOR_CONFIG_NAME = "collector.yaml"
 # its step appends the files into `<job dir>/otel/` when it stops. The step exports the directory in this variable.
 COLLECTOR_LOCAL_DIR_PREFIX = "/tmp/gym-otel-"
 COLLECTOR_LOCAL_DIR_ENV = "GYM_OTEL_LOCAL_DIR"
-COLLECTOR_FILE_SIGNALS = ("metrics", "traces", "logs")
-# Below the clusters' ephemeral range (ip_local_port_range 9000-65000): the collector's default
-# 13133 lies inside it, so an outgoing connection on the node can hold it and abort startup.
-COLLECTOR_HEALTH_PORT = 4319
-OTLP_GRPC_PORT = 4317
-OTLP_HTTP_PORT = 4318
 GYM_TELEMETRY_EXTRA = "telemetry"
 
 
@@ -193,7 +204,6 @@ def render_collector_config(
     """
     obs = config.otel
     file_dir = f"${{env:{COLLECTOR_LOCAL_DIR_ENV}}}" if node_local else str(remote_bench_dir / COLLECTOR_DIR)
-    token = f"${{env:{obs.token_env}}}"
     interval = f"{obs.scrape_interval_seconds}s"
 
     # The job name is what scraped data carries as `service.name`, and so becomes its display identity.
@@ -216,52 +226,6 @@ def render_collector_config(
                     "static_configs": [{"targets": [f"localhost:{port}"]}],
                 }
             )
-    # Each producer's own `service.name` survives as the display identity before `resource` overwrites it.
-    keep_display_name = (
-        'set(resource.attributes["service.name.override"], resource.attributes["service.name"]) '
-        'where resource.attributes["service.name.override"] == nil and resource.attributes["service.name"] != nil'
-    )
-    identity = {
-        f"{signal}_statements": [{"context": "resource", "statements": [keep_display_name]}]
-        for signal in ("metric", "trace", "log")
-    }
-    # vLLM names its metrics `vllm:<name>`; the shared dashboards, and Prometheus convention, use
-    # `vllm_<name>`, and the backend keeps whatever name arrives. Renamed after parsing so counters
-    # and histograms keep their types (Prometheus relabelling would make them untyped). `$$` escapes
-    # the collector's own `${...}` expansion so the regexp groups reach OTTL intact.
-    rename_colon_metrics = {
-        "metric_statements": [
-            {
-                "context": "metric",
-                "statements": ['replace_pattern(metric.name, "^([^:]+):(.+)$", "$${1}_$${2}")'],
-            }
-        ]
-    }
-
-    # vLLM records Gym's `X-Request-Id: <rollout id>-<8 hex>` as `gen_ai.request.id` (prefixed `chatcmpl-`), the
-    # only place the engine span names its rollout. Aggregators group on whole attributes, so copy it into the
-    # key every other Gym span uses. Request ids that are not Gym's (a plain uuid) do not match.
-    gym_engine_request_id = "^(?:chatcmpl-)?(.+)-[0-9a-f]{8}$$"
-    engine_rollout_id = {
-        "trace_statements": [
-            {
-                "context": "span",
-                "statements": [
-                    # Derive in the span-local cache, write only while absent: the pinned collector has no converter
-                    # form of `replace_pattern`, and an id the span already carries must stay as it is.
-                    'set(cache["engine_rollout_id"], attributes["gen_ai.request.id"]) '
-                    f'where name == "llm_request" and attributes["{ROLLOUT_ID_ATTRIBUTE}"] == nil '
-                    'and attributes["gen_ai.request.id"] != nil '
-                    f'and IsMatch(attributes["gen_ai.request.id"], "{gym_engine_request_id}")',
-                    f'replace_pattern(cache["engine_rollout_id"], "{gym_engine_request_id}", "$${{1}}") '
-                    'where cache["engine_rollout_id"] != nil',
-                    f'set(attributes["{ROLLOUT_ID_ATTRIBUTE}"], cache["engine_rollout_id"]) '
-                    f'where attributes["{ROLLOUT_ID_ATTRIBUTE}"] == nil and cache["engine_rollout_id"] != nil',
-                ],
-            }
-        ]
-    }
-
     attributes = [
         *([("service.name", obs.service_name, "upsert")] if obs.service_name is not None else []),
         ("user", getpass.getuser(), "upsert"),
@@ -277,126 +241,23 @@ def render_collector_config(
     # `${env:SLURM_JOB_ID}` expands to a bare number, which the collector types as an int;
     # dashboards match it as a label string.
     resource_actions.append({"key": "slurm_job_id", "action": "convert", "converted_type": "string"})
-    # The token rides only on the managed export, never into the job-directory copies.
-    managed_actions = [{"key": "Authorization", "value": token, "action": "upsert"}, *resource_actions]
-
-    # Operations that exist only as spans (sandbox start/exec, model calls) still get latency and count series.
-    # Exported remotely only: locally the same calls and durations are in `traces.jsonl`.
-    span_metrics = {
-        "histogram": {
-            "explicit": {"buckets": ["250ms", "1s", "2s", "5s", "10s", "30s", "60s", "120s", "300s", "600s", "1800s"]}
-        },
-        "dimensions": [{"name": "service.name.override"}, {"name": "nemo.gym.sandbox.provider"}],
-        "metrics_flush_interval": f"{obs.scrape_interval_seconds}s",
-    }
-
-    local_receivers = (["prometheus"] if scrape_configs else []) + ["otlp"]
-    node_filter = _local_node_metrics_filter(config)
-    local_filters = [NODE_METRICS_FILTER] if node_filter else []
-    trace_transforms = ["transform/identity"] + (["transform/engine_rollout_id"] if obs.vllm_traces else [])
-    doc = {
-        "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
-        "connectors": {"span_metrics": span_metrics},
-        "receivers": {
-            **({"prometheus": {"config": {"scrape_configs": scrape_configs}}} if scrape_configs else {}),
-            "otlp": {
-                "protocols": {
-                    "grpc": {"endpoint": f"0.0.0.0:{OTLP_GRPC_PORT}"},
-                    "http": {"endpoint": f"0.0.0.0:{OTLP_HTTP_PORT}"},
-                }
-            },
-        },
-        "processors": {
-            "batch": {},
-            "resource/managed": {"attributes": managed_actions},
-            "resource/local": {"attributes": resource_actions},
-            "transform/identity": identity,
-            "transform/metric_names": rename_colon_metrics,
-            **({"transform/engine_rollout_id": engine_rollout_id} if obs.vllm_traces else {}),
-            **({NODE_METRICS_FILTER: node_filter} if node_filter else {}),
-        },
-        "exporters": {
-            "otlp_http/managed": {"endpoint": obs.endpoint, "headers": {"Authorization": f"Bearer {token}"}},
-            **{f"file/{signal}": {"path": f"{file_dir}/{signal}.jsonl"} for signal in COLLECTOR_FILE_SIGNALS},
-        },
-        "service": {
-            "extensions": ["health_check"],
-            # debug would print every batch, token included, into the collector log.
-            "telemetry": {"logs": {"level": "info"}},
-            "pipelines": {
-                "metrics": {
-                    "receivers": [*local_receivers, "span_metrics"],
-                    "processors": ["transform/metric_names", "transform/identity", "resource/managed", "batch"],
-                    "exporters": ["otlp_http/managed"],
-                },
-                # Filtered before `resource/local` overwrites `service.name`, while it still names the scrape job.
-                "metrics/local": {
-                    "receivers": local_receivers,
-                    "processors": [
-                        "transform/metric_names",
-                        "transform/identity",
-                        *local_filters,
-                        "resource/local",
-                        "batch",
-                    ],
-                    "exporters": ["file/metrics"],
-                },
-                "traces": {
-                    "receivers": ["otlp"],
-                    "processors": [*trace_transforms, "resource/managed", "batch"],
-                    "exporters": ["otlp_http/managed"],
-                },
-                "traces/local": {
-                    "receivers": ["otlp"],
-                    "processors": [*trace_transforms, "resource/local", "batch"],
-                    "exporters": ["file/traces", "span_metrics"],
-                },
-                "logs": {
-                    "receivers": ["otlp"],
-                    "processors": ["transform/identity", "resource/managed", "batch"],
-                    "exporters": ["otlp_http/managed"],
-                },
-                "logs/local": {
-                    "receivers": ["otlp"],
-                    "processors": ["transform/identity", "resource/local", "batch"],
-                    "exporters": ["file/logs"],
-                },
-            },
-        },
-    }
-    if not obs.remote_export:
-        del doc["processors"]["resource/managed"]
-        del doc["exporters"]["otlp_http/managed"]
-        for signal in ("metrics", "traces", "logs"):
-            del doc["service"]["pipelines"][signal]
-        # Span metrics feed only the remote export; a connector nothing receives from fails collector startup.
-        del doc["connectors"]
-        doc["service"]["pipelines"]["traces/local"]["exporters"].remove("span_metrics")
+    doc = collector_document(
+        scrape_configs=scrape_configs,
+        resource_actions=resource_actions,
+        file_dir=file_dir,
+        remote_export=obs.remote_export,
+        endpoint=obs.endpoint,
+        token_env=obs.token_env,
+        scrape_interval_seconds=obs.scrape_interval_seconds,
+        engine_rollout_ids=obs.vllm_traces,
+        node_filter=_local_node_metrics_filter(config),
+    )
     return yaml.safe_dump(doc, sort_keys=False)
 
 
-NODE_METRICS_FILTER = "filter/local_node_metrics"
-# The scrape job name, which the prometheus receiver sets as `service.name` on every node's series.
-NODE_SCRAPE_JOB = "node"
-
-
-def _ottl_string(value: str) -> str:
-    """`value` as an OTTL string literal inside the collector's YAML: `$$` stops the collector's own `${...}` expansion."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "$$") + '"'
-
-
 def _local_node_metrics_filter(config: SubmitConfig) -> dict | None:
-    """The `filter` processor that drops node_exporter metrics outside `otel.local_node_metrics` from the local file.
-
-    Keyed on the scrape job rather than a name prefix, so it covers every family node_exporter serves (including
-    textfile collectors with their own prefixes) on every scraped node, and leaves DCGM, engine and Gym metrics alone.
-    """
+    """The filter on node_exporter metrics in the local file, when node_exporter is scraped (see `node_metrics_filter`)."""
     obs = config.otel
-    if obs.node_metrics_port is None or obs.local_node_metrics is None:
+    if obs.node_metrics_port is None:
         return None
-    keep = "^(?:" + "|".join(f"(?:{p})" for p in [*obs.local_node_metrics, *obs.local_node_metrics_extra]) + ")$"
-    condition = (
-        f'resource.attributes["service.name"] == {_ottl_string(NODE_SCRAPE_JOB)} '
-        f"and not IsMatch(metric.name, {_ottl_string(keep)})"
-    )
-    return {"metrics": {"metric": [condition]}}
+    return node_metrics_filter(obs.local_node_metrics, obs.local_node_metrics_extra)

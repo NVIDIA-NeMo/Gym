@@ -29,6 +29,21 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+# The node_exporter metrics the collector's local `metrics.jsonl` keeps by default: CPU time, load, memory, pressure
+# stall and network/InfiniBand byte totals, plus `up` to tell a filtered exporter from an unreachable one. The rest of
+# node_exporter's output (per-port InfiniBand error counters, systemd unit states, NFS mount statistics, hardware
+# sensors and the like) is node health rather than benchmark performance, and was about 90% of the file's bytes.
+LOCAL_NODE_METRICS = (
+    "up",
+    "node_cpu_seconds_total",
+    "node_load(1|5|15)",
+    "node_memory_(MemTotal|MemAvailable|MemFree|Cached|Buffers|Shmem|SwapTotal|SwapFree)_bytes",
+    "node_pressure_.*",
+    "node_network_(receive|transmit)_bytes_total",
+    "node_infiniband_port_data_(received|transmitted)_bytes_total",
+)
+
+
 class MemoryProfilingConfig(BaseModel):
     """Periodic host and logical-server memory sampling."""
 
