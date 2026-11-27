@@ -22,6 +22,7 @@ import re
 import shlex
 import shutil
 import sys
+import tarfile
 import threading
 import time
 import uuid
@@ -34,6 +35,7 @@ from subprocess import Popen
 from subprocess import run as subprocess_run
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 import ray
 import tomlkit
@@ -2702,6 +2704,53 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if proxy_val:
                 env_args += f"--env {proxy_var}={shlex.quote(proxy_val)} "
 
+        # [CUSTOM-SWESMITH-JVM-PROXY 2026-11-26] The env vars above do nothing for Maven/Gradle:
+        # confirmed directly (real image, real network) that Maven's own HTTP client ignores
+        # HTTP_PROXY/HTTPS_PROXY entirely and connects directly -- which works on this login node
+        # (open internet) but not on boost_usr_prod (air-gapped except through squidward). Maven
+        # and Gradle both read JVM system properties instead (http(s).proxyHost/Port/User/
+        # Password), settable via MAVEN_OPTS/GRADLE_OPTS/JAVA_TOOL_OPTIONS. PROXY_URL
+        # (nemo_rl/nemo_rl/utils/proxy.py) embeds basic-auth credentials in the URL itself
+        # (http://user:pass@host:port), which Java's proxy properties don't accept inline --
+        # split them out explicitly. Applied to every SWE-smith row (language isn't in
+        # dataset_name), harmless for non-JVM repos since these vars are simply never read.
+        if "SWE-smith" in data_point["dataset_name"]:
+            proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+            if proxy_url:
+                parsed_proxy = urlsplit(proxy_url)
+                if parsed_proxy.hostname:
+                    proxy_props = []
+                    for scheme in ("http", "https"):
+                        proxy_props.append(f"-D{scheme}.proxyHost={parsed_proxy.hostname}")
+                        if parsed_proxy.port:
+                            proxy_props.append(f"-D{scheme}.proxyPort={parsed_proxy.port}")
+                        if parsed_proxy.username:
+                            proxy_props.append(f"-D{scheme}.proxyUser={parsed_proxy.username}")
+                        if parsed_proxy.password:
+                            proxy_props.append(f"-D{scheme}.proxyPassword={parsed_proxy.password}")
+                    # nonProxyHosts is space-separated and needs its own JVM flag (a single
+                    # -Dhttp.nonProxyHosts applies to both http/https per the JDK docs).
+                    no_proxy_val = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
+                    if no_proxy_val:
+                        non_proxy_hosts = "|".join(h.strip() for h in no_proxy_val.split(",") if h.strip())
+                        proxy_props.append(f"-Dhttp.nonProxyHosts={shlex.quote(non_proxy_hosts)}")
+                    # [CUSTOM-SWESMITH-JVM-PROXY-TUNNEL-AUTH 2026-11-27] Without this, every one
+                    # of the properties above is silently useless for HTTPS targets specifically
+                    # (which is all of them -- Maven Central/repo.maven.apache.org is HTTPS-only):
+                    # confirmed directly against this cluster's real squidward proxy that a plain
+                    # curl with the same credentials succeeds (200), while Maven/the JVM gets
+                    # "407 Proxy Authentication Required" tunneling to the exact same host. The
+                    # JDK disables the Basic auth scheme for HTTPS CONNECT tunneling by default
+                    # (jdk.http.auth.tunneling.disabledSchemes=Basic, a security default dating to
+                    # JDK 8u111) -- it never even attempts to send the credentials set above for an
+                    # HTTPS url. Re-enabling it (empty value) is required for proxied Basic auth to
+                    # work through HTTPS at all; confirmed fixed with a real build (apache/dubbo,
+                    # dubbo-common, ConfigUtilsTest) against this exact proxy.
+                    proxy_props.append("-Djdk.http.auth.tunneling.disabledSchemes=")
+                    jvm_proxy_opts = " ".join(proxy_props)
+                    for jvm_opts_var in ("MAVEN_OPTS", "GRADLE_OPTS", "JAVA_TOOL_OPTIONS"):
+                        env_args += f"--env {jvm_opts_var}={shlex.quote(jvm_proxy_opts)} "
+
         # Launch Apptainer container and execute the script file
         #
         # [CUSTOM-CONTAIN-ISOLATION 2026-10-17/19] `--contain` restricts the container's
@@ -2724,10 +2773,47 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # is used rather than /tmp because the latter is RAM-backed (tmpfs) and shared by every
         # concurrent rollout on the node. Nothing reclaims this directory automatically, so it is
         # removed explicitly in the background after each rollout (see below).
+        # [CUSTOM-SWESMITH-HOME-CACHE 2026-11-27] SWE-smith's JVM repos (Maven/Gradle) resolve
+        # their full dependency set from scratch on every single rollout, because the per-rollout
+        # $HOME created above is always empty -- there is no ~/.m2 or ~/.gradle to reuse. Once the
+        # JVM proxy fix above made that resolution actually reach the network at all (see
+        # CUSTOM-SWESMITH-JVM-PROXY), doing it fresh every rollout is still needlessly slow and
+        # still fully network-dependent. SWESMITH_HOME_CACHE_DIR (see .env.example) is a plain
+        # directory containing a pre-warmed $HOME (built once, offline from training's perspective,
+        # by setup_scripts/extract_swesmith_home_cache.py from presync.sbatch).
+        #
+        # [CUSTOM-SWESMITH-HOME-CACHE-TAR 2026-11-27] Restore via a single tarball
+        # (`{cache_dir}.tar`), not `cp -a`/`shutil.copytree` on the exploded directory tree.
+        # Measured directly on this cluster: restoring ~100MB/~180 files with `cp -a` over the
+        # VM sidecar's virtio-9p share took 97-138s -- the bottleneck is per-file open/read
+        # round-trip overhead (confirmed: a raw bulk-bytes benchmark over the same mount hit
+        # ~884 MB/s, so bandwidth was never the problem), not data volume. A tarball turns ~180
+        # separate 9p round trips into one sequential read of a single file, which `tar -xf`
+        # then extracts entirely on local (guest) disk -- no further 9p traffic involved.
+        # extract_swesmith_home_cache.py produces and atomically promotes this tar alongside the
+        # exploded directory. Fail-open: if the tar doesn't exist (not yet built, wrong path,
+        # non-JVM cluster setup), skip silently and fall back to the original from-scratch
+        # behavior -- this must never be a hard dependency for SWE-smith to run at all.
+        swesmith_home_cache_dir = os.environ.get("SWESMITH_HOME_CACHE_DIR")
+        swesmith_home_cache_tar = f"{swesmith_home_cache_dir}.tar" if swesmith_home_cache_dir else None
+        restore_swesmith_home_cache = bool(
+            swesmith_home_cache_tar
+            and "SWE-smith" in data_point["dataset_name"]
+            and Path(swesmith_home_cache_tar).is_file()
+        )
+
         uses_vm_sidecar = _uses_vm_sidecar(data_point["dataset_name"])
         if uses_vm_sidecar:
             guest_scratch_dir = f"/var/tmp/swe_agents_scratch/{params.persistent_dir.name}_{command.mode}"
             guest_home_dir = f"{guest_scratch_dir}_home"
+            # The guest's $HOME is created inside the VM sidecar by this very shell command (it
+            # is not host-visible, unlike home_scratch_dir below), so the restore has to be a
+            # shell step too -- `tar -xf` runs inside the same `run_in_vm` SSH session, right
+            # after `mkdir -p` creates the destination and before apptainer starts. `|| true`:
+            # never fail the rollout over a cache-restore problem (fail-open, see above).
+            restore_cmd = ""
+            if restore_swesmith_home_cache:
+                restore_cmd = f"tar -xf {shlex.quote(swesmith_home_cache_tar)} -C {guest_home_dir} || true && "
             # Capture apptainer's real exit code into `_rc` before backgrounding the cleanup
             # `rm -rf`: backgrounding as the script's last statement would otherwise reset `$?`
             # to the backgrounding operator's own (always-0) status.
@@ -2737,6 +2823,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # mount to be visible inside the container.
             apptainer_cmd = (
                 f"mkdir -p {guest_scratch_dir} {guest_home_dir} && "
+                f"{restore_cmd}"
                 f"{params.apptainer_binary} exec --contain --writable-tmpfs --cleanenv --pid "
                 f"--no-mount tmp,bind-paths -H {guest_home_dir} --env TMPDIR={guest_scratch_dir} "
                 f"--mount type=bind,src={guest_scratch_dir},dst={guest_scratch_dir} "
@@ -2752,6 +2839,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             tmp_scratch_dir.mkdir(parents=True, exist_ok=True)
             home_scratch_dir = params.persistent_dir / "home_scratch"
             home_scratch_dir.mkdir(parents=True, exist_ok=True)
+            # Host-direct path: home_scratch_dir is a real host directory created directly above.
+            # Still extract the same tarball (not `shutil.copytree` on the exploded directory)
+            # for consistency with the VM-sidecar branch and to avoid the same many-small-files
+            # overhead on any host filesystem with comparable per-file-op latency (e.g. Lustre
+            # under concurrent load) -- same fail-open behavior (log-and-continue) as before.
+            if restore_swesmith_home_cache:
+                try:
+                    with tarfile.open(swesmith_home_cache_tar) as tf:
+                        tf.extractall(home_scratch_dir)
+                except (OSError, tarfile.TarError) as e:
+                    print(f"WARNING: failed to restore SWE-smith $HOME cache from {swesmith_home_cache_tar}: {e}")
             apptainer_cmd = (
                 f"{params.apptainer_binary} exec --contain --writable-tmpfs --cleanenv --pid "
                 f"--no-mount tmp,bind-paths -H {home_scratch_dir} "
