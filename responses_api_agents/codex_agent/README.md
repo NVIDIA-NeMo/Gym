@@ -128,6 +128,35 @@ compaction threshold must not exceed 90% of the explicit window. The pinned CLI 
 unknown-model metadata to a 272,000-token context and 90% compaction threshold. These are
 context-management controls, not generation budgets.
 
+### Subagents
+
+Codex offers its subagent tools as the `collaboration` namespace when the catalog entry of the
+model states `multi_agent_version: v2` (see `model_catalog_json` and `agents_enabled` under
+[Configuration](#configuration)). A Gym model server carries them on the streaming Responses path:
+
+- The model server offers each tool to the engine as a function named `collaboration__<name>`, and
+  it returns a call to Codex with the namespace and the tool name.
+- Codex sends each message that an agent gets from another agent as an `agent_message` input
+  item: the task of a spawned subagent, a message to a running agent, and a subagent's final answer
+  to its parent. The model server converts the item into a user message with the same text.
+- By default a subagent's first request holds its parent's conversation, then developer messages,
+  then the task. `vllm_model` sends those developer messages with the `developer` role, which a
+  chat template may not render: the chat template of `Qwen/Qwen3-8B` renders no message of that
+  role. With `replace_developer_role_with_system: true` it sends them as system messages, which a
+  chat template that admits a system message only at the start refuses.
+- Training token capture delivers one chain of model calls per rollout (see
+  [Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
+  By default a subagent's first call continues the call of its parent that spawned it, so the
+  subagent's calls form a branch of the parent's chain and are not delivered. Capture delivers
+  the parent's calls under two conditions. First, the scored response is attributed to the
+  parent's last call. Second, the engine's prompt for the request that carries the subagent's
+  answer starts with the tokens of the parent's earlier calls. Otherwise the rollout is masked.
+  The second condition fails with an engine that renders every request anew by a chat template
+  that leaves out the reasoning of the assistant turns before the last user message, because the
+  answer reaches the engine as a user message.
+
+These request forms are those of Codex 0.172.0.
+
 ## Requests, results, and lifecycle
 
 Input is a string or one user message with text and base64 data-URI `input_image` parts, optionally preceded by a text system/developer message.
@@ -429,7 +458,7 @@ codex_agent:
 - `stream_idle_timeout_ms`: provider stream idle budget. Gym model servers emit the synthesized SSE only once the full response is computed, so this must cover an entire generation; `null` defaults it to `timeout * 1000`
 - `request_max_retries`, `stream_max_retries`: the provider's resends of a request that fails before its stream starts, and reconnects after a stream drops. `null` (the default) leaves Codex's own defaults. Unlike `extra_config`, they also apply to sandbox sessions
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
-- `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Codex 0.168.0 to 0.172.0 mark `multi_agent` as deprecated and print a notice for the key before the turn starts. The notice says that the key keeps its effect, so a sandbox session reports it as an observation gap and does not fail the turn. A deprecation notice with another text fails the turn. Codex 0.172.0 prints no notice and offers no subagent tools with `multi_agent: null` and `agents_enabled: false`. Unlike `extra_config`, it also applies to sandbox sessions
+- `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tools reach an engine only through a model server that carries them ([Subagents](#subagents) states what the subagent tools need). A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only for such a model server or for one that relays Codex's requests unchanged. Codex 0.168.0 to 0.172.0 mark `multi_agent` as deprecated and print a notice for the key before the turn starts. The notice says that the key keeps its effect, so a sandbox session reports it as an observation gap and does not fail the turn. A deprecation notice with another text fails the turn. Codex 0.172.0 prints no notice and offers no subagent tools with `multi_agent: null` and `agents_enabled: false`. Unlike `extra_config`, it also applies to sandbox sessions
 - `model_catalog_json`: absolute path of a model catalog file, written into the generated config under the same name. Codex then takes its model catalog from that file instead of its bundled one, so a `model` the bundled catalog does not list gets the metadata of the file's entry with that `slug` (for example its tool set and base instructions) rather than Codex's fallback metadata. The entry decides the tool set ahead of `features`: with an entry copied from a bundled code-mode model, Codex offers the free-form `exec` tool although `features` sets `code_mode: false`, so name such a catalog only when the model server can carry that tool. `codex debug models --bundled` prints the bundled catalog in the file's format, `{"models": [...]}`. The file must exist where Codex runs (in a sandbox session, inside the sandbox) and be in the format of `codex_version`; the adapter does not write it, and Codex stops before its first model call when it cannot read the file. Codex resolves a relative path against its per-run `CODEX_HOME`, so only an absolute path is accepted. `null` (the default) leaves the key out. Unlike `extra_config`, it also applies to sandbox sessions
 - `agents_enabled`: the `enabled` key of the generated `[agents]` table. `true` writes `enabled = true`, `false` writes `enabled = false`, and `null` (the default) leaves the table out, so the CLI uses its own default. `false` removes Codex's subagent tools (the `collaboration` namespace), which a catalog entry with a `multi_agent_version` adds to the request even when `features` turns `multi_agent` off; an entry without that key adds none. The setting needs a Codex version that knows the key, and it is verified with Codex 0.163.0. Codex 0.144.4, the `codex_version` that `configs/codex_agent.yaml` pins, does not know the key and stops with a configuration error. Configuration validation therefore refuses `true` or `false` together with a `codex_version` of 0.144.4 or older. An older version is assumed not to know the key. A version between 0.144.4 and 0.163.0 is unverified and is not refused. Only a `codex_version` of three numbers, such as `0.144.4`, is compared; another form, such as `latest`, is not refused. Unlike `extra_config`, it also applies to sandbox sessions
 - `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied)
