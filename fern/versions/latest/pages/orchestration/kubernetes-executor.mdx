@@ -1,0 +1,113 @@
+---
+title: "Kubernetes Executor"
+description: "How gym eval submit runs a benchmark as a Kubernetes Job, what it supports today, and how to manage a run with kubectl."
+position: 6
+---
+
+The Kubernetes executor submits each benchmark as one Kubernetes `Job` with one pod. It is a first version: it covers a single node, and it supports a smaller part of the [submit config](/orchestration/configuration) than the [Slurm executor](/orchestration/slurm-executor). The [`gym job` commands](/orchestration/executors#capabilities) other than `list` do not work with it yet.
+
+## What the executor needs
+
+- `kubectl` on the machine you submit from. NeMo Gym does not log in to the cluster: set up the kubeconfig first, for example with `tsh kube login <cluster>`, and name the context in `compute.<name>.context`. With no `context`, the current one is used.
+- A namespace you can create Jobs in (`compute.<name>.namespace`, `default` if unset).
+- An existing `PersistentVolumeClaim` (`compute.<name>.pvc_name`, required). It is mounted at `job.output_path` in every container, and holds the run directory.
+- A cluster with native sidecar containers (Kubernetes 1.29 or later), because the services run as sidecars of the driver.
+- GPU nodes that expose `nvidia.com/gpu`, when a service asks for GPUs.
+
+Every `kubectl` call is bounded to 60 seconds. When one times out, for example because the login expired, that benchmark is recorded with the error and the others are unaffected.
+
+## A minimal config
+
+```yaml
+compute:
+  cluster:
+    type: kubernetes
+    context: mycluster
+    namespace: mynamespace
+    gpus_per_node: 8
+    pvc_name: mypvc
+
+services:
+  vllm_model:
+    type: vllm
+    container: vllm/vllm-openai:v0.9.0
+    model: Qwen/Qwen2.5-7B-Instruct
+    tensor_parallel_size: 2
+    port: 8000
+    health_check:
+      timeout_seconds: 1200
+    env:
+      HF_TOKEN: host:HF_TOKEN
+
+driver:
+  policy_model: vllm_model
+  container: python:3.12
+  gym_install:
+    ref: main
+  env:
+    HF_TOKEN: host:HF_TOKEN
+  benchmarks:
+    gpqa:
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+
+job:
+  output_path: /mnt/gym-output
+
+otel:
+  enabled: false
+```
+
+The repository has this file as `examples/k8s_vllm_single_node.yaml`. Preview the manifests without applying them with `gym eval submit --dry-run`.
+
+### Compute settings
+
+| Key | Meaning |
+| --- | --- |
+| `context`, `namespace` | Where the Job is created. |
+| `pvc_name` | Required. The claim mounted at `job.output_path`. |
+| `gpus_per_node` | The size of the one node. Service GPU footprints are checked against it. |
+| `node_selector`, `service_account` | Copied into the pod spec. |
+| `memory_per_gpu` | Memory request per GPU on a service container, `32Gi` by default. A pod with no memory request is the first the kubelet kills under pressure. |
+| `ttl_seconds_after_finished` | How long a finished Job and its pods are kept, 24 hours by default. |
+| `active_deadline_seconds` | Kills a Job that is still running after this long, which frees the GPUs of a hung server. Unset by default. |
+| `extra_args` | Copied as labels and annotations. |
+
+## How a benchmark runs
+
+Each benchmark becomes one Job, named `gym-<gym_job_id>-<benchmark>` after being made a valid Kubernetes name. The Job and its pod carry the labels `app.kubernetes.io/managed-by=nemo-gym`, `gym-job-id` and `gym-benchmark`. The pod has `restartPolicy: Never` and the Job has `backoffLimit: 0`, so a failure is not retried.
+
+- Each `vllm` service is a native sidecar container that starts before the driver. Its health check becomes a startup probe, and the driver does not start until it passes. Several instances of one service run as vLLM data-parallel ranks inside that one container.
+- The driver is the one regular container. It writes `gym-job.json` and `resolved-config.yaml` into the run directory on the PVC, then runs `gym eval prepare` and `gym eval run`.
+- The run directory is `<job.output_path>/<gym_job_id>/<benchmark>/`, with the same `logs/` and `artifacts/` layout as [on Slurm](/orchestration/slurm-executor#run-directory-layout).
+- The local index on your machine receives a copy of the record, so `gym job list` shows the submission.
+
+## What is not supported yet
+
+The executor rejects these at submit time with an error that names the setting:
+
+| Setting | Use instead |
+| --- | --- |
+| `otel` left on, which is the default | Set `otel.enabled: false`. |
+| `ray` services, and `use_ray_serve` on a service | None yet. |
+| `mounts` on a service or the driver | Only the PVC at `job.output_path` is mounted. |
+| `runtime:` values in `env` | `lit:` or `host:`. |
+| `resumable` on a benchmark | None yet. |
+| More than one node, or named `node_pools` | None yet. |
+
+## Managing a run
+
+`gym job status`, `info`, `cancel`, `logs` and `resubmit` stop with `kubernetes executor does not support <command>`. Use `kubectl` in the namespace and context you configured. The record's `job_id` is the Job name.
+
+| Instead of | Run |
+| --- | --- |
+| `gym job list` | `gym job list`. It reads the local index and works unchanged. |
+| `gym job status` | `kubectl get jobs -l gym-job-id=<id>`, with the ID lowercased and any characters other than letters, digits and `-` replaced by `-`. |
+| `gym job logs` | `kubectl logs job/<job name> -c driver` for the driver, and `-c <service>` for a service. Add `-f` to follow. |
+| `gym job cancel` | `kubectl delete job <job name>` |
+| `gym job info` | Read `gym-job.json` and `resolved-config.yaml` in the run directory on the PVC. |
+| `gym job resubmit` | Submit the config again. There is no in-place resubmit. |
+
+Results stay on the PVC after the Job's pods are removed.

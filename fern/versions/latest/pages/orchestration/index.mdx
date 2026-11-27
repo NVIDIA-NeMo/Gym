@@ -16,7 +16,7 @@ Use it when a benchmark needs more than one machine can offer: a model that span
 
 <Note>
 
-Slurm (with [Pyxis](https://github.com/NVIDIA/pyxis) container support) is the only executor today. The configuration and the [job record](/orchestration/job-records) are executor-neutral by design, so the schema does not assume Slurm, but nothing else is implemented.
+Two executors exist: Slurm (with [Pyxis](https://github.com/NVIDIA/pyxis) container support) and Kubernetes. The Kubernetes executor is a first version for one node, and it supports fewer commands and settings. [Executors and Capabilities](/orchestration/executors) says which command works with which executor.
 
 </Note>
 
@@ -27,7 +27,7 @@ A submit config has four required sections and one optional one:
 | Section | Describes | Reference |
 | --- | --- | --- |
 | `services` | Long-running servers to deploy beside the benchmark: `vllm`, `vllm_pd` (prefill/decode), or `ray`. | [Services](/orchestration/configuration#services) |
-| `compute` | The cluster to run on. One resource, of type `slurm`, with named node pools. | [Compute](/orchestration/configuration#compute) |
+| `compute` | The cluster to run on. One resource, of type `slurm` (with named node pools) or `kubernetes`. | [Compute](/orchestration/configuration#compute) |
 | `driver` | The process that runs `gym eval prepare` and `gym eval run` against the services, and the benchmarks it runs. | [Driver](/orchestration/configuration#driver) |
 | `job` | Where run directories are created on the cluster (`output_path`). | [Job](/orchestration/configuration#job) |
 | `otel` (optional) | The OpenTelemetry collector that runs beside each benchmark job. **On by default.** | [Collector for Submitted Jobs](/observability/eval-submit-collector) |
@@ -108,6 +108,14 @@ Every field of the submit config, the env-value prefixes, and the validation rul
 
 <Card title="Slurm Executor" href="/orchestration/slurm-executor">
 How a config becomes sbatch scripts, how files reach the cluster, and what lives in a run directory.
+</Card>
+
+<Card title="Executors and Capabilities" href="/orchestration/executors">
+Which executors exist and which `gym job` commands each one supports.
+</Card>
+
+<Card title="Kubernetes Executor" href="/orchestration/kubernetes-executor">
+How a benchmark runs as a Kubernetes Job, what is not supported yet, and how to manage a run with kubectl.
 </Card>
 
 <Card title="Job Records" href="/orchestration/job-records">
