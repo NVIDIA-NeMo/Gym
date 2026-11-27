@@ -148,6 +148,7 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
+    CleanupHandle,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     SingleAgentTurnFailure,
@@ -571,6 +572,9 @@ class HarborEnvironmentServer(
         self._shutting_down = False
         # Set, and logged, at the first release the policy model server answers 404 to.
         self._policy_model_lacks_release_route = False
+        # The policy model release of each episode key, until it succeeds. A redelivery of the key sends a failed one
+        # before it starts, so a release left for the shutdown sweep cannot end the redelivery's binding.
+        self._model_releases: dict[str, CleanupHandle] = {}
         # Each taskset's dataset-level TaskData (task_data.py beside its task folders), imported once here: None
         # for a dataset that ships none, or the error that keeps every episode of the taskset from seeding.
         self._task_data_schemas: dict[str, TaskDataSchema | TaskDataError | None] = {}
@@ -902,12 +906,25 @@ class HarborEnvironmentServer(
                         f"policy_model_server {self.config.policy_model_server.name!r} answered 404 to "
                         "/endpoint_binding/release: it is not a vllm_model server, so episodes release nothing there"
                     )
+            self._model_releases.pop(episode_key, None)
 
         cleanup.register_cleanup("harbor episode key", release_key)
+        if (earlier_release := self._model_releases.get(episode_key)) is not None:
+            # An earlier run of this key whose release failed: the model server binds this run's calls under the
+            # same key, so that release, retried later, would end this run's binding. It is sent now instead, and a
+            # release that fails again refuses this run, which the client retries.
+            try:
+                await earlier_release.close()
+            except Exception as error:
+                raise self._failure(
+                    stage="seed",
+                    failure_reason="The policy model release of a previous run of this episode failed",
+                    terminal=False,
+                ) from error
         if self.config.policy_model_server is not None:
             # Cleanups run last-registered first, so in the episode's own cleanup the release runs after the
             # agent-session close and the sandbox stop. A failed release is a cleanup observation only.
-            cleanup.register_cleanup("model session", release_model_session)
+            self._model_releases[episode_key] = cleanup.register_cleanup("model session", release_model_session)
         sandbox_cleanup = cleanup.register_cleanup("harbor sandbox", close_sandbox)
         try:
             # The job-level prompt template wraps the first turn's instruction before anything is provisioned: the

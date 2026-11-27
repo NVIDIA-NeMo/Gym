@@ -1633,6 +1633,31 @@ class TestAgentStage:
         await server.finish_running_cleanups()
         assert len(server.server_client.release_calls()) == 2
 
+    async def test_a_redelivery_sends_the_failed_release_of_the_earlier_run_before_it_starts(
+        self, tmp_path, monkeypatch
+    ):
+        """The model server binds both runs of a key under that key. The earlier run's failed release, left for the
+        shutdown sweep, would end the redelivery's binding while it runs; the redelivery sends it first instead."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, policy_model_server=POLICY_MODEL_SERVER)
+        client = server.server_client
+        client.fail_path = "/endpoint_binding/release"
+        assert (await run_episode(server, task)).failure is None
+        earlier_cleanups = list(server._running_cleanups.values())
+        assert len(earlier_cleanups) == 1 and not server._active
+
+        async def sweep_earlier_run():
+            # What the shutdown sweep does for the earlier run while the redelivery takes its turn.
+            for entry in earlier_cleanups[0]._cleanups:
+                await entry.close()
+
+        client.turn_hooks = [sweep_earlier_run]
+        assert (await run_episode(server, task)).failure is None
+
+        run_paths = ["/v1/agent_sessions", "/ng-rollout/r1/v1/responses", "/v1/agent_sessions/close"]
+        release = "/endpoint_binding/release"
+        assert client.paths() == [*run_paths, release, release, *run_paths, release]
+        assert not server._model_releases and not server._active
+
     async def test_model_session_is_released_only_after_the_sandbox_stop(self, tmp_path, monkeypatch):
         """While the sandbox may still run the harness, a release would let its next model call bind the key again.
         A failed stop withholds the release; the shutdown sweep, which starts every cleanup at once, sends it only
