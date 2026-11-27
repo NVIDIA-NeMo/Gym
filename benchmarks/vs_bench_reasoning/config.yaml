@@ -1,0 +1,25 @@
+config_paths:
+  - resources_servers/vs_bench_reference/configs/vs_bench_reference.yaml
+
+vs_bench_reasoning_resources_server:
+  _inherit_from: vs_bench_reference_resources_server
+
+vs_bench_reasoning_agent:
+  _inherit_from: vs_bench_reference_agent
+  responses_api_agents:
+    vs_bench_reference:
+      resources_server:
+        name: vs_bench_reasoning_resources_server
+      datasets:
+      - name: vs_bench_reasoning
+        type: benchmark
+        jsonl_fpath: benchmarks/vs_bench_reasoning/data/vs_bench_reasoning.jsonl
+        prepare_script: benchmarks/vs_bench_reasoning/prepare.py
+        num_repeats: 1
+
+vs_bench_reasoning_environment_server:
+  _inherit_from: vs_bench_reference_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: vs_bench_reasoning_agent

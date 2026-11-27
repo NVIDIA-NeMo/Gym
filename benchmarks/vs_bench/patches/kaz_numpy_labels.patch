@@ -1,0 +1,27 @@
+# Upstream: https://github.com/zelaix/VS-Bench, MIT license
+# Revision: 2c3531cdf91d1b620b4a9015126a242eb305a4d0
+# Original file: envs/knights_archers_zombies.py
+diff --git a/envs/knights_archers_zombies.py b/envs/knights_archers_zombies.py
+index 4db55ad..cac4232 100644
+--- a/envs/knights_archers_zombies.py
++++ b/envs/knights_archers_zombies.py
+@@ -226,6 +226,19 @@ class KnightsArchersZombies(BaseEnv, env_type="knights_archers_zombies"):
+     def get_perception_reward(self, raw_response, label):
+         import ast
+         import math
++        # Pandas may materialize nested parquet sequences as NumPy arrays.
++        # The scorer expects Python sequences for type checks, truth tests and
++        # removal of matched zombies. Normalize only the ground-truth label.
++        def as_python(value):
++            if isinstance(value, np.ndarray):
++                return as_python(value.tolist())
++            if isinstance(value, dict):
++                return {key: as_python(item) for key, item in value.items()}
++            if isinstance(value, (list, tuple)):
++                return [as_python(item) for item in value]
++            return value
++
++        label = as_python(label)
+         reward = 0
+         try:
+             # print(type(raw_response))

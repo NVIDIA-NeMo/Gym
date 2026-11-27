@@ -1,0 +1,13 @@
+# All four disjoint shards are required for the eight noncompetitive suites.
+config_paths:
+  - benchmarks/vs_bench_gameplay/config.yaml
+
+vs_bench_gameplay_benchmark_agent:
+  responses_api_agents:
+    vs_bench_gameplay:
+      datasets:
+      - name: vs_bench_gameplay
+        type: benchmark
+        jsonl_fpath: benchmarks/vs_bench_gameplay_suites_shard/data/vs_bench_suites_shard.jsonl
+        prepare_script: benchmarks/vs_bench_gameplay_suites_shard/prepare.py
+        num_repeats: 1

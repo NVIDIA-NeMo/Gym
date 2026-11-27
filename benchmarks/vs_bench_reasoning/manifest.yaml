@@ -1,0 +1,29 @@
+name: vs_bench_reasoning
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: other
+description: Original VS-Bench strategic reasoning with its reference agent and parser.
+modality: multimodal
+licensing: Apache-2.0
+authors:
+- VS-Bench authors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: vs_bench_reference
+agent_server: vs_bench_reference
+datasets:
+- name: vs_bench_reasoning
+  type: benchmark
+  jsonl_fpath: benchmarks/vs_bench_reasoning/data/vs_bench_reasoning.jsonl
+  prepare_script: benchmarks/vs_bench_reasoning/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

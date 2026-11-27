@@ -1,0 +1,36 @@
+vs_bench_author_root: ${oc.env:VS_BENCH_AUTHOR_ROOT,/unconfigured/vs-bench-source}
+vs_bench_author_python: ${oc.env:VS_BENCH_AUTHOR_PYTHON,/unconfigured/python}
+vs_bench_max_response_tokens: ${oc.env:VS_BENCH_MAX_RESPONSE_TOKENS,8192}
+vs_bench_max_reasoning_tokens: ${oc.env:VS_BENCH_MAX_REASONING_TOKENS,32000}
+
+vs_bench_reference_resources_server:
+  resources_servers:
+    vs_bench_reference:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      author_root: ${vs_bench_author_root}
+      author_python: ${vs_bench_author_python}
+
+vs_bench_reference_agent:
+  responses_api_agents:
+    vs_bench_reference:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: vs_bench_reference_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      author_root: ${vs_bench_author_root}
+      author_python: ${vs_bench_author_python}
+      max_response_tokens: ${vs_bench_max_response_tokens}
+      max_reasoning_tokens: ${vs_bench_max_reasoning_tokens}
+
+vs_bench_reference_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vs_bench_reference_agent
