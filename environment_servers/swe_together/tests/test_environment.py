@@ -21,6 +21,7 @@ from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifie
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.sandbox import PLACEMENT_GROUP_KEY
 from nemo_gym.trajectory import TrajectoryRecord
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 
 
 def activation(index=0, **kwargs):
@@ -945,6 +946,18 @@ async def test_shutdown_releases_the_runtime_bundle_after_its_sandboxes_stop(tmp
 async def test_interaction_deadline_closes_remote_work_before_grading(
     tmp_path, monkeypatch, native_outcome, confirmed
 ):
+    await _interaction_deadline_closes_remote_work_before_grading(tmp_path, monkeypatch, native_outcome, confirmed)
+
+
+def test_interaction_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(tmp_path, monkeypatch):
+    # On a loop clock ahead of monotonic, a monotonic deadline read as a loop time would expire before the activation
+    # starts, so the candidate would never be asked to work.
+    run_on_clock_ahead_loop(
+        _interaction_deadline_closes_remote_work_before_grading(tmp_path, monkeypatch, "interrupted", True)
+    )
+
+
+async def _interaction_deadline_closes_remote_work_before_grading(tmp_path, monkeypatch, native_outcome, confirmed):
     # The deadline must fire while the activation is in flight: 0.5 s leaves a loaded runner time to start it,
     # and the remote work outlasts the deadline, so only the deadline close can end it.
     environment = server(tmp_path, interaction_timeout_seconds=0.5, cleanup_timeout_seconds=1)

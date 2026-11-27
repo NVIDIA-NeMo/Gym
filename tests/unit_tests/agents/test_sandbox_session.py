@@ -28,6 +28,7 @@ from nemo_gym.sandbox.providers import SupportsSandboxIndependentUploads
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
 from nemo_gym.sandbox.providers.registry import get_provider_class
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
@@ -1308,10 +1309,6 @@ async def test_borrowed_close_survives_a_task_that_moved_its_workdir(tmp_path, f
 
 
 def test_monotonic_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(session):
-    class AheadClockLoop(asyncio.SelectorEventLoop):
-        def time(self) -> float:
-            return super().time() + 1_000_000
-
     async def main():
         return await session.execute(
             stage_activation=AsyncMock(return_value=SandboxCommand(argv=["worker"])),
@@ -1321,8 +1318,4 @@ def test_monotonic_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(sess
             deadline=monotonic() + 120,
         )
 
-    loop = AheadClockLoop()
-    try:
-        assert loop.run_until_complete(main()) == "transcript"
-    finally:
-        loop.close()
+    assert run_on_clock_ahead_loop(main()) == "transcript"

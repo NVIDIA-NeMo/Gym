@@ -24,6 +24,7 @@ from responses_api_agents.legal_agent_bench_native.app import (
     LegalAgentBenchNativeAgent,
     LegalAgentBenchNativeAgentConfig,
 )
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 
 
 def seed(**kwargs):
@@ -512,10 +513,6 @@ async def test_staging_deadline_uses_real_executor_and_requires_cleanup(monkeypa
 def test_staging_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(monkeypatch):
     from nemo_gym.sandbox import SandboxExecResult
 
-    class AheadClockLoop(asyncio.SelectorEventLoop):
-        def time(self) -> float:
-            return super().time() + 1_000_000
-
     async def main():
         runner, state, box = _tool_loop(monkeypatch)
 
@@ -528,11 +525,7 @@ def test_staging_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(monkey
         running = runner._run_loop(state, NeMoGymResponseCreateParamsNonStreaming(input=[]), "/v1/responses", {})
         return await asyncio.wait_for(running, 2)
 
-    loop = AheadClockLoop()
-    try:
-        result = loop.run_until_complete(main())
-    finally:
-        loop.close()
+    result = run_on_clock_ahead_loop(main())
     assert result.status == "incomplete" and result.metadata["lab_finish_reason"] == "agent_timeout"
 
 

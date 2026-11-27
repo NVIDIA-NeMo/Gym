@@ -20,6 +20,7 @@ from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 from responses_api_agents.miniswe_sandboxed_agent.models import MiniSWERunRequest, SeedSessionResponse
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 
 
 @pytest.fixture
@@ -125,6 +126,27 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert f.harnesses[0].model_base_url == "http://gym-model:8000/v1"
     f.provider.aclose.assert_awaited_once()
     assert f.body.responses_create_params.input == []
+
+
+def test_setup_deadlines_hold_on_an_event_loop_clock_ahead_of_monotonic(fixture):
+    # The connection and the workdir lookup each yield to the loop, so a setup deadline read on the wrong clock
+    # would expire inside them and the harness would never start.
+    f = fixture
+
+    async def connect(*args, **kwargs):
+        await asyncio.sleep(0)
+        return f.sandbox
+
+    async def workdir(*args, **kwargs):
+        await asyncio.sleep(0)
+        return SimpleNamespace(return_code=0, stdout="/workspace\n")
+
+    module.AsyncSandbox.connect.side_effect = connect
+    f.sandbox.exec.side_effect = workdir
+    response = run_on_clock_ahead_loop(f.agent.run(f.request, f.body))
+    assert response.reward == 0.25
+    assert f.verification["termination"]["reason"] == "completed"
+    assert f.verification["agent_started"]
 
 
 async def test_run_passes_rollout_prefixed_gym_model_url(fixture):
