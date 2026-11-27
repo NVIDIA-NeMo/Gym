@@ -10879,6 +10879,25 @@ def test_messages_repetition_capture_does_not_invent_a_bound_response(tmp_path: 
     assert "model_call_runaway_generation" in digest.unobserved
 
 
+@mark.parametrize("forwarded", [True, False])
+def test_messages_request_forwards_the_effort_of_output_config_when_configured(forwarded: bool) -> None:
+    server, client = TestCodexRequests._server(forward_anthropic_reasoning_effort=forwarded)
+    client.create_chat_completion = AsyncMock(
+        return_value=TestCodexRequests._completion({"role": "assistant", "content": "ok"})
+    )
+    body = {
+        "model": "m",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"effort": "xhigh"},
+    }
+
+    response = TestClient(server.setup_webserver()).post("/v1/messages", json=body)
+
+    assert response.status_code == 200
+    assert client.create_chat_completion.await_args.kwargs.get("reasoning_effort") == ("xhigh" if forwarded else None)
+
+
 @mark.parametrize(
     ("old_name", "new_name"),
     [

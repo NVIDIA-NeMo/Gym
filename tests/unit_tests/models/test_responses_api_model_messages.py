@@ -130,6 +130,28 @@ class TestDefaultMessagesRoute:
         assert result.status_code == 200
         assert "reasoning" not in server.last_params.model_dump(exclude_unset=True)
 
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        ("output_config", "reasoning"),
+        [(None, None), ({"effort": None}, None), ({"effort": "max"}, {"effort": "max"})],
+    )
+    def test_output_config_effort_is_forwarded_when_configured(
+        self, output_config: object, reasoning: object, stream: bool
+    ) -> None:
+        client, server = _client(_BodyOnlyModel, forward_anthropic_reasoning_effort=True)
+        result = client.post(
+            "/v1/messages",
+            json={
+                "model": "synthetic",
+                "messages": [],
+                "max_tokens": 8,
+                "stream": stream,
+                "output_config": output_config,
+            },
+        )
+        assert result.status_code == 200
+        assert server.last_params.model_dump(exclude_unset=True).get("reasoning") == reasoning
+
     def test_messages_route_registered_alongside_openai_routes(self) -> None:
         server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         paths = {route.path for route in server.setup_webserver().routes}

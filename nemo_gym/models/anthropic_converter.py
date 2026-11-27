@@ -314,12 +314,14 @@ class AnthropicConverter:
     # Ingress: Anthropic Messages request  ->  NeMo Gym Responses
     ############################################################################
     def anthropic_request_to_responses(
-        self, anthropic_body: MessageCreateParams
+        self, anthropic_body: MessageCreateParams, *, forward_reasoning_effort: bool = False
     ) -> NeMoGymResponseCreateParamsNonStreaming:
         """Inverse of ``responses_to_anthropic`` (the request direction).
 
         Parses an inbound Anthropic Messages request into Responses create params so it can be
-        forwarded to a downstream Gym model server's ``/v1/responses``.
+        forwarded to a downstream Gym model server's ``/v1/responses``. With ``forward_reasoning_effort``,
+        the effort of ``output_config`` becomes the Responses ``reasoning.effort``; without it, the effort
+        is dropped.
 
         ``anthropic_body`` is hinted with the Anthropic SDK's native ``MessageCreateParams``
         (a TypedDict union, so it accepts ``stream: true``). It's a type hint only — at runtime
@@ -340,6 +342,9 @@ class AnthropicConverter:
             params["temperature"] = anthropic_body["temperature"]
         if anthropic_body.get("top_p") is not None:
             params["top_p"] = anthropic_body["top_p"]
+        effort = (anthropic_body.get("output_config") or {}).get("effort")
+        if forward_reasoning_effort and effort is not None:
+            params["reasoning"] = {"effort": effort}
 
         tools = self._anthropic_tools_to_responses(anthropic_body.get("tools"))
         if tools:

@@ -318,6 +318,15 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "server. Minimal response.created keepalive events are unaffected."
         ),
     )
+    forward_anthropic_reasoning_effort: bool = Field(
+        default=False,
+        description=(
+            "Forward the effort of an Anthropic Messages request (`output_config.effort`) to the backend as the "
+            "Responses `reasoning.effort`, as a /v1/responses request states it. Off by default, which drops the "
+            "effort: the Claude Code CLI states one in every request, `high` unless configured, and a backend can "
+            "refuse a level that it does not serve."
+        ),
+    )
     stream_keepalive_s: Optional[float] = Field(
         default=None,
         gt=0,
@@ -952,7 +961,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         ``stream_keepalive_s`` holds the event stream open while the call runs.
         """
-        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(
+            body, forward_reasoning_effort=self.config.forward_anthropic_reasoning_effort
+        )
         if body.get("stream"):
             return await self._stream_messages(request, body, params)
         anthropic_response = self._anthropic_response(body, await self._invoke_responses(request, params))

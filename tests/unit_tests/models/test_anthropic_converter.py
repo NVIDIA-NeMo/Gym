@@ -63,6 +63,22 @@ class TestAnthropicRequestToResponses:
         assert params.input[0].role == "user"
         assert params.input[0].content == "Hello"
 
+    @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+    def test_forwarded_output_config_effort_becomes_the_reasoning_effort(self, effort: str) -> None:
+        body = {"model": "m", "max_tokens": 8, "messages": [], "output_config": {"effort": effort}}
+        forwarded = _converter().anthropic_request_to_responses(body, forward_reasoning_effort=True)
+        dropped = _converter().anthropic_request_to_responses(body)
+        assert forwarded.reasoning == {"effort": effort}
+        assert "reasoning" not in dropped.model_dump(exclude_unset=True)
+
+    @pytest.mark.parametrize("output_config", [None, {}, {"effort": None}, {"format": {"type": "json_schema"}}])
+    def test_request_without_an_effort_leaves_reasoning_unset(self, output_config: object) -> None:
+        params = _converter().anthropic_request_to_responses(
+            {"model": "m", "max_tokens": 8, "messages": [], "output_config": output_config},
+            forward_reasoning_effort=True,
+        )
+        assert "reasoning" not in params.model_dump(exclude_unset=True)
+
     def test_system_block_list_is_joined(self) -> None:
         params = _converter().anthropic_request_to_responses(
             {
