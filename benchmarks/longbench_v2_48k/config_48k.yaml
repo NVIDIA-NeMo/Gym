@@ -1,0 +1,22 @@
+# LongBench v2 restricted to rows whose untruncated prompt is under 48000 tokens.
+config_paths:
+  - resources_servers/longbench/configs/longbench.yaml
+
+longbench_48k_benchmark_resources_server:
+  _inherit_from: longbench
+
+longbench_48k_benchmark_simple_agent:
+  _inherit_from: longbench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: longbench_48k_benchmark_resources_server
+      datasets:
+      - name: longbench_48k
+        type: benchmark
+        jsonl_fpath: benchmarks/longbench/data/longbench_48k_benchmark.jsonl
+        # Rows carry a fully rendered prompt, so no template is applied.
+        prompt_config: null
+        prepare_script: benchmarks/longbench/prepare_48k.py
+        num_repeats: 1
+        license: Apache 2.0

@@ -1,0 +1,17 @@
+# Serve ONLY the longbench resources server (the /verify scorer), for driving
+# from an external eval runner:
+#
+#   ng_run "+config_paths=[resources_servers/longbench/configs/longbench_serve.yaml]"
+#
+# Grading is rule-based, so no model server is needed. The runner owns the
+# policy model and generation; it POSTs the model's answer to /verify.
+longbench:
+  resources_servers:
+    longbench:
+      entrypoint: app.py
+      host: 0.0.0.0
+      port: 8071
+      domain: long_context
+      verified: false
+      description: LongBench v2 multiple-choice long-context QA; reward = 1 when the extracted answer letter equals the gold letter.
+      value: Improve reasoning and answer extraction over long documents, dialogues and code repositories.
