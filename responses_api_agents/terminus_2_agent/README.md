@@ -67,12 +67,14 @@ The response status says how the run ended:
 | Close during the run | `incomplete` | `cancelled` |
 | A task command, such as `pkill python3`, sent the runner SIGTERM | `incomplete` | `terminated` |
 | Context overflow that summarization could not resolve | `incomplete` | `context_limit` |
+| The same overflow in an agent session with `collect_rollout_details` on, before the model's first reply | `failed`, with `ng_agent_outcome` | `context_limit` |
 | Model request rejected or failed, other harness error | `failed`, with `ng_agent_outcome` | `error` |
 | A stop reason this adapter does not know | `failed`, with `ng_agent_outcome` | the reason the runner saved |
 
 A rollout stop or the time limit that arrives before the runner saved anything, during seed or while the runner
 starts, ends the run as an empty `wall_time` run. Only the supervisor's receipt makes a SIGTERM a time limit. A failed response names `model_request_error` with the model's HTTP status,
-`model_transport_error`, `agent_invalid_output` (a reply cut off at the output limit), or `unknown`, and the
+`model_transport_error`, `agent_invalid_output` (a reply cut off at the output limit), `model_context_limit` (an
+overflow before the model's first reply, above), or `unknown`, and the
 Environment Server's outcome policy decides whether to verify, retry or fail the episode. In both execution modes,
 usage is reported only when every model response carried it, and a model call cancelled by the time limit leaves it
 unknown. Reasoning-token counts are always unknown, because Harbor keeps none.
@@ -123,7 +125,11 @@ agent replaces with Gym's Model Server client, so the agent refuses to start wit
 `reasoning` instead.
 `record_terminal_session` applies only on the host path. `collect_rollout_details` returns token IDs and log
 probabilities; in a sandbox they come back in the runner's result file, which the task's commands could also write,
-so treat them as evaluation evidence only.
+so treat them as evaluation evidence only. With it on, an agent session whose context overflowed before the model's
+first reply fails with `model_context_limit`, because there is no agent work to verify. The `harbor`
+and `single_agent_turn` Environment Servers then fail the episode without grading or retrying it. To retry it, set
+`agent_outcome_policy: {by_failure_kind: {model_context_limit: retry}}` on the Environment Server; an overflow on the
+first model call overflows again on every retry until the prompt or the model's context length changes.
 
 ### Benchmark profile
 

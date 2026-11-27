@@ -800,7 +800,10 @@ not retry or grading policy.
 Use `model_context_limit` only when a provider or harness explicitly reports that the
 model's context window was exceeded. HTTP 400 or 413 alone does not establish that
 cause. Report a context-limit stop as `status="incomplete"` with this reason: the
-partial work proceeds to verification without an automatic episode retry.
+partial work proceeds to verification without an automatic episode retry. Terminus 2
+agent sessions with `collect_rollout_details` on make one exception: they report an
+overflow before the model's first reply as `status="failed"` with `model_context_limit`,
+because there is no agent work to verify.
 
 The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
 upstream model request's status, not the agent endpoint's HTTP status. The
@@ -811,7 +814,7 @@ failed responses after closing the agent:
 | --- | --- | --- |
 | `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
 | Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
-| Other failures, including 401/403/404 or malformed metadata | No | No |
+| Other failures, including 401/403/404, `model_context_limit` or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
 failure flow. Retry eligibility does not force a retry; the collector's retry budget
@@ -840,6 +843,10 @@ Use `by_status_code: {503: fail}` to change 503 handling. Adding
 
 It applies to `single_agent_turn`, its legacy-response wrapper and `harbor`, not other
 Environment Server implementations or agents' own legacy `/run` methods.
+
+To retry a failed context-limit stop instead, set `by_failure_kind: {model_context_limit: retry}`.
+An overflow on the first model call repeats on every retry until the prompt or the model's
+context length changes.
 
 ## Make retries and close safe
 
