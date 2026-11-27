@@ -31,8 +31,6 @@ from statistics import fmean, variance
 
 from scipy.stats import t
 
-from nemo_gym.eval.comparison import DEFAULT_CONFIDENCE_LEVEL
-
 
 @dataclass(frozen=True, slots=True)
 class MetricScale:
@@ -150,7 +148,7 @@ def aggregate_welch(
     comparisons: Sequence[BenchmarkSamples],
     *,
     weights: Sequence[float] | None = None,
-    confidence_level: float = DEFAULT_CONFIDENCE_LEVEL,
+    confidence_level: float = 0.95,
 ) -> WelchResult:
     """Estimate a weighted candidate-minus-baseline delta with Welch–Satterthwaite uncertainty.
 

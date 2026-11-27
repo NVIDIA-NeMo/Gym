@@ -25,7 +25,6 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.eval.comparison import DEFAULT_CONFIDENCE_LEVEL
 
 
 ReportFormat = Literal["md", "json", "both"]
@@ -129,11 +128,11 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
         description="Which report artifacts to write: `md`, `json`, or `both`.",
     )
     confidence_level: float = Field(
-        default=DEFAULT_CONFIDENCE_LEVEL,
+        default=0.95,
         gt=0,
         lt=1,
         allow_inf_nan=False,
-        description="Two-sided confidence level for candidate-minus-baseline intervals, as a fraction between 0 and 1. "
+        description="Confidence level for candidate-minus-baseline intervals, as a fraction between 0 and 1. "
         "Side intervals stay at 95% and are recomputed for pooled sides.",
     )
 
@@ -304,7 +303,6 @@ class ComparisonResult(BaseModel):
     generated_at: str
     nemo_gym_version: str
     command: str
-    # Reports written before this field was added used 95% delta intervals.
     confidence_level: float = Field(
         default=0.95,
         gt=0,

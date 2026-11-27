@@ -32,7 +32,6 @@ from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 from nemo_gym.cli.utils import exit_cleanly_on_config_error, exit_cleanly_on_job_error
 from nemo_gym.environment.assets import asset_config_path
-from nemo_gym.eval.comparison import DEFAULT_CONFIDENCE_LEVEL
 from nemo_gym.utils.text import did_you_mean
 from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
@@ -2299,7 +2298,7 @@ COMMANDS = {
             _value_flag(
                 "confidence-level",
                 "confidence_level",
-                f"Two-sided delta confidence level as a fraction between 0 and 1 (default: {DEFAULT_CONFIDENCE_LEVEL:.2f}). "
+                "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
                 "Side intervals stay at 95%% and are recomputed for pooled sides.",
             ),
             _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
@@ -2338,7 +2337,7 @@ COMMANDS = {
             _value_flag(
                 "confidence-level",
                 "confidence_level",
-                f"Two-sided delta confidence level as a fraction between 0 and 1 (default: {DEFAULT_CONFIDENCE_LEVEL:.2f}).",
+                "Two-sided confidence level as a fraction between 0 and 1 (default: 0.95).",
             ),
             _value_flag(
                 "output-dir",

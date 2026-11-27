@@ -108,7 +108,7 @@ gym eval compare \
 
 It prints the key metrics and writes `<output_dir>/compare_report.md` and `<output_dir>/compare_report.json`. Read them this way:
 
-- **Delta is candidate minus baseline**, using each run's mean across repeats when available. The interval is a two-sided Welch t interval over the per-repeat scores, 90% by default. It treats the runs as independent samples of the same fixed task set. For a prespecified direction, the matching endpoint gives a one-sided test at 5% significance.
+- **Delta is candidate minus baseline**, using each run's mean across repeats when available. The interval is a two-sided Welch t interval over the per-repeat scores, 95% by default (`--confidence-level 0.90` after 0.7.0). It treats the runs as independent samples of the same fixed task set.
 - **Improvement** needs the whole interval above 0 (for a metric where higher is better). An interval that contains 0 shows neither an improvement nor a regression, and it does not show that the runs are equivalent.
 - **"No worse than"** needs a largest acceptable loss chosen before looking at the result: the lower end of the interval must be above minus that margin.
 - Overlapping intervals of the two separate runs are not the test. Use the interval of the difference.
@@ -120,7 +120,7 @@ Other cases:
 - **One repeat per run.** There is no interval. One run's standard error is at most `sqrt(p * (1 - p) / n)` for n tasks at pass rate p, about 5 points for 100 tasks at p = 0.5. Collect 2 or more repeats per side before deciding.
 - **A published number.** The Gym run's standard error `se_a` is `se_across_repeats/mean/reward`. Estimate the reference's as `se_b = sd1 / sqrt(k_ref)`, where `sd1` is `std_across_repeats/mean/reward` of the Gym run and `k_ref` is the reference's repeat count (1 if unknown). Put both on the same scale. A gap under about `2 * sqrt(se_a^2 + se_b^2)` is within noise; check settings (step 3) whatever the size of the gap.
 - **Several runs of the same setup.** After 0.7.0, `--baseline-runs` and `--candidate-runs` pool independent runs into one sample. A resumed run, a copy or a re-aggregation of the same rollouts is not an independent run.
-- **Several benchmarks.** After 0.7.0, `gym eval compare-suite --suite <suite.yaml>` combines normalized benchmark scores per model, with a 90% interval by default.
+- **Several benchmarks.** After 0.7.0, `gym eval compare-suite --suite <suite.yaml>` combines normalized benchmark scores per model, with a two-sided 95% interval by default, matching `gym eval compare`. One endpoint gives 2.5% significance for a prespecified one-sided test.
 - **More repeats.** For a standard error s you need about `(sd1 / s)^2` repeats. To plan repeat counts for a future comparison, hand off to `nemo-gym-repeat-planning` in the Gym repo.
 
 ### 5. Find the tasks that changed or fail
@@ -154,7 +154,7 @@ Next step: <rerun or resume X, align setting Y, add repeats, fix verifier Z>
 
 ## Examples
 
-**Two runs.** A team compares a BF16 baseline with an FP8 candidate on a 150-task tool-use benchmark, 4 repeats each. `gym eval compare --confidence-level 0.95` prints `mean/reward` 0.712 → 0.694, delta −0.018 [−0.041, 0.005]. The candidate's `<run_dir>/quality_summary.json` shows 600 expected rollouts and 11 failed (`model_request_error`, HTTP 429 from the endpoint); the baseline shows none. The two runs' configs differ only in the model path. The report:
+**Two runs.** A team compares a BF16 baseline with an FP8 candidate on a 150-task tool-use benchmark, 4 repeats each. `gym eval compare` prints `mean/reward` 0.712 → 0.694, delta −0.018 [−0.041, 0.005]. The candidate's `<run_dir>/quality_summary.json` shows 600 expected rollouts and 11 failed (`model_request_error`, HTTP 429 from the endpoint); the baseline shows none. The two runs' configs differ only in the model path. The report:
 
 ```text
 Verdict: within noise so far: the interval contains 0, and the candidate lost 11 rollouts to rate limits
