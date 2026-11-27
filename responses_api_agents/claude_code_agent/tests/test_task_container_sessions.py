@@ -84,6 +84,7 @@ def run_runner(tmp_path, prompt=None):
         "env": {},
         "settings": {},
         "mcp_config": None,
+        "required_mcp_servers": [],
         "skills_path": None,
     }
     if prompt is not None:

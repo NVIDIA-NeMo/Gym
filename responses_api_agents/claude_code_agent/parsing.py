@@ -157,6 +157,7 @@ def parse_stream_json(
     with pending tool calls retained as incomplete. The last main-thread assistant message's served ``id`` is
     returned in internal metadata as ``terminal_response_id`` and becomes ``response.id`` under capture.
     It is not a declared terminal id on the ``/run`` result; other attribution witnesses still corroborate it.
+    The status of each MCP server in the run's first init event is returned as ``mcp_servers``, by server name.
     """
     raw_events: list[dict] = []
     for line in stdout.splitlines():
@@ -182,6 +183,7 @@ def parse_stream_json(
     compacting_sessions: set[str] = set()
     compaction_attempts: list[dict[str, str]] = []
     terminal_response_id: Optional[str] = None
+    mcp_servers: Optional[dict[str, str]] = None
 
     for event in raw_events:
         etype = event.get("type")
@@ -305,6 +307,15 @@ def parse_stream_json(
                     )
                 )
 
+        elif etype == "system" and event.get("subtype") == "init" and mcp_servers is None:
+            # Written once Claude Code has tried each configured MCP server, before its first model request.
+            servers = event.get("mcp_servers")
+            mcp_servers = {
+                server["name"]: str(server.get("status"))
+                for server in (servers if isinstance(servers, list) else [])
+                if isinstance(server, dict) and isinstance(server.get("name"), str)
+            }
+
         elif etype == "system" and event.get("subtype") == "status":
             session_id = event.get("session_id")
             if not isinstance(session_id, str) or not session_id:
@@ -345,6 +356,8 @@ def parse_stream_json(
         metadata["num_turns"] = num_turns
     if compaction_attempts:
         metadata["compaction_attempts"] = compaction_attempts
+    if mcp_servers is not None:
+        metadata["mcp_servers"] = mcp_servers
     metadata.update(result_metadata)
     return output_items, metadata
 

@@ -5,7 +5,8 @@
 # The unset resources_server name makes Gym compose this agent onto the benchmark's own agent
 # instance; each session then creates its own sandbox through the `sandbox` provider, which must
 # reach the model server by address. Supply the sandbox image. The agent refuses a required
-# direct_http grant, so pair it with benchmarks whose Resources server serves no tools, such as HLE.
+# direct_http grant, so pair it with benchmarks whose Resources server serves no tools, such as HLE, or
+# serves them over MCP (resources_tool_transports: [mcp], with network_access: model_and_tools).
 use_absolute_ip: true
 # The head server's config endpoint is unauthenticated, so keep it off the address sandboxes reach.
 head_server:
@@ -27,12 +28,13 @@ claude_code_agent:
         name: policy_model
       model: ${policy_model_name}
       anthropic_api_key: ""
-      # Sandbox sessions require an exact CLI version.
+      # Sandbox sessions require an exact CLI version. This one waits about 5 seconds for MCP servers, so a
+      # required MCP grant that connects more slowly fails the activation; 2.1.292 waits up to MCP_TIMEOUT.
       claude_code_version: "2.1.108"
       sandbox_provider: sandbox
       # Grade what the model knows: the sandbox reaches only the model server, as with the deprecated agents.
-      # Claude takes no tool grants. The CLI is uploaded from the Agent Server, so setup needs no sandbox
-      # network, but the image must include bash.
+      # This refuses a required MCP grant: set model_and_tools to open each grant's host too. The CLI is
+      # uploaded from the Agent Server, so setup needs no sandbox network, but the image must include bash.
       network_access: model_only
       # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
       sandbox_config:

@@ -43,6 +43,7 @@ def runner_command(tmp_path: Path, code: str) -> list[str]:
         "env": {"GYM_VALUE": "it's set"},
         "settings": {},
         "mcp_config": None,
+        "required_mcp_servers": [],
         "skills_path": None,
     }
     return asyncio.run(state.stage_activation(payload)).argv
