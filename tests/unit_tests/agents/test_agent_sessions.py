@@ -146,6 +146,46 @@ def test_the_capabilities_route_declares_continuation_without_seeding() -> None:
         assert agent._session_records == {}
 
 
+class _CapabilitiesBeforeTaskSkills(BaseModel):
+    """The capabilities reply as an environment server that predates ``supports_task_skills`` reads it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports_task_tool_context: bool = False
+    continuation: AgentContinuationCapabilities | None = None
+
+
+@pytest.mark.parametrize("stages_skills", [False, True], ids=["no-task-skills", "task-skills"])
+def test_the_capabilities_reply_sends_supports_task_skills_only_when_declared(stages_skills: bool) -> None:
+    """A harness that stages no task skills answers as it did before the field existed, so an environment server
+    whose reply model forbids unknown fields still reads it, continuation included. A harness that stages them
+    sends the field, and it round-trips."""
+
+    class _Continues(_Agent):
+        def supports_task_tool_context(self) -> bool:
+            return True
+
+        def supports_task_skills(self) -> bool:
+            return stages_skills
+
+        def _agent_continuation_capabilities(self):
+            return AgentContinuationCapabilities(observations=["trajectory", "timing"])
+
+    agent = _Continues.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    wire = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities").json()
+    reply = AgentSessionCapabilitiesResponse.model_validate(wire)
+
+    assert reply.supports_task_skills is stages_skills
+    assert reply.continuation == AgentContinuationCapabilities(observations=["trajectory", "timing"])
+    if stages_skills:
+        assert wire["supports_task_skills"] is True
+        assert AgentSessionCapabilitiesResponse.model_validate(reply.model_dump(mode="json")) == reply
+    else:
+        assert set(wire) == {"supports_task_tool_context", "continuation"}
+        earlier = _CapabilitiesBeforeTaskSkills.model_validate(wire)
+        assert earlier.continuation == reply.continuation and earlier.supports_task_tool_context is True
+
+
 class _GrantCheckingAgent(_Agent):
     """Serves sessions without tool grants and refuses a seed that requires one."""
 
