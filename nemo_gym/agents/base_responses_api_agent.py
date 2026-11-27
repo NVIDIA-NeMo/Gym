@@ -262,6 +262,16 @@ class AgentSessionCapabilitiesResponse(BaseModel):
     supports_task_skills: bool = False
     continuation: AgentContinuationCapabilities | None = None
 
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        # Sent only when declared, so a harness that stages no task skills answers as it always did, and an
+        # environment server that predates the field still accepts the answer.
+        if not self.supports_task_skills:
+            result.pop("supports_task_skills", None)
+        return result
+
 
 class AgentCloseSessionRequest(BaseModel):
     """Close agent-server state."""
