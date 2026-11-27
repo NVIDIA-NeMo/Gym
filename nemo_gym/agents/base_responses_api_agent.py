@@ -277,6 +277,16 @@ class AgentSessionCapabilitiesResponse(BaseModel):
     continuation: AgentContinuationCapabilities | None = None
     sandbox_egress: AgentSandboxEgress | None = None
 
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        # Sent only when declared, so a harness that declares no sandbox hosts answers as it always did, and an
+        # environment server that predates the field still accepts the answer.
+        if self.sandbox_egress is None:
+            result.pop("sandbox_egress", None)
+        return result
+
 
 class AgentCloseSessionRequest(BaseModel):
     """Close agent-server state."""
