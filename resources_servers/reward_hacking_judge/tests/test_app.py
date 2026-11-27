@@ -300,7 +300,7 @@ async def test_verify_retries_an_unparseable_reply_then_fails_as_unparseable() -
     assert post.call_count == 2
 
 
-def test_source_runs_of_a_managed_run_follow_the_selected_attempt(tmp_path: Path, monkeypatch) -> None:
+def test_source_runs_of_a_managed_run_follow_the_selected_attempt(tmp_path: Path) -> None:
     identity = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
     source = tmp_path / "source.jsonl"
     source.write_text(json.dumps(identity) + "\n")
@@ -319,8 +319,6 @@ def test_source_runs_of_a_managed_run_follow_the_selected_attempt(tmp_path: Path
         # The earlier attempt's outcome is saved last, so it is the file's last row but not the selected outcome.
         store.record_outcome(first | {"reward": 1.0})
 
-    # Every row counts as large, so the scan reads them without their agent observations; verify reads them whole.
-    monkeypatch.setattr("nemo_gym.rollouts.rollout_records.PROJECTED_ROW_BYTES", 16)
     runs = load_source_runs(output)
 
     assert list(runs) == [(0, 0)]

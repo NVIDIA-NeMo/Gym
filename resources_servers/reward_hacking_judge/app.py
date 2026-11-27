@@ -155,18 +155,14 @@ class SourceRowError(Exception):
     """The source row of a rollout could not be read again, or is no longer that rollout's row."""
 
 
-# Values the startup scan never reads; a managed run's scan skips them in large rows.
-_SCAN_SKIP_KEYS = frozenset({"ng_trajectory", NG_AGENT_OBSERVATIONS_KEY, "response", "responses_create_params"})
-
-
 def _source_rows(path: Path) -> Iterator[tuple[dict[str, Any], SavedRow]]:
     """Each row of a rollouts file with a way to read it again, read one at a time."""
     # A managed run selects each rollout's latest attempt, as reverify does, which need not be its last row in the file.
-    store = RolloutStore.read(path, import_legacy=False, skip_keys=_SCAN_SKIP_KEYS)
+    store = RolloutStore.read(path, import_legacy=False)
     if store is not None:
         for record in store.selected_records("success").values():
-            # The record checks on read that its bytes are still this attempt's row; verify reads the whole row.
-            yield record.read(), replace(record, skip_keys=frozenset())
+            # The record checks on read that its bytes are still this attempt's row.
+            yield record.read(), record
         return
     with path.open("rb") as file:
         offset = 0
