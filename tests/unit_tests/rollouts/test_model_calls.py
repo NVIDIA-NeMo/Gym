@@ -6,6 +6,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.models.model_call_capture import CaptureStore
+from nemo_gym.rollouts.model_calls import _build_captured_model_call_record
 
 
 def test_observability_enabled_from_config(tmp_path):
@@ -311,3 +312,259 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
 
     assert store.has_pending("5-0") is False
+
+
+def _cancelled_exchange(response_raw, *, status_code=200, dialect="responses"):
+    """A call the capture recorded as cancelled: no parsed response, the body only as raw text."""
+    return {
+        "model_call_id": "call-cancelled",
+        "dialect": dialect,
+        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+        "started_at": 100.0,
+        "completed_at": 100.5,
+        "latency_ms": 500.0,
+        "status_code": status_code,
+        "error_category": "cancelled",
+        "request": {"input": "hi"},
+        "response": None,
+        "response_raw": response_raw,
+    }
+
+
+_COMPLETE_RESPONSES_BODY = {
+    "id": "resp-cancelled",
+    "model": "m",
+    "status": "completed",
+    "usage": {
+        "input_tokens": 12,
+        "output_tokens": 7,
+        "total_tokens": 19,
+        "output_tokens_details": {"reasoning_tokens": 5},
+    },
+    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+}
+
+
+def test_cancelled_call_with_a_complete_body_recovers_its_response():
+    exchange = _cancelled_exchange(orjson.dumps(_COMPLETE_RESPONSES_BODY).decode())
+
+    record = _build_captured_model_call_record(exchange, call_index=0)
+
+    assert record.response == _COMPLETE_RESPONSES_BODY
+    assert record.response_raw is None
+    assert record.response_id == "resp-cancelled"
+    assert record.response_status == "completed"
+    assert (record.tokens_in, record.tokens_out, record.tokens_total, record.tokens_reasoning) == (12, 7, 19, 5)
+    # The cancellation itself is still reported.
+    assert record.error_category == "cancelled"
+    assert record.status_code == 200
+
+
+def test_cancelled_chat_call_with_a_complete_body_recovers_its_response():
+    body = {
+        "id": "chatcmpl-1",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+    }
+
+    record = _build_captured_model_call_record(
+        _cancelled_exchange(orjson.dumps(body).decode(), dialect="chat"), call_index=0
+    )
+
+    assert record.response == body
+    assert record.response_id == "chatcmpl-1"
+    assert record.finish_reason == "stop"
+    assert (record.tokens_in, record.tokens_out, record.tokens_total) == (9, 3, 12)
+
+
+@pytest.mark.parametrize(
+    "response_raw, status_code",
+    [
+        pytest.param('{"id": "resp-1", "usage": {"input_t', 200, id="body cut before it was complete"),
+        pytest.param("", 200, id="empty body"),
+        pytest.param(None, 200, id="no body"),
+        pytest.param("[1, 2, 3]", 200, id="JSON that is not an object"),
+        pytest.param(orjson.dumps(_COMPLETE_RESPONSES_BODY).decode(), None, id="no status"),
+        pytest.param('{"error": {"message": "overloaded"}}', 500, id="error status"),
+    ],
+)
+def test_cancelled_call_without_a_complete_answer_keeps_what_was_captured(response_raw, status_code):
+    record = _build_captured_model_call_record(
+        _cancelled_exchange(response_raw, status_code=status_code), call_index=0
+    )
+
+    assert record.response is None
+    assert record.response_raw == response_raw
+    assert record.response_id is None
+    assert (record.tokens_in, record.tokens_out) == (None, None)
+    assert record.error_category == "cancelled"
+
+
+def test_only_cancelled_calls_have_their_raw_body_parsed():
+    exchange = _cancelled_exchange(orjson.dumps(_COMPLETE_RESPONSES_BODY).decode())
+    exchange["error_category"] = "capture_parse_error"
+
+    record = _build_captured_model_call_record(exchange, call_index=0)
+
+    assert record.response is None
+    assert record.response_raw == exchange["response_raw"]
+    assert record.tokens_out is None
+
+
+def test_a_parsed_response_is_never_replaced_by_its_raw_body():
+    exchange = _cancelled_exchange('{"id": "from-raw"}')
+    exchange["response"] = {"id": "parsed", "usage": {"input_tokens": 1, "output_tokens": 2}}
+    exchange["error_category"] = None
+
+    record = _build_captured_model_call_record(exchange, call_index=0)
+
+    assert record.response_id == "parsed"
+    assert record.response == exchange["response"]
+    assert record.response_raw == '{"id": "from-raw"}'
+
+
+def test_merge_capture_binds_a_cancelled_call_with_a_complete_body_to_its_agent_turn(tmp_path):
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    CaptureStore(tmp_path).record("0-0", _cancelled_exchange(orjson.dumps(_COMPLETE_RESPONSES_BODY).decode()))
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": {
+            "source": "test",
+            "records": [
+                {
+                    "kind": "agent_invocation",
+                    "invocation_id": "root",
+                    "model_calls": [
+                        {
+                            "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                            "response_id": "resp-cancelled",
+                        }
+                    ],
+                }
+            ],
+            "gaps": [],
+        },
+    }
+
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+
+    capture = record["ng_model_call_capture"]
+    [call] = capture["calls"]
+    assert call["response_id"] == "resp-cancelled"
+    assert (call["tokens_in"], call["tokens_out"]) == (12, 7)
+    assert call["response"] == _COMPLETE_RESPONSES_BODY
+    assert "response_raw" not in call or call["response_raw"] is None
+    assert capture["metrics"]["tokens_out"] == 7
+    [joined_ref] = record["ng_agent_observations"]["records"][0]["model_calls"]
+    assert joined_ref["model_call_id"] == "call-cancelled"
+    assert record["ng_agent_observations"]["gaps"] == []
+
+
+def _sse(*events):
+    """Server-sent events: each is (event name or None, payload as a dict or a literal string)."""
+    blocks = []
+    for name, payload in events:
+        data = payload if isinstance(payload, str) else orjson.dumps(payload).decode()
+        blocks.append((f"event: {name}\n" if name else "") + f"data: {data}\n\n")
+    return "".join(blocks)
+
+
+def test_cancelled_streamed_responses_call_with_a_complete_stream_recovers_its_response():
+    raw = _sse(
+        ("response.created", {"type": "response.created", "response": {"id": "resp-cancelled"}}),
+        ("response.completed", {"type": "response.completed", "response": _COMPLETE_RESPONSES_BODY}),
+    )
+
+    record = _build_captured_model_call_record(_cancelled_exchange(raw), call_index=0)
+
+    assert record.response == _COMPLETE_RESPONSES_BODY
+    assert record.response_raw is None
+    assert (record.response_id, record.tokens_in, record.tokens_out) == ("resp-cancelled", 12, 7)
+
+
+def test_cancelled_streamed_chat_call_with_a_complete_stream_recovers_its_response():
+    chunk = {"id": "chatcmpl-1", "model": "m"}
+    raw = _sse(
+        (None, {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "o"}}]}),
+        (None, {**chunk, "choices": [{"index": 0, "delta": {"content": "k"}, "finish_reason": "stop"}]}),
+        (None, {**chunk, "choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
+        (None, "[DONE]"),
+    )
+
+    record = _build_captured_model_call_record(_cancelled_exchange(raw, dialect="chat"), call_index=0)
+
+    assert record.response["choices"][0]["message"]["content"] == "ok"
+    assert record.response_raw is None
+    assert (record.response_id, record.finish_reason, record.tokens_in, record.tokens_out) == (
+        "chatcmpl-1",
+        "stop",
+        9,
+        3,
+    )
+
+
+@pytest.mark.parametrize(
+    "raw, dialect",
+    [
+        pytest.param(
+            _sse(("response.created", {"type": "response.created", "response": {"id": "resp-1"}})),
+            "responses",
+            id="stream cut before its terminal event",
+        ),
+        pytest.param(
+            _sse(("response.failed", {"type": "response.failed", "response": {"id": "resp-1"}})),
+            "responses",
+            id="stream ended with a failure",
+        ),
+        pytest.param(
+            _sse(("response.completed", {"type": "response.completed", "response": _COMPLETE_RESPONSES_BODY})),
+            "unknown",
+            id="unknown dialect",
+        ),
+        pytest.param(
+            _sse(("response.completed", {"type": "response.completed", "response": _COMPLETE_RESPONSES_BODY})),
+            None,
+            id="no dialect",
+        ),
+    ],
+)
+def test_cancelled_streamed_call_without_a_complete_stream_keeps_its_raw_body(raw, dialect):
+    exchange = _cancelled_exchange(raw)
+    exchange["dialect"] = dialect
+
+    record = _build_captured_model_call_record(exchange, call_index=0)
+
+    assert record.response is None
+    assert record.response_raw == raw
+    assert record.tokens_out is None
+
+
+def test_recovering_a_complete_cancelled_stream_keeps_its_failure_report(tmp_path):
+    from nemo_gym.core.failure_records import FailureReport
+    from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    # An omitted report is evidence too; recovery must not erase it with the raw SSE body.
+    raw = _sse(
+        (
+            "response.completed",
+            {
+                "type": "response.completed",
+                "response": _COMPLETE_RESPONSES_BODY,
+                FailureHeader.STREAM_FIELD: FailureReport(omitted=True).model_dump(mode="json"),
+            },
+        )
+    )
+    store = CaptureStore(tmp_path)
+    store.record("0-0", _cancelled_exchange(raw))
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+
+    assert FailureReportRow.report(record).omitted
+    [call] = record["ng_model_call_capture"]["calls"]
+    assert call["response"] == _COMPLETE_RESPONSES_BODY
+    assert call["response_raw"] is None
