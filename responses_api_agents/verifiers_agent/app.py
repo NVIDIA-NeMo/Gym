@@ -854,8 +854,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         checks read `turns[*].model_calls`.
 
         Each function call becomes a tool call of the turn that requested it, with the timing verifiers' tool
-        environment recorded where it ran the tool. A call it never ran, such as one with unparseable arguments,
-        has no timing and a ``tool_timing_unavailable`` gap.
+        environment recorded where it ran the tool and the result the model saw. A call it never ran, such as one
+        with unparseable arguments, has no timing and a ``tool_timing_unavailable`` gap.
         """
         gaps: list[ObservationGap] = []
         model_calls = [ModelCallRef(model_ref=self.config.model_server, response_id=rid) for rid in response_ids]
@@ -888,6 +888,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                         timing_source="executor" if timing else None,
                         status=timing.status if timing else ("completed" if call_id in results else "incomplete"),
                         error_type=timing.error_type if timing else None,
+                        output=results[call_id].get("output") if call_id in results else None,
                     )
                 )
         turns: list[TrajectoryTurn] = []

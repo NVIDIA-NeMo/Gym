@@ -652,12 +652,12 @@ class TestRolloutObservability:
         trajectory = self._trajectory_for(output, ["chatcmpl-a", "chatcmpl-b"], timings)
 
         assert [
-            (tool.tool_call_id, tool.model_call_ref.response_id, tool.status, tool.error_type)
+            (tool.tool_call_id, tool.model_call_ref.response_id, tool.status, tool.error_type, tool.output)
             for tool in trajectory.tool_calls
         ] == [
-            ("c1", "chatcmpl-a", "completed", None),
-            ("c2", "chatcmpl-a", "failed", "RuntimeError"),
-            ("c3", "chatcmpl-b", "completed", None),
+            ("c1", "chatcmpl-a", "completed", None, "done"),
+            ("c2", "chatcmpl-a", "failed", "RuntimeError", "boom"),
+            ("c3", "chatcmpl-b", "completed", None, "found"),
         ]
         assert all(tool.timing_source == "executor" for tool in trajectory.tool_calls)
         assert [(tool.started_at, tool.completed_at, tool.duration_ms) for tool in trajectory.tool_calls] == [
@@ -678,15 +678,26 @@ class TestRolloutObservability:
         trajectory = self._trajectory_for(output, ["chatcmpl-a", "chatcmpl-b"], {})
 
         assert [
-            (tool.tool_call_id, tool.status, tool.started_at, tool.timing_source) for tool in trajectory.tool_calls
+            (tool.tool_call_id, tool.status, tool.started_at, tool.timing_source, tool.output)
+            for tool in trajectory.tool_calls
         ] == [
-            ("c1", "completed", None, None),
-            ("c2", "incomplete", None, None),
+            ("c1", "completed", None, None, "Expecting value"),
+            ("c2", "incomplete", None, None, None),
         ]
         assert [(gap.code, gap.detail) for gap in trajectory.gaps] == [
             ("tool_timing_unavailable", "c1"),
             ("tool_timing_unavailable", "c2"),
         ]
+
+    def test_an_empty_tool_result_is_kept_as_an_empty_string(self) -> None:
+        output = [
+            {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "t", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": ""},
+        ]
+
+        trajectory = self._trajectory_for(output, ["chatcmpl-a"])
+
+        assert [(tool.status, tool.output) for tool in trajectory.tool_calls] == [("completed", "")]
 
     def test_a_rollout_with_no_model_calls_reports_a_gap(self) -> None:
         """Every call failing must not look like an ordinary empty trajectory."""
@@ -1346,4 +1357,12 @@ class TestToolCallTiming:
             ("c1", "completed", "executor"),
             ("c2", "failed", "executor"),
         ]
+        # The result the model saw, the failed call's error text included, survives serialization.
+        replies = {
+            item["call_id"]: item["output"]
+            for item in response.json()["output"]
+            if item["type"] == "function_call_output"
+        }
+        assert [tool["output"] for tool in tools] == [replies["c1"], replies["c2"]]
+        assert all(tool["output"] for tool in tools)
         assert all(tool["started_at"] is not None and tool["duration_ms"] is not None for tool in tools)
