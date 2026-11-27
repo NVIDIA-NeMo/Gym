@@ -281,6 +281,7 @@ class InferenceMetricsCollector:
             self.cache_layouts[replica] = cache_layout
         self.add_derived_metrics(result, f"vllm/{replica}/")
         self.add_offload_means(result)
+        self.add_offload_system_rates(result, f"mooncake/{replica}/")
         for metric in MOONCAKE_EVICTION_HISTOGRAMS:
             prefix = f"mooncake/total/{metric.removeprefix('master_')}"
             total = result.get(f"{prefix}_sum_per_second")
@@ -297,14 +298,40 @@ class InferenceMetricsCollector:
     def add_offload_means(metrics: dict[str, float]) -> None:
         """Compute interval mean durations from plain counters, without histograms."""
         for key, duration in list(metrics.items()):
-            if not key.startswith("mooncake/") or not key.endswith("_duration_us_per_second"):
+            if not key.startswith("mooncake/"):
                 continue
             if key.startswith("mooncake/stores_max/"):
                 continue  # Maxima of duration and operation rates may come from different stores.
-            base = key.removesuffix("_duration_us_per_second")
-            operations = metrics.get(f"{base}_operations_per_second")
+            namespace, replica, name_and_labels = key.split("/", 2)
+            name, separator, labels = name_and_labels.partition("/")
+            if not name.endswith("_duration_us_per_second"):
+                continue
+            base = f"{namespace}/{replica}/{name.removesuffix('_duration_us_per_second')}"
+            suffix = separator + labels
+            operations = metrics.get(f"{base}_operations_per_second{suffix}")
             if operations is not None and operations > 0:
-                metrics[f"{base}_mean_ms"] = duration / operations / 1000
+                metrics[f"{base}_mean_ms{suffix}"] = duration / operations / 1000
+
+    @staticmethod
+    def add_offload_system_rates(metrics: dict[str, float], prefix: str) -> None:
+        """Convert reset-aware Linux counters to device throughput and host stall percentages."""
+        for key, value in list(metrics.items()):
+            if not key.startswith(prefix):
+                continue
+            name, separator, labels = key.removeprefix(prefix).partition("/")
+            suffix = separator + labels
+            for direction in ("read", "write"):
+                if name == f"offload_block_{direction}_bytes_per_second":
+                    metrics[f"{prefix}offload_block_{direction}_gib_per_second{suffix}"] = value / 2**30
+            if name == "offload_block_busy_us_per_second":
+                metrics[f"{prefix}offload_block_busy_percent{suffix}"] = value / 10_000
+            elif name == "offload_block_weighted_io_us_per_second":
+                metrics[f"{prefix}offload_block_average_queue_depth{suffix}"] = value / 1_000_000
+            elif name in {
+                "offload_host_io_pressure_some_us_per_second",
+                "offload_host_io_pressure_full_us_per_second",
+            }:
+                metrics[f"{prefix}{name.removesuffix('_us_per_second')}_percent{suffix}"] = value / 10_000
 
     @staticmethod
     def add_derived_metrics(metrics: dict[str, float], prefix: str) -> None:
@@ -566,6 +593,9 @@ class InferenceMetricsCollector:
                     key.removeprefix(f"mooncake/{name}/"): value
                     for key, value in (snapshot or {}).items()
                     if key.startswith(f"mooncake/{name}/")
+                    # Host/device measurements include other processes; stacked
+                    # block-device layers overlap. Keep these per SSD owner.
+                    and not key.startswith((f"mooncake/{name}/offload_host_", f"mooncake/{name}/offload_block_"))
                 }
                 for (name, _), snapshot in zip(endpoints, snapshots)
                 if name in self.config.mooncake_client_endpoints

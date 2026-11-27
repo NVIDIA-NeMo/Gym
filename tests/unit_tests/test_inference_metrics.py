@@ -73,6 +73,86 @@ def test_offload_clients_export_counters_and_gauges_without_histograms():
     assert "mooncake/ssd0/offload_write_mean_ms" not in reset
 
 
+def offload_system_payload(step: int) -> str:
+    families = {
+        "block_write_bytes_total": ("counter", 1000 + step * 2**31),
+        "block_write_duration_us_total": ("counter", 1000 + step * 6000),
+        "block_write_operations_total": ("counter", 1 + step * 2),
+        "block_read_bytes_total": ("counter", 1000 + step * 2**30),
+        "block_busy_us_total": ("counter", 1000 + step * 500_000),
+        "block_weighted_io_us_total": ("counter", 1000 + step * 4_000_000),
+        "block_inflight_operations": ("gauge", 2),
+        "host_io_pressure_some_us_total": ("counter", 1000 + step * 200_000),
+        "host_io_pressure_full_us_total": ("counter", 1000 + step * 100_000),
+        "host_io_pressure_some_avg10_percent": ("gauge", 12.5),
+        "host_memory_dirty_bytes": ("gauge", 2**30),
+        "host_memory_writeback_bytes": ("gauge", 2**29),
+        "host_meminfo_available": ("gauge", 1),
+    }
+    lines = []
+    for name, (kind, value) in families.items():
+        metric = f"mooncake_offload_{name}"
+        lines.append(f"# TYPE {metric} {kind}")
+        if name.startswith("block_"):
+            # RAID and physical-device series must stay distinct.
+            lines.append(f'{metric}{{device="md0",layer="filesystem"}} {value}')
+            lines.append(f'{metric}{{device="nvme0n1",layer="backing"}} {value * 2}')
+        else:
+            lines.append(f"{metric} {value}")
+    return "\n".join(lines) + "\n"
+
+
+def test_offload_system_throughput_latency_pressure_and_resets():
+    collector = InferenceMetricsCollector(config(mooncake_client_endpoints={"ssd0": "http://localhost:9300"}))
+    first = collector.parse("ssd0", offload_system_payload(0), 10)
+    assert not any("_per_second" in key or "_mean_ms" in key for key in first)
+    second = collector.parse("ssd0", offload_system_payload(1), 12)
+    prefix = "mooncake/ssd0/offload_"
+    md = "/device/md0/layer/filesystem"
+    nvme = "/device/nvme0n1/layer/backing"
+    assert second[f"{prefix}block_write_gib_per_second{md}"] == 1
+    assert second[f"{prefix}block_write_gib_per_second{nvme}"] == 2
+    assert second[f"{prefix}block_read_gib_per_second{md}"] == 0.5
+    assert second[f"{prefix}block_write_mean_ms{md}"] == 3
+    assert second[f"{prefix}block_write_mean_ms{nvme}"] == 3
+    assert second[f"{prefix}block_busy_percent{md}"] == 25
+    assert second[f"{prefix}block_average_queue_depth{md}"] == 2
+    assert second[f"{prefix}host_io_pressure_some_percent"] == 10
+    assert second[f"{prefix}host_io_pressure_full_percent"] == 5
+    assert second[f"{prefix}host_io_pressure_some_avg10_percent"] == 12.5
+    assert second[f"{prefix}host_memory_dirty_bytes"] == 2**30
+    assert second[f"{prefix}host_memory_writeback_bytes"] == 2**29
+    # Zero completed I/O produces zero throughput, not a fabricated latency.
+    idle = collector.parse("ssd0", offload_system_payload(1), 14)
+    assert idle[f"{prefix}block_write_gib_per_second{md}"] == 0
+    assert f"{prefix}block_write_mean_ms{md}" not in idle
+    reset = collector.parse("ssd0", offload_system_payload(0), 16)
+    for name in ("block_write_mean_ms", "block_write_gib_per_second", "block_busy_percent"):
+        assert f"{prefix}{name}{md}" not in reset
+    assert f"{prefix}host_io_pressure_some_percent" not in reset
+    assert collector.parse("replica0", offload_system_payload(2), 18) == {}
+
+
+async def test_offload_system_metrics_remain_per_owner(monkeypatch):
+    collector = InferenceMetricsCollector(
+        config(mooncake_client_endpoints={"ssd0": "http://localhost:9300", "ssd1": "http://localhost:9301"})
+    )
+    for name in collector.config.mooncake_client_endpoints:
+        collector.parse(name, offload_system_payload(0), 10)
+    stop = asyncio.Event()
+    published = []
+
+    async def scrape(name, url):
+        stop.set()
+        return collector.parse(name, offload_system_payload(1), 12)
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    monkeypatch.setattr(metrics_module, "export_metrics", published.append)
+    await collector.run(stop)
+    # No misleading totals of overlapping devices or host-wide PSI percentages.
+    assert not published
+
+
 def test_master_offload_reference_metrics_and_age_gauges():
     collector = InferenceMetricsCollector(config(mooncake_endpoint="http://localhost:9003/metrics"))
     payload = """# TYPE master_offload_diagnostics_queued_oldest_age_seconds gauge
