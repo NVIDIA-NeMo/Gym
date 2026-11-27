@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import yaml
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationError, field_validator  # noqa: F401  (`nemo_gym._moved_paths` resolves it here)
 from rich.table import Table
 
 from nemo_gym._moved_paths import moved_names_getattr
