@@ -120,6 +120,9 @@ LEGACY_TIMEOUT_SIGNALS = (
     LegacySignal(
         "eval_timed_out", None, "resources_servers/swebench_pro/app.py", '"eval_timed_out": result.timed_out'
     ),
+    # DeepSWE, and DeepSWE external1 through the same verifier, set `verifier_timeout_s` only when the tests did not
+    # finish within the task's limit on the model's patch; the row is usually a scored loss with no failure class.
+    LegacySignal("verifier_timeout_s", None, "resources_servers/deepswe/app.py", "verifier_timeout_s=limit_s"),
     # BrowseComp's per-rollout `rollout_timeout_s`.
     LegacySignal("timed_out", None, "responses_api_agents/browsecomp_agent/app.py", 'update={"timed_out": int(bool('),
     # Terminus 2's run budget (the task's `[agent].timeout_sec`), recorded on the response it returns.

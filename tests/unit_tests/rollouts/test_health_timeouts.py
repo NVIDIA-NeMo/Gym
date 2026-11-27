@@ -162,6 +162,34 @@ class TestEvidence:
 
         assert result["by_limit"] == {"response.metadata.terminus2_outcome=timeout": 1}
 
+    @pytest.mark.parametrize(
+        "row",
+        [
+            # DeepSWE: a model loss with its failure facts and no failure class.
+            {"failure_kind": "deepswe:test_deadline", "failure_outcome_action": "count_as_zero"},
+            # DeepSWE external1 runs the same verifier but keeps no failure kind on a completed evaluation.
+            {"failure_kind": None},
+        ],
+        ids=["deepswe", "deepswe_external1"],
+    )
+    def test_a_deepswe_rollout_whose_tests_hit_their_limit_is_timed_out(self, row) -> None:
+        deadline = {
+            "evaluation_completed": True,
+            "verifier_exit_code": 124,
+            "verifier_timeout_s": 1800.0,
+            "reward": 0.0,
+        }
+
+        result = section(row | deadline)
+
+        assert result["by_limit"] == {"verifier_timeout_s": 1}
+        assert result["failed_without_signal"] == 0
+
+    def test_a_deepswe_rollout_that_fails_its_tests_is_not_timed_out(self) -> None:
+        row = {"verifier_exit_code": 1, "verifier_timeout_s": None, "evaluation_completed": True, "reward": 0.0}
+
+        assert section(row)["timed_out"] == 0
+
     def test_a_completed_terminus_rollout_is_not_timed_out(self) -> None:
         row = {"response": {"metadata": {"terminus2_outcome": "completed"}}, "reward": 1.0}
 
