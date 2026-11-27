@@ -83,13 +83,44 @@ def judge_tolerance(metadata: dict[str, Any], golden: GoldenAnswer) -> float:
     return golden.tolerance if golden.match_type == "numeric" else 0.0
 
 
+_REASONING_TAG = re.compile(r"<(/?)(think|thinking)>", re.I)
+
+
+def strip_closed_reasoning(text: str) -> str:
+    """Remove each <think>...</think> (or <thinking>) block in one linear pass.
+
+    Same result as re.sub(r"<(think|thinking)>.*?</\\1>", "", text, flags=re.S | re.I), which rescans the
+    rest of the text for every unclosed opening tag.
+    """
+    # Unicode regex backreferences fold İ to i but keep ı distinct.
+    tags = [
+        (m.start(), m.end(), m.group(1) == "/", m.group(2).replace("İ", "i").lower())
+        for m in _REASONING_TAG.finditer(text)
+    ]
+    next_close: dict[str, list[int]] = {name: [] for _, _, _, name in tags}
+    for index, (_, _, closing, name) in enumerate(tags):
+        if closing:
+            next_close[name].append(index)
+    cursors = {name: 0 for name in next_close}
+    kept, position = [], 0
+    for index, (start, end, closing, name) in enumerate(tags):
+        closes = next_close[name]
+        while cursors[name] < len(closes) and closes[cursors[name]] <= index:
+            cursors[name] += 1
+        if not closing and start >= position and cursors[name] < len(closes):
+            kept.append(text[position:start])
+            position = tags[closes[cursors[name]]][1]
+    kept.append(text[position:])
+    return "".join(kept)
+
+
 def extract_answer(text: str) -> str:
     """Extract the public atomic answer format, excluding private reasoning.
 
     With several <answer> tags the last one wins: a model that quotes the format before answering
     (e.g. <answer>YOUR_SHORT_ANSWER</answer>) is scored on the answer it gives afterwards.
     """
-    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.S | re.I)
+    text = strip_closed_reasoning(text)
     text = re.split(r"</(?:think|thinking)>", text, flags=re.I)[-1]
     text = re.split(r"<(?:think|thinking)>", text, flags=re.I)[0]
     answers = re.findall(r"<answer>(.*?)(?:</answer>|$)", text, re.S | re.I)
@@ -609,6 +640,8 @@ class AgenticMMEServer(SimpleResourcesServer):
             result.policy_error = body.response.error.message if body.response.error else None
             return result
         if body.response.incomplete_details:
+            # A cut-off episode scores zero in both metrics, keeping the same sample denominator.
+            result.string_match_reward = 0.0
             result.failure_reason = "incomplete_response"
             return result
         if result.step_limit_reached and not self.config.score_step_limit_answer:

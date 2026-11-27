@@ -13,6 +13,7 @@ gym dataset validate agentic_vbench --sandbox docker \
   --config environments/harbor/agentic_vbench/harbor_sandbox.yaml   # plays each task's solution/ through its verifier
 gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
   --config environments/harbor/agentic_vbench/harbor_sandbox.yaml \
+  --output results/harbor/agentic_vbench/opencode_agent/rollouts.jsonl \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
@@ -71,7 +72,32 @@ upstream does.
 (no empty default: without a key the value is null, which the server's `secrets` table rejects, so the server does
 not start), turns on separate verification for tasks with artifacts and the harness's `image_input`, and bounds
 concurrent episodes, since every episode starts one sandbox from a task image of a few gigabytes. Pass it with
-`--config`. The task Dockerfiles build their images (they download the task's clips from Hugging Face at build
+`--config`.
+
+The overlay names the OpenCode harness's block, so it loads only with `--agent opencode_agent`. `dataset.toml` also
+admits `pi_agent`, `openclaw_agent` and `codex_agent`, the other sandboxed session harnesses that send the model the
+images their tools read. Each has an overlay with the same server block:
+[`harbor_sandbox_pi.yaml`](harbor_sandbox_pi.yaml) and [`harbor_sandbox_openclaw.yaml`](harbor_sandbox_openclaw.yaml)
+set `image_input` on their harness; [`harbor_sandbox_codex.yaml`](harbor_sandbox_codex.yaml) sets
+`inline_tool_output_images` on a `vllm_model` server instead, because Codex's `view_image` tool returns a frame
+inside the tool result. All three raise the harness's time ceiling so that each task's own agent budget applies.
+
+```sh
+gym eval run agentic_vbench --agent pi_agent --sandbox docker \
+  --config environments/harbor/agentic_vbench/harbor_sandbox_pi.yaml \
+  --output results/harbor/agentic_vbench/pi_agent/rollouts.jsonl \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+```
+
+The three install their runtime into the sandbox at session start (or read one the image carries; see the harness
+READMEs). The generated rows and run config include the harness name (`tasks_pi_agent.jsonl`,
+`run_config_pi_agent.yaml`). All harnesses default to the same `results/harbor/agentic_vbench/rollouts.jsonl`.
+Give each harness its own `--output` path as above when comparing runs.
+
+The published numbers and the full-set run below are OpenCode's; no full-set run of another harness has been recorded
+here yet, and a harness is an experimental variable, so compare a harness's scores with its own.
+
+The task Dockerfiles build their images (they download the task's clips from Hugging Face at build
 time), so `gym eval run` and `gym dataset validate` build them once at prepare through the top-level `builds:` block
 (`tool`, `repository`); with `--sandbox docker` and no repository, `docker` builds them locally.
 

@@ -478,7 +478,8 @@ class TestAgenticSandboxSpec:
         sent = agent.server_client.post.call_args.kwargs["json"]
         assert "rtl_files" not in sent  # the model wrote nothing: scored as a miss, not masked
 
-    async def test_heavy_agent_sends_replayable_project_changes(self, tmp_path) -> None:
+    @pytest.mark.parametrize("deps_provision", ["archive", "baked"])
+    async def test_heavy_agent_sends_replayable_project_changes(self, tmp_path, deps_provision) -> None:
         import base64
         import hashlib
 
@@ -520,6 +521,8 @@ class TestAgenticSandboxSpec:
         box.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
         agent = self._target_agent()
         agent.config.prepared_repository_dir = str(tmp_path)
+        agent.config.deps_provision = deps_provision
+        agent._deps_archive = tmp_path / "agent-deps.tar.gz"
         body = self._target_run_request()
         body.verifier_metadata["repository_workspace_sha256"] = digest
         await self._run_to_verification(agent, box, body)
@@ -533,7 +536,21 @@ class TestAgenticSandboxSpec:
         apply_changes(replay, sent["repository_changes"])
         assert snapshot(replay) == snapshot(project)
         box.start_with_setup.assert_awaited_once()
-        box.upload.assert_awaited_once_with(archive, "/code/.nv/repository.tar.gz")
+        box.upload.assert_any_await(archive, "/code/.nv/repository.tar.gz")
+        commands = [call.args[0] for call in box.exec.await_args_list]
+        python = f"{agent._agent_deps_dir()}/bin/python"
+        restore = next(i for i, command in enumerate(commands) if "repository_workspace.py restore" in command)
+        collect = next(i for i, command in enumerate(commands) if "repository_workspace.py collect" in command)
+        harness = next(i for i, command in enumerate(commands) if "agent_runner.py" in command)
+        assert commands[restore].startswith(python + " ")
+        assert commands[collect].startswith(python + " ")
+        assert restore < harness < collect
+        if deps_provision == "archive":
+            unpack = next(i for i, command in enumerate(commands) if command.startswith("tar -xzf "))
+            assert unpack < restore
+            box.upload.assert_any_await(agent._deps_archive, "/code/.nv/agent-deps.tar.gz")
+        else:
+            assert commands[0] == f"test -x {python}"
 
     async def test_present_target_file_is_sent_to_verification(self) -> None:
         box = self._target_box(

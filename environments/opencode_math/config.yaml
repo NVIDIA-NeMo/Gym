@@ -22,7 +22,6 @@ opencode_math_agent:
       concurrency: 8
       command: opencode
       model: nvinf/nvidia/qwen/qwen3-5-397b-a17b
-      opencode_version: 1.17.11
       thinking: false
       setup_timeout: 900
       timeout: 900

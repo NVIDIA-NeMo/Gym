@@ -63,10 +63,27 @@ setsid "$@" <&0 &
 echo $! > "$FAKE_LOG/step.pid"
 wait $!
 """
-_SCANCEL = """#!/bin/bash
-echo "$@" >> "$FAKE_LOG/scancel"
-[[ -f $FAKE_LOG/step.pid ]] && kill -TERM -- -"$(cat "$FAKE_LOG/step.pid")" 2>/dev/null
-exit 0
+_SCANCEL = f"""#!{sys.executable}
+import os
+import signal
+import sys
+from pathlib import Path
+
+log = Path(os.environ["FAKE_LOG"])
+with (log / "scancel").open("a") as stream:
+    stream.write(" ".join(sys.argv[1:]) + "\\n")
+step_pid = log / "step.pid"
+if step_pid.exists():
+    session = int(step_pid.read_text())
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            pid = int(proc.name)
+            if os.getsid(pid) == session:
+                os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
 """
 HOST_REPORT = "__GYM_READER_HOST:cpu:99\n__GYM_READER_RC:0\n"
 

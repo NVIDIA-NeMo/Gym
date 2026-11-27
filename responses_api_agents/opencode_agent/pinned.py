@@ -31,8 +31,8 @@ fi
 """
 
 # After COPY_PINNED, installs the copy "$3" as the executable "$4" once it answers --version. Bytes that cannot run in
-# this image are rejected, whether the shell reports them as 126 or, for a missing interpreter, 126 or 127 (shells
-# differ), and so is a failing probe. Only a signal (above 128) may pass on a retry.
+# this image are rejected, whatever the shell reports for them (bash 126, dash 2) or, for a missing interpreter, 126 or
+# 127 (shells differ), and so is a failing probe. Only a signal (above 128) may pass on a retry.
 STAGE_EXECUTABLE = (
     COPY_PINNED
     + f"""chmod 755 "$3" || exit 1

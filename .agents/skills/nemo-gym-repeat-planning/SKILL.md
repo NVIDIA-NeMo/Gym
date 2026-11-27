@@ -1,6 +1,6 @@
 ---
 name: nemo-gym-repeat-planning
-description: Plan fixed benchmark or suite repeat counts from complete-pass SDs with gym eval plan-repeats, including an existing baseline or baseline investment across candidate checkpoints. Use for prospective repeat budgets, margin or variance sensitivity, and interpreting planning validation; use score-triage for unexplained observed score gaps.
+description: Plan fixed benchmark or suite repeat counts from complete-pass SDs with gym eval plan-repeats, including an existing baseline or baseline investment across candidate checkpoints. Use for prospective repeat budgets, margin or variance sensitivity, and interpreting planning validation; use nemo-gym-analyzing-results for score gaps between finished runs.
 ---
 
 # NeMo Gym Repeat Planning

@@ -52,5 +52,6 @@ gym eval run \
 ```
 
 The policy must accept images. Each task runs OpenCode in its own sandbox, and Gym's token capture records the model
-calls, so the same config serves RL training. The resources server's README (section "Run") lists what the sandbox
-needs: the sandbox image, the OpenSandbox provider settings and an address that the sandbox can reach.
+calls, so the same config serves RL training. To build the sandbox image, see the resources server's README, section
+["Sandbox image"](../../resources_servers/visual_coding_opencode/README.md#sandbox-image); its section "Run" lists
+what else the sandbox needs.
