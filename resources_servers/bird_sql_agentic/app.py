@@ -18,7 +18,7 @@ Flow of one rollout (legacy ``/run`` path used by ``simple_agent``):
 import asyncio
 import json
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -79,6 +79,7 @@ class BirdSqlAgenticVerifyResponse(BirdSqlVerifyResponse):
 class BirdSqlAgenticResourcesServer(BirdSqlResourcesServer):
     config: BirdSqlAgenticResourcesServerConfig
     session_id_to_db_id: Dict[str, str] = Field(default_factory=dict)
+    seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = BirdSqlAgenticSeedSessionRequest
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -89,6 +90,15 @@ class BirdSqlAgenticResourcesServer(BirdSqlResourcesServer):
         if not _DB_ID_PATTERN.match(db_id):
             raise ResourcesSeedRejectedError(f"Invalid db_id: {db_id!r}")
         self.session_id_to_db_id[session_id] = db_id
+    
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.session_id_to_db_id
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        self._bind_db(session_id, body.db_id)
+   
+    async def release_session_state(self, session_id: str) -> None:
+        self.session_id_to_db_id.pop(session_id, None)
 
     async def seed_session(
         self,
@@ -101,11 +111,10 @@ class BirdSqlAgenticResourcesServer(BirdSqlResourcesServer):
             db_id = body.task_data.get("db_id")
             if not isinstance(db_id, str):
                 raise ResourcesSeedRejectedError("task_data must include a string db_id")
-            self._bind_db(body.resources_session_id, db_id)
-            return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
+            response = await super().seed_session(body, request=request)
+            return response
 
-        self._bind_db(request.session[SESSION_ID_KEY], body.db_id)
-        return BaseSeedSessionResponse()
+        return await super().seed_session(body, request=request)
 
     async def execute_sql(self, request: Request, body: ExecuteSqlRequest) -> ExecuteSqlResponse:
         db_id = self.session_id_to_db_id.get(request.session[SESSION_ID_KEY])
