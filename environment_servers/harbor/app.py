@@ -1813,10 +1813,11 @@ class HarborEnvironmentServer(
                 if self._sandboxes.get(episode_key) is not owned:
                     failed_seed_error = exc
                 refused = isinstance(exc, HTTPException) and exc.status_code < 500
-                cause = exc.__cause__
-                credentials_rejected = (
-                    isinstance(cause, NgFailureEvent)
-                    and cause.failure_kind == failure_kinds.PROVIDER_CREDENTIALS_REJECTED
+                # `_seed` raises the provider's rejection as the cause of its 503; the solution upload raises it as is.
+                credentials_rejected = any(
+                    isinstance(error, NgFailureEvent)
+                    and error.failure_kind == failure_kinds.PROVIDER_CREDENTIALS_REJECTED
+                    for error in (exc, exc.__cause__)
                 )
                 if attempt >= attempts or refused or credentials_rejected or self._shutting_down:
                     raise

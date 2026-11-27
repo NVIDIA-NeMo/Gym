@@ -85,7 +85,7 @@ from nemo_gym.data.tasks.harbor import (
     HarborTaskError,
     load_task,
 )
-from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env, upload_dir
 from nemo_gym.server_runtime import BaseEnvironmentServerConfig
 
 
@@ -557,6 +557,53 @@ class TestEpisode:
         outer = response.failure_report.events[response.failure_report.failure_id]
         assert response.failure_report.events[outer.cause_id].failure_kind == "provider_credentials_rejected"
         assert starts == ["r1"] and server.server_client.calls == []
+
+    @pytest.mark.parametrize("failing", ["solution_upload", "setup"])
+    async def test_rejected_credentials_end_the_seed_retries_wherever_they_surface(
+        self, tmp_path, monkeypatch, failing
+    ):
+        """The oracle's solution upload raises the provider's rejection itself; `_seed` raises it as the cause of
+        its 503. Either way the episode allocates one sandbox and does not back off for another seed."""
+        server, task, _, created = make_server(
+            tmp_path, monkeypatch, seed_retries=2, agent_implementation="harbor_oracle_agent", solution=True
+        )
+        backoffs: list[int] = []
+
+        def no_delay(attempt: int) -> float:
+            backoffs.append(attempt)
+            return 0
+
+        monkeypatch.setattr("environment_servers.harbor.app._pull_retry_delay", no_delay)
+        if failing == "solution_upload":
+
+            async def upload_rejected(sandbox, source, target, **kwargs):
+                if target == "/solution":
+                    raise NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind=failure_kinds.PROVIDER_CREDENTIALS_REJECTED,
+                        operation="upload",
+                        failure_reason="Sandbox upload failed: Authentication credentials are invalid.",
+                    )
+                await upload_dir(sandbox, source, target, **kwargs)
+
+            monkeypatch.setattr("environment_servers.harbor.session.upload_dir", upload_rejected)
+        else:
+
+            class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
+                status_code = 401
+
+            async def refused(task, workdir, *, episode_key):
+                created.append((task.task_id, workdir))
+                raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
+
+            monkeypatch.setattr(server, "_create_sandbox", refused)
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert len(created) == 1 and backoffs == []
+        assert server.server_client.calls == [] and not server._sandboxes
 
     async def test_a_seed_that_fails_while_the_server_shuts_down_is_not_retried(self, tmp_path, monkeypatch):
         """No backoff and no second seed during shutdown: the episode reports the seed's own error."""
