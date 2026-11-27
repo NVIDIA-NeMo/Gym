@@ -53,7 +53,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentObservationBundle
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker, monotonic_timeout
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
     HarnessOutcome,
@@ -498,12 +498,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 try:
                     if seed.termination is None:
                         timings["agent_setup"] = {"started_at": state.setup_started_at or now()}
-                        # `timeout_at` reads the event loop's clock, which need not match `time.monotonic()` (uvloop
-                        # on macOS), so the setup deadline is always on the loop's clock.
-                        deadline = (
-                            state.setup_deadline or asyncio.get_running_loop().time() + self.config.setup_timeout_sec
-                        )
-                        async with asyncio.timeout_at(deadline):
+                        deadline = state.setup_deadline or monotonic() + self.config.setup_timeout_sec
+                        async with monotonic_timeout(deadline):
                             workdir = state.workdir
                             if workdir is None:
                                 cwd = await sandbox.exec("pwd", timeout_s=30, user=seed.user)
@@ -714,9 +710,9 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         try:
             if not cancelled and seed.termination is None:
                 setup_started_at = now()
-                setup_deadline = asyncio.get_running_loop().time() + self.config.setup_timeout_sec
+                setup_deadline = monotonic() + self.config.setup_timeout_sec
                 result.agent_timings["agent_setup"] = {"started_at": setup_started_at}
-                async with asyncio.timeout_at(setup_deadline):
+                async with monotonic_timeout(setup_deadline):
                     provider = create_provider(resolve_provider_config(seed.sandbox_provider))
                     sandbox = await AsyncSandbox.connect(seed.sandbox_descriptor, provider=provider)
                 if key in self._sessions:

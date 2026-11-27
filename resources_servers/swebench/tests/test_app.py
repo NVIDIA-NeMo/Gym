@@ -43,6 +43,7 @@ from resources_servers.swebench.app import (
 )
 from resources_servers.swebench.swebench_patches import (
     EVAL_SCRIPT_COMMAND,
+    chartjs_chrome_flag_edit,
     patch_swebench_multilingual_sandbox,
     run_instance,
 )
@@ -519,7 +520,9 @@ class TestImageAssets:
             position = upstream.index(f"curl -o {asset['path']} {asset['url']}")
             assert script[position] == f"cp /tmp/nemo-gym-swebench-test-asset-{index} {asset['path']}"
         # Only the downloads change: the copies run after the test files are reset and before the test patch applies.
-        assert [line for line in script if not line.startswith("cp ")] == [
+        # (The Chrome flag edit is the other Chart.js addition; test_chartjs_chrome_flag.py covers it.)
+        chrome_flag_edit = chartjs_chrome_flag_edit("karma.conf.js")
+        assert [line for line in script if not line.startswith("cp ") and line != chrome_flag_edit] == [
             line for line in upstream if not line.startswith("curl ")
         ]
 
@@ -533,7 +536,10 @@ class TestImageAssets:
 
         script = make_server()._make_test_spec(request).eval_script_list
 
-        assert script == make_test_spec(row, namespace="swebench").eval_script_list
+        chrome_flag_edit = chartjs_chrome_flag_edit("karma.conf.js")
+        assert [line for line in script if line != chrome_flag_edit] == make_test_spec(
+            row, namespace="swebench"
+        ).eval_script_list
 
     def test_image_assets_stored_as_a_json_string_are_read(self) -> None:
         request = SWEBenchVerifyRequest.model_validate(

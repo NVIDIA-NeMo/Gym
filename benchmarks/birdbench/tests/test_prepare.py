@@ -30,8 +30,14 @@ class _FakeDbHandle:
         return "#### Tables\n- t:\n"
 
 
-def _entry(db_id: str = "db1", question: str = "How many students?", evidence=None, sql: str = "SELECT 1") -> dict:
-    entry = {"db_id": db_id, "question": question, "SQL": sql, "difficulty": "simple"}
+def _entry(
+    db_id: str = "db1",
+    question: str = "How many students?",
+    evidence=None,
+    sql: str = "SELECT 1",
+    question_id: int = 0,
+) -> dict:
+    entry = {"question_id": question_id, "db_id": db_id, "question": question, "SQL": sql, "difficulty": "simple"}
     if evidence is not None:
         entry["evidence"] = evidence
     return entry

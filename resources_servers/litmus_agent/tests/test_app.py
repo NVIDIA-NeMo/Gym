@@ -1267,8 +1267,10 @@ class TestResourcesSessions:
             raise RuntimeError("driver upload failed")
 
         monkeypatch.setattr(_LocalFakeProvider, "upload_file", failed_upload)
-        with pytest.raises(RuntimeError, match="sandbox stop failed"):
+        # The start's own error is raised, with the failed rollback stop as its context.
+        with pytest.raises(RuntimeError, match="driver upload failed") as raised:
             await _run_code(server, "rs-1", "print(1)")
+        assert str(raised.value.__context__) == "sandbox stop failed"
         pending = server._sessions["rs-1"]
         assert not pending.ready
         provider = _LocalFakeProvider.instances[-1]

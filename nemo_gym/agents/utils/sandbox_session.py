@@ -47,6 +47,7 @@ from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.utils.deadlines import monotonic_timeout
 
 
 LOG = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
+REQUEST_GZIP_SCRIPT = Path(__file__).with_name("request_gzip.mjs")
 # A receipt wait gives up after this many consecutive failed polls that also span this many seconds: a sandbox being
 # snapshotted, or a gateway restart, refuses commands for a while.
 _RECEIPT_POLL_FAILURES = 5
@@ -430,9 +432,8 @@ class SandboxSession[Artifacts]:
         Callers that merely stop waiting (such as disconnected HTTP requests)
         must shield their shared activation task.
 
-        ``deadline`` is a time on the event loop's clock, ``asyncio.get_running_loop().time()``, which is what
-        ``asyncio.timeout_at`` reads. It need not equal ``time.monotonic()``: under uvloop on macOS it differs, and a
-        deadline taken from ``monotonic()`` there is already expired.
+        ``deadline`` is a ``time.monotonic()`` time, not an event loop time: past it, staging stops and the launch
+        does not start, and the harness runs for no longer than what is left of it or ``timeout``, whichever is less.
 
         ``pause_allowance_s`` extends the provider's execution deadline by the time the harness may
         spend paused for checkpoints, which the supervisor does not count against ``timeout``. A
@@ -447,13 +448,13 @@ class SandboxSession[Artifacts]:
         self._stage_task = asyncio.create_task(self._stage(stage_activation))
 
         async def launch() -> asyncio.Task[SandboxExecResult]:
-            async with asyncio.timeout_at(deadline):
+            async with monotonic_timeout(deadline):
                 command = await asyncio.shield(self._stage_task)
             if self._expire_requested:
                 await self._request_expiry(timeout=close_timeout)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
-            remaining = timeout if deadline is None else min(timeout, deadline - asyncio.get_running_loop().time())
+            remaining = timeout if deadline is None else min(timeout, deadline - monotonic())
             # The supervisor counts whole centiseconds; less than one cannot run the harness.
             if remaining < 0.01:
                 raise TimeoutError(f"{self.harness} activation deadline expired before launch")

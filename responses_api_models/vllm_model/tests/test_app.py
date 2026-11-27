@@ -9815,6 +9815,82 @@ def test_get_converter_forwards_the_custom_tool_strategy() -> None:
     assert model.get_converter().custom_tool_strategy == "function_bridge"
 
 
+def test_get_converter_forwards_the_tool_parameter_types() -> None:
+    types = {"write_stdin": {"session_id": "integer"}}
+    model = VLLMModel(
+        config=_custom_tool_config(tool_parameter_types=types),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert model.get_converter().tool_parameter_types == types
+    default = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
+    assert default.get_converter().tool_parameter_types == {}
+
+
+def test_responses_returns_the_listed_parameters_of_an_undeclared_tool_typed(monkeypatch: MonkeyPatch) -> None:
+    # The request declares only `exec`, so the engine's tool parser has no schema for `write_stdin`
+    # and returns its parameters as strings. `/v1/responses` returns the listed ones as integers.
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    upstream_arguments = json.dumps({"session_id": "86902", "chars": "12\n", "yield_time_ms": "1000"})
+    chat_completion = NeMoGymChatCompletion(
+        id="chtcmpl-123",
+        object="chat.completion",
+        created=FIXED_TIME,
+        model="dummy_model",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason="tool_calls",
+                message=NeMoGymChatCompletionMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        NeMoGymChatCompletionMessageToolCall(
+                            id="call_1",
+                            function=NeMoGymFunction(name="write_stdin", arguments=upstream_arguments),
+                            type="function",
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=chat_completion))
+    body = {
+        "input": "continue",
+        "tools": [
+            {
+                "type": "function",
+                "name": "exec",
+                "parameters": {"type": "object", "properties": {"code": {"type": "string"}}},
+                "strict": False,
+            }
+        ],
+    }
+
+    def served_arguments(**overrides: Any) -> str:
+        model = VLLMModel(
+            config=_custom_tool_config(**overrides),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        response = TestClient(model.setup_webserver()).post("/v1/responses", json=body)
+        assert response.status_code == 200
+        calls = [item for item in response.json()["output"] if item["type"] == "function_call"]
+        assert [call["name"] for call in calls] == ["write_stdin"]
+        return calls[0]["arguments"]
+
+    typed = served_arguments(
+        tool_parameter_types={"write_stdin": {"session_id": "integer", "yield_time_ms": "integer"}}
+    )
+    assert json.loads(typed) == {"session_id": 86902, "chars": "12\n", "yield_time_ms": 1000}
+    # Without the setting the call is returned as the engine sent it.
+    assert served_arguments() == upstream_arguments
+
+
+def test_tool_parameter_types_are_refused_on_the_native_responses_route() -> None:
+    with raises(ValueError, match="tool_parameter_types is not supported with is_responses_native=true"):
+        _custom_tool_config(tool_parameter_types={"write_stdin": {"session_id": "integer"}}, is_responses_native=True)
+
+
 def test_function_bridge_is_rejected_with_the_native_responses_route() -> None:
     with raises(ValueError, match="custom_tool_strategy=function_bridge is not supported with is_responses_native"):
         _custom_tool_config(custom_tool_strategy="function_bridge", is_responses_native=True)

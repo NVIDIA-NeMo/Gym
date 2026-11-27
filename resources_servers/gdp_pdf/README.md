@@ -293,6 +293,30 @@ shell requests, while permitting the model proxy at the gateway. Host services
 bound to that gateway are also reachable, so expose only the model proxy there.
 With Docker in a VM, run Gym inside that VM. Before seeding, the resources server
 checks that the Docker network is internal and rejects extra mounts/run flags.
+
+On OpenSandbox, confirm with the cluster operator that the deployment uses
+`[egress].mode = "dns+nft"` before setting `opensandbox_dns_nft_confirmed: true`.
+The default `dns` mode filters name resolution and leaves direct IP connections unfiltered.
+The Gym flag records the operator's confirmation. Only the cluster operator can
+configure the enforcement mode. See the [OpenSandbox network security guide](https://open-sandbox.ai/guides/network-security#how-enforcement-works).
+
+With `model_only`, GDP.pdf requests a deny-by-default policy that allows the model
+server's host on every port. Expose only the model proxy on that address. With
+isolation enabled, GDP.pdf rejects the seed if confirmation is missing, the
+provider is unsupported, the model address is loopback, or extra mounts or run
+flags are configured.
+
+```yaml
+gdp_pdf_sandbox:
+  resources_servers:
+    gdp_pdf:
+      sandbox_network_access: model_only
+      opensandbox_dns_nft_confirmed: false  # Set to true after confirming the deployment uses dns+nft.
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+```
+
 Other deployments require the explicit `allow_unisolated_sandbox: true` opt-out
 on the resources server. It is logged and recorded in each verification result;
 those deployments must provide their own filesystem and network isolation.

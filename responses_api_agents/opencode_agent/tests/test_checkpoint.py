@@ -827,6 +827,7 @@ async def _relaunch_after_a_stop(monkeypatch: pytest.MonkeyPatch, conversation: 
         interrupted_tool_calls=0,
         interrupted_tool_call_ids=[],
         reprompted_conversation=False,
+        adoption=None,
         session=session,
         persistent_directory="/s",
         runtime="/rt",
@@ -1249,7 +1250,7 @@ async def test_a_re_bind_into_a_sandbox_without_the_runtime_installs_it_from_the
             "/app",
             "/rt",
             None,
-            {"checkpointed": True, "ripgrep": ripgrep, "plugin_dependencies": dependencies},
+            {"checkpointed": True, "ripgrep": ripgrep, "plugin_dependencies": dependencies, "model_relay": False},
         )
     ]
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
@@ -1288,6 +1289,31 @@ async def test_a_re_bind_that_fails_releases_its_sandbox_connection(monkeypatch:
     # The seed that re-binds is retried: each attempt must not leave a connection behind.
     sandbox.disconnect.assert_awaited_once()
     assert state.session is None and state.restored == {"session": {}}
+
+
+@pytest.mark.parametrize(
+    "error", [asyncio.CancelledError(), ConnectionError("502 Bad Gateway")], ids=["cancel", "raise"]
+)
+async def test_a_re_bind_whose_restored_launch_check_did_not_finish_is_undone(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    sandbox = MagicMock(sandbox_id="fork")
+    sandbox.exec = AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0))
+    sandbox.disconnect = AsyncMock()
+    agent, state, body = _restored(monkeypatch, sandbox)
+    state.keeps_processes = True
+    saved = {"session": {"pause_seq": 1, "supervisor_identity": "1.2"}}
+    state.restored = dict(saved)
+    session = SimpleNamespace(root_dir="/sessions/s", session_dir="/sessions/s/launch-1", sandbox=sandbox)
+    monkeypatch.setattr(SandboxSession, "rebind", staticmethod(lambda *_, **__: session))
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.check_restored", AsyncMock(side_effect=error))
+
+    with pytest.raises(type(error)):
+        await agent._rebind_restored_agent_session_state(state, body)
+
+    # The retried seed must check the launch again: a session left re-bound would relaunch beside it.
+    assert state.session is None and state.adoption is None and state.restored == saved
+    sandbox.disconnect.assert_awaited_once()
 
 
 # -- the saved reply and the evidence of a finished session ------------------------------------------------------
@@ -1701,6 +1727,7 @@ def _agent_and_stopped_launch(**state: Any) -> tuple[OpenCodeAgent, SimpleNamesp
     values = {
         "launch_count": 1,
         "launch_records": [],
+        "adoption": None,
         "session": session,
         "request": SimpleNamespace(agent_session_id="a"),
         "prepare_launch": AsyncMock(side_effect=prepare_launch),
@@ -1734,12 +1761,7 @@ async def test_a_stopped_launch_with_no_budget_left_is_reported_as_timed_out_and
 
     # The activation's deadline passed while the launch was being stopped.
     await agent._run_launches(
-        state,
-        MagicMock(),
-        _fresh_payload,
-        prompt="fix the bug",
-        timeout=10,
-        deadline=asyncio.get_running_loop().time() - 1,
+        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() - 1
     )
 
     # Preparing a relaunch would discard the stopped launch's output: it stays, under a receipt that says timeout.
@@ -1761,12 +1783,7 @@ async def test_a_budget_that_runs_out_while_the_saved_conversation_is_read_repor
     # The budget check before the preparation passes; reading the conversation then takes the rest.
     await asyncio.wait_for(
         agent._run_launches(
-            state,
-            MagicMock(),
-            _fresh_payload,
-            prompt="fix the bug",
-            timeout=10,
-            deadline=asyncio.get_running_loop().time() + 0.2,
+            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 0.2
         ),
         10,
     )
@@ -1779,20 +1796,16 @@ async def test_a_budget_that_runs_out_while_the_saved_conversation_is_read_repor
 async def test_a_budget_spent_by_the_time_the_relaunch_is_prepared_reports_the_stopped_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The budget is on the event loop's clock; moving that clock on stands in for the preparation's commands.
-    loop = asyncio.get_running_loop()
-    real_time, ahead = loop.time, [0.0]
-    monkeypatch.setattr(loop, "time", lambda: real_time() + ahead[0])
+    now = [100.0]
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: now[0])
     agent, state, session = _agent_and_stopped_launch()
 
     async def aside(*, timeout: float) -> None:
-        ahead[0] += 5  # the commands of the preparation took the budget, each within its own timeout
+        now[0] += 5  # the commands of the preparation took the budget, each within its own timeout
 
     state.set_conversation_aside.side_effect = aside
 
-    await agent._run_launches(
-        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=loop.time() + 3
-    )
+    await agent._run_launches(state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=103.0)
 
     # The fresh start had already set the conversation aside and cleared its evidence.
     state.set_conversation_aside.assert_awaited_once()
@@ -1811,12 +1824,7 @@ async def test_a_relaunch_that_times_out_before_its_harness_starts_reports_the_s
     agent, state, session = _agent_and_stopped_launch()
 
     await agent._run_launches(
-        state,
-        MagicMock(),
-        _fresh_payload,
-        prompt="fix the bug",
-        timeout=10,
-        deadline=asyncio.get_running_loop().time() + 60,
+        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
     )
 
     _assert_reported_as_a_timeout_of_the_stopped_launch(state, session)
@@ -1835,12 +1843,7 @@ async def test_a_relaunch_whose_harness_started_keeps_its_own_timeout(monkeypatc
 
     with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
         await agent._run_launches(
-            state,
-            MagicMock(),
-            _fresh_payload,
-            prompt="fix the bug",
-            timeout=10,
-            deadline=asyncio.get_running_loop().time() + 60,
+            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
         )
     # The relaunch ran: the stopped launch's output is not put back in place of its own.
     assert session.cleanup is None and state.launch_count == 2
@@ -1852,11 +1855,6 @@ async def test_a_preparation_that_fails_within_the_budget_still_fails_the_activa
 
     with pytest.raises(type(error), match=str(error)):
         await agent._run_launches(
-            state,
-            MagicMock(),
-            _fresh_payload,
-            prompt="fix the bug",
-            timeout=10,
-            deadline=asyncio.get_running_loop().time() + 60,
+            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
         )
     state.execute.assert_not_awaited()

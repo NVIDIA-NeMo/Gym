@@ -61,6 +61,7 @@ from nemo_gym.core.model_call_sampling import (
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.telemetry.setup import is_trace_exporter_active
+from nemo_gym.utils.http_deadline import get_within_deadline
 from nemo_gym.utils.server_process import (
     _has_injected_global_config_env,
 )
@@ -316,19 +317,28 @@ class ServerClient(BaseModel):
             **kwargs,
         )
 
-    def poll_for_status(self, server_name: str, *, timeout_seconds: float = 5) -> ServerStatus:  # pragma: no cover
+    def poll_for_status(
+        self, server_name: str, *, timeout_seconds: float = 5, total_deadline: bool = False
+    ) -> ServerStatus:
+        """Probe a server's base URL. By default `timeout_seconds` applies to each phase of the request, as with
+        `requests`. With `total_deadline`, the poll ends at `timeout_seconds` in total, even for a peer that keeps
+        sending the headers, and the body is not read."""
         if server_name == HEAD_SERVER_KEY_NAME:
             server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]
         else:
             server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
 
         try:
-            requests.get(self._build_server_base_url(server_config_dict), timeout=timeout_seconds)
             # We don't check the status code since there may not be a route at /
+            base_url = self._build_server_base_url(server_config_dict)
+            if total_deadline:
+                get_within_deadline(base_url, timeout_s=timeout_seconds, read_body=False)
+            else:
+                requests.get(base_url, timeout=timeout_seconds)
             return "success"
         except requests.exceptions.ConnectionError:
             return "connection_error"
-        except requests.exceptions.Timeout:
+        except (requests.exceptions.Timeout, TimeoutError):
             return "timeout"
         except Exception:
             return "unknown_error"

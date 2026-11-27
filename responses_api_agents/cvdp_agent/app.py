@@ -1073,13 +1073,36 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 ).read_text()
 
             async with AsyncSandbox(self._sandbox_provider, spec) as box:
+                traj = self._traj_dir()
+                agent_deps_dir = self._agent_deps_dir()
+                agent_python = shlex.quote(f"{agent_deps_dir}/bin/python")
+
+                async def setup_runtime(sandbox: AsyncSandbox) -> None:
+                    if self.config.deps_provision == "archive":
+                        deps_archive_path = f"{traj}/agent-deps.tar.gz"
+                        directory = await sandbox.exec(f"mkdir -p {shlex.quote(agent_deps_dir)}", timeout_s=30)
+                        if directory.error_type or directory.return_code != 0:
+                            raise RuntimeError(f"agent runtime directory creation failed: {directory.stderr or ''}")
+                        await sandbox.upload(deps_archive, deps_archive_path)
+                        unpack = await sandbox.exec(
+                            f"tar -xzf {shlex.quote(deps_archive_path)} -C {shlex.quote(agent_deps_dir)}",
+                            timeout_s=600,
+                        )
+                        if unpack.error_type or unpack.return_code != 0:
+                            raise RuntimeError(f"agent runtime extraction failed: {(unpack.stderr or '')[-500:]}")
+                    elif self.config.deps_provision == "baked":
+                        runtime = await sandbox.exec(f"test -x {shlex.quote(agent_deps_dir)}/bin/python", timeout_s=30)
+                        if runtime.error_type or runtime.return_code != 0:
+                            raise RuntimeError(f"sandbox image does not contain {agent_deps_dir}/bin/python")
+
                 if repository_archive:
 
                     async def setup_repository(sandbox: AsyncSandbox) -> None:
-                        traj = self._traj_dir()
+                        # Repository helpers use the same portable runtime as the harness.
+                        await setup_runtime(sandbox)
                         await sandbox.upload(repository_archive, f"{traj}/repository.tar.gz")
                         command = (
-                            f"python {shlex.quote(traj + '/repository_workspace.py')} restore "
+                            f"{agent_python} {shlex.quote(traj + '/repository_workspace.py')} restore "
                             f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
                             f"--archive {shlex.quote(traj + '/repository.tar.gz')}"
                         )
@@ -1092,22 +1115,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     await box.start_with_setup(None, setup_repository)
                 else:
                     await box.start()
-                traj = self._traj_dir()
-                agent_deps_dir = self._agent_deps_dir()
-                if self.config.deps_provision == "archive":
-                    deps_archive_path = f"{traj}/agent-deps.tar.gz"
-                    await box.exec(f"mkdir -p {shlex.quote(agent_deps_dir)}", timeout_s=30)
-                    await box.upload(deps_archive, deps_archive_path)
-                    unpack = await box.exec(
-                        f"tar -xzf {shlex.quote(deps_archive_path)} -C {shlex.quote(agent_deps_dir)}",
-                        timeout_s=600,
-                    )
-                    if unpack.return_code != 0:
-                        raise RuntimeError(f"agent runtime extraction failed: {(unpack.stderr or '')[-500:]}")
-                elif self.config.deps_provision == "baked":
-                    runtime = await box.exec(f"test -x {shlex.quote(agent_deps_dir)}/bin/python", timeout_s=30)
-                    if runtime.return_code != 0:
-                        raise RuntimeError(f"sandbox image does not contain {agent_deps_dir}/bin/python")
+                    await setup_runtime(box)
                 agent_result = await box.exec(
                     f"{shlex.quote(agent_deps_dir)}/bin/python {traj}/agent_runner.py",
                     cwd=wd,
@@ -1148,7 +1156,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     repository_changes = None
                     if repository_archive:
                         collect = await box.exec(
-                            f"python {shlex.quote(traj + '/repository_workspace.py')} collect "
+                            f"{agent_python} {shlex.quote(traj + '/repository_workspace.py')} collect "
                             f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
                             f"--archive {shlex.quote(traj + '/changes.tar.gz')}",
                             timeout_s=600,

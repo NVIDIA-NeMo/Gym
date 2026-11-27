@@ -47,6 +47,7 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgentConfig,
     _sandbox_prepare_command,
     _session_opencode_config_error,
+    _slot,
 )
 from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.runtime import (
@@ -54,6 +55,8 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     UNRESTRICTED_IMAGE_ATTACHMENT,
 )
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
+from tests.helpers.event_loop_clock import run_on_clock_ahead_loop
 
 
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
@@ -263,7 +266,6 @@ def setup():
         entrypoint="app.py",
         num_workers=1,
         model_server={"type": "responses_api_models", "name": "policy"},
-        opencode_version="1.17.11",
         resources_server={"type": "resources_servers", "name": "resources"},
         sandbox_provider="unused",
         sandbox_config={},
@@ -292,6 +294,54 @@ def setup():
 
 def active_sessions(agent):
     return {key: record.state for key, record in agent._session_records.items() if record.state is not None}
+
+
+def test_gzip_rejects_local_execution_before_calling_resources(setup):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = True
+    agent = OpenCodeLegacyAgent(config=agent.config, server_client=agent.server_client)
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert (
+            response.json()["detail"]
+            == "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert (
+            run.json()["detail"]
+            == "OpenCode requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+    agent.server_client.post.assert_not_called()
+    sandbox.exec.assert_not_awaited()
+
+
+def test_gzip_rejects_opencode_2_configuration():
+    with pytest.raises(ValidationError, match="OpenCode 2 is unsupported"):
+        OpenCodeAgentConfig(
+            name="opencode",
+            host="localhost",
+            port=8001,
+            entrypoint="app.py",
+            opencode_version="2.2.7",
+            gzip_requests_enabled=True,
+        )
+
+
+def test_gzip_accepts_latest_opencode_version_at_config_validation():
+    config = OpenCodeAgentConfig(
+        name="opencode",
+        host="localhost",
+        port=8001,
+        entrypoint="app.py",
+        opencode_version="latest",
+        gzip_requests_enabled=True,
+    )
+
+    assert config.opencode_version == "latest"
+    assert config.gzip_requests_enabled is True
 
 
 @pytest.mark.parametrize("stage", ["prepare", "install"])
@@ -401,6 +451,23 @@ def count_media_decodes(monkeypatch):
 
     monkeypatch.setattr(MediaFile, "from_data_uri", classmethod(counting))
     return decodes
+
+
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+def test_gzip_plugin_is_staged_and_configured_only_when_enabled(setup, gzip_enabled):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = gzip_enabled
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        directory = sandbox.directory
+        assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
+        assert (f"{directory}/request_gzip_plugin.mjs" in sandbox.files) is gzip_enabled
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        plugin = (Path(directory) / "request_gzip_plugin.mjs").as_uri()
+        assert (plugin in config["plugin"]) is gzip_enabled
 
 
 def test_session_attaches_prompt_images_and_declares_image_input(setup, monkeypatch):
@@ -517,6 +584,35 @@ def test_session_close_stops_media_staging_before_releasing_the_sandbox(setup):
     assert not sandbox.launch.called
 
 
+def test_slot_wait_holds_its_monotonic_deadline_on_an_event_loop_clock_ahead_of_monotonic():
+    async def main():
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        asyncio.get_running_loop().call_later(0.05, semaphore.release)
+        async with _slot(semaphore, deadline=monotonic() + 120):
+            return semaphore.locked()
+
+    assert run_on_clock_ahead_loop(main())
+
+
+def test_preparation_deadline_holds_on_an_event_loop_clock_ahead_of_monotonic(setup, monkeypatch):
+    agent, _ = setup
+
+    async def prepare(*args, **kwargs):
+        await asyncio.sleep(0)
+
+    reply = object()
+    state = MagicMock(spec=OpenCodeSandboxSession)
+    state.validated_input = None
+    state.system_instructions = None
+    state.prepare_activation = AsyncMock(side_effect=prepare)
+    monkeypatch.setattr(agent, "_session_response", AsyncMock(return_value=reply))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Inspect", metadata={"agent_timeout_sec": "30"})
+
+    assert run_on_clock_ahead_loop(agent._activate_agent_session_state(state, body, activation_id=1)) is reply
+    state.prepare_activation.assert_awaited_once()
+
+
 def test_first_activation_budget_bounds_media_staging(setup):
     agent, sandbox = setup
     upload = sandbox.upload
@@ -617,7 +713,7 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert body["usage"]["total_tokens"] == 16
         payload = sandbox.params()
         assert payload["prompt"] == "Fix the code"
-        assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
+        assert payload["command"][0].endswith(f"nemo-gym-opencode-runtime-{OPENCODE_VERSION}/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
@@ -645,25 +741,6 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
-
-
-def test_first_activation_deadline_is_on_the_event_loop_clock(setup, monkeypatch):
-    """`asyncio.timeout_at` reads the event loop's clock, which uvloop on macOS runs apart from `time.monotonic()`.
-    With `monotonic()` far behind it, a deadline taken from `monotonic()` is already expired, and the activation times
-    out before OpenCode starts."""
-    from time import monotonic
-
-    agent, sandbox = setup
-    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: monotonic() - 10_000)
-    with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
-        assert result.status_code == 200, result.text
-        assert result.json()["status"] == "completed"
-        assert sandbox.launch.called
-        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
-        assert closed.status_code == 200, closed.text
 
 
 @pytest.mark.parametrize("owned", [False, True])
@@ -2063,7 +2140,7 @@ def test_malformed_later_artifact_keeps_partial_output(setup):
         "/tmp/",
         "/tmp/../tmp/task",
         "/tmp/nemo-gym-opencode-sessions",
-        "/tmp/nemo-gym-opencode-runtime-1.17.11/repo",
+        f"/tmp/nemo-gym-opencode-runtime-{OPENCODE_VERSION}/repo",
     ],
 )
 async def test_adapter_workdir_overlap_is_rejected_before_connection(setup, workdir):

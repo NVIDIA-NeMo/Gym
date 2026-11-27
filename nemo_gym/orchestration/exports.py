@@ -117,6 +117,10 @@ def validate_exports(config: "SubmitConfig") -> None:
             raise ValueError(
                 f"Benchmark '{benchmark_name}' sets `export`, which is not supported on Kubernetes compute yet."
             )
+        if benchmark.reverify and on_kubernetes:
+            raise ValueError(
+                f"Benchmark '{benchmark_name}' sets `reverify`, which is not supported on Kubernetes compute yet."
+            )
         live = set(exporter_extras(benchmark.run))
         for name, settings in exports.items():
             where = f"Benchmark '{benchmark_name}' export '{name}'"
