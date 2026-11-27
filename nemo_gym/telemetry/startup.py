@@ -71,6 +71,9 @@ STARTUP_SETUP_DONE_NS_ENV = "NEMO_GYM_STARTUP_SETUP_DONE_NS"
 STARTUP_SERVE_NS_ENV = "NEMO_GYM_STARTUP_SERVE_NS"
 #: W3C ``traceparent`` of the supervisor's span for this server.
 STARTUP_TRACEPARENT_ENV = "NEMO_GYM_STARTUP_TRACEPARENT"
+#: W3C ``traceparent`` of the span a launcher wants the supervisor's ``gym.startup`` span under.
+#: This is the OpenTelemetry environment-variable carrier name, so any launcher that sets it needs no Gym-specific knowledge.
+INBOUND_TRACEPARENT_ENV = "TRACEPARENT"
 
 #: Stages recorded before the server's own code runs, in launch order.
 VENV_SETUP_STAGE = "venv_setup"
@@ -136,6 +139,16 @@ def _exporting_telemetry() -> Optional[Any]:
     if telemetry is None or not telemetry.is_exporting:
         return None
     return telemetry
+
+
+def _inbound_context() -> Any:
+    """The context named by ``TRACEPARENT`` in the environment, or ``None`` when the launcher set none."""
+    traceparent = os.environ.get(INBOUND_TRACEPARENT_ENV, "")
+    if not traceparent:
+        return None
+    from opentelemetry.propagate import extract
+
+    return extract({"traceparent": traceparent})
 
 
 def _start_span(telemetry: Any, name: str, start_ns: int, parent_context: Any, attributes: Dict[str, Any]) -> Any:
@@ -303,7 +316,7 @@ class SupervisorStartup(StageTimeline):
         if telemetry is None or not is_span_group_enabled(GymSpanGroup.STARTUP):
             return
         try:
-            self._root_span = _start_span(telemetry, "gym.startup", self.start_ns, None, {})
+            self._root_span = _start_span(telemetry, "gym.startup", self.start_ns, _inbound_context(), {})
             self._telemetry = telemetry
         except Exception:
             logger.debug("nemo-lens: could not open the startup span", exc_info=True)
