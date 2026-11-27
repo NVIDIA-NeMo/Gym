@@ -5,6 +5,7 @@ set -Eeuo pipefail
 umask 077
 
 fail() { printf 'NOOA runtime: %s\n' "$*" >&2; exit 1; }
+refuse() { printf 'NOOA runtime: %s\n' "$*" >&2; exit 73; }
 require() {
   local tool
   for tool in "$@"; do
@@ -33,6 +34,8 @@ probe() {
 }
 # Print <prefix>-<uid> once it is a directory that only this user can change. Other users can
 # write a shared location such as /tmp, and a runtime one of them placed there must never run.
+# Exit 73 (EX_CANTCREAT) when the location itself rules that out, which every attempt on the
+# same image would repeat; any other failure exits 1.
 private_root() {
   require id stat mkdir
   local uid root parent owner mode
@@ -44,15 +47,22 @@ private_root() {
   parent=${root%/*}
   [[ -n "$parent" ]] || parent=/
   [[ ! -L "$parent" ]] \
-    || fail "refusing $root: $parent is a symbolic link, so the directory behind it could be replaced"
+    || refuse "refusing $root: $parent is a symbolic link, so the directory behind it could be replaced"
   owner=$(stat -c %u "$parent") && mode=$(stat -c %a "$parent") || fail "cannot inspect $parent"
   [[ "$owner" = 0 || "$owner" = "$uid" ]] \
-    || fail "refusing $root: $parent belongs to uid $owner, who could replace the runtime placed there"
+    || refuse "refusing $root: $parent belongs to uid $owner, who could replace the runtime placed there"
   (( !(8#$mode & 8#022) || (8#$mode & 8#1000) )) \
-    || fail "refusing $root: other users can write $parent and it has no sticky bit, so they could replace the runtime placed there"
-  mkdir -p "$root" || fail "cannot create $root"
-  [[ -d "$root" && ! -L "$root" && "$(stat -c %u:%a "$root")" =~ ^$uid:[0-7]?7[0145][0145]$ ]] \
-    || fail "$root must be a directory that uid $uid owns and no other user can write"
+    || refuse "refusing $root: other users can write $parent and it has no sticky bit, so they could replace the runtime placed there"
+  if [[ ! -e "$root" && ! -L "$root" ]]; then
+    [[ -w "$parent" && -x "$parent" ]] || refuse "refusing $root: uid $uid cannot write $parent"
+    # A concurrent setup by the same user may create it first.
+    mkdir "$root" 2>/dev/null || [[ -d "$root" ]] || fail "cannot create $root"
+  fi
+  # Only an answer that was read refuses: a read that fails says nothing about the directory.
+  [[ -d "$root" && ! -L "$root" ]] || refuse "refusing $root: it must be a directory"
+  owner=$(stat -c %u "$root") && mode=$(stat -c %a "$root") || fail "cannot inspect $root"
+  [[ "$owner:$mode" =~ ^$uid:[0-7]?7[0145][0145]$ ]] \
+    || refuse "refusing $root: it must be a directory that uid $uid owns and no other user can write"
   printf '%s\n' "$root"
 }
 

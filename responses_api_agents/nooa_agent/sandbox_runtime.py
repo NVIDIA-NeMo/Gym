@@ -21,7 +21,8 @@ from typing import TypeVar
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.agents import AgentSeedRejectedError
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
 LOGGER = logging.getLogger(__name__)
@@ -94,8 +95,22 @@ _RUNTIME_ROOT = "/opt/nemo-gym-nooa"
 # other users can write it, so the installer appends the user id and keeps the
 # directory private to that user.
 _FALLBACK_RUNTIME_ROOT = "/tmp/nemo-gym-nooa-runtime"
-# Installer `check` exit status: the runtime is absent and cannot be installed at that path.
+# Installer exit status of `check` and `private-root`: no runtime can be installed at that path.
 _CANNOT_INSTALL = 73
+
+
+def _cannot_install(result: SandboxExecResult) -> bool:
+    """Whether the installer itself ruled the location out; a command the provider could not run did not."""
+    return result.error_type is None and result.return_code == _CANNOT_INSTALL
+
+
+def _no_location(detail: str) -> AgentSeedRejectedError:
+    detail = f"NOOA runtime cannot be installed in this sandbox: {detail}"
+    # The caller wraps setup errors to keep its state for close, a path on which nothing else logs a refusal.
+    LOGGER.warning("Refusing the agent session seed: %s", detail)
+    return AgentSeedRejectedError(detail)
+
+
 _PYTHON_VERSION = "3.13.14"
 _PYTHON_RELEASE = "20260805"
 _INSTALLER_PATH = "responses_api_agents/nooa_agent/install_nooa_runtime.sh"
@@ -204,6 +219,12 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
     a source-bound bundle prepared outside the task. Offline setup installs only
     local wheels, without package indexes, URL requirements or build isolation.
     A healthy preinstalled or mounted runtime is reused without writing into it.
+
+    Raises AgentSeedRejectedError when the installer's ownership, permission
+    and path checks rule out both locations, which every attempt on the same
+    task image would repeat. Other failures, including an install that fails
+    in a location those checks accepted, raise ordinary errors, which an
+    environment server may retry.
     """
     root = Path(__file__).resolve().parents[2]
     source, fingerprint = await _runtime_io(_runtime_archive, root)
@@ -248,27 +269,38 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
             runtime = f"{_RUNTIME_ROOT}/{fingerprint}-{arch}-{libc}"
             check = shlex.join(["bash", script, "check", runtime, fingerprint, _IMPORT_CHECK])
             cached = await sandbox.exec(check, cwd="/", timeout_s=60)
-            if cached.return_code == _CANNOT_INSTALL:
+            if _cannot_install(cached):
                 # A healthy runtime under the default root is still reused (status 0), and a
                 # user who can install there still does (status 1); only others fall back.
                 claim = shlex.join(["bash", script, "private-root", _FALLBACK_RUNTIME_ROOT])
                 claimed = await sandbox.exec(claim, cwd="/", timeout_s=30)
+                if _cannot_install(claimed):
+                    # The task image decides this, so every attempt would end the same way:
+                    # refuse the seed once instead of failing as a setup error that is retried.
+                    # A provider may deliver the installer's stderr line on either stream.
+                    said = [
+                        line.removeprefix("NOOA runtime: ")
+                        for line in f"{claimed.stdout or ''}\n{claimed.stderr or ''}".splitlines()
+                        if line.startswith("NOOA runtime: ")
+                    ]
+                    reason = said[-1][-300:] if said else "no private directory could be used"
+                    raise _no_location(f"the sandbox user cannot write {_RUNTIME_ROOT}. Fallback: {reason}")
                 fallback = (claimed.stdout or "").strip()
-                usable = (
-                    claimed.return_code == 0 and re.fullmatch(f"{_FALLBACK_RUNTIME_ROOT}-[0-9]+", fallback) is not None
-                )
-                if usable:
-                    runtime = f"{fallback}/{fingerprint}-{arch}-{libc}"
-                    check = shlex.join(["bash", script, "check", runtime, fingerprint, _IMPORT_CHECK])
-                    cached = await sandbox.exec(check, cwd="/", timeout_s=60)
-                if not usable or cached.return_code == _CANNOT_INSTALL:
-                    # Fail before staging archives that no location in this sandbox can take.
-                    failed = cached if usable else claimed
+                if (
+                    claimed.return_code != 0
+                    or claimed.error_type is not None
+                    or re.fullmatch(f"{_FALLBACK_RUNTIME_ROOT}-[0-9]+", fallback) is None
+                ):
                     raise RuntimeError(
-                        f"NOOA runtime cannot be installed: the sandbox user can write neither {_RUNTIME_ROOT} "
-                        f"nor a private {_FALLBACK_RUNTIME_ROOT}-<uid>; exit={failed.return_code}; "
-                        f"stdout={(failed.stdout or '')[-2000:]} stderr={(failed.stderr or '')[-2000:]}"
+                        f"NOOA fallback runtime root could not be prepared: exit={claimed.return_code}; "
+                        f"error_type={claimed.error_type}; stdout={(claimed.stdout or '')[-2000:]} "
+                        f"stderr={(claimed.stderr or '')[-2000:]}"
                     )
+                runtime = f"{fallback}/{fingerprint}-{arch}-{libc}"
+                check = shlex.join(["bash", script, "check", runtime, fingerprint, _IMPORT_CHECK])
+                cached = await sandbox.exec(check, cwd="/", timeout_s=60)
+                if _cannot_install(cached):
+                    raise _no_location(f"the sandbox user can write neither {_RUNTIME_ROOT} nor {fallback}")
             python = f"{runtime}/python/bin/python3"
             if cached.return_code == 0:
                 completed = True

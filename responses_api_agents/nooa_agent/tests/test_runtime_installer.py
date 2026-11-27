@@ -22,6 +22,9 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Installer requires Linux flock and atomic mv -T")
 INSTALLER = Path(__file__).resolve().parents[1] / "install_nooa_runtime.sh"
 FINGERPRINT = "a" * 64
+# Exit status of `check` and `private-root` when the location itself cannot hold a runtime (EX_CANTCREAT).
+# The controller refuses the seed on it; every other failure exits with another status and stays retryable.
+REFUSED = 73
 # Run the actual shell/checksum/lock/publication code; only package installation is injected.
 PRIVATE_PYTHON = r"""
 import json, os, pathlib, sys, time
@@ -227,13 +230,46 @@ def test_private_root_belongs_to_this_user_alone() -> None:
             refused.append("foreign")
         for name in refused:
             result = claim(name)
-            assert (result.returncode, result.stdout) == (1, ""), name
+            assert (result.returncode, result.stdout) == (REFUSED, ""), name
 
         # The parent's own name must be fixed too, even when it leads to a directory that is safe now.
         (base / "linked").symlink_to(base)
         result = claim("linked/runtime")
-        assert (result.returncode, result.stdout) == (1, "")
+        assert (result.returncode, result.stdout) == (REFUSED, "")
         assert f"{base / 'linked'} is a symbolic link" in result.stderr
+
+        # A parent this user cannot write holds no root either.
+        closed = base / "closed"
+        closed.mkdir()
+        closed.chmod(0o555)
+        result = claim("closed/runtime")
+        assert (result.returncode, result.stdout) == (REFUSED, "")
+        assert f"cannot write {closed}" in result.stderr
+
+        # A read of the root that fails proves nothing about it, so it is no refusal.
+        stub = base / "bin"
+        stub.mkdir()
+        stub.chmod(0o755)
+        (stub / "stat").write_text(
+            f'#!/bin/sh\ncase "$*" in *broken-*) exit 5 ;; esac\nexec {shutil.which("stat")} "$@"\n'
+        )
+        (stub / "stat").chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(script), "private-root", str(base / "broken")],
+            env={**os.environ, "PATH": f"{stub}:{os.environ['PATH']}"},
+            text=True,
+            capture_output=True,
+            timeout=20,
+            **kwargs,
+        )
+        assert (result.returncode, result.stdout) == (1, "")
+        assert f"cannot inspect {base / f'broken-{uid}'}" in result.stderr
+
+        # A failure that says nothing about the location keeps the ordinary failure status.
+        result = subprocess.run(
+            ["bash", str(script), "private-root", "relative/runtime"], text=True, capture_output=True, timeout=20
+        )
+        assert (result.returncode, result.stdout) == (1, "")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -283,7 +319,7 @@ def test_private_root_needs_a_parent_where_others_cannot_replace_it(sticky: bool
             assert mark.exists()
         else:
             # Another user could swap the directory after any check of it, so nothing in it is run.
-            assert (claim.returncode, claim.stdout) == (1, "")
+            assert (claim.returncode, claim.stdout) == (REFUSED, "")
             assert f"other users can write {shared} and it has no sticky bit" in claim.stderr
             assert not mark.exists()
     finally:
@@ -316,14 +352,14 @@ def test_another_user_cannot_replace_a_private_root_that_was_handed_out() -> Non
         assert subprocess.run(replace, capture_output=True, timeout=20, **other).returncode == 0
         assert root.stat().st_uid == 65533
         result = subprocess.run(claim, text=True, capture_output=True, timeout=20, **owner)
-        assert (result.returncode, result.stdout) == (1, "")
+        assert (result.returncode, result.stdout) == (REFUSED, "")
         assert "no sticky bit" in result.stderr
 
         # The sticky bit does not bind the parent's owner, so only root or this user may own it.
         shared.chmod(0o1777)
         os.chown(shared, 65533, -1)
         result = subprocess.run(claim, text=True, capture_output=True, timeout=20, **owner)
-        assert (result.returncode, result.stdout) == (1, "")
+        assert (result.returncode, result.stdout) == (REFUSED, "")
         assert f"{shared} belongs to uid 65533" in result.stderr
     finally:
         shutil.rmtree(base, ignore_errors=True)

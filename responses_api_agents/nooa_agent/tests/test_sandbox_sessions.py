@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.agents import SUPERVISOR_FILE, AgentCloseSessionRequest
+from nemo_gym.agents import SUPERVISOR_FILE, AgentCloseSessionRequest, AgentSeedRejectedError
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
@@ -81,6 +81,21 @@ async def test_offline_runtime_failure_never_activates_or_destroys_borrowed_sand
     staging.assert_awaited_once_with(sandbox, wheelhouse_path=Path("/prepared/nooa"))
     connect.assert_awaited_once()
     sandbox.exec.assert_not_awaited()
+    with pytest.raises(HTTPException, match="closing"):
+        instance._require_agent_session("session")
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_image_that_cannot_hold_the_runtime_refuses_the_seed_once(setup) -> None:
+    instance, sandbox, staging, _ = setup
+    staging.side_effect = AgentSeedRejectedError("NOOA runtime cannot be installed in this sandbox: no location")
+    # The seed answers the refusal itself (HTTP 422, terminal for the environment server), not a setup failure.
+    with pytest.raises(AgentSeedRejectedError, match="cannot be installed in this sandbox") as error:
+        await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    assert error.value.status_code == 422
+    # The borrowed connection is still released by close, and the session is never activated.
     with pytest.raises(HTTPException, match="closing"):
         instance._require_agent_session("session")
     await close(instance)

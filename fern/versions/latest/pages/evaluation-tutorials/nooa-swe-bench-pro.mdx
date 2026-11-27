@@ -36,8 +36,9 @@ Cold runtime setup requires Linux x86_64 or aarch64 with glibc, `bash`, `tar`, `
 `tee`, `mv` with `-T` support, and a writable `/tmp`. A sandbox user who cannot write `/opt/nemo-gym-nooa` also
 needs `id`, `stat`, and a `/tmp` that allows executable files (not mounted `noexec`). That `/tmp` must be a real
 directory, not a symbolic link, belong to root or to the sandbox user and, when other users can write it, have the
-sticky bit, as the usual mode `1777` does; otherwise another user could replace the runtime, and setup stops with
-an error. The controller supplies Python;
+sticky bit, as the usual mode `1777` does; otherwise another user could replace the runtime. A task image whose
+ownership and permissions rule out both locations is refused once, with the reason, and is not retried; a `noexec`
+`/tmp` is found only during installation and fails as an ordinary setup error. The controller supplies Python;
 Alpine/musl images are not supported. Python packages normally require outbound access during cold installation.
 The NOOA SWE-bench Pro recipe instead requires a controller-prepared offline wheelhouse because its task sandbox
 allows only the Gym model-server host. Model and granted Resources URLs must be reachable from the sandbox;
