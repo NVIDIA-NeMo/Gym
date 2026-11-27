@@ -336,6 +336,29 @@ def _agent_to_rs_mapping_from_agent_blocks(
     return mapping
 
 
+def _agent_to_rs_mapping_from_environment_server_blocks(
+    global_config_dict: dict[str, Any] | DictConfig,
+) -> dict[str, str]:
+    # An environment server pairs an agent that names no resources server with the one that grades it. An agent
+    # paired with two different resources servers is left out: its rows route by their environment server stamp.
+    mapping: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for block in global_config_dict.values():
+        if not isinstance(block, (dict, DictConfig)) or "environment_servers" not in block:
+            continue
+        for environment_server in (block["environment_servers"] or {}).values():
+            agent = ((environment_server or {}).get("agent_server") or {}).get("name")
+            rs = ((environment_server or {}).get("resources_server") or {}).get("name")
+            if not agent or not rs:
+                continue
+            if mapping.get(str(agent), str(rs)) != str(rs):
+                ambiguous.add(str(agent))
+            mapping[str(agent)] = str(rs)
+    for agent in ambiguous:
+        del mapping[agent]
+    return mapping
+
+
 def _agent_to_rs_mapping_from_resources_only_config(
     global_config_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
@@ -403,7 +426,14 @@ def _build_agent_to_resources_server_mapping(
     mapping = _agent_to_rs_mapping_from_agent_blocks(global_config_dict)
     if mapping:
         return mapping
-    return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
+    try:
+        return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
+    except ConfigError:
+        # Several resources servers: the environment servers' pairs still route their agents.
+        mapping = _agent_to_rs_mapping_from_environment_server_blocks(global_config_dict)
+        if mapping:
+            return mapping
+        raise
 
 
 def _selected_atif_resources_server_routes(

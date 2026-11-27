@@ -30,6 +30,7 @@ from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -322,6 +323,54 @@ class TestBuildAgentToResourcesServerMapping:
         }
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent_name"] == "verifier_block"
+
+    @staticmethod
+    def _environment_server_config() -> dict:
+        """An agent with no resources server, paired with one by an environment server, beside unused resources
+        servers (a standalone agent and its verifier)."""
+        return {
+            "rs_unused_one": {"resources_servers": {"impl_one": {}}},
+            "rs_unused_two": {"resources_servers": {"impl_two": {}}},
+            "graded_rs": {"resources_servers": {"impl": {}}},
+            "opencode_agent": {"responses_api_agents": {"opencode_agent": {"resources_server": None}}},
+            "episode_server": {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "resources_server": {"type": "resources_servers", "name": "graded_rs"},
+                        "agent_server": {"type": "responses_api_agents", "name": "opencode_agent"},
+                    }
+                }
+            },
+        }
+
+    def test_environment_server_pairs_agent_with_its_resources_server(self) -> None:
+        config = self._environment_server_config()
+        mapping = _build_agent_to_resources_server_mapping(config)
+        assert mapping == {"opencode_agent": "graded_rs"}
+        stamped = {ENVIRONMENT_SERVER_STAMP_KEY_NAME: "episode_server", AGENT_REF_KEY_NAME: {"name": "opencode_agent"}}
+        assert _rs_for_row(stamped, mapping, config) == "graded_rs"
+        unstamped = {AGENT_REF_KEY_NAME: {"name": "opencode_agent"}}
+        assert _rs_for_row(unstamped, mapping, config) == "graded_rs"
+
+    def test_single_resources_server_still_routes_any_agent_name(self) -> None:
+        """With one resources server the catch-all stays: an agent name no environment server lists still routes."""
+        config = self._environment_server_config()
+        del config["rs_unused_one"], config["rs_unused_two"]
+        mapping = _build_agent_to_resources_server_mapping(config)
+        assert _rs_for_row({AGENT_REF_KEY_NAME: {"name": "renamed_agent"}}, mapping, config) == "graded_rs"
+
+    def test_agent_paired_with_two_resources_servers_is_left_out(self) -> None:
+        config = self._environment_server_config()
+        config["second_episode_server"] = {
+            "environment_servers": {
+                "single_agent_turn": {
+                    "resources_server": {"name": "rs_unused_two"},
+                    "agent_server": {"name": "opencode_agent"},
+                }
+            }
+        }
+        with pytest.raises(ConfigError, match="multiple resources servers"):
+            _build_agent_to_resources_server_mapping(config)
 
 
 class TestAtifPreflight:
