@@ -35,3 +35,21 @@ def test_profile_restricts_the_sandbox_to_the_model_server(monkeypatch: pytest.M
     assert settings.network_access == "model_only"
     # OpenClaw cannot download its runtime through that policy, so the profile requires one in the image.
     assert settings.sandbox_runtime_dir == REQUIRED_SETTING_VALUES["sandbox_runtime_dir"]
+
+
+def test_profile_accepts_an_uploaded_runtime_in_place_of_one_in_the_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Under the profile's own instance name, where a setting the profile does not list is accepted.
+    agent = "++openclaw_agent.responses_api_agents.openclaw_agent"
+    upload = (f"{agent}.sandbox_runtime_upload=true", f"{agent}.sandbox_runtime_dir=null")
+
+    settings = get_first_server_config_dict(
+        compose_profile_on_hle("openclaw_agent", monkeypatch, required=False, cli_args=upload),
+        "hle_equivalence_llm_judge_openclaw_agent",
+    )
+
+    assert settings.sandbox_runtime_upload is True and settings.sandbox_runtime_dir is None
+    # The profile still requires a value for sandbox_runtime_dir, so the upload setting alone is not enough.
+    with pytest.raises(
+        ValueError, match=r"required config value\(s\) are unset[\s\S]*openclaw_agent\.sandbox_runtime_dir"
+    ):
+        compose_profile_on_hle("openclaw_agent", monkeypatch, required=False, cli_args=upload[:1])

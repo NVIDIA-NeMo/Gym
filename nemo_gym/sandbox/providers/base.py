@@ -14,12 +14,12 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from urllib.parse import urlsplit
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
@@ -144,24 +144,62 @@ def clamp_resource_requests(
     return clamped, changed
 
 
+# Sandboxes that must run together carry this label with a shared placement group: the services of one Compose
+# project, or a sandbox and its sidecars. Members reach each other by pod IP and may share storage, so a multi-cell
+# front end (cell-router) routes every create with the same value to one cell.
+PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
+
+
+def _tcp_ports(ports: object, *, owner: str) -> tuple[int, ...]:
+    """Validate a spec's TCP port numbers."""
+    if not isinstance(ports, (list, tuple)):
+        raise TypeError(f"{owner} ports must be a list or tuple of TCP port numbers")
+    normalized: list[int] = []
+    for raw_port in ports:
+        if isinstance(raw_port, bool) or not isinstance(raw_port, (int, str)):
+            raise ValueError(f"Invalid {owner.lower()} TCP port: {raw_port!r}")
+        try:
+            port = int(raw_port)
+        except ValueError as exc:
+            raise ValueError(f"Invalid {owner.lower()} TCP port: {raw_port!r}") from exc
+        if port < 1 or port > 65535:
+            raise ValueError(f"{owner} TCP port must be between 1 and 65535, got {port}")
+        if port in normalized:
+            raise ValueError(f"Duplicate {owner.lower()} TCP port: {port}")
+        normalized.append(port)
+    return tuple(normalized)
+
+
 @dataclass(frozen=True)
 class SandboxSidecarSpec:
     """An extra container started with the sandbox from its own image.
 
-    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
-    How the sandbox reaches a sidecar over the network is provider-specific.
+    A sidecar that serves the sandbox names its service: ``entrypoint`` starts it and ``ports`` lists the TCP ports
+    the sandbox may reach. The provider waits for the ports of a service it started before the create returns, and
+    the sandbox reaches no other port of the sidecar where the provider can enforce that. A sidecar that names
+    ``ports`` without an ``entrypoint`` starts no service: whoever creates the sandbox starts it afterwards with
+    ``AsyncSandbox.sidecar(name).exec`` and waits for it. A sidecar without ``ports`` is one the sandbox may not
+    reach, such as a grader; run commands in it the same way.
+    The sidecar has its own filesystem; how the sandbox reaches it over the network is provider-specific.
     """
 
     name: str
     image: str
     env: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+    # Provider-specific options for this sidecar alone; a provider refuses an option it cannot apply.
+    provider_options: dict[str, Any] = field(default_factory=dict)
+    # The command that starts the sidecar's service, run without a shell. Without one the sidecar idles.
+    entrypoint: list[str] | None = None
+    # The TCP ports of the sidecar's service that the sandbox may reach.
+    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not self.name or not self.image:
             raise ValueError("A sandbox sidecar needs a name and an image")
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        object.__setattr__(self, "ports", _tcp_ports(self.ports, owner="Sandbox sidecar"))
 
 
 @dataclass(frozen=True)
@@ -202,24 +240,7 @@ class SandboxSpec:
         if len({sidecar.name for sidecar in sidecars}) != len(sidecars):
             raise ValueError("Sandbox sidecar names must be unique")
         object.__setattr__(self, "sidecars", sidecars)
-        if not isinstance(self.ports, (list, tuple)):
-            raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
-        normalized_ports: list[int] = []
-        for raw_port in self.ports:
-            if isinstance(raw_port, bool):
-                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
-            if not isinstance(raw_port, (int, str)):
-                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
-            try:
-                port = int(raw_port)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}") from exc
-            if port < 1 or port > 65535:
-                raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
-            if port in normalized_ports:
-                raise ValueError(f"Duplicate sandbox TCP port: {port}")
-            normalized_ports.append(port)
-        object.__setattr__(self, "ports", tuple(normalized_ports))
+        object.__setattr__(self, "ports", _tcp_ports(self.ports, owner="Sandbox"))
 
 
 @dataclass
@@ -286,6 +307,14 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+class SandboxExecArgvUnsupportedError(NotImplementedError):
+    """Raised before anything runs when an ``exec`` argument list cannot run without a shell.
+
+    The provider lacks ``SupportsSandboxExecArgv``, or it cannot honor this call's options without a shell (a
+    ``user`` it switches to only through ``su``, say). The list is never joined into shell text instead.
+    """
+
+
 def sandbox_credentials_rejected(
     error: BaseException,
     *,
@@ -350,6 +379,55 @@ class SandboxSnapshotInUseError(SandboxSnapshotError):
     """Raised when a provider refuses to delete a snapshot because something still uses it."""
 
 
+NetworkRule = Literal["inherit", "no_network", "model_only", "model_and_tools", "hosts_only"]
+"""The egress rule a sandbox starts with.
+
+``inherit`` keeps the provider's default. ``no_network`` allows no egress. ``model_only`` allows the model server,
+``model_and_tools`` the model server and the tool servers, and ``hosts_only`` only the hosts listed for the sandbox.
+Every restricted rule also allows the listed hosts.
+"""
+NETWORK_RULES: frozenset[NetworkRule] = frozenset(get_args(NetworkRule))
+
+# What a snapshot of a sandbox can keep.
+SnapshotContent = Literal["files", "processes"]
+Reconnect = Literal["always", "same_host", "never"]
+
+
+@dataclass(frozen=True)
+class SandboxCapabilities:
+    """What a provider class can do beyond start, commands, file transfer and stop, declared as its ``capabilities``
+    class attribute.
+
+    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none. Every owner,
+    typed config, ``OwnedSandboxes``, ``borrow()``, stop and shutdown sweep works on every provider. These capabilities
+    are needed only by servers that use them, which are refused as early as they can be known.
+
+    Attributes:
+        snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots. With
+            ``"processes"``, a snapshot saves memory and running processes, and a sandbox created from it
+            continues them.
+        network_rules: The egress rules the provider can apply at creation (see :data:`NetworkRule`). A provider
+            that lists any rule besides ``inherit`` implements :class:`SupportsSandboxNetworkRules`.
+        reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
+            ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
+            ``never``.
+    """
+
+    snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+    network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
+    reconnect: Reconnect = "always"
+
+
+def provider_capabilities(provider: object, *, config: Mapping[str, Any] | None = None) -> SandboxCapabilities:
+    """The provider's effective capabilities, resolved from its deployment config when checking a class at startup."""
+    if config is not None and isinstance(provider, type):
+        resolve = getattr(provider, "capabilities_for_config", None)
+        if resolve is not None:
+            return resolve(config)
+    capabilities = getattr(provider, "capabilities", None)
+    return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
+
+
 @dataclass(frozen=True)
 class SandboxSnapshotInfo:
     """One snapshot in a provider's listing.
@@ -391,7 +469,11 @@ class SandboxProvider(Protocol):
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        """Run a command inside a sandbox."""
+        """Run a command inside a sandbox.
+
+        ``command`` is shell text. Only a provider that implements ``SupportsSandboxExecArgv`` also takes a list of
+        strings, declared there; ``AsyncSandbox.exec`` passes a list to no other provider.
+        """
         ...
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
@@ -412,6 +494,20 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxNetworkRules(Protocol):
+    """A provider that applies egress rules besides ``inherit`` when it creates a sandbox."""
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with ``rule`` applied, allowing ``hosts``; only called for a rule it declares.
+
+        ``hosts`` are host names or addresses a sandbox on this provider can reach, already resolved by the owner.
+        """
         ...
 
 
@@ -443,6 +539,31 @@ class SupportsSandboxExecScopedProcesses(Protocol):
     """
 
     async def exec_processes_terminated(self, handle: SandboxHandle) -> bool: ...
+
+
+@runtime_checkable
+class SupportsSandboxExecArgv(Protocol):
+    """Optional provider capability: ``exec`` runs an argument list without a shell.
+
+    Such a provider's ``exec`` takes ``command`` as shell text or as a list of strings, and runs a list as the
+    process's argv with no shell in between, as ``SupportsSandboxSidecars.sidecar_exec`` does because sidecar images
+    can be distroless. ``AsyncSandbox.exec`` hands a list only to a provider whose ``exec_takes_argv()`` is true and
+    raises ``SandboxExecArgvUnsupportedError`` for any other. The provider may still refuse one call with that error,
+    before anything runs, when an option such as ``user`` would need a shell; it never joins the list into shell text.
+    """
+
+    def exec_takes_argv(self) -> bool: ...
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str | Sequence[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult: ...
 
 
 @runtime_checkable
@@ -583,6 +704,10 @@ class SupportsSandboxSidecars(Protocol):
         """Download one file from ``sidecar`` to the local filesystem."""
         ...
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        """The host name or address at which the sandbox reaches ``sidecar``'s ports; it need not resolve elsewhere."""
+        ...
+
 
 @runtime_checkable
 class SupportsSandboxPauseResume(Protocol):
@@ -610,6 +735,11 @@ class SupportsSandboxSnapshot(Protocol):
     A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
     its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
     other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
+
+    What a snapshot keeps depends on the provider, which declares it as ``capabilities.snapshot_keeps``
+    (:class:`SandboxCapabilities`); read it with ``provider_capabilities(provider).snapshot_keeps``. A provider whose
+    snapshots save memory and running processes, so that a sandbox created from one continues them, declares
+    ``"processes"`` beside ``"files"``.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:

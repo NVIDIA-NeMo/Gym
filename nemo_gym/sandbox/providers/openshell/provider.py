@@ -35,14 +35,15 @@ import shlex
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from nemo_gym.sandbox.attribution import PROCESS_KEY, AttributionConfig, resolve_process_id, sanitize_label_value
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
@@ -50,6 +51,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import require_shell_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -565,6 +567,8 @@ def _wait_deleted(client: Any, inst: _OpenShellSandbox, operations: OpenShellOpe
 class OpenShellProvider:
     """Sandbox provider backed by an OpenShell gateway's gRPC control plane."""
 
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities()
+
     name = "openshell"
 
     def __init__(
@@ -840,7 +844,7 @@ class OpenShellProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -854,6 +858,7 @@ class OpenShellProvider:
         deadline past it. ``user`` is ignored with a warning: the OpenShell exec API has no user
         field, so commands run as the sandbox's default user.
         """
+        command = require_shell_text(command, provider=self.name)
         inst = handle.raw
         if user is not None:
             LOGGER.warning(
@@ -946,6 +951,44 @@ class OpenShellProvider:
         target_path = Path(target_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(target_path.write_bytes, data)
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Share gateway identity without serializing gateway credentials."""
+        inst = handle.raw
+        return {
+            "provider": self.name,
+            "sandbox_id": inst.sandbox_id,
+            "name": inst.name,
+            "endpoint": self._connection.endpoint,
+            "workspace": inst.workspace,
+            "image": inst.image,
+            "workdir": inst.workdir,
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Reconnect through the configured gateway, retaining owner-managed lifetime."""
+        if (
+            descriptor.get("provider") != self.name
+            or descriptor.get("endpoint") != self._connection.endpoint
+            or descriptor.get("workspace") != self._connection.workspace
+        ):
+            raise ValueError("OpenShell reconnect requires the same gateway and workspace")
+        name, sandbox_id = descriptor["name"], descriptor["sandbox_id"]
+        ref = await self._call(self._client.get, name, workspace=self._connection.workspace)
+        if ref.id != sandbox_id or ref.name != name:
+            raise ValueError("OpenShell sandbox identity changed")
+        return SandboxHandle(
+            sandbox_id=sandbox_id,
+            provider_name=self.name,
+            raw=_OpenShellSandbox(
+                name=name,
+                sandbox_id=sandbox_id,
+                workspace=self._connection.workspace,
+                image=descriptor.get("image"),
+                env={},
+                workdir=descriptor.get("workdir"),
+            ),
+        )
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Sandbox phase via GetSandbox (missing -> STOPPED; RPC failure -> UNKNOWN)."""
