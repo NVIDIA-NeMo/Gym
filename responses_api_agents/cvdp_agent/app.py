@@ -43,7 +43,14 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.config import (
+    TASK_INDEX_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
+)
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
@@ -318,6 +325,18 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         if self.config.simple_agent:
             return await self._run_simple(request, body)
         return await self._run_agentic(request, body)
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server, which owns the CVDP metrics."""
+        if self.config.skip_verification:
+            return await super().aggregate_metrics(body)
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def responses(
         self,

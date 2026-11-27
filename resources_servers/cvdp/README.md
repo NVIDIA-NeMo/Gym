@@ -309,6 +309,11 @@ gym eval run --no-serve \
 
 At the end of this step, you should have rollouts.jsonl, rollouts_agent_metrics.json, rollouts_materialized_inputs.jsonl, rollouts_reward_profiling.jsonl.
 
+Besides the overall `mean/reward`, the aggregate metrics report the mean reward of every category in the dataset as
+`mean/<category>/reward` (for example `mean/cid003/reward`), with the same statistics across repeats. The CVDP agent
+server forwards `/aggregate_metrics` to this resources server, so both the simple and the sandboxed-harness variants
+report them.
+
 ### Step 3 — Generate report
 
 The report requires measured rollouts and rejects masked or explicitly incomplete

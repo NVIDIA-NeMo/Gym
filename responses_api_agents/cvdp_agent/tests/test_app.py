@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
@@ -1318,3 +1318,40 @@ def test_sandbox_entrypoint_resolver_routes_the_untrained_role(tmp_path: Path, u
         "http://model/ng-rollout/rollout-1/v1",
         f"{untrained_url or 'http://model/ng-rollout/rollout-1'}/v1",
     ]
+
+
+class TestAggregateMetrics:
+    def _agent(self, **overrides) -> CVDPAgent:
+        config = CVDPAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="cvdp_agent",
+            simple_agent=True,
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="cvdp"),
+            **overrides,
+        )
+        return CVDPAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def test_returns_the_resources_server_metrics(self) -> None:
+        agent = self._agent()
+        response = AsyncMock()
+        response.read.return_value = json.dumps({"key_metrics": {"mean/reward": 0.5, "mean/cid002/reward": 0.25}})
+        agent.server_client.post.return_value = response
+        body = AggregateMetricsRequest(verify_responses=[{"_ng_task_index": 0, "reward": 0.5, "category": "cid002"}])
+
+        result = await agent.aggregate_metrics(body)
+
+        agent.server_client.post.assert_called_once_with(server_name="cvdp", url_path="/aggregate_metrics", json=body)
+        assert result.key_metrics == {"mean/reward": 0.5, "mean/cid002/reward": 0.25}
+
+    async def test_skipped_verification_does_not_call_the_resources_server(self) -> None:
+        agent = self._agent(skip_verification=True)
+        body = AggregateMetricsRequest(verify_responses=[{"_ng_task_index": 0, "reward": 0.0}])
+
+        with pytest.warns(RuntimeWarning):
+            result = await agent.aggregate_metrics(body)
+
+        agent.server_client.post.assert_not_called()
+        assert result.key_metrics == {}

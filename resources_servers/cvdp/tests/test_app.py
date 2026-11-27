@@ -27,6 +27,7 @@ import yaml
 from fastapi.responses import JSONResponse
 
 from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NgFailureEvent, RequestFailureLog
 from nemo_gym.eval.rollout_reverification import _is_judge_failure
 from nemo_gym.rollouts.rollout_recovery import has_saved_generation
@@ -1734,3 +1735,41 @@ async def test_empty_repository_delta_verifies_collected_project_not_summary(tmp
 
     assert seen == [expected]
     assert result.reward == 1.0 and result.evaluation_completed and not result.mask_sample
+
+
+def _scored_row(task_index: int, rollout_index: int, reward: float, category: str | None = None) -> dict:
+    row = {"_ng_task_index": task_index, "_ng_rollout_index": rollout_index, "reward": reward}
+    if category is not None:
+        row["category"] = category
+    return row
+
+
+class TestCategoryRewardMetrics:
+    # Two repeats of three tasks. Task 1's second rollout never reached verify, so it has no category.
+    ROWS = [
+        _scored_row(0, 0, 1.0, "cid002"),
+        _scored_row(0, 1, 0.0, "cid002"),
+        _scored_row(1, 0, 1.0, "cid002"),
+        _scored_row(1, 1, 0.0),
+        _scored_row(2, 0, 1.0, "cid016"),
+        _scored_row(2, 1, 1.0, "cid016"),
+    ]
+
+    async def test_reports_the_mean_reward_of_each_category_in_the_data(self):
+        result = await _make_server().aggregate_metrics(AggregateMetricsRequest(verify_responses=self.ROWS))
+
+        assert result.key_metrics["mean/reward"] == pytest.approx(4 / 6)
+        assert result.key_metrics["mean/cid002/reward"] == pytest.approx(2 / 4)
+        assert result.key_metrics["mean/cid016/reward"] == pytest.approx(1.0)
+        assert {name for name in result.key_metrics if name.startswith("mean/cid")} == {
+            "mean/cid002/reward",
+            "mean/cid016/reward",
+        }
+
+    async def test_summarizes_each_category_across_repeats(self):
+        result = await _make_server().aggregate_metrics(AggregateMetricsRequest(verify_responses=self.ROWS))
+
+        by_repeat = {row["_ng_rollout_index"]: row for row in result.repeat_level_metrics}
+        assert by_repeat[0]["mean/cid002/reward"] == pytest.approx(1.0)
+        assert by_repeat[1]["mean/cid002/reward"] == pytest.approx(0.0)
+        assert result.agent_metrics["mean_across_repeats/mean/cid002/reward"] == pytest.approx(0.5)
