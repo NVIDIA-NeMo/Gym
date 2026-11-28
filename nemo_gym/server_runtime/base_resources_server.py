@@ -239,6 +239,14 @@ class BaseRunRequest(BaseModel):
     )
 
 
+# The /verify body field that lends the verifier operate-scope access (SandboxAccess) to the sandbox the episode ran
+# in, when the Environment Server started it (single_agent_turn with sandbox_provider). A verifier that grades in it
+# declares it on its own verify request model, excluded from dumps, and borrows it with borrow(); its owner stops it
+# after the episode. It is not a field of BaseVerifyRequest, so no verify response or episode result type carries a
+# sandbox descriptor.
+NG_SANDBOX_ACCESS_KEY = "ng_sandbox_access"
+
+
 class BaseVerifyRequest(BaseRunRequest):
     response: NeMoGymResponse
 
