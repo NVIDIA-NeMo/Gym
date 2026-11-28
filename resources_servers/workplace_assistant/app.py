@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import functools
 import math
 from typing import Any, Dict
 
@@ -96,6 +97,11 @@ def _restore_tool_env(state: dict[str, Any]) -> dict[str, Any]:
     return tool_env
 
 
+@functools.cache
+def _tool_names() -> frozenset[str]:
+    return frozenset(get_tools(_TOOLKITS)["functions"])
+
+
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
@@ -131,6 +137,24 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         app.post("/{path}")(self.route_to_python_function)
         return app
+
+    def normalize_tool_name(self, name: str) -> str:
+        """Map a tool-call name a harness reported over MCP to this server's tool name, for scoring.
+
+        Harnesses name this server's MCP tools differently: Claude Code, Hermes and Pi report
+        ``mcp__<server>__<tool>`` (stripped by the base), OpenCode and Kilo Code ``<server>_<tool>``, and
+        OpenClaw ``<server>__<tool>``, where ``<server>`` is this server's instance name. The two prefixed
+        forms are stripped only when the rest is one of this server's tools, so another server's tool keeps
+        its name and scores as an unknown tool. The verify wrapper installed with ``expose_tools_over_mcp``
+        calls this; the response keeps the names the model emitted.
+        """
+        name = super().normalize_tool_name(name)
+        server = self.config.name or type(self).__name__
+        for prefix in (f"{server}_", f"{server}__"):
+            tool = name.removeprefix(prefix)
+            if name.startswith(prefix) and tool in _tool_names():
+                return tool
+        return name
 
     # Register all 27 workplace tools as MCP tools via the catch-all route when expose_tools_over_mcp is enabled.
     def mcp_tools(self, harvested, catchall):
