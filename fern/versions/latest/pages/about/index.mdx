@@ -1,28 +1,38 @@
 ---
 title: "NeMo Gym"
-description: "NeMo Gym is a library for evaluating and improving models and agents using environments."
+description: "NeMo Gym is an open-source library for evaluating and improving AI agents: run agents on tasks, score every attempt, and use the results to optimize the agent or train the model."
 position: 1
 ---
 
-NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
+NeMo Gym is an open-source library for evaluating and improving AI agents: run agents on tasks, score every attempt, and use the results to optimize the agent or train the model.
 
 ## When to Use NeMo Gym
 
-- You need to **evaluate models or agents** in stateful environments (for example, code execution, tool calling, sandboxes).
-- You want **reproducible evaluation** across teams using shared environments and verifiers.
-- You need to use environments **at scale** — multiple repeats per task, or thousands of concurrent requests for training.
-- You want to **seamlessly transition** between evaluation, agent optimization, and training.
+- Improve an agent by measuring each change to its prompts, tools, or model, so you know which ones made it better.
+- Evaluate agents on hundreds of benchmarks, including the recipes behind NVIDIA's published Nemotron scores.
+- Train a model to do better at agentic tasks with training data at scale: rollouts collected offline for SFT or generated online during RL.
+- Share the same agents, tools, and verifiers across evaluation, agent optimization, and model training.
+- Build your own tasks, or use existing ones written for Harbor, Verifiers, OpenEnv, and other environment libraries.
 
-If you are scoring model outputs with a stateless check and do not need scale or training, a script is probably sufficient.
+## Used in Production
+
+Some public examples:
+
+- **NVIDIA Nemotron:** NVIDIA evaluates the Nemotron model family with NeMo Gym and generates the rollouts it is trained on. The benchmarks, training environments, and [evaluation recipes](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemotron_recipes) are in the NeMo Gym repository, and the training cookbooks are public. [Read more](https://github.com/NVIDIA-NeMo/Nemotron)
+- **Improving an agent:** Siemens EDA optimized its Fuse EDA AI Agent for chip design with NeMo Gym: the composite verification score rose from about 55% to about 95%, with about 66% fewer agent turns. [Read more](https://developer.nvidia.com/blog/optimizing-agent-reliability-and-tool-calling-efficiency-for-chip-design-using-nvidia-nemo-gym)
+- **Training a model:** Salesforce post-trained Koa, its first CRM reasoning model, with NeMo Gym and NeMo RL. Salesforce reports that Koa matches or exceeds leading models on CRM actions with 3x fewer errors. [Read more](https://investor.salesforce.com/news/news-details/2026/Announcing-Koa-Salesforces-First-CRM-Reasoning-Model-Built-on-NVIDIA-Nemotron/default.aspx)
 
 ## What NeMo Gym Provides
 
-- Modular, extensible interfaces for agents, environments, tasks, and verifiers
-- Environment hub of popular benchmarks and training environments
-- Use your own agents or choose from built-in harnesses
-- Scale to thousands of concurrent environments
-- Train with the RL framework of your choice
-- Battle-tested in production Nemotron training
+NeMo Gym is built around environments. An environment is everything an agent needs to attempt a task and be scored: a dataset of tasks, an agent harness, a verifier, and per-task state. See [Environments](/about/concepts/environments).
+
+- Environment hub: hundreds of benchmarks and training environments, including those built for Nemotron development
+- Built-in agent harnesses: dozens ready to use, including Claude Code, Codex, Hermes, and OpenClaw, or use NeMo Gym with your own agent
+- Trustworthy evaluation: repeats per task and run comparisons with confidence intervals tell a real change from noise
+- RL-ready agent harnesses: token IDs captured for every model call, including sub-agents and context compaction
+- RL ecosystem: integrations with training frameworks including Miles, NeMo RL, Unsloth, and VeRL
+- High concurrency: scale to thousands of tasks running at the same time, with runs that resume after a Slurm timeout or preemption
+- Sandbox isolation: tasks that execute code run each attempt in its own sandbox, with providers including Apptainer, Daytona, Docker, and OpenShell, or add your own
 
 ![NeMo Gym Product Overview](../../../../assets/images/product_overview.png)
 

@@ -8,43 +8,48 @@
 
 **[Requirements](#-requirements)** • **[Quick Start](#-quick-start)** • **[Environment Tutorials](#-environment-tutorials)** • **[Available Environments](#-available-environments)** • **[Documentation & Resources](#-documentation--resources)** • **[Community & Support](#-community--support)** • **[Citations](#-citations)**
 
-NeMo Gym is a library for evaluating and improving models and agents using environments. NeMo Gym provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments.
-
-An environment is the complete system an agent interacts with to complete a task. It consists of a dataset (tasks to solve), an agent harness (how the model interacts with the world), a verifier (task completion scoring), and state (per-task execution context).
+NeMo Gym is an open-source library for evaluating and improving AI agents: run agents on tasks, score every attempt, and use the results to optimize the agent or train the model.
 
 ## 🎯 When to Use NeMo Gym
 
-- You need to **evaluate models or agents** in stateful environments (e.g. code execution, tool calling, sandboxes)
-- You want **reproducible evaluation** across teams using shared environments and verifiers
-- You need to use environments **at scale** — multiple repeats per task, or thousands of concurrent requests for training
-- You want to **seamlessly transition** between evaluation, agent optimization, and training
+- Improve an agent by measuring each change to its prompts, tools, or model, so you know which ones made it better
+- Evaluate agents on hundreds of benchmarks, including the recipes behind NVIDIA's published Nemotron scores
+- Train a model to do better at agentic tasks with training data at scale: rollouts collected offline for SFT or generated online during RL
+- Share the same agents, tools, and verifiers across evaluation, agent optimization, and model training
+- Build your own tasks, or use existing ones written for Harbor, Verifiers, OpenEnv, and other environment libraries
 
-If you're scoring model outputs with a stateless check and don't need scale or training, a script is probably sufficient.
+## 🏭 Used in Production
+
+Some public examples:
+
+- **NVIDIA Nemotron:** NVIDIA evaluates the Nemotron model family with NeMo Gym and generates the rollouts it is trained on. The benchmarks, training environments, and [evaluation recipes](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemotron_recipes) are in the NeMo Gym repository, and the training cookbooks are public. [Read more](https://github.com/NVIDIA-NeMo/Nemotron)
+- **Improving an agent:** Siemens EDA optimized its Fuse EDA AI Agent for chip design with NeMo Gym: the composite verification score rose from about 55% to about 95%, with about 66% fewer agent turns. [Read more](https://developer.nvidia.com/blog/optimizing-agent-reliability-and-tool-calling-efficiency-for-chip-design-using-nvidia-nemo-gym)
+- **Training a model:** Salesforce post-trained Koa, its first CRM reasoning model, with NeMo Gym and NeMo RL. Salesforce reports that Koa matches or exceeds leading models on CRM actions with 3x fewer errors. [Read more](https://investor.salesforce.com/news/news-details/2026/Announcing-Koa-Salesforces-First-CRM-Reasoning-Model-Built-on-NVIDIA-Nemotron/default.aspx)
 
 ## 🏆 What NeMo Gym Provides
 
-- Modular, extensible interfaces for agents, environments, tasks, and verifiers
-- Environment hub of popular benchmarks and training environments
-- Use your own agents or choose from built-in harnesses
-- Scale to thousands of concurrent environments
-- Train with the RL framework of your choice
-- Optional OpenTelemetry tracing across the agent, model, and resources servers
-- Battle-tested in production Nemotron training
+NeMo Gym is built around environments. An environment is everything an agent needs to attempt a task and be scored: a dataset of tasks, an agent harness, a verifier, and per-task state. See [Environments](https://docs.nvidia.com/nemo/gym/main/about/concepts/environments).
 
-![NeMo Gym Product Overview](fern/assets/images/product_overview.png)
+- Environment hub: hundreds of benchmarks and training environments, including those built for Nemotron development
+- Built-in agent harnesses: dozens ready to use, including Claude Code, Codex, Hermes, and OpenClaw, or use NeMo Gym with your own agent
+- Trustworthy evaluation: repeats per task and run comparisons with confidence intervals tell a real change from noise
+- RL-ready agent harnesses: token IDs captured for every model call, including sub-agents and context compaction
+- RL ecosystem: integrations with training frameworks including Miles, NeMo RL, Unsloth, and VeRL
+- High concurrency: scale to thousands of tasks running at the same time, with runs that resume after a Slurm timeout or preemption
+- Sandbox isolation: tasks that execute code run each attempt in its own sandbox, with providers including Apptainer, Daytona, Docker, and OpenShell, or add your own
 
 ## 🌎 Ecosystem
 
-NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/about/ecosystem#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/main/about/ecosystem) page for more details.
+NeMo Gym is a standalone library and is also part of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/about/ecosystem#related-nemo-libraries), a GPU-accelerated platform for training generative AI models and optimizing AI agents. NeMo Gym is integrated with the broader agentic ecosystem - see the [Ecosystem](https://docs.nvidia.com/nemo/gym/main/about/ecosystem) page for more details.
 
 **Environment Libraries:** Seamlessly combine environments and benchmarks from other libraries alongside NeMo Gym environments. Examples:
 [Aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) • [Harbor](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/harbor) • [OpenEnv](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/openenv) • [Reasoning Gym](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym) • [Verifiers](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent)
 
 **Training Framework Libraries:** Use environments for SFT and RL training.
-[NeMo RL](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo) • [Unsloth](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/unsloth) • [VeRL](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)
+[Miles](https://miles.radixark.com/docs/user-guide/nemo-gym) • [NeMo RL](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo) • [Unsloth](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/unsloth) • [VeRL](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)
 
 **Agent Harnesses:** Agent harnesses for evaluation and training available out of the box. Examples:
-[OpenHands](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/swe_agents) • [Mini SWE Agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) • [LangGraph](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent)
+[Claude Code](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) • [Codex](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/codex_agent) • [Hermes](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/hermes_agent) • [OpenClaw](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/openclaw_agent)
 
 ## 📣 News
 
@@ -522,7 +527,7 @@ If you use NeMo Gym in your research, please cite it using the following BibTeX 
 
 ```bibtex
 @misc{nemo-gym,
-  title = {NeMo Gym: An Open Source Library for Scaling Reinforcement Learning Environments for LLM},
+  title = {NeMo Gym: An Open Source Library for Evaluating and Improving AI Agents},
   howpublished = {\url{https://github.com/NVIDIA-NeMo/Gym}},
   author={NVIDIA},
   year = {2025},

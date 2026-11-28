@@ -32,6 +32,7 @@ from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 from nemo_gym.cli.utils import exit_cleanly_on_config_error, exit_cleanly_on_job_error
 from nemo_gym.environment.assets import asset_config_path
+from nemo_gym.package_info import __description__
 from nemo_gym.utils.text import did_you_mean
 from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
@@ -2572,7 +2573,7 @@ def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Comman
 
 def build_parser() -> argparse.ArgumentParser:
     # _GymArgumentParser propagates to every subparser (argparse defaults parser_class to type(self)).
-    parser = _GymArgumentParser(prog="gym", add_help=True)
+    parser = _GymArgumentParser(prog="gym", description=__description__, add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
     # Also registered on every command that emits JSON, so `--json` is accepted before or after the subcommand.
     parser.add_argument(

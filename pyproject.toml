@@ -23,20 +23,25 @@ dynamic = [
     "version",
     "readme",
 ]
-description = "NeMo Gym is a library for building reinforcement learning environments"
+description = "NeMo Gym is an open-source library for evaluating and improving AI agents: run agents on tasks, score every attempt, and use the results to optimize the agent or train the model."
 license = {file = "LICENSE"}
 requires-python = ">=3.13.14"
 authors = [{ name = "NVIDIA" }]
 maintainers = [{ name = "NVIDIA" }]
 
 keywords = [
-    "reinforcement-learning",
-    "RL",
+    "agent-evaluation",
+    "evaluation",
+    "benchmark",
+    "benchmarks",
     "agent",
     "agentic",
+    "coding-agents",
+    "agent-harness",
+    "environments",
+    "sandbox",
     "LLM",
     "large-language-models",
-    "training-data",
     "rollout",
     "trajectory",
     "verification",
@@ -44,6 +49,10 @@ keywords = [
     "reward",
     "tool-calling",
     "function-calling",
+    "reinforcement-learning",
+    "RL",
+    "SFT",
+    "training-data",
     "data-collection",
     "NeMo",
     "NVIDIA",
@@ -60,7 +69,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Software Development :: Libraries",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]

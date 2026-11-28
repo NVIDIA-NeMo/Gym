@@ -31,6 +31,14 @@ __contact_emails__ = "nemo-toolkit@nvidia.com"
 __homepage__ = "https://github.com/NVIDIA-NeMo/Gym"
 __repository_url__ = "https://github.com/NVIDIA-NeMo/Gym"
 __download_url__ = "https://github.com/NVIDIA-NeMo/Gym/releases"
-__description__ = "NeMo Gym is a library for building reinforcement learning (RL) training environments"
+__description__ = (
+    "NeMo Gym is an open-source library for evaluating and improving AI agents: run agents on tasks, score every "
+    "attempt, and use the results to optimize the agent or train the model."
+)
 __license__ = "Apache2"
-__keywords__ = "deep learning, machine learning, gpu, NLP, pytorch, torch"
+__keywords__ = (
+    "agent-evaluation, evaluation, benchmark, benchmarks, agent, agentic, coding-agents, agent-harness, "
+    "environments, sandbox, LLM, large-language-models, rollout, trajectory, verification, verifier, reward, "
+    "tool-calling, function-calling, reinforcement-learning, RL, SFT, training-data, data-collection, NeMo, "
+    "NVIDIA"
+)
