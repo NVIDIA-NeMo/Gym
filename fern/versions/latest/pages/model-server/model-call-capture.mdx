@@ -284,7 +284,9 @@ rollout tables omit `ng_trajectory` and model-call request and response payloads
 ### Raw `CaptureStore` record
 
 Each rollout has an append-only file named `<rollout_id>.capture.jsonl`. Each line contains one raw
-model-server exchange, including its request and response.
+model-server exchange, including its request and response. With `model_call_capture_format: delta`, a line stores
+only the part of its request that earlier calls did not hold; readers rebuild the record below
+(see [Store long sessions](#store-long-sessions)).
 The following synthetic record shows the exact persisted field shape. It is formatted across lines
 for readability but stored as one JSONL line.
 
@@ -356,6 +358,7 @@ The CLI workflow above sets these top-level fields in Gym's [global config](/mai
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
+| `model_call_capture_format` | `str` | `full` | `full` stores each exchange whole. `delta` stores each request's history as the items earlier calls of the rollout did not hold, and large `data:` URLs once per rollout under `blobs/`. See [Store long sessions](#store-long-sessions). |
 
 You can put the same settings in a YAML config instead:
 
@@ -392,6 +395,27 @@ locking.
 
 Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id. Use a
 separate capture directory for concurrent collection jobs whose indices can overlap.
+
+### Store long sessions
+
+An agent re-sends its whole conversation on every call, so a capture in the `full` format grows with the square of
+the session. A Codex session that re-sends its screenshots can write tens of gigabytes per hour. For long agentic
+runs, set the delta format:
+
+```yaml
+observability_enabled: true
+model_call_capture_dir: /absolute/path/to/model-calls
+model_call_capture_format: delta
+```
+
+With `delta`, each line keeps a `capture_format` key that names an earlier line of the same file
+(`base_model_call_id`) and how many of its history items come first (`shared_prefix`); request fields equal to
+that line's are listed in `inherited_keys`; large `data:` URLs live in `blobs/<rollout_id>/<sha256>` and the line
+lists their JSON paths. Every Gym reader, including `CaptureStore.read()`, rebuilds full exchanges from both
+formats. A tool that reads `*.capture.jsonl` lines directly must handle `capture_format` lines, or read through
+`CaptureStore`; `CaptureStore.copy_full()` writes a self-contained `full` copy. Check the format on your own
+captures with `scripts/replay_capture_delta.py convert`. The design and measurements are in
+[Linear Model-Call Capture](/main/infrastructure/engineering-notes/linear-model-call-capture).
 
 ## If you build a custom agent
 

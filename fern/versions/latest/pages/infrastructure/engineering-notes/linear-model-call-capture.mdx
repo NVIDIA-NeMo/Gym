@@ -1,0 +1,97 @@
+---
+title: "Linear Model-Call Capture"
+description: "Why model-call capture grew with the square of an agent session, and the opt-in capture format that keeps its disk linear."
+---
+This note explains why [model-call capture](/main/model-server/model-call-capture) grew with the square of a long agent
+session, and the opt-in setting that keeps it linear on disk: `model_call_capture_format: delta`. The default is
+unchanged.
+
+## The problem
+
+An agent re-sends its whole conversation on every model call. Capture stored each request in full, so a rollout's
+capture file is about `0.7 × calls × last request size`. Codex also re-sends every earlier tool-output screenshot,
+2-4 MB of base64 each, on every call.
+
+A Terminal-Bench Science run (DeepSeek V4.1 Flash with Codex, 70 sessions of 8 hours) wrote 60 GB of captures in its
+first hour. One file reached 25.9 GB, with single requests of 90 MB. A text-only session grows by about 80 MB per hour;
+a session with screenshots by up to 26 GB per hour.
+
+## Delta capture format
+
+With `model_call_capture_format: delta`, each line stores what the rollout's earlier calls did not already hold:
+
+- **History.** The request's history list (`input` for Responses, `messages` for Chat and Messages) holds only the
+  new items. `base_model_call_id` names an earlier line of the same file, and `shared_prefix` says how many of
+  that line's items come first.
+- **Inherited fields.** Request fields equal to the base call's, such as `tools` and `instructions`, are listed in
+  `inherited_keys` and left `null`.
+- **Blobs.** Base64 `data:` URLs of at least 1 KiB are stored once per rollout as
+  `blobs/<rollout_id>/<sha256>`, next to the capture files. The line lists the JSON path of each one it replaced
+  and leaves `null` there.
+
+All of this sits under one `capture_format` key, which a full-format line never has. No value inside an exchange
+can be mistaken for a reference. A line looks like this, shortened:
+
+```json
+{"model_call_id": "c7", "dialect": "responses",
+ "request": {"model": "m", "instructions": null, "tools": null,
+             "input": [{"type": "function_call_output", "call_id": "t7",
+                        "output": [{"type": "input_image", "image_url": null}]}]},
+ "response": {"...": "..."},
+ "capture_format": {"version": 2, "base_model_call_id": "c6", "history_key": "input", "shared_prefix": 41,
+                    "inherited_keys": ["instructions", "tools"],
+                    "blobs": [[["request", "input", 0, "output", 0, "image_url"], "9f2c...e1"]]}}
+```
+
+Every other field of the exchange, such as `model_ref`, `agent_instance`, timings and the response, is stored as in
+the full format.
+
+**Choosing the base.** Policy, subagent, judge and user-simulator calls interleave in one file, in completion
+order, and several processes append to it. So the base is not "the previous line". Each writer process remembers
+the item digests of the last few calls it wrote for each rollout. It picks the one with the longest common prefix,
+and under the file lock it reads the base line's head back to check that its `model_call_id` is still at that
+offset. A capture that was deleted and recreated for a retry fails this check, and a writer that restarted
+remembers no calls. In both cases, and after a context compaction (no common prefix), the line stores the whole
+history. A writer never names a line written by another process.
+
+**Crash safety.** Appends keep the existing lock, fsync and pending markers. Blobs are written to a temporary file,
+fsynced and renamed, together with their directories, before the line that names them. A crash between the two
+leaves an unreferenced blob, which is harmless. A writer killed in the middle of an append leaves a partial last
+line; the next append, in either format, ends that line first, so only it is lost and no later line extends it.
+
+## Readers
+
+`CaptureStore.read()` and `read_available()` return full exchanges from either format, line by line, so a file may
+mix both. `iter_available()` yields one exchange at a time. Its `payloads=False` view drops the request history and
+other large request fields, so metadata readers never hold a conversation.
+
+Rebuilt requests of consecutive calls share the item objects of their common prefix, and each blob is read once.
+Reading a whole rollout costs about its unique content. Full-format lines get the same sharing: each one's items
+are compared with the call it continues and replaced by the earlier objects when equal.
+
+A line whose base or blob cannot be read is reported unreadable, like a damaged line. It is never rebuilt
+wrongly, and `capture_index` is still the line's position.
+
+## Compatibility
+
+- The default stays `full`: lines are written as before.
+- Every reader in Gym accepts both formats. `CaptureStore.copy_full()` writes a self-contained full-format copy;
+  the SWE-Together judge evidence uses it.
+- External readers of `*.capture.jsonl` lines need to handle `capture_format` lines, through `CaptureStore` or
+  `scripts/replay_capture_delta.py`, before a run turns `delta` on.
+- Deleting a rollout's capture, including the collector's cleanup before a retry, also deletes its blob directory.
+
+## Measurements
+
+These are real captures from the run above. Each was converted with `scripts/replay_capture_delta.py` under a
+16 GB memory cap, and every rebuilt exchange is byte-identical to its source line.
+
+| Capture | Calls | Full format | Delta (lines + blobs) | Ratio | Convert + verify | Peak RSS |
+|---|---|---|---|---|---|---|
+| `0-0` (text) | 167 | 87 MB | 22.5 MB | 3.9× | 1.4 s | 0.1 GB |
+| `9-0` (screenshots) | 93 | 5.2 GB | 101 MB (42 blobs) | 51× | 35 s | 0.8 GB |
+| `4-0` (screenshots) | 286 | 13.3 GB | 151 MB (166 blobs) | 88× | 88 s | 0.6 GB |
+| `61-0` (screenshots) | 211 | 25.9 GB | 385 MB (128 blobs) | 67× | 173 s | 2.1 GB |
+
+In a text-only session, about 90% of the delta bytes are each call's own output. Two thirds of that is the raw
+SSE text kept next to the reassembled response.
