@@ -2441,7 +2441,17 @@ class VLLMModel(SimpleResponsesAPIModel):
     @classmethod
     def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Keep every known prompt-affecting field aligned with generation."""
-        return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
+        tokenize_body = {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
+        # vLLM's /tokenize, unlike chat completions, keeps `tool_calls` of a `content: None` assistant message as a
+        # lazy iterator that tokenizers which deep-copy the messages reject (HTTP 400). An omitted field renders the same.
+        if isinstance(tokenize_body.get("messages"), list):
+            tokenize_body["messages"] = [
+                {key: value for key, value in message.items() if value is not None}
+                if isinstance(message, dict)
+                else message
+                for message in tokenize_body["messages"]
+            ]
+        return tokenize_body
 
     def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
         context = current_capture_context()
