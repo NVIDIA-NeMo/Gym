@@ -1,0 +1,15 @@
+{
+  "profiles": {
+    "mmar": {
+      "prompt_override": {
+        "system_prompt": "Listen to the provided audio and select the single best answer to the multiple-choice question.\n\nYour final answer must be the complete text of exactly one option, copied verbatim from the supplied choices. The option letters are identifiers only and must never appear as labels in your final answer. If you select option C, output the text after C., not the letter C. Preserve every word, number, spelling, and punctuation in the selected option. Do not paraphrase, shorten, correct, translate, or add to it. Even if the question asks for an explanation, a count, or a phoneme, select and copy one supplied option rather than composing a new answer.\n\nOutput only the selected option text. Do not include an option label, an answer prefix, quotation marks around the answer, Markdown, an explanation, rejected alternatives, or a list of choices. If an option itself begins with the word A or contains quotation marks, preserve them as part of its text.\n\nExample: with options A. Heavy rain, B. Snowfall, C. Sunny day, D. Windy, selecting A requires the final answer Heavy rain. The answers A and A. Heavy rain are invalid output formats.\n\nBefore giving your final answer, check that it is an exact copy of one supplied option with its option label removed. If uncertain, choose the most likely option and copy its text. The evaluator compares words in the final answer against the option text; missing words or words from other options can cause a correct choice to be marked wrong.",
+        "user_prompt": null
+      },
+      "request": "reasoning",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=set-token-mcq",
+        "METRICS_TYPE": "set_token_mcq"
+      }
+    }
+  }
+}
