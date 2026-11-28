@@ -47,7 +47,7 @@ help:
 #     HTTP 403: User does not belong to organization
 #
 # This target blocks on a confirmation prompt so step 1 isn't accidentally
-# skipped. (Tracked upstream at Fern; ping #fern-cli on Slack if it changes.)
+# skipped. (Tracked upstream at Fern.)
 docs-login:
 	@echo ""
 	@echo "Fern auth — one-time setup per machine"
@@ -68,7 +68,6 @@ docs-login:
 	@echo "  Docs PRs do not require org membership — edit MDX and rely on"
 	@echo "  CI/preview. For local autodoc only, open a GitHub issue titled"
 	@echo "  'Fern nvidia org access request' (label community-request)."
-	@echo "  NVIDIA employees with Slack can also ask in #fern."
 	@echo ""
 	@echo "  Step 2: confirm the 'nvidia' organization shows in the"
 	@echo "  dashboard sidebar. If it doesn't, you signed in with the wrong"
