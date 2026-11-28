@@ -23,6 +23,7 @@ finished, retrying one that was interrupted) lives here.
 import json
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,10 +34,13 @@ from nemo_gym.artifacts.exporters import load_run_exporter_class
 from nemo_gym.artifacts.exporters.base import ExportResult, ExportState
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import RunExportConfig
+from nemo_gym.orchestration.executors.slurm.job_allocations import record_own_allocation
 from nemo_gym.orchestration.exports import RESULT_JSON_FPATH_KEY
 
 
 RUNNING_STATE = "running"
+# The job directory, which the driver step of a submitted benchmark gets in its environment.
+BENCH_DIR_ENV = "NEMO_GYM_BENCH_DIR"
 _FINAL_STATES = (ExportState.SUCCEEDED.value, ExportState.SKIPPED.value)
 
 
@@ -97,6 +101,20 @@ def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
     return result
 
 
+def record_allocation_before_export(environ: Mapping[str, str]) -> None:
+    """In a resumable Slurm job, add the job's own running allocation to its directory before an export reads it.
+
+    The job script records it only after the driver step, where the exports run. Best-effort: it never stops an export.
+    """
+    bench_dir = environ.get(BENCH_DIR_ENV)
+    if not bench_dir:
+        return
+    try:
+        record_own_allocation(Path(bench_dir), environ=environ)
+    except OSError as exc:
+        print(f"Warning: the job's allocation was not recorded before the export: {exc}", file=sys.stderr)
+
+
 def main() -> None:
     """`python3 -m nemo_gym.orchestration.export_step <exporter> +key=value ...`: the settings are Hydra overrides."""
     from nemo_gym.config.config_types import ConfigError
@@ -110,6 +128,7 @@ def main() -> None:
         global_config_dict = get_global_config_dict(
             global_config_dict_parser_config=GlobalConfigDictParserConfig(skip_exporters=True)
         )
+        record_allocation_before_export(os.environ)
         result = run_export(name, global_config_dict)
 
         print(f"Export {name}: {result.state.value}")

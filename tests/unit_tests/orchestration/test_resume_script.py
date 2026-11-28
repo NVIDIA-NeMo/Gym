@@ -2154,6 +2154,35 @@ def test_the_segment_that_ends_the_chain_records_its_own_allocation(tmp_path, mo
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_row_the_export_step_recorded_is_not_recorded_again_at_the_end_of_the_chain(tmp_path, monkeypatch):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    (tmp_path / "allocations").write_text(
+        f"100|TIMEOUT|1000|1300|300|2|node[01-02]|{_GPU_TRES}|0\n"
+        f"200|RUNNING|1400|Unknown|90|2|node[03-04]|{_GPU_TRES}|0\n"
+    )
+    # The driver step finishes the run and, as its export step does, records its own allocation from Slurm's job
+    # environment before the epilogue runs.
+    record = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[3])!r}); "
+        "from pathlib import Path; "
+        "from nemo_gym.orchestration.executors.slurm.job_allocations import record_own_allocation; "
+        "assert record_own_allocation(Path('.'))"
+    )
+    driver = f"{_FINISHES_THE_RUN} && {shlex.quote(sys.executable)} -c {shlex.quote(record)}"
+    slurm_env = {"SLURM_JOB_START_TIME": "1400", "SLURM_JOB_NUM_NODES": "2", "SLURM_JOB_NODELIST": "node[03-04]"}
+
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", driver=driver, sentinel_id="998", extra_env=slurm_env)
+
+    assert result.returncode == 0 and "Run complete" in result.stdout, result.stdout + result.stderr
+    # The prologue recorded the previous job; the export step this job's running allocation; the epilogue, which
+    # keeps one row per job, restart count and `ended`, added no second running row.
+    assert [(row["job_id"], row["ended"], row["source"]) for row in _allocations(tmp_path)] == [
+        ("100", True, "sacct"),
+        ("200", False, "slurm_environment"),
+    ]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_an_idle_sentinel_records_its_own_allocation_and_nothing_else_changes(tmp_path):
     (tmp_path / ".gym_job_chain").write_text("100\n777\n")
     stop = "Infra retry limit (3) reached. Stopping.\n"
