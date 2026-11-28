@@ -92,9 +92,9 @@ Advance only after incomplete delivery. Keep the first complete answer regardles
 of its grade. Judge recovery never regenerates that answer. Two HTTP 2xx judge
 deliveries are allowed across resumes, with bounded transport retries and the
 existing timeouts. Malformed reviews consume that budget; failed connections and
-non-2xx judge responses do not. HTTP 401 or 403 stops admission until an operator fixes the judge credentials.
+non-2xx judge responses do not. HTTP 401 or 403 yields `provider_credentials_rejected` and stops admission until an operator fixes the judge credentials. Deterministic other 4xx errors stay terminal, rather than spending automatic retries.
 Other retryable judge transport failures defer only the affected
-task: `/verify` answers 503 with the judge's HTTP status, the other tasks keep
+task: `/verify` returns Gym's typed `judge_failed` response with the judge's HTTP status, the other tasks keep
 running, their rows are published, and the run then fails so a resume judges the
 saved answer again. An auto-resume job chain does that resume itself, one infra
 retry per follow-up job. Received non-2xx headers allow this recovery even if the error body is

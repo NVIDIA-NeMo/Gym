@@ -25,13 +25,14 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
+    PROVIDER_CREDENTIALS_REJECTED,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NgFailureEvent,
 )
-from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED
+from nemo_gym.core.failure_kinds import PROVIDER_QUOTA_EXHAUSTED
 from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.critpt.app import (
     _REPO_ROOT,
