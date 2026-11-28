@@ -30,6 +30,7 @@ MAX_TURNS = 4
 # ADK writes PostgreSQL.
 _DATABASE = re.compile(r'^You have a DB called "([A-Za-z0-9_-]+)"\.$', re.MULTILINE)
 _MAX_QUESTIONS = re.compile(r"^You have at most (\d+) clarification turns\.", re.MULTILINE)
+_SCHEMA_HEADING = "\n\n# DB Schema Info:\n"
 _KNOWLEDGE_HEADING = "\n\n# External Knowledge:\n"
 _INSTRUCTIONS_HEADING = "\n\n# Instructions:\n"
 _PHASE_1 = re.compile(r"\AUser Query:\n(.*)\n\nYou have \d+ clarification turns\. ", re.DOTALL)
@@ -39,6 +40,9 @@ _FOLLOW_UP = re.compile(
     re.DOTALL,
 )
 _DEBUG_PREFIXES = ("Your SQL is not executable: ", "Your SQL is not correct.")
+_EXECUTION_ERROR = re.compile(r"\AYour SQL is not executable: (.*)\nPlease fix and call submit_sql\.\Z", re.DOTALL)
+# How many of an entry's child entries the interactive pipeline gets, as auto-ontology-eval gives it.
+MAX_KNOWLEDGE_CHILDREN = 5
 # The note the server adds to each answer of the user.
 _QUESTIONS_LEFT_NOTE = "\n\n[SYSTEM NOTE: Clarification turns remaining: "
 
@@ -53,6 +57,8 @@ class CInteractTask:
 
     database: str
     dialect: str
+    # The schema text the instruction shows: each table's definition and its first rows.
+    schema: str
     # The knowledge-base entries the user shares: id, knowledge, description and definition.
     knowledge: list[dict[str, Any]]
     max_questions: int
@@ -101,7 +107,8 @@ def read_task(instructions: str) -> CInteractTask:
     database = _DATABASE.search(instructions)
     max_questions = _MAX_QUESTIONS.search(instructions)
     # The schema comes first, and its text is the database's: the knowledge is after the last heading of it.
-    _, knowledge_heading, rest = instructions.rpartition(_KNOWLEDGE_HEADING)
+    head, knowledge_heading, rest = instructions.rpartition(_KNOWLEDGE_HEADING)
+    _, _, schema = head.partition(_SCHEMA_HEADING)
     knowledge_text, instructions_heading, _ = rest.partition(_INSTRUCTIONS_HEADING)
     if database is None or max_questions is None or not knowledge_heading or not instructions_heading:
         raise CInteractTextError("The first request's instructions are not BIRD-Interact's c-Interact instruction")
@@ -113,7 +120,11 @@ def read_task(instructions: str) -> CInteractTask:
         raise CInteractTextError("The instruction's knowledge base is not a list")
     dialect = "sqlite" if "SQLite writing ability" in instructions else "postgres"
     return CInteractTask(
-        database=database.group(1), dialect=dialect, knowledge=knowledge, max_questions=int(max_questions.group(1))
+        database=database.group(1),
+        dialect=dialect,
+        schema=schema,
+        knowledge=knowledge,
+        max_questions=int(max_questions.group(1)),
     )
 
 
@@ -183,3 +194,40 @@ def asking_prompt(dialogue: Dialogue) -> str:
         f"columns. You may ask {remaining} more question{'s' if remaining != 1 else ''} in this task; after that, "
         "submit your best query."
     )
+
+
+def execution_error(turn: Turn) -> str | None:
+    """A debug turn's error, when the submission did not run; None when it ran but was wrong, or for another turn."""
+    if turn.kind != "debug":
+        return None
+    match = _EXECUTION_ERROR.match(turn.text)
+    return match.group(1) if match else None
+
+
+def interactive_knowledge(
+    entries: list[dict[str, Any]], children: dict[int, list[int]]
+) -> tuple[str, dict[str, list[str]]]:
+    """The visible knowledge as Auto Ontology's interactive pipeline takes it, as auto-ontology-eval writes it.
+
+    Returns the entries as text, and for each entry with children among the visible entries, its first
+    ``MAX_KNOWLEDGE_CHILDREN`` children's texts. ``children`` maps an entry's id to its ``children_knowledge``.
+    """
+    texts: dict[int, str] = {}
+    for entry in entries:
+        name, entry_id = entry.get("knowledge", ""), entry.get("id")
+        parts = [f"- {name}"] if name else []
+        if description := entry.get("description"):
+            parts.append(f"  Description: {description}")
+        if definition := entry.get("definition"):
+            parts.append(f"  Definition: {definition}")
+        if parts and entry_id is not None:
+            texts[entry_id] = "\n".join(parts)
+    children_texts: dict[str, list[str]] = {}
+    for entry in entries:
+        name, entry_id = entry.get("knowledge", ""), entry.get("id")
+        child_ids = children.get(entry_id) if entry_id is not None else None
+        if not name or not isinstance(child_ids, list):
+            continue
+        if found := [texts[child] for child in child_ids[:MAX_KNOWLEDGE_CHILDREN] if child in texts]:
+            children_texts[name] = found
+    return "\n".join(texts.values()), children_texts

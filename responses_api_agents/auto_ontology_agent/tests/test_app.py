@@ -462,6 +462,10 @@ def test_the_episode_runs_on_the_policy_whatever_the_settings_say(tmp_path) -> N
         "REASONING_ENDPOINT": MODEL_URL,
         "REASONING_MODEL": "openai/policy",
         "REASONING_API_KEY": MODEL_SERVER_API_KEY,
+        # The interactive pipeline also calls Auto Ontology's non-reasoning model: it runs on the policy too.
+        "NON_REASONING_ENDPOINT": MODEL_URL,
+        "NON_REASONING_MODEL": "openai/policy",
+        "NON_REASONING_API_KEY": MODEL_SERVER_API_KEY,
     }
 
 
@@ -514,7 +518,7 @@ def _turn(message: str) -> NeMoGymResponseCreateParamsNonStreaming:
 
 def test_a_c_interact_seed_with_a_task_context_is_refused() -> None:
     seed = _c_interact_seed(agent_context={"values": TASK})
-    assert "reads its task from each turn" in check_agent_seed_rejected(_agent().setup_webserver(), seed)
+    assert "reads its task from its requests" in check_agent_seed_rejected(_agent().setup_webserver(), seed)
 
 
 def test_a_c_interact_seed_without_a_direct_http_grant_is_refused() -> None:
