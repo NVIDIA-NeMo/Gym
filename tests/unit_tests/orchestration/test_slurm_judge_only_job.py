@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import yaml
 from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from nemo_gym.cli import eval as eval_cli
@@ -23,6 +24,7 @@ from nemo_gym.eval.recovery.evidence import JUDGE_JOB_JOURNAL_NAME
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.otel import COLLECTOR_HEALTH_PORT
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
@@ -45,7 +47,12 @@ from tests.unit_tests.orchestration.test_eval_resubmit import (
 
 
 def _model_served_run(
-    tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str | None = None, run: dict | None = None
+    tmp_path: Path,
+    *,
+    cpu_pool: bool = False,
+    judge_pool: str | None = None,
+    run: dict | None = None,
+    otel: dict | None = None,
 ) -> Path:
     """A submitted run with a vLLM policy on a GPU pool, whose managed Store holds one scored row and one result
     masked by a verify call lost in transport, with its chain accounting complete. With ``judge_pool`` it also serves
@@ -89,7 +96,7 @@ def _model_served_run(
                 },
             },
             "job": {"output_path": str(tmp_path)},
-            "otel": {"enabled": False},
+            "otel": otel or {"enabled": False},
         }
     )
     run_dir = tmp_path / "gym-job-x"
@@ -557,6 +564,23 @@ def test_an_old_pin_model_served_run_is_rejudged_headless_on_the_installed_revis
     )
     assert out.judge_job["gym_commit"] == "b" * 40
     assert "b" * 40 in _queued_script(job_dir)
+
+
+def test_the_judge_only_job_rewrites_a_collector_config_an_older_gym_wrote(tmp_path, judge_slurm_bin) -> None:
+    """A run staged by an older Gym has a collector config whose health check listens on another port; the judge-only
+    job's script waits on this Gym's port, so the config is rendered again before the job is queued."""
+    otel = {"token_env": "JUDGE_OTEL_TOKEN", "endpoint": "https://otel.example", "service_name": "judge"}
+    job_dir = _model_served_run(tmp_path, otel=otel)
+    collector = job_dir / "otel" / "collector.yaml"
+    collector.parent.mkdir()
+    collector.write_text("extensions:\n  health_check:\n    endpoint: 0.0.0.0:13133\n")
+
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.ok and out.dispatched == "reverify", out.decision.reason
+    endpoint = yaml.safe_load(collector.read_text())["extensions"]["health_check"]["endpoint"]
+    assert endpoint == f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"
+    assert f":{COLLECTOR_HEALTH_PORT}" in _queued_script(job_dir)
 
 
 def test_the_judge_only_job_skips_the_policy_endpoint_readiness_wait(tmp_path, judge_slurm_bin) -> None:

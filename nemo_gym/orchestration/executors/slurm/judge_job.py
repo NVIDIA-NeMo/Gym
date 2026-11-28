@@ -49,6 +49,7 @@ from nemo_gym.orchestration.executors.connection import (
     get_connection,
 )
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
+from nemo_gym.orchestration.executors.otel import collector_config_path, otel_active, render_collector_config
 from nemo_gym.orchestration.executors.slurm.judge_profile import (
     JUDGE_POOL_NAME,
     NO_CPU_PARTITION,
@@ -104,6 +105,19 @@ _JOURNAL_JUDGE_JOB = (
     "error=sys.argv[4] if len(sys.argv) > 4 else ''; entry.update({'error': error} if error else {}); "
     "f=open(sys.argv[1],'a'); f.write(json.dumps(entry, sort_keys=True)+chr(10)); f.close()"
 )
+
+
+def _collector_config_update(config: SubmitConfig, benchmark: str, job_dir: Path) -> list[str]:
+    """Write the job dir's collector config as this Gym renders it. The judge-only script starts the collector on that
+    file and waits on this Gym's health port, so a config an older Gym wrote, naming another port, fails its startup."""
+    if not otel_active(config):
+        return []
+    path = collector_config_path(job_dir)
+    rendered = render_collector_config(config, benchmark, job_dir)
+    return [
+        f"mkdir -p {shlex.quote(str(path.parent))} && printf %s {shlex.quote(rendered)} > {shlex.quote(str(path))} "
+        "|| fail 'cannot update the collector config'"
+    ]
 
 
 def _stopped(decision: RecoveryDecision, reason: str, refusal: str | None = None) -> RecoveryOutcome:
@@ -309,6 +323,7 @@ class JudgeJobs:
                 "trap _gym_release_rejudge_lock EXIT",
                 *_chain_live_check(evidence.job_chain, "an original allocation is still live"),
                 f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} || fail 'accounting changed or exhausted'",
+                *_collector_config_update(bound, benchmark, job_dir),
                 # Only the staged driver script is owner-only. The umask of the rest of the dispatch is the caller's:
                 # sbatch hands it to the job, so the job's output directory and files, and the journals and markers
                 # written below, are readable by the run's other readers like the run's other artifacts.
@@ -533,6 +548,7 @@ class JudgeJobs:
             ),
             f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} "
             "|| fail 'saved sources or accounting changed since the evidence was collected; collect it again'",
+            *_collector_config_update(bound, benchmark, job_dir),
             # Only the staged driver script is owner-only. The umask of the rest of the dispatch is the caller's: sbatch
             # hands it to the job, so the job's output directory and files (the reverification folder, its receipt), and
             # the journals written below, are readable by the run's other readers like the run's other artifacts.

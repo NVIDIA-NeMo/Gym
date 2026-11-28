@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from nemo_gym.eval.recovery.decision import (
     RecoveryAction,
@@ -15,6 +16,7 @@ from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.otel import COLLECTOR_HEALTH_PORT
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
@@ -68,7 +70,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
                 },
             },
             "job": {"output_path": str(tmp_path)},
-            "otel": {"enabled": False},
+            "otel": {"enabled": True, "endpoint": "https://otel.example", "token_env": "JUDGE_OTEL_TOKEN"},
         }
     )
     (job.parent / "resolved_config.yaml").write_text("fixture: true\n")
@@ -211,3 +213,6 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
         (script_path,) = job.glob("reverify-*.sh")
         assert script_path.stat().st_mode & 0o777 == 0o600
         assert (tmp_path / "sbatch_umask").read_text().strip() == "0022"
+        # The script waits on this Gym's collector health port, so the job dir's config is rendered by this Gym.
+        collector = yaml.safe_load((job / "otel" / "collector.yaml").read_text())
+        assert collector["extensions"]["health_check"]["endpoint"] == f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"
