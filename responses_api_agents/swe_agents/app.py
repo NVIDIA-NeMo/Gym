@@ -1793,10 +1793,59 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # run configured with a different ref could `reset --hard` the shared
         # tree while containers still execute from it.
         legacy_dir = self.parent_dir / "swe_openhands_setup"
-        if legacy_dir.exists() and self._cache_dir_is_default() and self._openhands_tree_valid(legacy_dir):
+        if (
+            legacy_dir.exists()
+            and self._cache_dir_is_default()
+            and self._existing_setup_is_reusable(legacy_dir / "OpenHands")
+        ):
             print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
             return legacy_dir
         return self.setup_root / "swe_openhands_setup" / _repo_slug(self.config.agent_framework_repo) / commit
+
+    def _probe_openhands_venv(self, openhands_dir: Path) -> Optional[str]:
+        """Probe an existing OpenHands venv's deps; return None if healthy, else the failure."""
+        venv_python = openhands_dir / ".venv" / "bin" / "python"
+        try:
+            probe = subprocess_run(
+                [
+                    str(venv_python),
+                    "-I",
+                    "-c",
+                    (
+                        "from importlib.metadata import version; "
+                        "from packaging.version import Version; "
+                        "assert Version(version('jinja2')) >= Version('3.1.3'); "
+                        "assert Version(version('pyjwt')) >= Version('2.9'); "
+                        "assert Version(version('sqlalchemy')) >= Version('2.0.40'); "
+                        "assert Version(version('flask')) >= Version('2.2'); "
+                        "import datasets"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                errors="replace",
+            )
+        except OSError as e:
+            # Other launch errors are the host's, not the tree's.
+            if e.errno not in (errno.EACCES, errno.ENOENT, errno.ENOEXEC):
+                raise
+            return f"{type(e).__name__}: {e}"
+        if probe.returncode == 0:
+            return None
+        return " ".join(probe.stderr.strip().splitlines()[-1:]) or f"exit code {probe.returncode}"
+
+    def _existing_setup_is_reusable(self, openhands_dir: Path) -> bool:
+        """Whether a pre-existing OpenHands checkout can be reused as-is."""
+        if not (openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists()):
+            return False
+        probe_failure = self._probe_openhands_venv(openhands_dir)
+        if probe_failure is not None:
+            print(
+                f"OpenHands venv at {openhands_dir} failed its runtime probe ({probe_failure}); not reusing it",
+                flush=True,
+            )
+            return False
+        return True
 
     def setup(self) -> Path:
         repo = self.config.agent_framework_repo
@@ -1811,17 +1860,33 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         ):
             # Baked tree with no remote to resolve `ref` against: use it as
             # shipped (the pre-resolution local-HEAD sync was a no-op here).
+            probe_failure = self._probe_openhands_venv(legacy_dir / "OpenHands")
+            if probe_failure is not None:
+                print(
+                    f"WARNING: pre-staged OpenHands venv at {legacy_dir} failed its runtime probe "
+                    f"({probe_failure}); using it anyway because there is no remote to rebuild from",
+                    flush=True,
+                )
             print(f"Using pre-staged setup tree at {legacy_dir} (no resolvable remote)", flush=True)
             return legacy_dir
 
         commit = _resolve_remote_commit(repo, ref)
         setup_dir = self._openhands_setup_target(commit)
 
+        if setup_dir == legacy_dir:
+            with file_lock(setup_dir, "OpenHands setup"):
+                if self._existing_setup_is_reusable(setup_dir / "OpenHands"):
+                    print(f"OpenHands already set up at {setup_dir}", flush=True)
+                    self._sync_openhands_to_commit(setup_dir / "OpenHands", commit)
+                    return setup_dir
+            # A pre-staged tree is never rebuilt in place: build under the cache root instead.
+            setup_dir = self.setup_root / "swe_openhands_setup" / _repo_slug(repo) / commit
+
         with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"
             miniforge_dir = setup_dir / "miniforge3"
 
-            if self._openhands_tree_valid(setup_dir):
+            if self._existing_setup_is_reusable(openhands_dir):
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
                 self._sync_openhands_to_commit(openhands_dir, commit)
                 return setup_dir

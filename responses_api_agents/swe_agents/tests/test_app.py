@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import errno
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -617,10 +619,16 @@ class TestOpenHandsSetupDirResolution:
         stack.enter_context(patch.object(swe_app, "maybe_get_global_config_dict", return_value=config_dict))
         return stack
 
+    def _make_tree(self, setup_dir: Path, probe_script: str = "#!/bin/sh\nexit 0\n", mode: int = 0o755) -> Path:
+        python = setup_dir / "OpenHands" / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text(probe_script)
+        python.chmod(mode)
+        return python
+
     def _make_valid_legacy_tree(self, legacy_root: Path) -> Path:
         legacy_setup = legacy_root / "swe_openhands_setup"
-        (legacy_setup / "OpenHands" / ".venv" / "bin").mkdir(parents=True)
-        (legacy_setup / "OpenHands" / ".venv" / "bin" / "python").touch()
+        self._make_tree(legacy_setup)
         return legacy_setup
 
     def test_target_keys_by_repo_identity_and_commit(self, tmp_path: Path) -> None:
@@ -653,6 +661,62 @@ class TestOpenHandsSetupDirResolution:
         with self._patched_roots(tmp_path / "cache", tmp_path / "legacy"):
             expected = tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA
             assert processor._openhands_setup_target(self.SHA) == expected
+
+    @pytest.mark.parametrize(
+        ("ref", "tree", "probe_script", "returns", "built"),
+        [
+            (SHA, "prestaged", "#!/bin/sh\nexit 0\n", "prestaged", False),
+            (SHA, "prestaged", "#!/bin/sh\nexit 1\n", "cache", True),
+            # Passes when the tree is chosen, fails the recheck under the lock.
+            (SHA, "prestaged", '#!/bin/sh\n[ -e "$0.probed" ] && exit 1\ntouch "$0.probed"\n', "cache", True),
+            # No remote to rebuild from: used anyway, with a warning.
+            ("main", "prestaged", "#!/bin/sh\nexit 1\n", "prestaged", False),
+            (SHA, "cache", "#!/bin/sh\nexit 0\n", "cache", False),
+            (SHA, "cache", "#!/bin/sh\nexit 1\n", "cache", True),
+        ],
+    )
+    def test_setup_rebuilds_only_an_unhealthy_cache_tree(
+        self, tmp_path: Path, capsys, ref: str, tree: str, probe_script: str, returns: str, built: bool
+    ) -> None:
+        trees = {
+            "prestaged": tmp_path / "legacy" / "swe_openhands_setup",
+            "cache": tmp_path / "cache" / "swe_openhands_setup" / swe_app._repo_slug(None) / self.SHA,
+        }
+        python = self._make_tree(trees[tree], probe_script)
+        with (
+            self._patched_roots(tmp_path / "cache", tmp_path / "legacy"),
+            patch.object(OpenHandsHarnessProcessor, "_sync_openhands_to_commit"),
+            patch.object(OpenHandsHarnessProcessor, "_run_setup_command") as build_mock,
+        ):
+            assert self._processor(ref).setup() == trees[returns]
+        builds = [call.args[0].split()[0] for call in build_mock.call_args_list]
+        assert builds == ([f"SETUP_DIR={trees['cache']}"] if built else [])
+        assert python.exists() is not (built and tree == "cache")
+        assert ("WARNING" in capsys.readouterr().out) is (ref == "main")
+
+    @pytest.mark.parametrize(
+        ("probe_script", "mode", "failure"),
+        [
+            ('#!/bin/sh\n[ "$1" = -I ]\n', 0o755, None),  # healthy, and run in isolated mode
+            ("#!/bin/sh\nexit 1\n", 0o755, "exit code 1"),
+            ("#!/bin/sh\necho Traceback >&2\necho ImportError >&2\nexit 1\n", 0o755, "ImportError"),
+            ("#!/bin/sh\nprintf '\\377' >&2\nexit 1\n", 0o755, "\ufffd"),  # undecodable output
+            ("#!/bin/sh\nexit 0\n", 0o644, "PermissionError: .*"),
+            ("not an executable\n", 0o755, "OSError: .*"),
+            ("#!/usr/bin/nonexistent\n", 0o755, "FileNotFoundError: .*"),
+        ],
+    )
+    def test_probe_reports_why_a_venv_is_unusable(
+        self, tmp_path: Path, probe_script: str, mode: int, failure: Optional[str]
+    ) -> None:
+        self._make_tree(tmp_path, probe_script, mode)
+        result = self._processor(self.SHA)._probe_openhands_venv(tmp_path / "OpenHands")
+        assert result is None if failure is None else re.fullmatch(failure, result)
+
+    def test_probe_raises_when_the_host_cannot_launch_it(self, tmp_path: Path) -> None:
+        launch_error = OSError(errno.ENOMEM, "Cannot allocate memory")
+        with patch.object(swe_app, "subprocess_run", side_effect=launch_error), pytest.raises(OSError):
+            self._processor(self.SHA)._probe_openhands_venv(tmp_path)
 
 
 class TestResolveRemoteCommit:
