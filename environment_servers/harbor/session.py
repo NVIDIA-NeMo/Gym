@@ -168,6 +168,15 @@ def resolve_env_templates(env: dict[str, str], secrets: Mapping[str, str] | None
     return resolved
 
 
+def resolve_mcp_headers(server: HarborMCPServer) -> dict[str, str]:
+    """``server``'s headers with their ``${VAR}`` references read from the process environment, for its grant only:
+    the resolved values go nowhere else. A variable that is unset and has no default refuses the task."""
+    try:
+        return server.resolve_headers(os.environ)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _skills_path(skills_dir: str, workdir: str) -> str | None:
     """``skills_dir`` as the absolute path the seed uploads to, a relative one read from ``workdir``; ``None`` for one
     only a shell resolves (``~``, ``$``), which the server cannot place."""
@@ -365,7 +374,8 @@ class HarborSessionMixin:
         if not servers and not environment.skills_dir:
             return
         context = {
-            "mcp_servers": [server.model_dump(mode="json") for server in servers],
+            # Headers reach the agent only in a grant, resolved there; this file never holds their values.
+            "mcp_servers": [server.model_dump(mode="json", exclude={"headers"}) for server in servers],
             "skills_dir": environment.skills_dir
             and (_skills_path(environment.skills_dir, workdir) or environment.skills_dir),
         }

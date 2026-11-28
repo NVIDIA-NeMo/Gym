@@ -10,10 +10,11 @@ them; :meth:`HarborSettings.unknown_keys` lists them so the loader can say so.
 """
 
 import re
+from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 
 class HarborSettings(BaseModel):
@@ -70,12 +71,83 @@ class HarborHealthcheck(HarborSettings):
     retries: int = 3
 
 
+# Harbor's MCP header rules (``MCPServerConfig.headers`` in ``harbor/models/task/config.py`` and the helpers in
+# ``harbor/utils/env.py`` at v0.25.0): an HTTP token as the name, a ``${VAR}`` or ``${VAR:-default}`` embedded
+# anywhere in the value, and a credential header, named as Harbor names credentials, holding only ``${VAR}``
+# references without a default, after an optional auth scheme and joined by separators (``Bearer ${TOKEN}``).
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_HEADER_TEMPLATE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN(?!S)|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
+_NO_DEFAULT_TEMPLATE = r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::-)?\}"
+_TEMPLATED_CREDENTIAL = re.compile(rf"\s*(?:[A-Za-z]+\s+)?{_NO_DEFAULT_TEMPLATE}(?:[\s:-]*{_NO_DEFAULT_TEMPLATE})*\s*")
+
+
+def _is_credential_header(name: str) -> bool:
+    return bool(_CREDENTIAL_NAME.search(name)) or name.lower() in ("cookie", "set-cookie")
+
+
+def _header_templates(value: str) -> list[tuple[str, str | None]]:
+    """``(variable, default or None)`` for each ``${VAR}`` in a header value; a malformed ``${`` raises."""
+    templates = [(match[1], match[2]) for match in _HEADER_TEMPLATE.finditer(value)]
+    if "${" in _HEADER_TEMPLATE.sub(" ", value) or any(default and "${" in default for _, default in templates):
+        raise ValueError("invalid environment variable template")
+    return templates
+
+
 class HarborMCPServer(HarborSettings):
     name: str
     transport: Literal["stdio", "sse", "streamable-http"] = "sse"
     url: str | None = None
     command: str | None = None
     args: list[str] = Field(default_factory=list)
+    # Harbor 0.25.0: HTTP headers for an sse or streamable-http server, with ``${VAR}`` references the Harbor
+    # Environment Server resolves when it grants the server (:meth:`resolve_headers`), so the task never holds a
+    # credential, only the variable that supplies it.
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("headers")
+    @classmethod
+    def check_headers(cls, headers: dict[str, str]) -> dict[str, str]:
+        for name, value in headers.items():
+            if not _HEADER_NAME.fullmatch(name):
+                raise ValueError(f"Invalid MCP HTTP header name: {name!r}")
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"MCP HTTP header {name!r} must not contain newlines")
+            try:
+                templates = _header_templates(value)
+            except ValueError as exc:
+                raise ValueError(f"MCP HTTP header {name!r}: {exc}") from exc
+            credential = _is_credential_header(name)
+            literal_default = any(
+                default and (credential or _CREDENTIAL_NAME.search(variable)) for variable, default in templates
+            )
+            if literal_default or (credential and value.strip() and not _TEMPLATED_CREDENTIAL.fullmatch(value)):
+                raise ValueError(
+                    f"MCP HTTP header {name!r} must reference credentials as ${{VAR}} without a default, such as "
+                    "'Bearer ${TOKEN}'"
+                )
+        return headers
+
+    def resolve_headers(self, env: Mapping[str, str]) -> dict[str, str]:
+        """``headers`` with each ``${VAR}`` read from ``env``, ``${VAR:-default}`` taking its default when the
+        variable is unset, as Harbor resolves them before the agent starts. An unset variable without a default,
+        or a value that resolves to a line break, raises :class:`ValueError` naming the server and the header."""
+        resolved: dict[str, str] = {}
+        for name, value in self.headers.items():
+            where = f"MCP server {self.name!r} header {name!r}"
+
+            def substitute(match: re.Match[str]) -> str:
+                variable, default = match.groups()
+                if variable in env:
+                    return env[variable]
+                if default is not None:
+                    return default
+                raise ValueError(f"{where}: environment variable {variable!r} is not set")
+
+            resolved[name] = _HEADER_TEMPLATE.sub(substitute, value)
+            if "\r" in resolved[name] or "\n" in resolved[name]:
+                raise ValueError(f"{where} must not contain newlines")
+        return resolved
 
     @model_validator(mode="before")
     @classmethod
@@ -88,6 +160,8 @@ class HarborMCPServer(HarborSettings):
     def require_endpoint(self) -> "HarborMCPServer":
         if not (self.command if self.transport == "stdio" else self.url):
             raise ValueError(f"MCP server {self.name!r}: stdio needs `command`, other transports need `url`")
+        if self.transport == "stdio" and self.headers:
+            raise ValueError(f"MCP server {self.name!r}: `headers` is only supported for HTTP transports")
         return self
 
 

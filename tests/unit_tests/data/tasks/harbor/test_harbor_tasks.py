@@ -257,6 +257,58 @@ interval_sec = 5.0
         )
         assert config.environment.mcp_servers[0].transport == "streamable-http"
 
+    def test_mcp_server_headers_load_and_resolve_as_harbor_resolves_them(self):
+        data = {
+            "environment": {
+                "mcp_servers": [
+                    {
+                        "name": "search",
+                        "transport": "streamable-http",
+                        "url": "http://mcp.example/mcp",
+                        "headers": {"Authorization": "Bearer ${SEARCH_TOKEN}", "X-Region": "eu-${REGION:-west}"},
+                    },
+                    {"name": "plain", "url": "http://x"},
+                ]
+            }
+        }
+        config = HarborTaskConfig.model_validate(data)
+        assert HarborTaskConfig.unknown_keys(data) == []
+        search, plain = config.environment.mcp_servers
+        # The task keeps the references; only the resolution sees a value.
+        assert search.headers["Authorization"] == "Bearer ${SEARCH_TOKEN}"
+        assert search.resolve_headers({"SEARCH_TOKEN": "t0k"}) == {
+            "Authorization": "Bearer t0k",
+            "X-Region": "eu-west",
+        }
+        assert plain.headers == {} and plain.resolve_headers({}) == {}
+        with pytest.raises(ValueError, match="'search' header 'Authorization': environment variable 'SEARCH_TOKEN'"):
+            search.resolve_headers({})
+        with pytest.raises(ValueError, match="newlines"):
+            search.resolve_headers({"SEARCH_TOKEN": "a\nb"})
+
+    def test_mcp_server_headers_are_refused_on_stdio(self):
+        server = {"name": "t", "transport": "stdio", "command": "srv", "headers": {"X-Region": "eu"}}
+        with pytest.raises(ValueError, match="only supported for HTTP transports"):
+            HarborTaskConfig.model_validate({"environment": {"mcp_servers": [server]}})
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("Authorization", "Bearer abc123"),
+            ("X-Api-Key", "abc123"),
+            ("Cookie", "session=abc123"),
+            # A default is a literal credential too, in a credential header or on a credential variable.
+            ("Authorization", "Bearer ${TOKEN:-abc123}"),
+            ("X-Region", "${REGION_KEY:-abc123}"),
+            ("X-Region", "${UNCLOSED"),
+            ("Bad Name", "x"),
+        ],
+    )
+    def test_mcp_server_headers_refuse_literal_credentials_and_bad_syntax(self, name, value):
+        server = {"name": "t", "url": "http://x", "headers": {name: value}}
+        with pytest.raises(ValueError, match="MCP HTTP header"):
+            HarborTaskConfig.model_validate({"environment": {"mcp_servers": [server]}})
+
 
 class TestDockerfileDetection:
     def test_base_image_with_settings(self):
