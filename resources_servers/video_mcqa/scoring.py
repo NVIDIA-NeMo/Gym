@@ -8,7 +8,7 @@ import re
 from collections import Counter
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 from resources_servers.video_mcqa.task import LABELS, Setting, VerifierMetadata
 
@@ -51,10 +51,12 @@ _THOUGHT = re.compile(r"<(think|thinking)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | r
 class QuestionScore:
     """One attempt; infrastructure failures are explicitly inconclusive."""
 
+    ALLOWED_POLICIES: ClassVar[tuple[str, ...]] = _POLICIES
+
     task_id: str
     dataset_revision: str
     setting: Setting
-    answer_policy: AnswerPolicy
+    answer_policy: str
     outcome: Outcome
     predicted_answer: str | None
     reward: float | None
@@ -65,7 +67,7 @@ class QuestionScore:
             raise ValueError("task_id must be a nonempty string")
         if not isinstance(self.dataset_revision, str) or re.fullmatch(r"[0-9a-f]{40}", self.dataset_revision) is None:
             raise ValueError("dataset_revision must be a fixed source commit")
-        if self.setting not in ("single_turn", "agentic") or self.answer_policy not in _POLICIES:
+        if self.setting not in ("single_turn", "agentic") or self.answer_policy not in self.ALLOWED_POLICIES:
             raise ValueError("Unknown setting or answer policy")
         if self.outcome not in _OUTCOMES:
             raise ValueError("Unknown outcome")
@@ -93,7 +95,7 @@ class AccuracySummary:
 
     setting: Setting
     dataset_revision: str
-    answer_policy: AnswerPolicy
+    answer_policy: str
     expected: int
     returned: int
     completed: int
@@ -184,14 +186,15 @@ def aggregate_scores(
     expected_task_ids: Collection[str],
     dataset_revision: str,
     setting: Setting,
-    answer_policy: AnswerPolicy = "boxed_only_v1",
+    answer_policy: str = "boxed_only_v1",
+    allowed_policies: Collection[str] = _POLICIES,
 ) -> AccuracySummary:
     """Account for every frozen ID, rejecting duplicate or mixed-protocol rows.
 
     Missing and infrastructure-failed tasks remain in the accuracy denominator;
     coverage and is_complete expose that the resulting number is provisional.
     """
-    if setting not in ("single_turn", "agentic") or answer_policy not in _POLICIES:
+    if setting not in ("single_turn", "agentic") or answer_policy not in allowed_policies:
         raise ValueError("Unknown setting or answer policy")
     if not isinstance(dataset_revision, str) or re.fullmatch(r"[0-9a-f]{40}", dataset_revision) is None:
         raise ValueError("dataset_revision must be a fixed source commit")
@@ -266,6 +269,8 @@ def parse_llm_choice(reply: str | None, *, option_count: int) -> str:
     ``choice`` that is missing, null or not a string, raises ``ValueError``: it is an unusable reading, not a wrong
     answer.
     """
+    if type(option_count) is not int or not 2 <= option_count <= len(LABELS):
+        raise ValueError(f"option_count must be an integer from two to {len(LABELS)}")
     text = final_answer_text(reply)
     match = _JSON_OBJECT.search(text)
     try:

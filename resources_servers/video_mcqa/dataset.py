@@ -10,7 +10,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from resources_servers.video_mcqa.task import VerifierMetadata, VideoQuestion
+from resources_servers.video_mcqa.task import LABELS, VerifierMetadata, VideoQuestion
 
 
 Benchmark = Literal["videomme_v1", "lvbench"]
@@ -105,29 +105,59 @@ def _sequence(value: object, *, field: str) -> list[object]:
     return list(value)
 
 
-def _options(value: object) -> tuple[str, ...]:
+def parse_options(value: object, *, exact_count: int | None = None, strip_labels: bool = True) -> tuple[str, ...]:
+    """Validate 2 to 26 choices and strip optional canonical A-Z option prefixes."""
     values = [text(item, field="option") for item in _sequence(value, field="options")]
-    if len(values) != 4:
-        raise ValueError("VideoMME-v1 and LVBench require exactly four choices")
-    matches = [re.match(r"^(?:([A-D])[.)]|\(([A-D])\))\s+", option) for option in values]
-    if any(matches):
-        if not all(matches) or [match[1] or match[2] for match in matches] != list("ABCD"):
-            raise ValueError("Choice labels must occur once in canonical A-D order")
-        values = [option[match.end() :].strip() for option, match in zip(values, matches)]
+    if exact_count is not None:
+        if type(exact_count) is not int or not 2 <= exact_count <= len(LABELS):
+            raise ValueError(f"exact_count must be an integer from 2 to {len(LABELS)}")
+        if len(values) != exact_count:
+            raise ValueError(f"Expected exactly {exact_count} choices, got {len(values)}")
+    elif not 2 <= len(values) <= len(LABELS):
+        raise ValueError(f"Options must contain between 2 and {len(LABELS)} choices")
+    if strip_labels:
+        expected = list(LABELS[: len(values)])
+        max_label = expected[-1]
+        pattern = re.compile(rf"^(?:([A-{max_label}])[.)]|\(([A-{max_label}])\))\s+")
+        matches = [pattern.match(option) for option in values]
+        if any(matches):
+            if not all(matches) or [match[1] or match[2] for match in matches] != expected:
+                raise ValueError(f"Choice labels must occur once in canonical A-{max_label} order")
+            values = [text(option[match.end() :], field="option") for option, match in zip(values, matches)]
     return tuple(values)
 
 
-def _embedded_options(value: object) -> tuple[str, tuple[str, ...]]:
+def parse_embedded_options(value: object, *, exact_count: int | None = None) -> tuple[str, tuple[str, ...]]:
+    """Split a question stem from trailing canonical (A)-(Z) embedded options."""
     question = text(value, field="question")
-    matches = list(re.finditer(r"(?m)^\s*\(([A-H])\)\s*", question))
-    if [match[1] for match in matches] != list("ABCD"):
-        raise ValueError("LVBench question must end with canonical (A)-(D) options")
+    if exact_count is not None:
+        if type(exact_count) is not int or not 2 <= exact_count <= len(LABELS):
+            raise ValueError(f"exact_count must be an integer from 2 to {len(LABELS)}")
+        expected = list(LABELS[:exact_count])
+        # Keep base A-H detection when exact_count <= 8 (e.g., 4-choice LVBench) so extra (E)-(H) options
+        # remain rejected while inner lines like "(I) ..." inside option text stay intact.
+        max_label = "H" if exact_count <= 8 else LABELS[-1]
+        matches = list(re.finditer(rf"(?m)^\s*\(([A-{max_label}])\)\s*", question))
+        if [match[1] for match in matches] != expected:
+            raise ValueError(f"Question must end with canonical (A)-({expected[-1]}) options")
+    else:
+        matches = list(re.finditer(r"(?m)^\s*\(([A-Z])\)\s*", question))
+        if not 2 <= len(matches) <= len(LABELS) or [match[1] for match in matches] != list(LABELS[: len(matches)]):
+            raise ValueError(f"Question must end with 2 to {len(LABELS)} canonical (A)-(Z) options")
     stem = text(question[: matches[0].start()], field="question stem")
     options = tuple(
         text(question[match.end() : matches[index + 1].start() if index + 1 < len(matches) else None], field="option")
         for index, match in enumerate(matches)
     )
     return stem, options
+
+
+def _options(value: object, *, exact_count: int | None = None) -> tuple[str, ...]:
+    return parse_options(value, exact_count=exact_count)
+
+
+def _embedded_options(value: object, *, exact_count: int | None = None) -> tuple[str, tuple[str, ...]]:
+    return parse_embedded_options(value, exact_count=exact_count)
 
 
 def _normalized(
@@ -188,7 +218,7 @@ def load_videomme_v1(
                     identity=row.get("question_id"),
                     video_id=record.get("videoID", record.get("video_id")),
                     question=row.get("question"),
-                    options=_options(row.get("options")),
+                    options=_options(row.get("options"), exact_count=4),
                     answer=row.get("answer"),
                     subsets={
                         "duration": (text(record.get("duration"), field="duration"),),
@@ -216,7 +246,7 @@ def load_lvbench(
         questions = _sequence(record["qa"], field="qa") if "qa" in record else [record]
         for value in questions:
             row = _mapping(value, field="question")
-            stem, options = _embedded_options(row.get("question"))
+            stem, options = _embedded_options(row.get("question"), exact_count=4)
             identity = row.get("uid")
             # The official JSONL mixes integer and string UIDs; its scorer
             # explicitly converts them to strings before looking up answers.

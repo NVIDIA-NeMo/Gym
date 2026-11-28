@@ -11,6 +11,7 @@ covers the schemas' validators in the core suite, on synthetic values.
 import pytest
 from pydantic import ValidationError
 
+from resources_servers.cgbench import task_data as cgbench
 from resources_servers.lvbench import task_data as lvbench
 from resources_servers.video_mcqa.task_data import TaskData, VideoBinding, VideoMCQATaskData
 from resources_servers.videomme_v1 import task_data as videomme_v1
@@ -30,6 +31,8 @@ ROW = {
     "options": ["Circle", "Square", "Triangle", "Star"],
 }
 FIVE_CHOICES = {"option_count": 5, "options": ["Circle", "Square", "Triangle", "Star", "Moon"]}
+EIGHT_CHOICES = {"option_count": 8, "options": [f"Choice {i}" for i in range(8)]}
+NINE_CHOICES = {"option_count": 9, "options": [f"Choice {i}" for i in range(9)]}
 BINDING = {"source": "/data/invented.mp4", "sandbox_path": "video/invented.mp4", "sha256": "b" * 64}
 
 
@@ -83,7 +86,7 @@ def test_rows_without_their_question_and_options_are_rejected(missing):
 @pytest.mark.parametrize("updates", [{"level": 2}, {"group_id": "group-1"}])
 def test_only_videomme_v2_rows_take_levels_and_groups(updates):
     assert VideoMCQATaskData.model_validate({**ROW, **updates})
-    for schema in (TaskData, videomme_v1.TaskData, lvbench.TaskData):
+    for schema in (TaskData, videomme_v1.TaskData, lvbench.TaskData, cgbench.TaskData):
         with pytest.raises(ValidationError, match="no v2 group or level"):
             schema.model_validate({**ROW, **updates})
 
@@ -94,3 +97,11 @@ def test_any_number_of_choices_except_in_videomme_v1_and_lvbench():
         assert schema.model_validate(ROW).option_count == 4
         with pytest.raises(ValidationError, match="four choices"):
             schema.model_validate({**ROW, **FIVE_CHOICES})
+
+
+def test_cgbench_accepts_up_to_eight_choices_and_rejects_nine():
+    assert cgbench.TaskData.model_validate(ROW).option_count == 4
+    assert cgbench.TaskData.model_validate({**ROW, **FIVE_CHOICES}).option_count == 5
+    assert cgbench.TaskData.model_validate({**ROW, **EIGHT_CHOICES}).option_count == 8
+    with pytest.raises(ValidationError, match="between two and eight choices"):
+        cgbench.TaskData.model_validate({**ROW, **NINE_CHOICES})

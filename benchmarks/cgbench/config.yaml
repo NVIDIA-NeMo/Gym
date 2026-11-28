@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# CG-Bench full (12,129 questions, 1,219 videos, 5-8 options, long_acc without subtitles), single-turn:
+# one model call per question with the full video via file:// URL (under cgbench_video_url_dir) and the
+# CG-Bench long_acc JSON prompt. Scored by cgbench_rule_v1 by default; pass ++prepare_script_args.prompt=boxed
+# ++prepare_script_args.answer_policy=boxed_only_v1 for boxed scoring, or compose with
+# resources_servers/cgbench/configs/cgbench_single_turn_llm_extraction.yaml and
+# ++prepare_script_args.answer_policy=llm_extraction_v1 for judge-based extraction.
+# Data: CG-Bench/CG-Bench @ aa63c0b7f74b5b43b5e0c1f012ea96bc9f460c57 (gated: auto; accept HF terms & set HF_TOKEN).
+config_paths:
+  - resources_servers/cgbench/configs/cgbench_single_turn.yaml
+
+cgbench_source_dir: null
+cgbench_video_dir: ${cgbench_source_dir}/cg_videos_720p
+cgbench_video_url_dir: ${cgbench_video_dir}
+cgbench_cohort_manifest: benchmarks/cgbench/data/cgbench_cohort.json
+num_repeats: 1
+prepare_script_args:
+  source_dir: ${cgbench_source_dir}
+  video_dir: ${cgbench_video_dir}
+  video_url_dir: ${cgbench_video_url_dir}
+  num_repeats: ${num_repeats}
+
+cgbench_single_turn:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: cgbench
+        type: benchmark
+        jsonl_fpath: benchmarks/cgbench/data/cgbench_benchmark.jsonl
+        prepare_script: benchmarks/cgbench/prepare.py
+        num_repeats: 1

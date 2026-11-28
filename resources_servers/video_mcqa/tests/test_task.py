@@ -185,6 +185,40 @@ class TestModelProjection(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 prepare_agentic(question(), expected_answer="B", video_path=value)
 
+    def test_explicit_prompt_text_for_single_turn_and_agentic(self) -> None:
+        custom = "Custom benchmark question prompt"
+        single = prepare_single_turn(
+            question(), expected_answer="B", video_url="https://example.invalid/clip.mp4", prompt_text=custom
+        )
+        self.assertEqual(single["responses_create_params"]["input"][0]["content"][1]["text"], custom)
+        agentic = prepare_agentic(
+            question(), expected_answer="B", video_path="/testbed/videos/synthetic.mp4", prompt_text=custom
+        )
+        self.assertEqual(
+            agentic["responses_create_params"]["input"][0]["content"][0]["text"],
+            f"Video: /testbed/videos/synthetic.mp4\n{custom}",
+        )
+        with self.assertRaises(ValueError):
+            prepare_single_turn(
+                question(), expected_answer="B", video_url="https://example.invalid/clip.mp4", prompt_text="  "
+            )
+        with self.assertRaises(ValueError):
+            prepare_single_turn(
+                question(),
+                expected_answer="B",
+                video_url="https://example.invalid/clip.mp4",
+                prompt="lvbench",
+                prompt_text=custom,
+            )
+        with self.assertRaises(ValueError):
+            prepare_agentic(
+                question(),
+                expected_answer="B",
+                video_path="/testbed/videos/synthetic.mp4",
+                prompt="lvbench",
+                prompt_text=custom,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

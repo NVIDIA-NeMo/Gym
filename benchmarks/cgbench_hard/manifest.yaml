@@ -1,0 +1,43 @@
+name: cgbench_hard
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: CG-Bench-hard single-turn full-video multiple-choice QA (long_acc without subtitles; 2,417 questions,
+  1,010 videos, 5-8 options) across category, sub_category, domain, and duration buckets.
+modality: video
+licensing: MIT
+authors:
+- Guo Chen
+maintainers:
+- cg1177
+capabilities:
+- multimodal_input_understanding/temporal_media_understanding
+- retrieval_and_grounding/long_context_learning
+- reasoning/spatial_temporal_reasoning
+domains:
+- general
+primary_metric: mean/CG_Bench_hard
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: cgbench
+agent_server: simple_agent
+datasets:
+- name: cgbench_hard
+  type: benchmark
+  jsonl_fpath: benchmarks/cgbench_hard/data/cgbench_hard_benchmark.jsonl
+  prepare_script: benchmarks/cgbench_hard/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

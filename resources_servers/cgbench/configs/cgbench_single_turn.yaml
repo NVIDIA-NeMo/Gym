@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# CG-Bench (full / mini / hard) single-turn full-video long_acc MCQA (without subtitles) with
+# deterministic rule scoring (cgbench_rule_v1) or boxed_* policies and fixed-cohort accuracy across
+# category, sub_category, domain, and duration buckets.
+cgbench:
+  resources_servers:
+    cgbench:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: CG-Bench (full/mini/hard) single-turn full-video long_acc MCQA (5-8 options, no subtitles) with category, sub_category, domain, and duration accuracy.
+      cohort_manifest: ${cgbench_cohort_manifest}
+
+cgbench_single_turn:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: cgbench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+cgbench_single_turn_environment:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cgbench
+      agent_server:
+        type: responses_api_agents
+        name: cgbench_single_turn

@@ -1,0 +1,44 @@
+name: cgbench_agentic
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: CG-Bench full agentic full-video multiple-choice QA (long_acc without subtitles; 12,129 questions,
+  1,219 videos, 5-8 options) answered by OpenCode in a shared video_mcqa sandbox with frame-sampling tools.
+modality: video
+licensing: MIT
+authors:
+- Guo Chen
+maintainers:
+- cg1177
+capabilities:
+- multimodal_input_understanding/temporal_media_understanding
+- tool_and_computer_use/multi_step_tool_use
+- retrieval_and_grounding/long_context_learning
+- reasoning/spatial_temporal_reasoning
+domains:
+- general
+primary_metric: mean/CG_Bench_agentic
+requirements:
+  gpu: false
+  network: allowlist
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: cgbench
+agent_server: opencode_agent
+datasets:
+- name: cgbench_agentic
+  type: benchmark
+  jsonl_fpath: benchmarks/cgbench_agentic/data/cgbench_agentic_benchmark.jsonl
+  prepare_script: benchmarks/cgbench_agentic/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active
