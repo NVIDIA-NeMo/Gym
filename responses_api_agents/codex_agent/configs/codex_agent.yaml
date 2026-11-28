@@ -30,6 +30,7 @@ codex_agent:
       features:  # config.toml [features]; null leaves a feature at the CLI default
         multi_agent: false
         code_mode: false
+      web_search: disabled  # disabled | cached | indexed | live; non-disabled needs a model server that runs web search (see README)
       model_catalog_json: null  # config.toml model_catalog_json: absolute path of a model catalog file where Codex runs
       agents_enabled: null  # config.toml [agents] enabled; refused with codex_version 0.144.4 or older (see README)
       tool_pid_namespace: false  # task-sandbox sessions only: tool commands in a nested pid namespace (README)
