@@ -340,6 +340,25 @@ def test_constructor_pins_enroot_env(fake_binary: str, tmp_path: Path) -> None:
     assert provider._sqsh_cache_dir.is_dir()
 
 
+@pytest.mark.parametrize("inherited", [None, "yes", "no"])
+def test_constructor_preserves_home_mount_default(fake_binary: str, tmp_path: Path, monkeypatch, inherited) -> None:
+    if inherited is None:
+        monkeypatch.delenv("ENROOT_MOUNT_HOME", raising=False)
+    else:
+        monkeypatch.setenv("ENROOT_MOUNT_HOME", inherited)
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path)})
+    assert provider._enroot_env.get("ENROOT_MOUNT_HOME") == inherited
+
+
+@pytest.mark.parametrize("configured,expected", [(False, "no"), (True, "yes")])
+def test_constructor_can_override_home_mount(
+    fake_binary: str, tmp_path: Path, monkeypatch, configured, expected
+) -> None:
+    monkeypatch.setenv("ENROOT_MOUNT_HOME", "yes" if not configured else "no")
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path), "mount_home": configured})
+    assert provider._enroot_env["ENROOT_MOUNT_HOME"] == expected
+
+
 # --------------------------------------------------------------------------- #
 # create
 # --------------------------------------------------------------------------- #
@@ -394,7 +413,7 @@ async def test_create_builds_argv_and_runs_probe(
     start_argv = start_rec.calls[0]
     assert start_argv[:2] == [FAKE_BINARY, "start"]
     assert "--rw" in start_argv
-    assert _contains_seq(start_argv, ["-m", f"{staging}:/sandbox"])
+    assert _contains_seq(start_argv, ["-m", f"{staging}:/sandbox:none:bind,x-create=dir"])
     assert _contains_seq(start_argv, ["-m", "/data:/data"])
     assert _contains_seq(start_argv, ["-m", "/host/a:/code/a"])
     assert _contains_seq(start_argv, ["-e", "FOO=bar"])
