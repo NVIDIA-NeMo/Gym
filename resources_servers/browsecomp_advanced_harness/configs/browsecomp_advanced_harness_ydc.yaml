@@ -1,0 +1,76 @@
+config_paths:
+- nemo_gym/sandbox/providers/docker/configs/docker.yaml
+
+use_absolute_ip: true
+# Only the servers the sandboxes call get the host address; the head server's config endpoint stays on loopback.
+absolute_ip_server_types: [responses_api_models, resources_servers, responses_api_agents]
+
+browsecomp_advanced_harness_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      allowed_agents: [browsecomp_agent]
+      entrypoint: app.py
+      domain: agent
+      debug: false
+      search_provider: ydc
+      ydc_api_key: ${ydc_api_key}
+      exclude_domains_file_path: ${exclude_domains_file_path}
+      # The example rows expose search/browse only, so retain inline page content.
+      # Workspace mode requires rows that also expose bash_command, as in the benchmark.
+      workspace: none
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /workspace
+        ttl_s: 7200
+      use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+      verified: false
+      description: Model uses search tools to satisfy a user query.
+      value: Measure agentic search capability
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${search_judge_model_base_url}
+      api_key: ${search_judge_model_api_key}
+      model: ${search_judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+browsecomp_advanced_harness_agent:
+  responses_api_agents:
+    browsecomp_agent:
+      entrypoint: app.py
+      resources_server: null
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /sandbox
+        ttl_s: 7200
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browsecomp_advanced_harness/data/example.jsonl
+
+browsecomp_advanced_harness_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: browsecomp_advanced_harness_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: browsecomp_advanced_harness_agent
+      resources_tool_transports: [direct_http]
+      default_episode_timeout_seconds: 6000
+      cleanup_timeout_seconds: 300
