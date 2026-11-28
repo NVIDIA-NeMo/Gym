@@ -26,6 +26,19 @@ verifiers use harbor-rewardkit criteria, which changes the meaning of test count
   compare harnesses on the 63 other tasks with `++task_ids_fpath=benchmarks/terminal_bench_4/root_image_tasks.txt`.
   It has no step limit, so its scores are not comparable with the Artificial Analysis settings of
   `terminal_bench_4/miniswe`.
+- `terminal_bench_4/hermes`: Hermes in
+  [`hermes_agent`](../../responses_api_agents/hermes_agent/README.md) agent sessions, on the same task folders and
+  Harbor environment server, with the episode bound of `terminal_bench_4/miniswe`, Hermes's run limit raised to the
+  tasks' 8-hour agent budget and its turn limit set by `tb4_max_steps` (500 by default, as mini-SWE's step limit).
+  A task's own MCP servers and skills directory reach Hermes through its configuration.
+- `terminal_bench_4/nooa`: NOOA's BenchAgent in
+  [`nooa_agent`](../../responses_api_agents/nooa_agent/README.md) agent sessions, on the same task folders and
+  Harbor environment server, with the episode bound and setup allowance of `terminal_bench_4/miniswe` and NOOA's run
+  limit raised to the tasks' 8-hour agent budget. NOOA installs its runtime under `/opt/nemo-gym-nooa`, which the
+  three tasks whose image runs as a non-root user do not allow (leave them out as for `terminal_bench_4/opencode`).
+  A task's own MCP servers are tool objects on the agent, and its skills directory is named in the prompt. Set
+  `NOOA_SWE_RUNTIME_WHEELHOUSE` to an offline bundle of the runtime built for the checkout to install without the
+  package index.
 - `terminal_bench_4/miniswe_legacy_agent` (deprecated): the same mini-SWE version in
   `miniswe_sandboxed_agent`, over the legacy `/run` relay of the TB4 resources server. It stays for comparison until that
   server is retired; "The `/run` profile" and its subsections describe this path.
