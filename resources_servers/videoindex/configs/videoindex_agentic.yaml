@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic Video-Index (v1.0 / v1.1): OpenCode answers each question in a sandbox that holds the video,
+# with the shared video_mcqa frame tools watch_video and view_image (resources_servers/video_mcqa/sandbox_image).
+# The verifier scores the final answer with the cohort's answer policy (official rule videoindex_rule_v1 by default)
+# and reports overall and 4-capability-group accuracy under Video_Index_v1_0_agentic / Video_Index_v1_1_agentic.
+#
+# Needs a sandbox image built from resources_servers/video_mcqa/sandbox_image/Dockerfile (VIDEO_MCQA_SANDBOX_IMAGE),
+# OpenSandbox settings (OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY), agentic rows and their cohort
+# (videoindex_agentic_cohort_manifest), and the host directories of their videos (videoindex_agentic_video_roots).
+# The sandbox reaches only the policy model server's host, by address.
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
+videoindex_agentic:
+  resources_servers:
+    videoindex:
+      entrypoint: app.py
+      host: 127.0.0.1
+      domain: other
+      verified: false
+      description: Video-Index v1.0/v1.1 agentic video MCQA in an OpenCode sandbox with frame tools, fixed-cohort accuracy.
+      cohort_manifest: ${videoindex_agentic_cohort_manifest}
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:VIDEO_MCQA_SANDBOX_IMAGE,null}
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        resources: {cpu: 4, memory_mib: 12288, disk_gib: 30}
+        env: {SHELL: /bin/sh}
+      sandbox_workdir: /testbed/work
+      sandbox_media_root: /testbed
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      video_roots: ${videoindex_agentic_video_roots}
+
+videoindex_agentic_opencode:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      host: 127.0.0.1
+      description: Agentic Video-Index with OpenCode and the video_mcqa frame tools in a sandbox session
+      resources_server:
+        type: resources_servers
+        name: videoindex_agentic
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      concurrency: 16
+      thinking: true
+      timeout: 3600
+      context_window: 262144
+      max_output_tokens: 32768
+      session_close_timeout_seconds: 90
+      image_input: true
+      plugins:
+        - /opt/video-mcqa/video_tools.mjs
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      sandbox_plugin_dependencies_path: /opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
+      opencode_config:
+        tools:
+          webfetch: false
+        permission:
+          bash: allow
+          edit: allow
+          external_directory: allow
+          doom_loop: ask
+        compaction:
+          auto: false
+
+videoindex_agentic_environment:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: videoindex_agentic
+      agent_server:
+        type: responses_api_agents
+        name: videoindex_agentic_opencode
+      max_concurrent_episodes: 16
+      queue_timeout_seconds: 86400
+      default_episode_timeout_seconds: 6600

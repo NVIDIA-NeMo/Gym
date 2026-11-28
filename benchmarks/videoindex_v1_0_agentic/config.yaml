@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic Video-Index v1.0 (840 questions, 2-10 options, 4 capability groups): OpenCode answers each question in a
+# sandbox lent by the videoindex resources server using resources_servers/video_mcqa/sandbox_image (watch_video and
+# view_image). Scored by the official Apache-2.0 rule (videoindex_rule_v1) by default; append
+# resources_servers/videoindex/configs/videoindex_agentic_llm_extraction.yaml and prepare with
+# ++prepare_script_args.answer_policy=llm_extraction_v1 for judge-based extraction.
+# Needs VIDEO_MCQA_SANDBOX_IMAGE and OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY.
+config_paths:
+  - resources_servers/videoindex/configs/videoindex_agentic.yaml
+
+videoindex_v1_0_agentic_source_dir: null
+videoindex_v1_0_agentic_video_dir: ${videoindex_v1_0_agentic_source_dir}/videos
+videoindex_agentic_cohort_manifest: benchmarks/videoindex_v1_0_agentic/data/videoindex_v1_0_agentic_cohort.json
+videoindex_agentic_video_roots:
+  - ${videoindex_v1_0_agentic_video_dir}
+num_repeats: 1
+prepare_script_args:
+  source_dir: ${videoindex_v1_0_agentic_source_dir}
+  video_dir: ${videoindex_v1_0_agentic_video_dir}
+  num_repeats: ${num_repeats}
+
+videoindex_agentic_opencode:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+      - name: videoindex_v1_0_agentic
+        type: benchmark
+        jsonl_fpath: benchmarks/videoindex_v1_0_agentic/data/videoindex_v1_0_agentic_benchmark.jsonl
+        prepare_script: benchmarks/videoindex_v1_0_agentic/prepare.py
+        num_repeats: 1

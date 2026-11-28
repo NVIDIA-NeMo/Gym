@@ -249,6 +249,7 @@ def prepare_single_turn(
     video_url: str | None = None,
     frames: Sequence[tuple[str, str]] | None = None,
     prompt: PromptStyle = "boxed",
+    prompt_text: str | None = None,
 ) -> PreparedTask:
     """Attach the prepared video once, as one video part or as labelled frames (``video_parts``), then the question.
 
@@ -256,6 +257,13 @@ def prepare_single_turn(
     """
     if prompt not in get_args(PromptStyle):
         raise ValueError(f"Unknown prompt style {prompt!r}")
+    if prompt_text is not None:
+        if prompt != "boxed":
+            raise ValueError("Specify either prompt or prompt_text, not both")
+        _text(prompt_text, "prompt_text")
+        rendered = prompt_text
+    else:
+        rendered = _question_text(question) if prompt == "boxed" else _letter_question_text(question, prompt)
     metadata = _verifier_metadata(question, expected_answer=expected_answer)
     return {
         "task_id": question.task_id,
@@ -270,9 +278,7 @@ def prepare_single_turn(
                         *video_parts(video_url=video_url, frames=frames),
                         {
                             "type": "input_text",
-                            "text": _question_text(question)
-                            if prompt == "boxed"
-                            else _letter_question_text(question, prompt),
+                            "text": rendered,
                         },
                     ],
                 }
@@ -283,7 +289,12 @@ def prepare_single_turn(
 
 
 def prepare_agentic(
-    question: VideoQuestion, *, expected_answer: str, video_path: str, prompt: PromptStyle = "boxed"
+    question: VideoQuestion,
+    *,
+    expected_answer: str,
+    video_path: str,
+    prompt: PromptStyle = "boxed",
+    prompt_text: str | None = None,
 ) -> PreparedTask:
     """Expose the bound sandbox path without source URLs, gold, or tool hints.
 
@@ -295,11 +306,17 @@ def prepare_agentic(
         raise ValueError("video_path must be a single-line sandbox path")
     if prompt not in get_args(PromptStyle):
         raise ValueError(f"Unknown prompt style {prompt!r}")
-    text = (
-        _question_text(question, video_path=video_path)
-        if prompt == "boxed"
-        else f"Video: {video_path}\n{_letter_question_text(question, prompt)}"
-    )
+    if prompt_text is not None:
+        if prompt != "boxed":
+            raise ValueError("Specify either prompt or prompt_text, not both")
+        _text(prompt_text, "prompt_text")
+        text = f"Video: {video_path}\n{prompt_text}"
+    else:
+        text = (
+            _question_text(question, video_path=video_path)
+            if prompt == "boxed"
+            else f"Video: {video_path}\n{_letter_question_text(question, prompt)}"
+        )
     metadata = _verifier_metadata(question, expected_answer=expected_answer)
     return {
         "task_id": question.task_id,

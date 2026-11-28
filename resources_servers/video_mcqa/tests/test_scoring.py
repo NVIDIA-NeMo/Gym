@@ -4,10 +4,11 @@
 """Exercise actual parsing and fixed-cohort accounting using invented inputs."""
 
 import unittest
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import ClassVar
 
-from resources_servers.video_mcqa.scoring import aggregate_scores, grade_answer
-from resources_servers.video_mcqa.task import VerifierMetadata
+from resources_servers.video_mcqa.scoring import QuestionScore, aggregate_scores, grade_answer
+from resources_servers.video_mcqa.task import LABELS, VerifierMetadata
 from resources_servers.video_mcqa.tests.test_task import question
 
 
@@ -64,6 +65,65 @@ class TestScoring(unittest.TestCase):
         self.assertEqual(grade_answer(r"\boxed{L}", eleven, setting="agentic").outcome, "format_error")
         # Up to eight options the counted letters stay A-H: a box past them is no answer.
         self.assertEqual(grade_answer(r"\boxed{B} \boxed{I}", metadata(), setting="agentic").outcome, "correct")
+
+    def test_option_count_boundaries_two_through_ten_and_twenty_six(self) -> None:
+        for count in (2, 3, 4, 8, 9, 10, 26):
+            options = tuple(f"choice {index}" for index in range(count))
+            last = LABELS[count - 1]
+            meta = VerifierMetadata.from_question(replace(question(), options=options), expected_answer=last)
+            with self.subTest(count=count):
+                self.assertEqual(grade_answer(rf"\boxed{{{last}}}", meta, setting="single_turn").outcome, "correct")
+                self.assertEqual(
+                    grade_answer(last, meta, setting="single_turn", answer_policy="boxed_or_letter_v1").outcome,
+                    "correct",
+                )
+                self.assertEqual(grade_answer(r"\boxed{A}", meta, setting="single_turn").outcome, "incorrect")
+                self.assertEqual(
+                    grade_answer(rf"\boxed{{A}} \boxed{{{last}}}", meta, setting="single_turn").outcome,
+                    "ambiguous_answer",
+                )
+                if count < len(LABELS):
+                    oob = LABELS[count]
+                    self.assertEqual(
+                        grade_answer(rf"\boxed{{{oob}}}", meta, setting="single_turn").outcome, "format_error"
+                    )
+                    self.assertEqual(
+                        grade_answer(oob, meta, setting="single_turn", answer_policy="boxed_or_letter_v1").outcome,
+                        "format_error",
+                    )
+
+    def test_score_subclass_can_extend_allowed_policies(self) -> None:
+        @dataclass(frozen=True, slots=True)
+        class CustomScore(QuestionScore):
+            ALLOWED_POLICIES: ClassVar[tuple[str, ...]] = ("custom_rule_v1",)
+
+        score = CustomScore(
+            task_id="synthetic/one",
+            dataset_revision="a" * 40,
+            setting="single_turn",
+            answer_policy="custom_rule_v1",
+            outcome="correct",
+            predicted_answer="B",
+            reward=1.0,
+            evaluation_completed=True,
+        )
+        summary = aggregate_scores(
+            [score],
+            expected_task_ids=["synthetic/one"],
+            dataset_revision="a" * 40,
+            setting="single_turn",
+            answer_policy="custom_rule_v1",
+            allowed_policies=CustomScore.ALLOWED_POLICIES,
+        )
+        self.assertEqual((summary.correct, summary.avg_accuracy, summary.is_complete), (1, 1.0, True))
+        with self.assertRaises(ValueError):
+            aggregate_scores(
+                [score],
+                expected_task_ids=["synthetic/one"],
+                dataset_revision="a" * 40,
+                setting="single_turn",
+                answer_policy="custom_rule_v1",
+            )
 
     def test_conflicting_boxed_answers_are_ambiguous(self) -> None:
         result = grade_answer(r"\boxed{B} then \boxed{A}", metadata(), setting="agentic")

@@ -17,7 +17,6 @@ from nemo_gym.core import (
 from nemo_gym.server_runtime import BaseVerifyResponse, observe_llm_judge_grading
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 from resources_servers.video_mcqa.scoring import (
-    AnswerPolicy,
     Failure,
     QuestionScore,
     final_answer_text,
@@ -43,7 +42,7 @@ class AnswerJudgeConfig(BaseModel):
         default_factory=lambda: NeMoGymChatCompletionCreateParamsNonStreaming(messages=[])
     )
 
-    def check_answer_judge(self, answer_policy: AnswerPolicy) -> None:
+    def check_answer_judge(self, answer_policy: str) -> None:
         """Refuse to start a server whose cohort needs a judge that the config does not name."""
         if answer_policy == "llm_extraction_v1" and self.judge_model_server is None:
             raise ValueError("A cohort with answer_policy llm_extraction_v1 needs judge_model_server")
@@ -56,9 +55,10 @@ async def grade_final_answer(
     metadata: VerifierMetadata,
     *,
     setting: Setting,
-    answer_policy: AnswerPolicy,
+    answer_policy: str,
     failure: Failure | None,
     respond: Callable[[QuestionScore], VerifyResponseT],
+    grade_rule: Callable[..., QuestionScore] = grade_answer,
 ) -> VerifyResponseT:
     """The verify response ``respond`` builds from ``grade_answer``'s score of the final answer.
 
@@ -73,9 +73,7 @@ async def grade_final_answer(
         raise ValueError("llm_extraction_v1 needs each row's question and options in its verifier_metadata")
     answer = final_answer_text(final_text)
     if answer_policy != "llm_extraction_v1" or failure is not None or not answer:
-        return respond(
-            grade_answer(final_text, metadata, setting=setting, answer_policy=answer_policy, failure=failure)
-        )
+        return respond(grade_rule(final_text, metadata, setting=setting, answer_policy=answer_policy, failure=failure))
     if config.judge_model_server is None:
         raise ValueError("A cohort with answer_policy llm_extraction_v1 needs judge_model_server")
     judge_name = config.judge_model_server.name
