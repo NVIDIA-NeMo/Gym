@@ -1341,6 +1341,42 @@ class TestAgentStage:
         assert [(access["name"], access["required"]) for access in seed["tool_accesses"]] == [("user-server", True)]
         assert any("test.sh" in call["command"] for call in sandbox.execs)
 
+    async def test_a_granted_servers_headers_reach_the_agent_resolved_and_never_task_json(self, tmp_path, monkeypatch):
+        """Harbor 0.25.0 headers: the grant carries them resolved from the server's environment; task.json, which
+        the agent can read, carries no header at all."""
+        monkeypatch.setenv("SEARCH_TOKEN", "s3cr3t")
+        monkeypatch.delenv("SEARCH_TENANT", raising=False)
+        headers = 'headers = { Authorization = "Bearer ${SEARCH_TOKEN}", X-Tenant = "${SEARCH_TENANT:-acme}" }\n'
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER + headers, task_mcp_grants="required"
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        (seed,) = server.server_client.seed_bodies()
+        assert seed["tool_accesses"][0]["connection"]["headers"] == {
+            "Authorization": "Bearer s3cr3t",
+            "X-Tenant": "acme",
+        }
+        context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert '"name": "user-server"' in context_write["command"]
+        assert "headers" not in context_write["command"] and "s3cr3t" not in context_write["command"]
+
+    async def test_a_header_variable_that_is_not_set_refuses_the_task_before_provisioning(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SEARCH_TOKEN", raising=False)
+        headers = 'headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }\n'
+        server, task, _, created = make_server(
+            tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER + headers, task_mcp_grants="required"
+        )
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "'SEARCH_TOKEN' is not set" in failure.failure_reason
+        assert created == [] and not server.server_client.seed_bodies()
+
     async def test_a_grant_the_tool_access_schema_rejects_is_a_staged_terminal_failure(self, tmp_path, monkeypatch):
         """The grant lookup runs inside the seed's try: a declaration the grant schema refuses (a name the session
         contract does not accept) fails the episode at stage agent, terminal, instead of escaping as a 500."""

@@ -73,7 +73,12 @@ from environment_servers.harbor.sandboxes import (
     SEED_CREATE_GRACE_S,
     HarborSandboxMixin,
 )
-from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
+from environment_servers.harbor.session import (
+    HarborSession,
+    HarborSessionMixin,
+    resolve_env_templates,
+    resolve_mcp_headers,
+)
 from environment_servers.harbor.steps import HarborStepsMixin, StepPrepareError
 from environment_servers.harbor.users import HarborUsersMixin
 from environment_servers.harbor.verifier import (
@@ -1756,7 +1761,7 @@ class HarborEnvironmentServer(
                 MCPToolAccess(
                     name=server.name,
                     required=self.config.task_mcp_grants == "required",
-                    connection=MCPStreamableHTTPConnection(url=server.url),
+                    connection=MCPStreamableHTTPConnection(url=server.url, headers=resolve_mcp_headers(server)),
                 )
             )
         return accesses
@@ -1870,6 +1875,19 @@ class HarborEnvironmentServer(
         resolve_env_templates(task.config.verifier.env, self.config.secrets)
         if task.config.verifier.environment is not None:
             resolve_env_templates(task.config.verifier.environment.env)
+        # MCP headers reach the agent only in a grant (`_task_tool_accesses`), which resolves them; a variable one
+        # leaves unset refuses the task here, before provisioning, as Harbor fails the trial before setup.
+        for server in self._task_mcp_servers(task):
+            if not server.headers:
+                continue
+            if self.config.task_mcp_grants != "off" and server.transport == "streamable-http":
+                resolve_mcp_headers(server)
+            else:
+                LOGGER.warning(
+                    f"{task.task_id}: MCP server {server.name!r} ({server.transport}) declares headers, which reach "
+                    "the agent only when task_mcp_grants grants a streamable-http server; the agent gets it without "
+                    "them"
+                )
         # The separate verifier's user is as static as its image: a `name:group` the provider cannot run as fails
         # here, before the rollout it would otherwise follow (`_sandbox_spec` refuses the agent's own the same way).
         self._refuse_verifier_group(task)
