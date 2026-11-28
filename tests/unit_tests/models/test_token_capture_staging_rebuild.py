@@ -167,6 +167,17 @@ def _branched() -> tuple[RolloutReceipt, list[StagedCallBaseSnapshot]]:
     return _receipt(snapshots, terminal="main"), snapshots
 
 
+def test_held_rows_cannot_be_rebuilt() -> None:
+    receipt, snapshots = _branched()
+    held = receipt.manifest[0].model_copy(
+        update={"custody": "held", "digest": None, "extras_digest": None, "chain_hash": None, "cumulative_hash": None}
+    )
+    receipt = receipt.model_copy(update={"manifest": [held, *receipt.manifest[1:]]})
+    with pytest.raises(ReceiptVerificationError) as error:
+        verify_and_linearize(receipt, snapshots)
+    assert error.value.code == "held_custody_row"
+
+
 def test_verify_and_linearize_selects_only_terminal_ancestry() -> None:
     receipt, snapshots = _branched()
     row = verify_and_linearize(receipt, snapshots)

@@ -89,6 +89,7 @@ from nemo_gym.models.token_capture.protocols import (
     installed_lineage_store,
     installed_token_sink,
 )
+from nemo_gym.models.token_capture.records import Custody
 
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,11 @@ class TokenCaptureSettings(BaseModel):
     # Every backend stages a canonical delta before returning coordinates.
     # ``dynamo_worker`` serves the policy model server, which sets ``dynamo_frontend: true``.
     external_staging_backend: ExternalStagingBackend = "vllm_worker"
+    # Which receipt the worker may answer an admission with.
+    # ``staged`` requires the digests a consumer verifies fetched tokens against.
+    # ``held`` accepts ids and lengths only, for a worker that keeps the tokens in its own store
+    # and joins them itself, so nothing on Gym's side ever fetches or verifies them.
+    external_staging_custody: Custody = "staged"
     # Name of the environment variable containing the manifest-route bearer token.
     # The serving process reads the token without adding it to serialized configuration.
     control_auth_token_env: str = Field(
@@ -225,6 +231,8 @@ class TokenCaptureConfig(BaseModel):
             raise ValueError("parent_resolution=source_history requires external vLLM or Dynamo staging")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
+        if block.external_staging_custody == "held" and not block.external_staging:
+            raise ValueError("token_id_capture.external_staging_custody=held requires external_staging=true")
         if block.external_staging and block.rebuild_response:
             raise ValueError(
                 "token_id_capture.external_staging requires rebuild_response=false because the "

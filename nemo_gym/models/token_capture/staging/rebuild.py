@@ -322,6 +322,11 @@ def verify_and_linearize(
     records_by_id: dict[str, CallRecord] = {}
     staging_keys: set[str] = set()
     for record in receipt.manifest:
+        if record.custody == "held":
+            raise _fail(
+                "held_custody_row",
+                f"call {record.model_call_id} is held by its worker and has no staged snapshot to rebuild from",
+            )
         if record.model_call_id in records_by_id:
             raise _fail("duplicate_manifest_row", "model_call_id values are not unique")
         if record.staging_key in staging_keys:
