@@ -31,7 +31,7 @@ A full annotated config is in [`configs/bwrap.yaml`](configs/bwrap.yaml).
         --proc /proc --dev /dev
         --bind <tmp> /tmp --bind <home> <home_path>
         --bind <workspace> <workdir> [--bind <workspace> <workspace host path>]
-        [--ro-bind|--bind <mount src> <mount dst>]...
+        [--ro-bind-fd|--bind-fd <open source fd> <mount dst>]...
         --remount-ro /
         --chdir <cwd or workdir> [extra_args...] -- <shell> -c <command>
   ```
@@ -88,6 +88,16 @@ A full annotated config is in [`configs/bwrap.yaml`](configs/bwrap.yaml).
   - extra mounts → their `src`. Read-only mounts are download-only. A regular-file
     mount is addressed only at its exact destination.
 
+  Trusted system and host-network bind aliases are resolved when their configuration
+  is first used, keeping the original sandbox destination; later alias retargeting
+  cannot select another source. Extra mount sources must not be symlink aliases.
+  Bind sources are opened without following symlinks in any component and passed to
+  bubblewrap through `--ro-bind-fd` or `--bind-fd`. A source or ancestor replaced with
+  a symlink is refused before another command starts. An already-open source stays
+  pinned to that filesystem object; bubblewrap verifies the mounted device and inode
+  before starting guest code. Use real paths for extra mount
+  sources, not symlink aliases. This requires bubblewrap's FD-bind options, available
+  in the documented 0.11.2 runtime.
   The table follows bind order: a later mount at or above an earlier one's
   destination hides it, and transfers resolve to the mount a command sees.
 
