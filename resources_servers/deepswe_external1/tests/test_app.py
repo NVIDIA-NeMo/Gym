@@ -14,6 +14,7 @@ import pytest
 from fastapi import Request
 
 import resources_servers.deepswe_external1.app as module
+import resources_servers.swebench.sandbox_session_checkpoints as checkpoints
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.metrics import select_measured
 from nemo_gym.sandbox import SandboxExecResult
@@ -248,7 +249,9 @@ async def test_seed_rejects_preexisting_invalid_head(
 
     box.exec.side_effect = execute
     box.start_with_setup = AsyncMock(side_effect=start)
-    monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=box))
+    # A session's agent sandbox is made on the provider every task sandbox shares.
+    monkeypatch.setattr(checkpoints, "AsyncSandbox", MagicMock(return_value=box))
+    monkeypatch.setattr(DeepsweExternal1ResourcesServer, "shared_provider", lambda self: MagicMock())
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda name, config: {})
     monkeypatch.setattr(module, "resolve_provider_metadata", lambda name, config: {})
