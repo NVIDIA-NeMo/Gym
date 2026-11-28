@@ -439,8 +439,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     LOG.exception("Failed to stop Hermes sandbox")
                     if sandbox is not None:
                         try:
-                            async with asyncio.timeout(self.config.cleanup_timeout):
-                                await sandbox.stop()
+                            await sandbox.stop(timeout_s=self.config.cleanup_timeout)
                         except Exception:
                             LOG.exception("Sandbox fallback cleanup also failed")
                 finally:

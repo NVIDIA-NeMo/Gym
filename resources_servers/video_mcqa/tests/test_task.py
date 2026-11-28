@@ -5,7 +5,7 @@
 
 import json
 import unittest
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 
 from resources_servers.video_mcqa.task import (
     VerifierMetadata,
@@ -87,6 +87,7 @@ class TestPrivateMetadata(unittest.TestCase):
         self.assertEqual(metadata.dataset_revision, item.dataset_revision)
         self.assertEqual(metadata.option_count, 3)
         self.assertEqual(metadata.expected_answer, "B")
+        self.assertEqual((metadata.question, metadata.options), (item.question, item.options))
 
     def test_invalid_gold_is_not_normalized_or_guessed(self) -> None:
         for value in ("", "AB", " B", "b", "H", None):
@@ -104,9 +105,19 @@ class TestPrivateMetadata(unittest.TestCase):
             {"video_sha256": "bad"},
             {"level": False},
             {"group_id": ""},
+            {"question": " "},
+            {"options": ("A circle", "A triangle")},
+            {"options": ("A circle", "", "A square")},
+            {"options": "abc"},
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 replace(metadata, **values)
+
+    def test_metadata_read_back_from_json_keeps_its_options_as_a_tuple(self) -> None:
+        metadata = VerifierMetadata.from_question(question(), expected_answer="B")
+        read_back = VerifierMetadata(**json.loads(json.dumps(asdict(metadata))))
+        self.assertEqual(read_back, metadata)
+        self.assertIsInstance(read_back.options, tuple)
 
 
 class TestModelProjection(unittest.TestCase):

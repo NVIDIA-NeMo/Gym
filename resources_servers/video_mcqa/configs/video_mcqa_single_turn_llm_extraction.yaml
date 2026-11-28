@@ -1,0 +1,54 @@
+# video_mcqa_single_turn.yaml with answer extraction by a judge model, for a cohort with answer_policy
+# llm_extraction_v1: VideoMME-v1 or LVBench rows prepared with their benchmark's bare-letter prompt, or the rows of a
+# question set. The judge reads the row's question and options and the final answer (never the video or the gold
+# label) and returns the chosen option, which is then scored. See resources_servers/video_mcqa/README.md.
+video_mcqa:
+  resources_servers:
+    video_mcqa:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Single-turn video MCQA for a VideoMME-v1, LVBench or question-set cohort; a judge model reads the chosen option (llm_extraction_v1).
+      cohort_manifest: ${video_mcqa_cohort_manifest}
+      judge_model_server:
+        type: responses_api_models
+        name: video_mcqa_answer_judge
+      judge_chat_completion_create_params:
+        messages: []
+
+# The judge: any OpenAI-compatible chat model (judge_base_url, judge_api_key, judge_model_name).
+video_mcqa_answer_judge:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+video_mcqa_single_turn:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: video_mcqa
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/video_mcqa/data/example.jsonl
+        license: Apache 2.0
+
+video_mcqa_single_turn_environment:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: video_mcqa
+      agent_server:
+        type: responses_api_agents
+        name: video_mcqa_single_turn

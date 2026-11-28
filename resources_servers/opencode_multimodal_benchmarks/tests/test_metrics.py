@@ -9,14 +9,17 @@ import pytest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from nemo_gym.metrics import compute_aggregate_metrics
+from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
 from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig, VisualBenchmarksServer
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats
 
 
-@pytest.fixture(params=["VStarBench", "HRBench8K", "VTCBench"])
+@pytest.fixture(params=["VStarBench", "HRBench8K", "VTCBench", "AgentX"])
 def repeated_benchmark(request):
     benchmark = request.param
-    config_type, server_type = (VisualBenchmarksConfig, VisualBenchmarksServer)
+    config_type, server_type = (
+        (AgentXConfig, AgentXServer) if benchmark == "AgentX" else (VisualBenchmarksConfig, VisualBenchmarksServer)
+    )
     server = server_type(
         config=config_type(host="127.0.0.1", port=12345, name="benchmark", entrypoint="app.py"),
         server_client=MagicMock(spec=ServerClient),
@@ -34,6 +37,7 @@ def repeated_benchmark(request):
                 "category": "spatial",
                 "l2_category": "detail",
                 "split": "test",
+                "modality": "Image" if task < 2 else "Video",
             },
         }
         for task in range(3)

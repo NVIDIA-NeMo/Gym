@@ -99,8 +99,15 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession, harness_kill_evidence
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
+from responses_api_agents.codex_agent.tool_host import (
+    codex_config_overrides,
+    environments_toml,
+    setup_failure_hint,
+    tool_host_paths,
+    tool_host_setup_command,
+)
 from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 
@@ -108,11 +115,26 @@ LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
-_OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+# Codex's final error when a model response ends at its output-token limit (the output cap), a gradable outcome.
+# Codex 0.144.4 and 0.154.0 retry such a response as a stream disconnect and report the first text; Codex 0.163.0
+# does not retry it and reports the second. An error is the output cap only if it equals one of them in full, so
+# a stream disconnect with another cause after the prefix, such as a transport failure, is never taken for it.
+_OUTPUT_LIMIT_ERRORS = (
+    "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+    "Incomplete response returned, reason: max_output_tokens",
+)
 # Characters of Codex stderr kept in the error of an activation that never started a turn.
 _STDERR_TAIL_CHARS = 2000
 # Codex 0.144.4 rejects MCP server names with other characters.
 _CODEX_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+# An exact Codex version names one release; a tag or a range such as `latest` does not.
+_EXACT_CODEX_VERSION = re.compile(r"\d+\.\d+\.\d+")
+# Codex 0.144.4 stops on the `enabled` key of the [agents] table with a configuration error
+# ("expected struct AgentRoleToml in `agents`"), and Codex 0.163.0 accepts the key. No version
+# between the two is verified. CodexAgentConfig refuses agents_enabled for 0.144.4 and for every
+# older version, which is assumed not to know a key that a later version rejects.
+_AGENTS_ENABLED_REJECTED_UP_TO = "0.144.4"
+_AGENTS_ENABLED_VERIFIED_WITH = "0.163.0"
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -276,6 +298,11 @@ def _redact(text: str, values: list[str]) -> str:
 def _codex_mcp_server_name(name: str) -> bool:
     """Whether Codex accepts ``name`` as an MCP server name."""
     return _CODEX_MCP_SERVER_NAME.fullmatch(name) is not None
+
+
+def _version_numbers(version: str) -> tuple[int, ...]:
+    """Split an exact Codex version such as 0.144.4 into its numbers, which compare in release order."""
+    return tuple(int(part) for part in version.split("."))
 
 
 def _toml_key(key: str) -> str:
@@ -602,7 +629,12 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+# The tool-host probe's output kept in a seed failure's message.
+_TOOL_HOST_DETAIL_CHARS = 4000
+
+
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).
@@ -665,6 +697,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
     # extra_config, this also applies to sandbox sessions.
     features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
+    # The base config's `model_catalog_json`: a model catalog file that replaces Codex's bundled one, so
+    # a `model` the bundled catalog does not list gets that file's metadata. The file must exist where
+    # Codex runs (in a sandbox session, inside the sandbox); the adapter does not write it. Absolute,
+    # because Codex resolves a relative path against the per-run CODEX_HOME. None leaves the key out.
+    # Unlike extra_config, this also applies to sandbox sessions.
+    model_catalog_json: str | None = Field(default=None, pattern=r"^/")
+    # The `enabled` key of the base config's [agents] table; false removes Codex's subagent tools.
+    # None leaves the table out, so the CLI applies its own default. Refused for a codex_version up to
+    # the newest one known to reject the key (see validate_agents_enabled_version). Unlike extra_config,
+    # this also applies to sandbox sessions.
+    agents_enabled: bool | None = None
     # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
     # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
     # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
@@ -692,6 +735,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    # Agent-host directory where a failed sandboxed activation keeps the session's supervisor and
+    # Codex logs (output.log, stderr.log, events.jsonl, ...) before the sandbox is released. None: off.
+    failure_artifacts_dir: Optional[str] = None
+    # Task-sandbox sessions only (ignored on the local /run path): run Codex's tool commands in a nested pid
+    # namespace (bwrap) so they
+    # cannot see or signal the supervisor, the runner or the Codex CLI (see tool_host.py). The
+    # session fails at seed if the namespace cannot be created.
+    tool_pid_namespace: bool = False
+    # Agent-host path of the bwrap binary uploaded for that namespace. None: the bwrap sandbox
+    # provider's own bwrap_path.
+    tool_pid_namespace_bwrap_path: Optional[str] = None
 
     @field_validator("sandbox_logs_dir")
     @classmethod
@@ -719,6 +773,22 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         """A tool call cannot outlast the Codex run that makes it."""
         if self.mcp_tool_timeout_seconds is not None and self.mcp_tool_timeout_seconds > self.timeout:
             raise ValueError("mcp_tool_timeout_seconds must not exceed timeout, which bounds the whole Codex run")
+        return self
+
+    @model_validator(mode="after")
+    def validate_agents_enabled_version(self) -> "CodexAgentConfig":
+        """Refuse agents_enabled for a codex_version up to the newest one known to reject the [agents] `enabled` key.
+
+        An older version is assumed not to know the key. Only an exact codex_version is compared. Any other
+        value, such as `latest`, is accepted here.
+        """
+        if self.agents_enabled is None or not _EXACT_CODEX_VERSION.fullmatch(self.codex_version):
+            return self
+        if _version_numbers(self.codex_version) <= _version_numbers(_AGENTS_ENABLED_REJECTED_UP_TO):
+            raise ValueError(
+                f"Codex {self.codex_version} does not support `agents_enabled`. Use a compatible version "
+                f"(verified with {_AGENTS_ENABLED_VERIFIED_WITH}) or omit the setting."
+            )
         return self
 
 
@@ -811,6 +881,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(
                     "Codex network_access applies only to a sandbox it creates, not a borrowed one"
                 )
+            # CODEX_* and OPENAI_* variables could redirect Codex's configuration or model calls, and Gym sets
+            # NEMO_GYM_* variables for the harness itself. The refusal lists names only: a value can be a credential.
+            reserved = sorted(
+                name for name in body.sandbox_access.env if name.startswith(("CODEX_", "OPENAI_", "NEMO_GYM_"))
+            )
+            if reserved:
+                raise AgentSeedRejectedError(
+                    "Codex does not accept SandboxAccess.env variables named CODEX_*, OPENAI_* or NEMO_GYM_*: "
+                    + ", ".join(reserved)
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in PurePosixPath(workdir).parts:
@@ -843,7 +923,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             )
         if self.config.model_server is None:
             raise HTTPException(422, "Codex in the task sandbox requires a sandbox-reachable Gym model_server")
-        if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
+        if not self.config.codex_version or not _EXACT_CODEX_VERSION.fullmatch(self.config.codex_version):
             raise HTTPException(422, "Codex in the task sandbox requires an exact codex_version, for example 0.144.4")
         if self.config.codex_version != TESTED_CODEX_VERSION:
             LOG.warning(
@@ -865,7 +945,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if self.config.sandbox_mode != "danger-full-access":
             raise HTTPException(422, "Codex in the task sandbox requires danger-full-access inside the task sandbox")
 
-        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        tool_bwrap = self._tool_namespace_bwrap(provider_config) if self.config.tool_pid_namespace else None
+        provider = create_provider(provider_config)
         if owns_sandbox:
             try:
                 spec = restrict_sandbox_network(
@@ -971,6 +1053,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             await sandbox.upload(Path(__file__).with_name(LAUNCHER_FILE), f"{directory}/{LAUNCHER_FILE}")
+            if tool_bwrap is not None:
+                await self._prepare_tool_host(sandbox, directory=directory, runtime=runtime, bwrap=tool_bwrap)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -978,6 +1062,47 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
+
+    def _tool_namespace_bwrap(self, provider_config: Any) -> Path:
+        """The agent-host bwrap binary to upload for the tool pid namespace."""
+        path = self.config.tool_pid_namespace_bwrap_path
+        if path is None and isinstance(provider_config, Mapping) and isinstance(provider_config.get("bwrap"), Mapping):
+            path = provider_config["bwrap"].get("bwrap_path")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise HTTPException(
+                422, "tool_pid_namespace needs tool_pid_namespace_bwrap_path or a bwrap sandbox provider"
+            )
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            raise HTTPException(422, f"tool_pid_namespace: bwrap {path!r} is not an executable file on the agent host")
+        return Path(path)
+
+    async def _preserve_failure_artifacts(self, state: CodexSandboxSession, detail: dict[str, Any]) -> None:
+        """Keep a failed activation's logs, bounded by the close budget so a slow read never holds the failure."""
+        try:
+            async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                await state.preserve_failure_artifacts(self.config.failure_artifacts_dir, detail)
+        except TimeoutError:
+            LOG.warning("Codex failure artifacts not preserved within %s s", self.config.session_close_timeout_seconds)
+
+    async def _prepare_tool_host(self, sandbox: AsyncSandbox, *, directory: str, runtime: str, bwrap: Path) -> None:
+        """Upload bwrap and prove that it can create the tool namespace before the episode starts."""
+        uploaded, _ = tool_host_paths(directory)
+        await sandbox.upload(bwrap, uploaded)
+        command = tool_host_setup_command(directory, runtime)
+        result = await sandbox.exec(command, timeout_s=60)
+        if result.return_code != 0 or result.error_type:
+            detail = f"{result.stderr or ''}{result.stdout or ''}".strip()
+            if len(detail) > _TOOL_HOST_DETAIL_CHARS:
+                detail = "..." + detail[-_TOOL_HOST_DETAIL_CHARS:]
+            message = (
+                f"Cannot create the Codex tool pid namespace (tool_pid_namespace): exit={result.return_code}, "
+                f"error_type={result.error_type}; {detail}.{setup_failure_hint(detail)}"
+            )
+            if "platform Codex binary not found" in detail:
+                # The runtime lacks the binary: every fresh sandbox fails the same way, so do not retry.
+                raise AgentSeedRejectedError(message)
+            # Others (a per-node namespace limit, the 60 s exec timing out) may pass on another attempt.
+            raise RuntimeError(message)
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         """Validate and normalize input before consuming the session's activation."""
@@ -1085,6 +1210,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        if self.config.tool_pid_namespace:
+            config = _deep_merge(config, codex_config_overrides())
         # Codex's forced stdin prompt rejects empty text; an explicit empty argument accepts image-only input.
         command = self._build_command("" if media and not prompt.strip() else "-", state.session.workdir)
         image_args = [arg for file in media for arg in ("--image", media_path(file))]
@@ -1094,15 +1221,19 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
+        access = state.request.sandbox_access
         payload = {
             "directory": state.session.session_dir,
             "command": command,
             "model_base_url": base_url,
+            "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "invocation_id": invocation_id,
             "timeout": timeout,
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
+                # SandboxAccess.env; the seed refuses one that holds a CODEX_*, OPENAI_* or NEMO_GYM_* variable.
+                **(access.env if access else {}),
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
@@ -1120,7 +1251,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     payload,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
-                    files={"home/.codex/config.toml": toml_dumps(config)},
+                    files={
+                        "home/.codex/config.toml": toml_dumps(config),
+                        **(
+                            {"home/.codex/environments.toml": environments_toml(state.session.session_dir)}
+                            if self.config.tool_pid_namespace
+                            else {}
+                        ),
+                    },
                     media=media,
                     deadline=monotonic() + timeout,
                 )
@@ -1190,7 +1328,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         errors = usage.get("errors") or []
         output_limited = (
             bool(errors)
-            and all(message == _OUTPUT_LIMIT_ERROR for message in errors)
+            and all(message in _OUTPUT_LIMIT_ERRORS for message in errors)
             and cleanup is not None
             and not cleanup["error"]
             and failure is None
@@ -1214,6 +1352,26 @@ class CodexAgent(SimpleResponsesAPIAgent):
         completed = any(event.get("type") == "turn.completed" for _, event in events)
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
+        # Nobody stopped the harness, yet a harness process died: often a tool command signalled it
+        # (pkill -f python, kill -9 -1, ...), but also the OOM killer or a crash. Label it so summaries can
+        # count it apart; blame the agent only on positive evidence: stop signals its tools sent the supervisor.
+        harness_kill = None
+        harness_kill_code = (
+            "agent_killed_harness"
+            if not self.config.tool_pid_namespace and (cleanup or {}).get("foreign_signals")
+            else "harness_killed"
+        )
+        if failure is None and error:
+            harness_kill = harness_kill_evidence(
+                cleanup=cleanup,
+                cleanup_receipt_missing=state.session.cleanup_receipt_missing,
+                launch_return_code=state.session.launch_return_code,
+            )
+            if harness_kill:
+                error = f"{harness_kill_code}: {harness_kill}; {error}"
+        foreign_signals = {
+            name: count for name, count in (("supervisor", (cleanup or {}).get("foreign_signals", 0)),) if count
+        }
         status = "failed" if error else "incomplete" if cleanup["timed_out"] or output_limited else "completed"
         # A reported provider failure keeps its classified outcome, so the Environment Server decides it. A run
         # that never started a turn did no work to grade, and its stderr explains the failure (see below).
@@ -1291,8 +1449,28 @@ class CodexAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup is not None and cleanup["return_code"] is None:
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
+        if state.session.cleanup_receipt_missing:
+            gaps.append(
+                ObservationGap(
+                    code="cleanup_receipt_missing",
+                    detail=(
+                        f"supervisor exited ({state.session.launch_return_code}) without a cleanup receipt; "
+                        "the sandbox provider confirmed that no sandboxed process remains"
+                    ),
+                )
+            )
         if failure is not None:
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
+        if harness_kill:
+            gaps.append(ObservationGap(code=harness_kill_code, detail=harness_kill))
+        if foreign_signals:
+            gaps.append(
+                ObservationGap(
+                    code="harness_signals_ignored",
+                    detail="stop signals from inside the sandbox, ignored: "
+                    + ", ".join(f"{name} {count}" for name, count in foreign_signals.items()),
+                )
+            )
         if not events:
             gaps.append(ObservationGap(code="agent_transcript_unavailable"))
         invocation_status = "incomplete" if failure else status
@@ -1306,6 +1484,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 status=invocation_status,
                 error_type=invocation_error,
                 gaps=gaps,
+                # One Codex process writes this session's records on one sandbox clock.
+                clock_domain=f"codex-wall:{uuid4().hex}",
+                agent_instance=f"codex-agent:{uuid4().hex}",
+                observation_schema_version="2.0",
             )
             state.observations = associate_codex_compaction_calls(
                 state.observations, state.model_attempts or [], model_ref=self.config.model_server
@@ -1400,6 +1582,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 error = f"{error}; stderr: {stderr}"
                 # Environment Servers keep the observations, not the 502 body, in their failure records.
                 state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
+        # Decided before a graded failure clears ``error``: a graded harness kill keeps its logs too.
+        artifact_error = error
         graded_error = None
         if gradable:
             # The observations are stored first, so a close during the liveness probe still finds them.
@@ -1411,6 +1595,27 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 for record in state.observations.records:
                     if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
                         record.status = status
+        if (
+            failure is not None or artifact_error or state.session.cleanup_receipt_missing
+        ) and self.config.failure_artifacts_dir:
+            # Before raising: close releases the sandbox and deletes these files.
+            await self._preserve_failure_artifacts(
+                state,
+                {
+                    "failure": repr(failure) if failure is not None else None,
+                    "error": artifact_error or None,
+                    "graded": graded_error is not None,
+                    "cleanup": dict(cleanup) if cleanup is not None else None,
+                    "cleanup_receipt_missing": state.session.cleanup_receipt_missing,
+                    "launch_return_code": state.session.launch_return_code,
+                    "capture_error": repr(state.session.capture_error) if state.session.capture_error else None,
+                    "events": len(events),
+                    "terminal_events": terminal_events,
+                    "classification": harness_kill_code if harness_kill else None,
+                    "harness_kill": harness_kill,
+                    "foreign_signals": foreign_signals,
+                },
+            )
         if failure is not None:
             raise failure
         if error and not reported_model_error:
@@ -1590,10 +1795,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
         model = self._effective_model()
         if model:
             config["model"] = model
-        for name in ("model_context_window", "model_auto_compact_token_limit"):
+        for name in ("model_context_window", "model_auto_compact_token_limit", "model_catalog_json"):
             value = getattr(self.config, name)
             if value is not None:
                 config[name] = value
+        if self.config.agents_enabled is not None:
+            config["agents"] = {"enabled": self.config.agents_enabled}
         if self.config.reasoning_effort:
             config["model_reasoning_effort"] = self.config.reasoning_effort
         if developer_instructions:
@@ -1727,7 +1934,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
             observations = None
             if rollout_id is not None:
                 observations = read_codex_observations(
-                    codex_home, rollout_id, returncode=proc.returncode, timed_out=timed_out
+                    codex_home,
+                    rollout_id,
+                    returncode=proc.returncode,
+                    timed_out=timed_out,
+                    # This fresh CODEX_HOME is written by one local Codex process.
+                    clock_domain=f"codex-wall:{uuid4().hex}",
+                    agent_instance=f"codex-agent:{uuid4().hex}",
+                    observation_schema_version="2.0",
                 )
             return stdout.decode(errors="replace"), model, observations, timed_out
         finally:
@@ -1809,6 +2023,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1911,6 +2129,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
             raise AgentSessionConflictError("Use the agent session responses and close routes")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Codex requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:

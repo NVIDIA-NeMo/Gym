@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+mcqa_tool_rewards:
+  resources_servers:
+    mcqa_tool_rewards:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: mcqa training verification with configurable tool penalties

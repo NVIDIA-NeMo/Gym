@@ -615,6 +615,10 @@ def _score_tracks(
 
 
 class SavTracksResourcesServer(SimpleResourcesServer):
+    # Each verification scores tracks against the request's targets: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: SavTracksResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

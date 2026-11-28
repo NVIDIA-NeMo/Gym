@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 import orjson
 import pytest
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
@@ -371,3 +371,27 @@ def test_an_explicit_rollout_id_with_an_attempt_suffix_cannot_also_take_an_attem
     # Both at once would build "job-a2-a1", which decodes to no rollout and attempt.
     with pytest.raises(ValueError, match="already ends with the attempt suffix"):
         maybe_rollout_id_from_run_body({"_ng_rollout_id": "job-a2", "_ng_attempt_index": 1})
+
+
+def test_capture_identity_reaches_handler_and_matches_saved_exchange(tmp_path):
+    app = FastAPI()
+    seen = []
+
+    @app.post("/v1/responses")
+    async def endpoint(request: Request):
+        seen.append(dict(request.state.nemo_gym_model_call_identity))
+        return _model_response("policy", "answer")
+
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=str(tmp_path)),
+        model_server_name="policy",
+    )
+    with TestClient(app) as client:
+        for _ in range(2):
+            assert client.post("/ng-rollout/0-0/v1/responses", json={"input": "identical"}).status_code == 200
+    saved = CaptureStore(tmp_path).read("0-0")
+    assert len(seen) == len(saved) == 2
+    assert {item["model_call_id"] for item in seen} == {item["model_call_id"] for item in saved}
+    assert len({item["model_call_id"] for item in seen}) == 2
+    assert all(item["rollout_id"] == "0-0" for item in seen)

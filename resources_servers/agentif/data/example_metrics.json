@@ -17,17 +17,17 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 2124.0,
-        "Min": 1201.0,
-        "Max": 3168.0,
-        "Standard deviation": 711.134
+        "Average": 1074.0,
+        "Min": 409.0,
+        "Max": 2381.0,
+        "Standard deviation": 874.82
     },
     "Number of turns": {
         "Total # non-null values": 5,
-        "Average": 5.0,
-        "Min": 2.0,
-        "Max": 9.0,
-        "Standard deviation": 2.646
+        "Average": 2.6,
+        "Min": 1.0,
+        "Max": 5.0,
+        "Standard deviation": 1.52
     },
     "Temperature": {
         "Total # non-null values": 0,
@@ -35,20 +35,5 @@
         "Min": 0.0,
         "Max": 0.0,
         "Standard deviation": 0.0
-    },
-    "Number of constraints": {
-        "Total # non-null values": 5,
-        "Average": 12.6,
-        "Min": 12.0,
-        "Max": 14.0,
-        "Standard deviation": 0.894
-    },
-    "domain": {
-        "unique_count": 1,
-        "total_count": 5
-    },
-    "prompt_type": {
-        "unique_count": 2,
-        "total_count": 5
     }
 }

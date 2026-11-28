@@ -97,6 +97,10 @@ def _compute_reward(
 
 
 class GuiCoordinateResourcesServer(SimpleResourcesServer):
+    # Each verification scores a point against the request's target: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: GuiCoordinateResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

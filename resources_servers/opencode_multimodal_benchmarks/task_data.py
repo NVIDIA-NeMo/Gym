@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Task-owned fields shared by the four visual benchmark datasets."""
+"""Task-owned fields shared by the five visual benchmark datasets."""
 
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 
 MetadataString = Annotated[str, Field(json_schema_extra={"legacy_location": "verifier_metadata"})]
@@ -34,9 +34,10 @@ class TaskData(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    benchmark: Literal["VStarBench", "HRBench8K", "VTCBench", "ZeroBench"] = Field(
+    benchmark: Literal["VStarBench", "HRBench8K", "VTCBench", "AgentX", "ZeroBench"] = Field(
         json_schema_extra={"legacy_location": "verifier_metadata"}
     )
+    task_id: str | None = None
     index: MetadataString
     question: MetadataString
     answer: MetadataString
@@ -49,6 +50,35 @@ class TaskData(BaseModel):
     expected_samples: int = Field(gt=0, json_schema_extra={"legacy_location": "verifier_metadata"})
     dataset_revision: MetadataString = ""
     source_index: MetadataString = ""
+    GT_json: MetadataString = ""
+    query_type: MetadataString = ""
+    query_type_raw: MetadataString = ""
+    modality: MetadataString = ""
+    source_media_sha256: dict[str, str] = Field(
+        default_factory=dict, json_schema_extra={"legacy_location": "verifier_metadata"}
+    )
+    video_sampling: dict[str, object] = Field(
+        default_factory=dict, json_schema_extra={"legacy_location": "verifier_metadata"}
+    )
+
+    @model_serializer(mode="wrap")
+    def serialize_task(self, handler):
+        data = handler(self)
+        if self.benchmark != "AgentX":
+            # Preserve the pre-Agent-X metadata shape, including its existing defaults.
+            # Explicit caller annotations still round-trip as they did with extra="allow".
+            for name in (
+                "task_id",
+                "GT_json",
+                "query_type",
+                "query_type_raw",
+                "modality",
+                "source_media_sha256",
+                "video_sampling",
+            ):
+                if name not in self.model_fields_set:
+                    data.pop(name, None)
+        return data
 
     @field_validator("index", "question", "answer")
     @classmethod
@@ -70,4 +100,7 @@ class TaskData(BaseModel):
             if any(key not in "ABCDEFG" or len(key) != 1 or not value.strip() for key, value in self.options.items()):
                 raise ValueError("VTCBench options require letters A-G and nonempty text")
             reference_options(self.answer, self.options)
+        if self.benchmark == "AgentX":
+            if self.query_type not in {"objective", "subjective"} or self.modality not in {"Image", "Video"}:
+                raise ValueError("Agent-X requires query_type and modality")
         return self

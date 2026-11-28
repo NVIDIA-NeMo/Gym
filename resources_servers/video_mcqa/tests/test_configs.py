@@ -2,15 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.config_types import DatasetConfig
-from resources_servers.video_mcqa.app import VideoMCQAResourcesServerConfig
+from nemo_gym.client import ServerClient
+from nemo_gym.config import DatasetConfig
+from resources_servers.video_mcqa.app import VideoMCQAResourcesServer, VideoMCQAResourcesServerConfig
+from resources_servers.video_mcqa.question_set import QuestionSetCohort
+from resources_servers.video_mcqa.sandbox import PLUGIN_PATH, SANDBOX_IMAGE_DIR
+from resources_servers.video_mcqa.tests.helpers import REVISION
 from resources_servers.video_mcqa.tests.test_app import make_server
+from resources_servers.video_mcqa.tests.test_question_sets import SOURCE, agentic_row, request
 from resources_servers.videomme_v2.app import VideoMMEV2ResourcesServerConfig
+from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.simple_agent.app import SimpleAgentConfig
 
 
@@ -44,3 +51,132 @@ def test_actual_composed_single_turn_configs_resolve_and_validate(tmp_path, serv
     )
     assert environment.agent_server.name == agent_name
     assert environment.resources_server.name == server_name
+
+
+def question_set_cohort(directory: Path, **updates: object) -> Path:
+    """An agentic question-set cohort for the rows of agentic_row(), as configs/video_mcqa_agentic.yaml serves."""
+    cohort = QuestionSetCohort(
+        question_set="invented_shapes",
+        dataset_source=SOURCE,
+        dataset_revision=REVISION,
+        setting="agentic",
+        task_ids=("shapes:one",),
+        **updates,
+    )
+    path = directory / f"question-set-agentic-{cohort.answer_policy}.json"
+    path.write_text(cohort.model_dump_json())
+    return path
+
+
+@pytest.mark.parametrize("server_name", ["videomme_v1", "lvbench", "videomme_v2", "video_mcqa"])
+def test_actual_composed_agentic_configs_resolve_and_validate(tmp_path, monkeypatch, server_name) -> None:
+    monkeypatch.setenv("VIDEO_MCQA_SANDBOX_IMAGE", "registry.example/video-mcqa-sandbox:test")
+    # The shared server's agentic config serves a question set; the benchmarks' serve their example cohorts.
+    cohort = (
+        question_set_cohort(tmp_path)
+        if server_name == "video_mcqa"
+        else Path(__file__).parents[2] / server_name / "data" / "example_agentic_cohort.json"
+    )
+    path = Path(__file__).parents[2] / server_name / "configs" / f"{server_name}_agentic.yaml"
+    values = {
+        f"{server_name}_agentic_cohort_manifest": str(cohort),
+        f"{server_name}_agentic_video_roots": [str(tmp_path)],
+        "policy_model_name": "policy",
+    }
+    loaded = OmegaConf.load(path)
+    assert list(loaded.config_paths) == ["nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"]
+    config = OmegaConf.to_container(OmegaConf.merge(loaded, OmegaConf.create(values)), resolve=True)
+    name = f"{server_name}_agentic"
+    config_type = VideoMMEV2ResourcesServerConfig if server_name == "videomme_v2" else VideoMCQAResourcesServerConfig
+    resource = config_type(name=name, port=8001, **config[name]["resources_servers"][server_name])
+    assert resource.sandbox_provider == "sandbox" and resource.sandbox_network_access == "model_only"
+    assert resource.sandbox_config.image == "registry.example/video-mcqa-sandbox:test"
+    assert (resource.sandbox_media_root, resource.sandbox_workdir) == ("/testbed", "/testbed/work")
+    assert resource.sandbox_model_server.name == "policy_model" and resource.video_roots == [tmp_path]
+    agent_config = config[f"{name}_opencode"]["responses_api_agents"]["opencode_agent"]
+    agent = OpenCodeAgentConfig(name=f"{name}_opencode", port=8002, **agent_config)
+    # Every server but the policy model stays on loopback: the sandbox's egress rule opens the model's host.
+    assert resource.host == agent.host == "127.0.0.1"
+    assert agent.resources_server.name == name and agent.plugins == [str(PLUGIN_PATH)]
+    assert agent.image_input and agent.opencode_config["compaction"] == {"auto": False}
+    # OpenCode's own tools, and its shell tool on sh, as in the sandbox the training data was generated in, but no
+    # webfetch: the sandbox reaches only the model server.
+    assert agent.opencode_config["tools"] == {"webfetch": False}
+    assert resource.sandbox_config.env == {"SHELL": "/bin/sh"}
+    # A third identical tool call in one model response ends the run, as when the training data was generated.
+    assert agent.opencode_config["permission"]["doom_loop"] == "ask"
+    assert agent.network_access == "inherit" and agent.sandbox_provider is None
+    # The image's Dockerfile installs the binary and the plugin dependencies these pins name.
+    dockerfile = (SANDBOX_IMAGE_DIR / "Dockerfile").read_text()
+    assert f"{agent.sandbox_executable_sha256}  {agent.sandbox_executable_path}" in dockerfile
+    assert agent.sandbox_plugin_dependencies_sha256 in dockerfile
+    assert f"COPY video_tools.mjs {PLUGIN_PATH}" in dockerfile
+    environment = SingleAgentTurnLegacyEnvironmentServerConfig(
+        name=f"{name}_environment",
+        port=8003,
+        **config[f"{name}_environment"]["environment_servers"]["single_agent_turn_legacy"],
+    )
+    assert environment.agent_server.name == f"{name}_opencode" and environment.resources_server.name == name
+    assert environment.max_concurrent_episodes == agent.concurrency
+
+
+async def test_question_set_agentic_config_grades_a_training_row_by_its_boxed_letter(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VIDEO_MCQA_SANDBOX_IMAGE", "registry.example/video-mcqa-sandbox:test")
+    path = Path(__file__).parents[1] / "configs" / "video_mcqa_agentic.yaml"
+    values = {
+        "video_mcqa_agentic_cohort_manifest": str(question_set_cohort(tmp_path)),
+        "video_mcqa_agentic_video_roots": [str(tmp_path)],
+        "policy_model_name": "policy",
+    }
+    config = OmegaConf.to_container(OmegaConf.merge(OmegaConf.load(path), OmegaConf.create(values)), resolve=True)
+    resource = VideoMCQAResourcesServerConfig(
+        name="video_mcqa_agentic", port=8001, **config["video_mcqa_agentic"]["resources_servers"]["video_mcqa"]
+    )
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    server = VideoMCQAResourcesServer(config=resource, server_client=client)
+    # The cohort's boxed_only_v1 grades the final answer's \boxed{} letter; no judge model is called.
+    correct = await server.verify(request(agentic_row(), r"\boxed{B}"))
+    wrong = await server.verify(request(agentic_row(), r"\boxed{A}"))
+    assert (correct.reward, correct.outcome) == (1.0, "correct")
+    assert (wrong.reward, wrong.outcome) == (0.0, "incorrect")
+    assert not client.method_calls
+    # The config names no judge model, so a cohort whose answer policy needs one is refused at start.
+    judged = question_set_cohort(tmp_path, answer_policy="llm_extraction_v1")
+    with pytest.raises(ValueError, match="needs judge_model_server"):
+        VideoMCQAResourcesServer(config=resource.model_copy(update={"cohort_manifest": judged}), server_client=client)
+
+
+@pytest.mark.parametrize("server_name", ["videomme_v1", "lvbench", "videomme_v2"])
+def test_agentic_llm_extraction_overlays_add_a_loopback_judge(tmp_path, monkeypatch, server_name) -> None:
+    monkeypatch.setenv("VIDEO_MCQA_SANDBOX_IMAGE", "registry.example/video-mcqa-sandbox:test")
+    configs = Path(__file__).parents[2] / server_name / "configs"
+    plain = OmegaConf.load(configs / f"{server_name}_agentic.yaml")
+    overlay = OmegaConf.load(configs / f"{server_name}_agentic_llm_extraction.yaml")
+    values = {
+        f"{server_name}_agentic_cohort_manifest": str(tmp_path / "cohort.json"),
+        f"{server_name}_agentic_video_roots": [str(tmp_path)],
+        "policy_model_name": "policy",
+        "judge_base_url": "https://judge.example.invalid/v1",
+        "judge_api_key": "placeholder",
+        "judge_model_name": "judge-model",
+    }
+    merged = OmegaConf.to_container(OmegaConf.merge(plain, overlay, OmegaConf.create(values)), resolve=True)
+    name = f"{server_name}_agentic"
+    config_type = VideoMMEV2ResourcesServerConfig if server_name == "videomme_v2" else VideoMCQAResourcesServerConfig
+    resource = config_type(name=name, port=8001, **merged[name]["resources_servers"][server_name])
+    assert resource.judge_model_server.name == "video_mcqa_answer_judge"
+    resource.check_answer_judge("llm_extraction_v1")
+    judge = merged["video_mcqa_answer_judge"]["responses_api_models"]["openai_model"]
+    # The lent sandbox may reach every port of the policy model's host; the judge stays off that address.
+    assert judge["host"] == "127.0.0.1" and judge["openai_model"] == "judge-model"
+    # The overlay changes only the resources server's judge fields: the agent, environment and sandbox are the plain
+    # agentic config's.
+    plain_values = OmegaConf.to_container(OmegaConf.merge(plain, OmegaConf.create(values)), resolve=True)
+    for key in (f"{name}_opencode", f"{name}_environment"):
+        assert merged[key] == plain_values[key]
+    added = {"judge_model_server", "judge_chat_completion_create_params"}
+    resources = merged[name]["resources_servers"][server_name]
+    assert {k: v for k, v in resources.items() if k not in added} == plain_values[name]["resources_servers"][
+        server_name
+    ]

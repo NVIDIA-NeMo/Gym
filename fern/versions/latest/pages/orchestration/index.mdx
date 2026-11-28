@@ -80,12 +80,17 @@ You can override an existing scratch value (`_images.vllm=...`), but `+_images.n
 
 ### Output and exit status
 
-On success the command prints the run directory and one line per benchmark:
+On success the command prints the run directory and one line per benchmark, then the submission's id and the command to look at it (see [Job Management](/orchestration/job-management)):
 
 ```text
 Run directory: /lustre/me/evals/gym-job-20260101T120000Z-a1b2c3
 submitted gpqa → Slurm job 1234567
+Submission: gym-job-20260101T120000Z-a1b2c3
+Check on it: gym job status gym-job-20260101T120000Z-a1b2c3
+All job commands: gym job --help
 ```
+
+The last three lines are left out with `--json`, which prints only the record, and when no benchmark could be submitted.
 
 If `sbatch` rejects a benchmark, that benchmark prints `failed <name>: <error>`. The other benchmarks in the same submission are still queued and recorded. The command then prints `Error: N benchmark(s) failed to submit` to stderr and exits with status 1.
 

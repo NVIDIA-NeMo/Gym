@@ -79,7 +79,7 @@ from nemo_gym.server_runtime import (
     CleanupContext,
     handled_episode_failure,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, monotonic_timeout
 
 
 LOGGER = logging.getLogger(__name__)
@@ -311,7 +311,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     turn_deadline + self.config.cleanup_timeout_seconds, state.interaction_deadline
                 )
                 try:
-                    async with asyncio.timeout_at(collection_deadline) as timer:
+                    async with monotonic_timeout(collection_deadline) as timer:
                         response = await self.server_client.post(
                             self.config.agent_server.name,
                             self._activation_path(request),
@@ -614,6 +614,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
 
     async def _next_user_turn(self, state: Episode, activation: CandidateTurn) -> UserTurn:
         turn = activation.activation_id - 1
+        # A full context cannot take another turn; score the work so far.
+        if activation.stop_reason == "context_limit":
+            return UserTurn(activation_id=activation.activation_id, kind="stop", stop_reason="context_limit")
         if turn >= self.config.max_resumes:
             return UserTurn(activation_id=activation.activation_id, kind="stop", stop_reason="max_resumes")
         remaining = self._remaining_interaction_seconds(state)

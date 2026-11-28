@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "benchmark": "lvbench",
+  "dataset_source": "https://huggingface.co/datasets/THUDM/LVBench",
+  "dataset_revision": "0000000000000000000000000000000000000000",
+  "setting": "agentic",
+  "answer_policy": "boxed_only_v1",
+  "task_ids": [
+    "lvbench:example-1",
+    "lvbench:example-2",
+    "lvbench:example-3",
+    "lvbench:example-4",
+    "lvbench:example-5"
+  ],
+  "task_subsets": {
+    "lvbench:example-1": {
+      "domain": [
+        "Synthetic examples"
+      ],
+      "task_type": [
+        "entity recognition"
+      ]
+    },
+    "lvbench:example-2": {
+      "domain": [
+        "Synthetic examples"
+      ],
+      "task_type": [
+        "entity recognition"
+      ]
+    },
+    "lvbench:example-3": {
+      "domain": [
+        "Synthetic examples"
+      ],
+      "task_type": [
+        "entity recognition"
+      ]
+    },
+    "lvbench:example-4": {
+      "domain": [
+        "Synthetic examples"
+      ],
+      "task_type": [
+        "event understanding"
+      ]
+    },
+    "lvbench:example-5": {
+      "domain": [
+        "Synthetic examples"
+      ],
+      "task_type": [
+        "key information retrieval"
+      ]
+    }
+  },
+  "num_repeats": 1
+}

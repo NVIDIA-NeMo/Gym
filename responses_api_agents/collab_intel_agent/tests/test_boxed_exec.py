@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
@@ -71,6 +72,7 @@ class FakeBox:
         self.uploads: list[tuple[str, int]] = []
         self.commands: list[str] = []
         self.stopped = False
+        self.stop_limits: list[float | None] = []
         FakeBox.instances.append(self)
 
     async def start(self, spec):
@@ -96,10 +98,14 @@ class FakeBox:
             return SandboxExecResult(stdout="noise\n" + json.dumps(FakeBox.wrapper_result), stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
-    async def stop(self):
+    async def stop(self, *, timeout_s: float | None = None):
+        self.stop_limits.append(timeout_s)
         if FakeBox.stop_hangs:
             FakeBox.stop_hangs -= 1
-            await asyncio.Event().wait()
+            # A hung delete: the sandbox's own stop gives up after timeout_s, as AsyncSandbox.stop does. Without
+            # one, the hang still ends, so a caller that passes no limit fails its test instead of hanging it.
+            with anyio.fail_after(timeout_s if timeout_s is not None else 1):
+                await asyncio.Event().wait()
         if FakeBox.stop_errors:
             FakeBox.stop_errors -= 1
             raise ConnectionError("delete unconfirmed")
@@ -246,6 +252,7 @@ def test_a_hung_stop_is_bounded_and_retried_at_close(monkeypatch):
         assert "p" in boxes._boxes and not FakeBox.instances[0].stopped
         await boxes.close()
         assert FakeBox.instances[0].stopped and not boxes._boxes
+        assert FakeBox.instances[0].stop_limits == [0.05, 0.05], "each stop is bounded by the configured limit"
 
     asyncio.run(go())
 

@@ -37,7 +37,7 @@ async def test_only_rate_limits_retry_and_every_attempt_keeps_body_and_owner(sta
                     assert await response.read() == b"payload"
                 finally:
                     response.release()
-            assert seen == [(b'{"input":[]}', ["owner"])] * len(statuses)
+            assert seen == [(b'{"input":[]}', ["owner.unattributed"])] * len(statuses)
         finally:
             await runner.cleanup()
             await get_global_aiohttp_client().close()

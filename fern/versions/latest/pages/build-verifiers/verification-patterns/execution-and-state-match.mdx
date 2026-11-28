@@ -93,22 +93,15 @@ except asyncio.TimeoutError:
 text = stdout.decode("utf-8", errors="replace")
 ```
 
-For distributed evaluation, put the blocking checker in a Ray task. [`code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen), [`evalplus`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/evalplus), and [`code_fim`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_fim) use Ray remote functions to isolate work and distribute it across workers:
-
-```python
-@ray.remote(scheduling_strategy="SPREAD")
-def check_correctness_remote(sample, generation, timeout):
-    return check_correctness(sample, generation, timeout)
-
-results = await check_correctness_remote.remote(sample, code, timeout)
-```
-
-Ray futures are directly awaitable. In async server code, use `await future`; do not call `ray.get()`, which blocks the event loop.
+If the checker is too heavy to run in the server's own processes, run it in a sandbox or spread it across nodes; see [Distributing Heavy Work](/about/architecture#distributing-heavy-work).
 
 Other examples:
 
 - [`competitive_coding_challenges`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/competitive_coding_challenges) checks competitive-programming inputs and outputs.
 - [`nvarc`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/nvarc) executes a generated Python transformation and validates its returned grid.
+- [`evalplus`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/evalplus) runs generated Python functions against the HumanEval+ and MBPP+ tests.
+- [`code_fim`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_fim) runs code-infilling completions against the HumanEval-Infilling tests.
+- [`code_gen`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/code_gen) runs Python solutions in a sandbox against stdin/stdout tests or, with `type: assertions`, against the task's own assertion suite, under each task's time and memory limits; its [README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/code_gen/README.md) describes both formats.
 
 ---
 
@@ -141,7 +134,7 @@ match = gold_rows is not None and pred_rows is not None and set(gold_rows) == se
 
 Result normalization is benchmark-specific. Decide whether row order, duplicate rows, floating-point tolerance, column order, and `NULL` values are significant. Record execution errors separately from valid but incorrect results so infrastructure failures are diagnosable.
 
-[`spider2_lite`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/spider2_lite) is another execution-based SQL example and uses Ray for its evaluator.
+[`spider2_lite`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/spider2_lite) is another execution-based SQL example.
 
 ---
 
@@ -235,6 +228,149 @@ reward = 1.0 if result.return_code == 0 else 0.0
 ```
 
 Treat file paths, environment variables, container mounts, and harness content as untrusted. Resolve every requested path under the rollout workspace, mount only required directories, and avoid exposing host credentials or sockets.
+
+---
+
+### CVDP heavy repository tasks
+
+Heavy tasks use complete starting repositories rather than only inline RTL files.
+Run these commands from the Gym repository root with Gym installed, Git, the
+Hugging Face `hf` CLI, and uv ≥ 0.13.4 available. The `uv run --locked` commands
+use the resources server's locked dependencies. The existing
+[non-agentic preparation](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/cvdp#download-dataset)
+and [generic-agent instructions](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/cvdp_agent)
+remain available for other subsets.
+
+**Reviewed artifacts.** Use the CVDP v1.1.0 non-commercial heavy task JSONL and
+sanitized context bundles from the same Hugging Face dataset revision,
+[`5b807d945f6a99aa645f7e43a64a2115e281b4bf`](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset/tree/5b807d945f6a99aa645f7e43a64a2115e281b4bf).
+This task file contains 75 tasks. The bundle directory also supports tasks outside
+this selected subset. Its `manifest.txt` maps original task commits to sanitized
+context commits; it is different from the verifier-image manifest generated below.
+Retain the upstream LICENSE/NOTICE and the individual projects' license notices.
+
+```bash
+hf download nvidia/cvdp-benchmark-dataset \
+  --repo-type dataset \
+  --revision 5b807d945f6a99aa645f7e43a64a2115e281b4bf \
+  --include "cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial.jsonl" \
+    "cvdp_v1.1.0_agentic_heavy_code_generation_public/*.bundle" \
+    "cvdp_v1.1.0_agentic_heavy_code_generation_public/manifest.txt" \
+    LICENSE NOTICE \
+  --local-dir resources_servers/cvdp/data
+```
+
+At this revision the raw task JSONL has SHA-256
+`809916fa3248a4b2597b2a2ac364d3450d24936cad0e25bbe1bf0f1243ad1ea7`;
+the bundle `manifest.txt` has SHA-256
+`90977fa56c94df56299d8607fcd480f3f90497d7fda58d3809d31c77093ba357`.
+Do not mix task files, manifests, or bundles from different revisions.
+
+**Prepare the starting repositories and Gym rows.** No upstream prompt export is
+needed for heavy tasks:
+
+```bash
+uv run --locked --project resources_servers/cvdp python -m resources_servers.cvdp.scripts.prepare_heavy \
+  --dataset resources_servers/cvdp/data/cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial.jsonl \
+  --bundles resources_servers/cvdp/data/cvdp_v1.1.0_agentic_heavy_code_generation_public \
+  --workspaces resources_servers/cvdp/data/heavy_workspaces \
+  --output resources_servers/cvdp/data/cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial_gym.jsonl \
+  --cache results/cvdp-heavy/git-cache
+```
+
+The converter selects each manifest's sanitized starting commit, extracts the
+project tree, and writes content-addressed `<sha256>.tar.gz` snapshots. It uses
+reference-patch keys to identify target paths but **does not apply reference
+patches**. A
+`*.repositories.json` receipt beside the converted JSONL records the selected
+commits and snapshot identifiers. Preparation does not certify that the upstream
+repository itself is free of answer-bearing companion files.
+
+The output filename and snapshot directory above match
+[`cvdp_agent_heavy_claude.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/cvdp_agent/configs/cvdp_agent_heavy_claude.yaml).
+Both the resources server and agent must read the same `prepared_repository_dir`.
+The config inherits the agent instance name **`cvdp_agent_generic_claude`**; there
+is no separate `cvdp_agent_heavy_claude` agent instance.
+
+**Prepare verifier images.** Select simulator images compatible with the worker
+architecture and provider. This example uses `nvidia/cvdp-sim:v1.0.0` for both
+simulation and synthesis; use the same substitutions in image preparation and
+at runtime. The reviewed subset has 81 direct-image services and no Compose
+`build:` recipes. The first command therefore writes an empty image mapping
+without invoking Docker; `--image-prefix` is required by the preparation CLI but
+unused for these tasks. For another subset with `build:` recipes, use a
+Docker-capable build host, a registry image prefix accessible to workers, and
+`--push`.
+
+```bash
+uv run --locked --project resources_servers/cvdp python -m resources_servers.cvdp.prepare \
+  resources_servers/cvdp/data/cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial_gym.jsonl \
+  --prepared-repository-dir resources_servers/cvdp/data/heavy_workspaces \
+  --oss-sim-image nvidia/cvdp-sim:v1.0.0 \
+  --oss-pnr-image nvidia/cvdp-sim:v1.0.0 \
+  --image-prefix cvdp-heavy \
+  --manifest resources_servers/cvdp/data/heavy_prepared_images.json
+
+uv run --locked --project resources_servers/cvdp python -m resources_servers.cvdp.prepare \
+  resources_servers/cvdp/data/cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial_gym.jsonl \
+  --prepared-repository-dir resources_servers/cvdp/data/heavy_workspaces \
+  --oss-sim-image nvidia/cvdp-sim:v1.0.0 \
+  --oss-pnr-image nvidia/cvdp-sim:v1.0.0 \
+  --manifest resources_servers/cvdp/data/heavy_prepared_images.json \
+  --check-only
+```
+
+The image manifest covers Compose build recipes; it does not replace repository
+snapshots. Images referenced directly by tasks must also be available to the
+provider. A local `.sif` requires Apptainer; if using local image mappings, validate
+manifest coverage with those same mappings instead of reusing keys generated
+with different base-image substitutions.
+
+**Configure and run.** Keep endpoint credentials local. Set these values in your
+repo-root `env.yaml` (replace the model and endpoint; supply `POLICY_API_KEY` through
+your local environment):
+
+```yaml
+cvdp_sim_image: nvidia/cvdp-sim:v1.0.0
+anthropic_model_name: YOUR_MODEL_NAME
+policy_model_name: ${anthropic_model_name}
+policy_base_url: https://YOUR_ENDPOINT/v1
+policy_api_key: ${oc.env:POLICY_API_KEY}
+```
+
+Create a local overlay with an absolute image-manifest path. Both snapshot-directory
+settings are shown explicitly; their values match the heavy config defaults.
+
+```bash
+mkdir -p results/cvdp-heavy
+cat > results/cvdp-heavy/local.yaml <<EOF
+cvdp:
+  resources_servers:
+    cvdp:
+      prepared_repository_dir: resources_servers/cvdp/data/heavy_workspaces
+      prepared_image_manifest: ${PWD}/resources_servers/cvdp/data/heavy_prepared_images.json
+cvdp_agent_generic_claude:
+  responses_api_agents:
+    cvdp_agent:
+      prepared_repository_dir: resources_servers/cvdp/data/heavy_workspaces
+EOF
+
+gym eval run \
+  --config responses_api_agents/cvdp_agent/configs/cvdp_agent_heavy_claude.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  --config results/cvdp-heavy/local.yaml \
+  --agent cvdp_agent_generic_claude \
+  --split validation --limit 1 --num-repeats 1 --concurrency 1 \
+  --output results/cvdp-heavy/smoke.jsonl
+```
+
+The shipped config uses Apptainer. Configure another supported provider for both
+components if needed. The Claude Code budget is 1,800 seconds and 60 turns; the
+outer agent sandbox execution limit is 1,920 seconds, and each verifier service
+has a separate 600-second limit. Inspect the smoke trajectory and verifier output
+before removing `--limit 1` for the complete 75-task subset; choose a fresh output
+path for the full run. Keep downloaded data, generated repositories, local overlays,
+and credentials out of source control.
 
 ---
 

@@ -72,7 +72,7 @@ def test_harness_reuse_preserves_source_and_output_guards(
         assert json.loads(sidecar_bytes)["Number of examples"] == 1
         metrics = json.loads((output / "benchmark_metrics.json").read_text())
         assert metrics["Number of examples"] == 1
-        expected_template = "default-stirrup.yaml" if harness == "stirrup" else "harness-neutral.yaml"
+        expected_template = "default-stirrup.yaml" if harness == "stirrup" else "prompts/nooa.yaml"
         assert metrics["prompt_config"].endswith(expected_template)
 
     # The same source is reusable, but an existing rendered output must not be

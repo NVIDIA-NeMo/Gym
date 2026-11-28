@@ -1,0 +1,28 @@
+# Deployment overlay for Agentic-VBench on the Harbor task shape with the OpenClaw harness. Pass it instead of
+# `harbor_sandbox.yaml`, which carries the OpenCode harness's block and so loads only with `--agent opencode_agent`:
+#
+#   gym eval run agentic_vbench --agent openclaw_agent --sandbox docker \
+#     --config environments/harbor/agentic_vbench/harbor_sandbox_openclaw.yaml ...
+#
+# The server block is `harbor_sandbox.yaml`'s, key for key (a test keeps the two equal): the judge key as a
+# verifier-only secret, separate verification of the tasks that declare artifacts, and the episode cap. Only the
+# harness block differs.
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      secrets:
+        NVINFERENCE_API_KEY: ${oc.env:NVINFERENCE_API_KEY,${oc.env:INFERENCE_API_KEY,null}}
+      separate_verifier_for_artifacts: true
+      max_concurrent_episodes: 12
+      queue_timeout_seconds: 43200
+      sandbox_ready_timeout_s: 1800
+
+# The tasks need the model to look at frames it extracts. The prompt has no image, so OpenClaw declares image input
+# to the model only with this key.
+openclaw_agent:
+  responses_api_agents:
+    openclaw_agent:
+      image_input: true
+      # A ceiling above every task's own agent budget (1800 s or more), as OpenCode's shipped config has; the
+      # harness's default of 900 s would end the tasks early.
+      timeout: 10800

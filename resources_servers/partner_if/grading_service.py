@@ -14,6 +14,7 @@ from nemo_gym.verification import call_judge
 from resources_servers.partner_if.engine import aggregate, evaluate, reward_checks
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
 from resources_servers.partner_if.grading_contract import (
+    UNSCORABLE,
     Evaluation,
     GradingContract,
     GradingItem,
@@ -128,10 +129,21 @@ async def grade(
     )
 
 
-def unanswered(contract: GradingContract, failure_kind: str, reason: str) -> GradeResponse:
-    """With no answer to grade, every check fails without the judge, so a prohibition cannot pass by omission."""
-    judgments = [
-        RawJudgment(id=item.id, passed=False, reason=reason, evidence="No answer to grade", failure_kind=failure_kind)
-        for item in contract.checks
-    ]
+def grade_without_evidence(
+    contract: GradingContract, failure_kind: str, reason: str, *, unavailable_checks: dict[str, str] | None
+) -> GradeResponse:
+    """Record a failed or unscorable verdict for every check without calling the judge."""
+    unavailable_checks = unavailable_checks or {}
+    judgments = []
+    for item in contract.checks:
+        unavailable = unavailable_checks.get(item.id)
+        if unavailable is None:
+            judgment = RawJudgment(
+                id=item.id, passed=False, reason=reason, evidence="No answer to grade", failure_kind=failure_kind
+            )
+        else:
+            judgment = RawJudgment(
+                id=item.id, passed=None, reason=unavailable, evidence=unavailable, failure_kind=UNSCORABLE
+            )
+        judgments.append(judgment)
     return GradeResponse(grading_result=aggregate(contract, judgments))

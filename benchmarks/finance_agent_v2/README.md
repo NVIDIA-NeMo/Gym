@@ -77,7 +77,7 @@ gym eval prepare --benchmark finance_agent_v2
 
 # 2. Evaluate against it (auto-serves the resources server + agent).
 gym eval run --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml \
   --output results/finance_agent_v2_27q.jsonl --concurrency 4
 ```
 
@@ -98,7 +98,7 @@ component name:
 ```bash
 # Terminal 1 — serve
 gym env start --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml
+  --config responses_api_models/openai_model/configs/openai_model.yaml
 
 # Terminal 2 — collect (repeat as needed against the same servers)
 gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \
@@ -116,6 +116,15 @@ the Vals leaderboard's Accuracy and All-Pass columns, but not their numbers: thi
 measures the 27 public questions rather than their private 450-question split, with
 our own judge rather than their three-model jury. `rubric_fraction` is ungated and
 unweighted, so it has no counterpart there at all.
+
+Run limits follow Vals: a rollout is bounded by the agent's one-hour
+`max_time_seconds`, checked between turns, plus a 200-turn `max_steps` cap that
+only stops a looping model (Vals has no turn cap; the training default of 50 cuts
+off long but legitimate rollouts). The benchmark overlay also unsets the training
+defaults for the retrieval output budget (`retrieval_max_output_tokens`), the
+per-tool timeout (`tool_call_timeout`) and the soft rollout budget
+(`max_rollout_time_seconds`), so `retrieve_information` can use the model's full
+generation budget and a single rollout can take close to an hour on a slow endpoint.
 
 ## Licensing & grading
 

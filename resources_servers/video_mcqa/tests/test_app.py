@@ -2,16 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.lvbench.app import LVBenchResourcesServer
 from resources_servers.video_mcqa.app import (
     AccuracyCohort,
@@ -21,7 +21,6 @@ from resources_servers.video_mcqa.app import (
     final_assistant_text,
 )
 from resources_servers.video_mcqa.prepare import prepare_dataset
-from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY
 from resources_servers.video_mcqa.tests.helpers import (
     REVISION,
     grade_failed_run_and_replay,
@@ -62,6 +61,26 @@ def make_server(
         server_client=client,
     )
     return server, rows, cohort
+
+
+@pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
+def test_relative_cohort_manifest_is_read_from_the_gym_root(monkeypatch, benchmark) -> None:
+    # Gym starts each resources server in its own directory; benchmark configs name the cohort from the Gym root.
+    root = Path(__file__).resolve().parents[3]
+    monkeypatch.chdir(root / "resources_servers" / benchmark)
+    manifest = Path("resources_servers", benchmark, "data", "example_agentic_cohort.json")
+    assert not manifest.exists()
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    cls = VideoMMEV1ResourcesServer if benchmark == "videomme_v1" else LVBenchResourcesServer
+    server = cls(
+        config=VideoMCQAResourcesServerConfig(
+            name=benchmark, host="127.0.0.1", port=8000, entrypoint="app.py", cohort_manifest=manifest
+        ),
+        server_client=client,
+    )
+    assert server._cohort == AccuracyCohort.model_validate_json((root / manifest).read_text(encoding="utf-8"))
+    assert server._cohort.benchmark == benchmark and server._cohort.setting == "agentic"
 
 
 def request(row, text=r"\boxed{B}", **updates):
@@ -115,24 +134,35 @@ async def test_model_failure_is_masked_and_cannot_be_called_correct(tmp_path, be
 @pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
 @pytest.mark.parametrize(
     "updates",
-    [{}, {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}],
-    ids=["failed_run", "length_limited"],
+    [
+        {"status": "failed", "error": {"code": "invalid_prompt", "message": "fixture: the model refused the request"}},
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+    ],
+    ids=["failed_run", "incomplete_run"],
 )
-async def test_failed_agent_run_stays_zero_when_its_saved_answer_is_replayed(tmp_path, benchmark, updates) -> None:
+async def test_failed_or_incomplete_agent_run_is_zero_also_when_replayed(tmp_path, benchmark, updates) -> None:
     server, rows, _ = make_server(tmp_path, benchmark=benchmark, setting="agentic")
-    failed = response(metadata={EXECUTION_FAILURE_METADATA_KEY: "true"}, **updates)
-    saved, replayed = await grade_failed_run_and_replay(server, VideoMCQAVerifyRequest, rows[0], failed)
-    # The saved row keeps the correct-looking answer for inspection.
+    saved, replayed = await grade_failed_run_and_replay(server, VideoMCQAVerifyRequest, rows[0], response(**updates))
+    # The saved row keeps the correct-looking answer for inspection; its status decides the score on replay too.
     assert final_assistant_text(NeMoGymResponse.model_validate(saved["response"])) == r"\boxed{B}"
     for result in (saved, replayed.model_dump()):
         assert (result["outcome"], result["predicted_answer"], result["reward"]) == ("execution_failure", None, 0)
         assert result["evaluation_completed"] and not result["mask_sample"]
-    # Without the agent's marker the same answer is correct; a failed model call stays inconclusive.
-    assert (await server.verify(request(rows[0], response=response(**updates)))).outcome == "correct"
-    infrastructure = await server.verify(
-        request(rows[0], response={**failed, "status": "failed", "error": {"code": "server_error", "message": "x"}})
-    )
-    assert infrastructure.outcome == "infrastructure_failure" and infrastructure.mask_sample
+    direct = await server.verify(request(rows[0], response=response(**updates)))
+    assert direct.failure_kind == f"{benchmark}:execution_failure" and direct.failure_reason
+    # The same answer in a completed run is correct.
+    assert (await server.verify(request(rows[0]))).outcome == "correct"
+
+
+async def test_a_failed_model_call_is_masked_only_in_the_single_turn_setting(tmp_path) -> None:
+    failed = response(status="failed", error={"code": "server_error", "message": "fixture"})
+    for setting, outcome, masked in (
+        ("single_turn", "infrastructure_failure", True),
+        ("agentic", "execution_failure", False),
+    ):
+        server, rows, _ = make_server(tmp_path, setting=setting)
+        result = await server.verify(request(rows[0], response=failed))
+        assert (result.outcome, result.mask_sample, result.reward) == (outcome, masked, 0)
 
 
 @pytest.mark.parametrize("setting", ["single_turn", "agentic"])
@@ -215,6 +245,26 @@ async def test_a_row_gym_counts_as_zero_stays_missing(tmp_path, benchmark) -> No
     assert measured_metrics[f"{prefix}/is_complete"] is False
 
 
+@pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
+async def test_saved_rule_scored_results_without_question_and_options_aggregate_again(tmp_path, benchmark) -> None:
+    server, rows, _ = make_server(tmp_path, benchmark=benchmark)
+    results = [await measured(server, rows[0]), await measured(server, rows[1], r"\boxed{A}", index=1)]
+    # Results saved before rows carried the question and its options.
+    saved = copy.deepcopy(results)
+    for result in saved:
+        del result["verifier_metadata"]["question"], result["verifier_metadata"]["options"]
+    again = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=saved))
+    current = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=results))
+    prefix = "Video_MME" if benchmark == "videomme_v1" else "LVBench"
+    assert again.key_metrics[f"{prefix}/raw_acc"] == 50 and again.key_metrics[f"{prefix}/is_complete"] is True
+    assert {key: value for key, value in again.agent_metrics.items() if prefix in key} == {
+        key: value for key, value in current.agent_metrics.items() if prefix in key
+    }
+    # Replaying a saved answer grades it as before.
+    replayed = await server.verify(VideoMCQAVerifyRequest.model_validate(saved[0]))
+    assert (replayed.outcome, replayed.reward) == ("correct", 1.0)
+
+
 async def test_no_returned_results_is_provisional_not_perfect(tmp_path) -> None:
     server, _, _ = make_server(tmp_path)
     metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
@@ -240,6 +290,8 @@ async def test_foreign_or_v2_metadata_is_rejected(tmp_path, field, value) -> Non
     row["verifier_metadata"][field] = value
     if field == "task_id":
         row["task_id"] = value
+    if field == "option_count":
+        row["verifier_metadata"]["options"] = row["verifier_metadata"]["options"][:value]
     with pytest.raises(ValueError):
         await server.verify(request(row))
 

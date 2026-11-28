@@ -90,7 +90,7 @@ async def test_discarded_sandbox_stops_conversation_and_preserves_original_error
         assert observation.is_error
         assert control.cancelled.is_set()
 
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     with pytest.raises(openhands_agent.SkillsBenchSandboxError, match="provider disconnected"):
         await SkillsBenchOpenHands.run(agent, "task", environment, None)
     assert _provider().closed_handles == ["sbx-123"]
@@ -345,7 +345,7 @@ async def test_deadline_discards_completed_command_descendants_and_joins_worker(
             worker_finished.set()
 
     environment = SimpleNamespace(exec=sandbox_exec, stop=sandbox_stop)
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     assert await asyncio.to_thread(waiting_for_model.wait, 5)
     assert [observation.exit_code for observation in observations] == [0, 0]
@@ -415,7 +415,7 @@ async def test_timeout_waits_for_worker_before_verifier_can_start() -> None:
         time.sleep(0.05)
         finished.set()
 
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     environment = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/workspace\n")))
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     assert await asyncio.to_thread(started.wait, 5)
@@ -485,7 +485,7 @@ async def test_deadline_discards_active_command_and_joins_worker(detached):
             worker_finished.set()
 
     environment = SimpleNamespace(exec=sandbox_exec, stop=sandbox_stop)
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
@@ -557,7 +557,9 @@ async def test_docker_deadline_discards_detached_processes(tmp_path, completed):
     try:
         await environment.start(force_build=False)
         task = asyncio.create_task(
-            SkillsBenchOpenHands.run(SimpleNamespace(_run_openhands=run_openhands), "Task", environment, None)
+            SkillsBenchOpenHands.run(
+                SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None), "Task", environment, None
+            )
         )
         for _ in range(20):
             probe = await environment.exec("test -f /tmp/service-ready && test ! -f /tmp/answer")
@@ -660,6 +662,26 @@ async def test_unknown_command_exit_discards_sandbox_before_return():
     environment.stop.assert_awaited_once_with(delete=True)
     assert control.cancelled.is_set()
     assert "outcome is unknown" in control.sandbox_failure
+
+
+@pytest.mark.asyncio
+async def test_terminal_commands_outlast_the_trial_agent_deadline(tmp_path):
+    # The longest official budget is 7200 s; scaled by 1.5, Harbor's agent deadline is 10800 s.
+    deadline = 7200 * 1.5
+    agent = SkillsBenchOpenHands(
+        logs_dir=tmp_path, model_name="test-policy", api_base="http://unused.invalid/v1", agent_timeout_sec=deadline
+    )
+    environment = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/root\n", stderr="")), stop=AsyncMock()
+    )
+
+    def run_openhands(_instruction, _environment, _context, instance_id, _cwd, _control):
+        assert _EXECUTORS[instance_id](TerminalAction(command="python simulate.py")).exit_code == 0
+
+    agent._run_openhands = run_openhands
+    await agent.run("task", environment, None)
+    assert environment.exec.await_args_list[-1].kwargs["timeout_sec"] > deadline
+    environment.stop.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -813,7 +835,7 @@ async def test_finished_conversation_drains_soft_wait_before_verification(cancel
         assert result.exit_code == -1
 
     environment = SimpleNamespace(exec=sandbox_exec, stop=sandbox_stop)
-    agent = SimpleNamespace(_run_openhands=run_openhands)
+    agent = SimpleNamespace(_run_openhands=run_openhands, agent_timeout_sec=None)
     task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
     await asyncio.wait_for(started.wait(), timeout=3)
     await asyncio.sleep(0.05)

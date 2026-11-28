@@ -324,7 +324,7 @@ class BoxedExec:
 
     async def _stop(self, box: AsyncSandbox) -> bool:
         try:
-            await asyncio.wait_for(box.stop(), STOP_TIMEOUT_S)  # a hung delete must not hold the phase's release
+            await box.stop(timeout_s=STOP_TIMEOUT_S)  # a hung delete must not hold the phase's release
             return True
         except Exception as exc:  # kept for a later retry; the spec's ttl is the backstop
             logger.warning("collab_intel sandbox stop failed (%s)", type(exc).__name__)
