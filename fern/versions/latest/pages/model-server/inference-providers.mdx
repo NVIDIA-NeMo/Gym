@@ -24,6 +24,7 @@ All provider configs live in [`responses_api_models/inference_provider/configs/`
 |----------|--------|----------|
 | Baseten | `baseten.yaml` | `https://inference.baseten.co/v1` |
 | DeepInfra | `deepinfra.yaml` | `https://api.deepinfra.com/v1/openai` |
+| Doubleword | `doubleword.yaml` | `https://api.doubleword.ai/v1` |
 | Fireworks | `fireworks.yaml` | `https://api.fireworks.ai/inference/v1` |
 | Friendli | `friendli.yaml` | `https://api.friendli.ai/serverless/v1` |
 | Gemini | `gemini.yaml` | `https://generativelanguage.googleapis.com/v1beta/openai` |
@@ -47,6 +48,24 @@ If your provider is not in the table above, also set the base URL:
 # env.yaml
 policy_base_url: https://your-provider.com/v1
 ```
+
+## Doubleword flex inference
+
+The Doubleword config defaults to `service_tier: flex`, trading longer waits for lower inference costs than realtime. It uses blocking Chat Completions requests: Gym waits for each completed answer while independent rollouts can run concurrently. No batch files or background polling are required.
+
+Set `policy_api_key` and `policy_model_name` in `env.yaml`, choosing a model that supports flex from the [Doubleword model catalog](https://docs.doubleword.ai/inference-api/models). Then use the evaluation commands below with:
+
+```bash
+model_config="responses_api_models/inference_provider/configs/doubleword.yaml"
+```
+
+Allow enough output tokens for reasoning as well as the final answer; reaching the token limit can leave an evaluation without a final answer.
+
+The config starts with 16 concurrent requests and enables parsing of reasoning output. Adjust `num_concurrent_requests` for your workload and account limits; larger bursts can increase queueing time. Each dependent step in a multi-turn rollout waits for the preceding model call to finish, so allow for longer evaluation runtimes.
+
+For realtime inference on a supported model, change `extra_body.service_tier` to `priority`. Explicit request parameters take precedence over `extra_body`, including `service_tier`. See [Doubleword's async inference documentation](https://docs.doubleword.ai/inference-api/async-inference) for the latency and pricing tradeoff.
+
+Doubleword supports best-effort implicit prompt caching on cache-supported models, with no extra configuration required. This config leaves provider caching defaults in place and does not request explicit caching. Gym exposes provider-reported cached input tokens in `usage.input_tokens_details.cached_tokens`. Repeated-prefix evaluations may benefit from caching, so distinguish warm-cache results from cold-cache measurements. See [Doubleword’s prompt caching documentation](https://docs.doubleword.ai/inference-api/prompt-caching) for model availability and explicit caching options.
 
 ## Configuration Reference
 
