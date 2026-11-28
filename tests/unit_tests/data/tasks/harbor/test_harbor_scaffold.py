@@ -40,6 +40,14 @@ class TestDatasetInit:
         with pytest.raises(FileExistsError):
             init_dataset(tmp_path, "my-dataset")
 
+    def test_scaffold_names_a_working_directory_below_the_root(self, tmp_path):
+        """The default image sets no WORKDIR, so without `[environment].workdir` the agent and the verifier would work
+        in `/`, which Claude Code and several other harnesses refuse when their agent session is seeded."""
+        from nemo_gym.data.tasks.harbor.scaffold import DEFAULT_IMAGE, init_dataset
+
+        (task,) = discover_tasks(init_dataset(tmp_path, "my-dataset"))
+        assert task.image == DEFAULT_IMAGE and task.workdir == "/workspace"
+
     def test_org_name_is_kept_and_the_folder_is_the_short_name(self, tmp_path):
         """`gym dataset init acme/my-dataset`: the manifest keeps the org, the folder is the name without it."""
         from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config

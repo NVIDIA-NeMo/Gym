@@ -37,6 +37,7 @@ def seed(*, borrowed=True, workdir="/app"):
 
 
 def agent(**kwargs):
+    kwargs.setdefault("anthropic_api_key", "test-key")  # pragma: allowlist secret
     return app.ClaudeCodeAgent(
         config=app.ClaudeCodeAgentConfig(
             name="claude", host="127.0.0.1", port=8080, entrypoint="app.py", claude_code_version="2.1.108", **kwargs
@@ -236,6 +237,20 @@ async def test_unusable_network_access_is_rejected_before_connecting(monkeypatch
     create_provider.assert_not_called()
     constructor.assert_not_called()
     constructor.connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_api_without_a_key_is_rejected_before_connecting(monkeypatch):
+    # No model_server, no anthropic_base_url and no key: every episode would fail auth and still be scored.
+    constructor = MagicMock()
+    monkeypatch.setattr(app, "AsyncSandbox", constructor)
+    create_provider = MagicMock()
+    monkeypatch.setattr(app, "create_provider", create_provider)
+    instance = agent(sandbox_provider="sandbox", sandbox_config={"workdir": "/app"}, anthropic_api_key="")
+    with pytest.raises(AgentSeedRejectedError, match="anthropic_api_key"):
+        await instance._seed_agent_session_state(seed(borrowed=False))
+    create_provider.assert_not_called()
+    constructor.assert_not_called()
 
 
 def test_setup_without_bash_names_it(tmp_path):

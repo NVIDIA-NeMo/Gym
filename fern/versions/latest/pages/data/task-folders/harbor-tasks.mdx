@@ -89,6 +89,9 @@ name = "local/hello"
 
 [environment]
 docker_image = "python:3.12-slim"
+# Where the agent works and the verifier runs. Unset, it is the image's WORKDIR, which is / for an image that
+# sets none, and several harnesses refuse to work in /.
+workdir = "/workspace"
 cpus = 1
 memory_mb = 2048
 storage_mb = 10240
@@ -100,10 +103,13 @@ timeout_sec = 600.0
 timeout_sec = 120.0
 ```
 
-`[environment]` sets the image and the sandbox's resources, and `[agent]` and `[verifier]` set each phase's time
-limit in seconds. `timeout_multiplier` and `resource_multiplier` under `[gym.defaults]` in `dataset.toml` scale
-every task's time limits and its cpus, memory and storage. Gym takes the task ID from the folder name, not from
-`[task].name`. Harbor keys a dataset on `[task].name`, so give every task its own name if you plan to publish.
+`[environment]` sets the image, the working directory and the sandbox's resources, and `[agent]` and `[verifier]` set
+each phase's time limit in seconds. The agent works in `workdir`, and the verifier runs there too. Gym creates it at
+seed. Without `workdir`, the task runs in the image's `WORKDIR`, which is `/` for an image that sets none, such as
+`python:3.12-slim`. Claude Code and several other harnesses refuse to work in `/`. `timeout_multiplier` and
+`resource_multiplier` under `[gym.defaults]` in `dataset.toml` scale every task's time limits and its cpus, memory
+and storage. Gym takes the task ID from the folder name, not from `[task].name`. Harbor keys a dataset on
+`[task].name`, so give every task its own name if you plan to publish.
 
 ### The environment
 

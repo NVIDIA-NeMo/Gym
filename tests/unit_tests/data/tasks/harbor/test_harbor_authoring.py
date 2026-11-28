@@ -1979,6 +1979,8 @@ class TestScaffold:
         prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["hello-1", "hello-2", "hello-3"]
         assert all(t.python_verifier is not None and t.has_solution and t.has_answer for t in prepared.tasks)
+        # Every rendered task keeps the template's working directory, so the agent never works in the image's `/`.
+        assert {t.workdir for t in prepared.tasks} == {"/workspace"}
         rows = [json.loads(line) for line in prepared.rows_path.read_text().splitlines()]
         assert rows[1]["task_input"]["task_data"]["answer"] == "42"
         task = prepared.tasks[2]

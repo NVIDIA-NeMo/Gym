@@ -67,6 +67,9 @@ name = "{org}/{task}"
 
 [environment]
 docker_image = "{image}"
+# Where the agent works and the verifier runs. Unset, it is the image's WORKDIR, which is / for an image that
+# sets none, and several harnesses refuse to work in /.
+workdir = "/workspace"
 cpus = 1
 memory_mb = 2048
 storage_mb = 10240

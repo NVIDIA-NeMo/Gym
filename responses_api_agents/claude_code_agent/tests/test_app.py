@@ -27,6 +27,7 @@ import pytest
 import yaml
 from fastapi import Request
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 
 from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
@@ -53,7 +54,11 @@ from responses_api_agents.claude_code_agent.app import (
     _invocation_outcome,
     parse_stream_json,
 )
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations, read_transcripts
+from responses_api_agents.claude_code_agent.observability import (
+    TESTED_CLAUDE_CODE_VERSION,
+    extract_claude_code_observations,
+    read_transcripts,
+)
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -66,6 +71,8 @@ def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
 
 def _config(**kwargs) -> ClaudeCodeAgentConfig:
     kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name=""))
+    # Direct-path agents refuse to run without a key; model_server/anthropic_base_url tests ignore it.
+    kwargs.setdefault("anthropic_api_key", "test-key")  # pragma: allowlist secret
     return ClaudeCodeAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -928,6 +935,25 @@ class TestRolloutCorrelation:
 
         assert captured["base_url"] == base_url
 
+    def test_run_refuses_a_direct_api_call_without_a_key(self) -> None:
+        agent = _make_agent(anthropic_api_key="")
+        agent.server_client.post = AsyncMock(side_effect=AssertionError("must refuse before seeding"))
+        response = TestClient(agent.setup_webserver(), raise_server_exceptions=False).post(
+            "/run", json={"responses_create_params": {"input": "hi"}}
+        )
+        assert response.status_code == 422, response.text
+        assert "anthropic_api_key" in response.json()["detail"]
+
+    @pytest.mark.parametrize(
+        "routing",
+        [
+            {"model_server": ModelServerRef(type="responses_api_models", name="policy_model")},
+            {"anthropic_base_url": "http://localhost:8000"},
+        ],
+    )
+    def test_a_routed_agent_needs_no_key(self, routing: dict) -> None:
+        assert _make_agent(anthropic_api_key="", **routing)._missing_direct_api_key() is None
+
 
 class TestExtractInstruction:
     def test_user_only(self) -> None:
@@ -1531,6 +1557,28 @@ class TestConfigYaml:
         assert inner["max_turns"] == 30
         # Restricting egress is opt-in: the shipped default leaves the provider's network alone.
         assert inner["network_access"] == "inherit"
+
+    def test_shipped_configs_pin_the_tested_claude_code_version(self) -> None:
+        # Sandbox sessions refuse to seed without an exact version, so the shipped config must carry one.
+        configs = Path(__file__).resolve().parent.parent / "configs"
+        for cfg_path in (configs / "claude_code_agent.yaml", configs / "profiles" / "benchmark.yaml"):
+            data = yaml.safe_load(cfg_path.read_text())
+            inner = data["claude_code_agent"]["responses_api_agents"]["claude_code_agent"]
+            assert inner["claude_code_version"] == TESTED_CLAUDE_CODE_VERSION, cfg_path.name
+
+    def test_config_resolves_without_an_anthropic_api_key(self) -> None:
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "claude_code_agent.yaml"
+        config = OmegaConf.load(cfg_path)
+
+        def resolved_key(cfg) -> str:
+            resolved = OmegaConf.to_container(cfg, resolve=True)
+            return resolved["claude_code_agent"]["responses_api_agents"]["claude_code_agent"]["anthropic_api_key"]
+
+        # A run through a Gym model server or a local endpoint needs no key at all.
+        assert resolved_key(config) == ""
+        # A key set at the top level (env.yaml or the command line) still reaches the agent.
+        key = "sk-test"  # pragma: allowlist secret
+        assert resolved_key(OmegaConf.merge(config, {"anthropic_api_key": key})) == key
 
 
 class TestCaptureFriendlyTranscript:

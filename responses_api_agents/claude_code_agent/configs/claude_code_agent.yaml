@@ -6,7 +6,7 @@ claude_code_agent:
       model_server: null  # Gym model-server ref, or use anthropic_base_url directly
       concurrency: 32
       model: claude-sonnet-4-6
-      anthropic_api_key: ${anthropic_api_key}
+      anthropic_api_key: ${oc.select:anthropic_api_key,""}  # unused with model_server; the Anthropic key or the anthropic_base_url token
       anthropic_base_url: null
       max_turns: 30
       timeout: 300
@@ -15,7 +15,7 @@ claude_code_agent:
       disallowed_tools: null
       tools: null  # restrict the available built-in tool set (--tools)
       session_name: null  # explicit session name (--name)
-      claude_code_version: null  # sandbox sessions require an exact version, e.g. "2.1.108"
+      claude_code_version: "2.1.108"  # tested version; sandbox sessions require an exact one, null installs the latest locally
       # Runtime capabilities. Defaults keep the runtime isolated/reproducible.
       bare: true  # set false to auto-discover skills, hooks, plugins, MCP, memory, CLAUDE.md
       mcp_config: null  # path to an MCP server config file (--mcp-config); works even with bare: true
