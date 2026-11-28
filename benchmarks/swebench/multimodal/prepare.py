@@ -25,8 +25,10 @@ The test patch's binary files (``image_assets["test_patch"]``, the reference ima
 tasks) are downloaded too and stored in the row as ``content_base64``. The evaluation copies them
 into place, so the verifier sandbox needs no internet access either.
 
-The test split is not prepared: the SWE-bench harness pinned by the swebench resources server
-(swebench 4.1.0) has no environment specs for its repositories.
+The test split is prepared by benchmarks/swebench/multimodal_test/prepare.py with the same row
+format. The swebench 4.1.0 harness the swebench resources server pins has no environment specs for
+the test split's repositories, so that benchmark's resources server evaluates each row with the
+image, evaluation script and log parser the row carries (``evaluation_spec_source: row``).
 """
 
 import base64
@@ -104,11 +106,23 @@ def with_test_asset_contents(image_assets: dict, fetch: Callable[[str], bytes] =
     return image_assets | {"test_patch": test_assets} if test_assets else image_assets
 
 
-def issue_image_parts(urls: list[str], fetch: Callable[[str], bytes] = fetch_url) -> list[dict]:
-    """``input_image`` parts for the issue's images, in issue order."""
+def issue_image_parts(
+    urls: list[str], fetch: Callable[[str], bytes] = fetch_url, *, skip_unreachable: bool = False
+) -> list[dict]:
+    """``input_image`` parts for the issue's images, in issue order.
+
+    With ``skip_unreachable``, an image that cannot be downloaded is left out and its URL stays in the issue text;
+    otherwise the failure stops the preparation.
+    """
     parts = []
     for url in urls:
-        content = fetch(url)
+        try:
+            content = fetch(url)
+        except OSError as error:
+            if not skip_unreachable:
+                raise
+            print(f"Skipping issue image that could not be downloaded: {url} ({error})")
+            continue
         media_type = sniff_image_media_type(content)
         if media_type is None:
             print(f"Skipping issue asset that is not a PNG, JPEG, GIF or WebP image: {url}")
@@ -118,19 +132,26 @@ def issue_image_parts(urls: list[str], fetch: Callable[[str], bytes] = fetch_url
     return parts
 
 
-def build_row(row: dict, prompt_template: str, fetch: Callable[[str], bytes] = fetch_url) -> dict:
+def build_row(
+    row: dict,
+    prompt_template: str,
+    fetch: Callable[[str], bytes] = fetch_url,
+    *,
+    split: str = SPLIT,
+    skip_unreachable_issue_images: bool = False,
+) -> dict:
     prompt = prompt_template.replace("{{ workspace_path }}", "/testbed").replace(
         "{{ instance.problem_statement }}", row["problem_statement"]
     )
     image_assets = parse_image_assets(row.get("image_assets"))
-    images = issue_image_parts(issue_image_urls(image_assets), fetch)
+    images = issue_image_parts(issue_image_urls(image_assets), fetch, skip_unreachable=skip_unreachable_issue_images)
     content = [{"type": "input_text", "text": prompt}, *images] if images else prompt
 
     row = row | {
         "image_assets": with_test_asset_contents(image_assets, fetch),
         "responses_create_params": {"input": [{"role": "user", "content": content}]},
         "subset": "multimodal",
-        "split": SPLIT,
+        "split": split,
         # SWE Bench Multimodal doesn't have/use these
         "environment_setup_commit": "",
         "difficulty": "",
@@ -141,17 +162,27 @@ def build_row(row: dict, prompt_template: str, fetch: Callable[[str], bytes] = f
     return row
 
 
-def prepare() -> Path:
-    ds = load_dataset(DATASET_NAME, split=SPLIT, token=get_hf_token())
+def prepare(
+    split: str = SPLIT,
+    output_fpath: Path = OUTPUT_FPATH,
+    revision: Optional[str] = None,
+    *,
+    skip_unreachable_issue_images: bool = False,
+) -> Path:
+    """Write ``split`` of the dataset, at ``revision`` if given, to ``output_fpath``."""
+    ds = load_dataset(DATASET_NAME, split=split, revision=revision, token=get_hf_token())
 
     prompt_template = Path("benchmarks/swebench/minimax_prompt.txt").read_text()
 
-    with OUTPUT_FPATH.open("w", encoding="utf-8") as fout:
+    with output_fpath.open("w", encoding="utf-8") as fout:
         for row in ds:
-            fout.write(json.dumps(build_row(row, prompt_template)) + "\n")
+            row = build_row(
+                row, prompt_template, split=split, skip_unreachable_issue_images=skip_unreachable_issue_images
+            )
+            fout.write(json.dumps(row) + "\n")
 
-    print(f"Wrote {len(ds)} problems to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    print(f"Wrote {len(ds)} problems to {output_fpath}")
+    return output_fpath
 
 
 if __name__ == "__main__":

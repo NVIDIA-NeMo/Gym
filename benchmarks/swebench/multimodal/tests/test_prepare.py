@@ -16,11 +16,14 @@
 
 import base64
 import json
+import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
 from benchmarks.swebench.multimodal import prepare
+from benchmarks.swebench.multimodal_test import prepare as test_split_prepare
 from resources_servers.swebench.task_data import TaskData
 
 
@@ -177,3 +180,50 @@ def test_fetch_url_raises_after_the_last_attempt(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(OSError, match="not found"):
         prepare.fetch_url("https://example.com/a.png")
+
+
+def test_an_unreachable_issue_image_stops_the_preparation_unless_skipping_is_asked(capsys) -> None:
+    def fetch(url: str) -> bytes:
+        if url.endswith("gone.png"):
+            raise urllib.error.URLError("Name or service not known")
+        return PNG
+
+    urls = ["https://example.com/a.png", "https://gone.example/gone.png"]
+    with pytest.raises(urllib.error.URLError):
+        prepare.issue_image_parts(urls, fetch)
+
+    parts = prepare.issue_image_parts(urls, fetch, skip_unreachable=True)
+    assert [_decode(part["image_url"]) for part in parts] == [("data:image/png;base64", PNG)]
+    assert "could not be downloaded: https://gone.example/gone.png" in capsys.readouterr().out
+
+
+def test_build_row_records_its_split_and_keeps_the_rows_evaluation_fields() -> None:
+    evaluation = {
+        "image": "swebench/sweb.eval.x86_64.chartjs_1776_chart.js-1:latest",
+        "eval_script": "#!/bin/bash\necho hi",
+        "log_parser": "parse_log_chart_js",
+        "eval_type": "fail_only",
+    }
+    out = prepare.build_row(_row({"problem_statement": []}) | evaluation, TEMPLATE, fetch=pytest.fail, split="test")
+    assert out["split"] == "test"
+    assert {key: out[key] for key in evaluation} == evaluation
+
+
+def test_the_test_split_prepare_writes_the_pinned_split_and_skips_unreachable_issue_images(monkeypatch) -> None:
+    calls = []
+
+    def prepare_split(split: str, output_fpath: Path, revision: str, **kwargs: bool) -> Path:
+        calls.append((split, output_fpath, revision, kwargs))
+        return output_fpath
+
+    monkeypatch.setattr(test_split_prepare, "prepare_split", prepare_split)
+    assert test_split_prepare.prepare() == test_split_prepare.OUTPUT_FPATH
+    assert calls == [
+        (
+            "test",
+            test_split_prepare.OUTPUT_FPATH,
+            "4e6662d51c48e475f7f346e4fa09a6f8b31fcaa5",
+            {"skip_unreachable_issue_images": True},
+        )
+    ]
+    assert test_split_prepare.OUTPUT_FPATH.name == "swebench_multimodal_test_benchmark.jsonl"

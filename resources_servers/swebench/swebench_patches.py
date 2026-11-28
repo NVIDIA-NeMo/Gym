@@ -26,6 +26,7 @@ from swebench.harness.run_evaluation import *
 from nemo_gym import PARENT_DIR
 from nemo_gym.sandbox import AsyncSandbox
 from resources_servers.swebench.failure_only_grading import failure_only_suite_completed
+from resources_servers.swebench.row_evaluation import RowTestSpec, get_row_eval_report, karma_runs_completed
 
 
 # The eval script's stderr joins its stdout, in order. SWE-bench's start and end markers are no-op commands that
@@ -34,12 +35,37 @@ from resources_servers.swebench.failure_only_grading import failure_only_suite_c
 # tests print on stdout before the start marker.
 EVAL_SCRIPT_COMMAND = "/bin/bash /eval.sh 2>&1"
 
+# How SWE-bench 5 applies a patch (run_evaluation.py, v5.0.1, MIT): a three-way merge before the partial --reject,
+# patch(1) only forwards, and a clean tree before each attempt. Used for rows that define their evaluation; the
+# harness path keeps the pinned harness's GIT_APPLY_CMDS.
+ROW_GIT_APPLY_CMDS = [
+    "git apply --verbose",
+    "git apply --verbose --3way",
+    "git apply --verbose --reject",
+    "patch --batch --forward --fuzz=5 -p1 -i",
+]
+RESET_WORKTREE_COMMAND = "/bin/bash -c 'git checkout -- . ; git clean -fd'"
+
+
+def eval_report_for(test_spec: TestSpec | RowTestSpec, pred: dict, test_output_path: Path) -> dict:
+    """SWE-bench's report for ``pred``. A row that defines its own evaluation is graded with its own log parser and
+    eval_type under SWE-bench 5's rules, which also refuse a fail_only verdict from a log that shows no sign the
+    suite ran; any other test spec with the pinned harness."""
+    if isinstance(test_spec, RowTestSpec):
+        return get_row_eval_report(test_spec, pred, str(test_output_path), include_tests_status=True)
+    return get_eval_report(
+        test_spec=test_spec,
+        prediction=pred,
+        test_log_path=test_output_path,
+        include_tests_status=True,
+    )
+
 
 # @bxyu-nvidia: We modify the run_instance function to:
 # 1. Enable async container operations.
 # 2. Avoid complicated patching logic.
 async def run_instance(
-    test_spec: TestSpec,
+    test_spec: TestSpec | RowTestSpec,
     pred: dict,
     rm_image: bool,
     force_rebuild: bool,
@@ -72,12 +98,7 @@ async def run_instance(
         test_output_path = log_dir / LOG_TEST_OUTPUT
         if not test_output_path.exists():
             raise ValueError(f"Test output file {test_output_path} does not exist")
-        report = get_eval_report(
-            test_spec=test_spec,
-            prediction=pred,
-            test_log_path=test_output_path,
-            include_tests_status=True,
-        )
+        report = eval_report_for(test_spec, pred, test_output_path)
         # Write report to report.json
         with open(report_path, "w") as f:
             f.write(json.dumps(report, indent=4))
@@ -140,7 +161,11 @@ async def run_instance(
 
         # Attempt to apply patch to container (TODO: FIX THIS)
         applied_patch = False
-        for git_apply_cmd in GIT_APPLY_CMDS:
+        row_defined = isinstance(test_spec, RowTestSpec)
+        for attempt, git_apply_cmd in enumerate(ROW_GIT_APPLY_CMDS if row_defined else GIT_APPLY_CMDS):
+            if row_defined and attempt:
+                # A failed attempt (notably --reject) leaves a partly patched tree; start the next from a clean one.
+                await container.exec_run(RESET_WORKTREE_COMMAND, workdir=DOCKER_WORKDIR, user=DOCKER_USER)
             val = await container.exec_run(
                 f"{git_apply_cmd} {DOCKER_PATCH}",
                 workdir=DOCKER_WORKDIR,
@@ -152,6 +177,14 @@ async def run_instance(
                 break
             else:
                 logger.info(f"Failed to apply patch to container: {git_apply_cmd}")
+        if not applied_patch and row_defined:
+            # The fallbacks can leave the patch fully applied while each exited non-zero.
+            reverse_check = await container.exec_run(
+                f"git apply --check --reverse {DOCKER_PATCH}", workdir=DOCKER_WORKDIR, user=DOCKER_USER
+            )
+            if reverse_check.exit_code == 0:
+                logger.info(f"{APPLY_PATCH_PASS}: verified already applied")
+                applied_patch = True
 
         # The jqlang__jq-2681 image contains dirty generated lexer files from
         # a different Flex version. Apply its golden source files only; jq's
@@ -229,16 +262,13 @@ async def run_instance(
 
         # Get report from test output
         logger.info(f"Grading answer for {instance_id}...")
-        eval_report = get_eval_report(
-            test_spec=test_spec,
-            prediction=pred,
-            test_log_path=test_output_path,
-            include_tests_status=True,
-        )
+        eval_report = eval_report_for(test_spec, pred, test_output_path)
         # Failure-only grading counts every test missing from the log as passing, so a suite that never started or
-        # stopped part way would read as resolved. Accept that verdict only from a suite that ran to completion.
+        # stopped part way would read as resolved. Accept that verdict only from a suite that ran to completion. The
+        # row grader makes its own check.
         if (
             eval_report[instance_id]["resolved"]
+            and not isinstance(test_spec, RowTestSpec)
             and test_spec.repo in FAIL_ONLY_REPOS
             and not failure_only_suite_completed(test_spec.repo, test_output)
         ):
@@ -246,6 +276,19 @@ async def run_instance(
                 instance_id,
                 f"The {test_spec.repo} test suite did not run to completion, so its failure-only report shows no "
                 "verdict",
+                logger,
+            )
+        # The same rule for a fail_only row: a Karma run that stopped part way shows no verdict.
+        if (
+            eval_report[instance_id]["resolved"]
+            and isinstance(test_spec, RowTestSpec)
+            and test_spec.eval_type == "fail_only"
+            and not karma_runs_completed(test_output)
+        ):
+            raise EvaluationError(
+                instance_id,
+                f"The {test_spec.repo} Karma run did not execute every planned test, so its failure-only report shows "
+                "no verdict",
                 logger,
             )
         report = eval_report
@@ -285,6 +328,49 @@ async def run_instance(
             "patch_apply_failed": patch_apply_failed,
             "error": error,
         }
+
+
+# OpenLayers' tests use WebGL in Chrome under Xvfb. Without a GPU that needs Chrome's software renderer (SwiftShader),
+# which Chrome does not fall back to in a sandbox that lets it start its own sandbox: WebGL context creation fails and
+# a WebGL test's hook error ends the Karma suite part way. Under Docker's default seccomp Chrome cannot start its
+# sandbox and runs unsandboxed with software WebGL (SWE-bench#636). A wrapper at the path the evaluation script launches
+# Chrome from gives it that setup; with fewer flags, Karma still stopped part way in some runs.
+OPENLAYERS_CHROME_FLAGS = "--no-sandbox --enable-unsafe-swiftshader --use-angle=swiftshader --ignore-gpu-blocklist"
+OPENLAYERS_CHROME_WRAPPER = (
+    "[ -e /usr/bin/google-chrome-stable.real ] || { mv /usr/bin/google-chrome-stable /usr/bin/google-chrome-stable.real"
+    f" && printf '#!/bin/sh\\nexec /usr/bin/google-chrome-stable.real {OPENLAYERS_CHROME_FLAGS} \"$@\"\\n'"
+    " > /usr/bin/google-chrome-stable && chmod 755 /usr/bin/google-chrome-stable; }"
+)
+
+
+def patch_swebench_openlayers_software_webgl(test_spec: Any) -> None:
+    """Give OpenLayers' Chrome the software WebGL renderer before its tests start."""
+    if test_spec.repo != "openlayers/openlayers" or OPENLAYERS_CHROME_WRAPPER in test_spec.eval_script_list:
+        return
+    start = f": '{START_TEST_OUTPUT}'"
+    if start not in test_spec.eval_script_list:
+        raise ValueError(f"The evaluation script of {test_spec.instance_id} has no start-of-test-output marker")
+    test_spec.eval_script_list.insert(test_spec.eval_script_list.index(start), OPENLAYERS_CHROME_WRAPPER)
+
+
+# Some evaluation scripts run several `xvfb-run` commands on display :99 one after another. xvfb-run returns before the
+# X server it stopped has exited, so the next one can fail with "Xvfb failed to start" and that suite never runs. A
+# wrapper makes xvfb-run wait (up to 30 s) until the server named in the display's lock file has exited.
+XVFB_RUN_WRAPPER = (
+    "[ -e /usr/bin/xvfb-run.real ] || { mv /usr/bin/xvfb-run /usr/bin/xvfb-run.real && printf '#!/bin/sh\\n"
+    'for i in $(seq 30); do [ -e /tmp/.X99-lock ] && kill -0 "$(tr -d " " < /tmp/.X99-lock)" 2>/dev/null '
+    '|| break; sleep 1; done\\nexec /usr/bin/xvfb-run.real "$@"\\n\' > /usr/bin/xvfb-run && chmod 755 /usr/bin/xvfb-run; }'
+)
+
+
+def patch_swebench_xvfb_run_wait(test_spec: Any) -> None:
+    """Make a script that starts Xvfb wait for the previous X server before starting the next."""
+    start = f": '{START_TEST_OUTPUT}'"
+    if XVFB_RUN_WRAPPER in test_spec.eval_script_list or start not in test_spec.eval_script_list:
+        return
+    index = test_spec.eval_script_list.index(start)
+    if any("xvfb-run" in line for line in test_spec.eval_script_list[index:]):
+        test_spec.eval_script_list.insert(index, XVFB_RUN_WRAPPER)
 
 
 ########################################

@@ -23,7 +23,7 @@ from shutil import rmtree
 from tempfile import TemporaryDirectory
 from time import monotonic, time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, Literal, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from fastapi import Request
@@ -65,6 +65,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.trajectory import SandboxObservation
 from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
+from resources_servers.swebench.row_evaluation import RowTestSpec, insert_test_asset_restore, make_row_test_spec
 from resources_servers.swebench.sandbox_session_checkpoints import (
     CheckpointedSandboxSessionResourcesServer,
     SandboxCheckpointFields,
@@ -74,8 +75,10 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_sandbox,
+    patch_swebench_openlayers_software_webgl,
     patch_swebench_pytest_result_summary,
     patch_swebench_verified_env_vars,
+    patch_swebench_xvfb_run_wait,
     run_instance,
 )
 from resources_servers.swebench.task_data import SWEBenchImageAssets, SWEBenchTestAsset, image_assets_from_json
@@ -114,6 +117,13 @@ class SwebenchResourcesServerConfig(SandboxCheckpointFields, BaseResourcesServer
 
     evaluation_timeout: Optional[int] = None
 
+    # Where the test spec comes from. `swebench_harness`: the pinned swebench harness derives the image, evaluation
+    # script and log parser from per-repository specs. `row`: the row's own `image`, `eval_script`, `log_parser` and
+    # `eval_type` (SWE-bench's row format since swebench 5.0), graded with SWE-bench 5's rules
+    # (resources_servers/swebench/row_evaluation.py). The SWE-bench Multimodal test split needs `row`: the pinned
+    # harness has no specs for its repositories.
+    evaluation_spec_source: Literal["swebench_harness", "row"] = "swebench_harness"
+
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
@@ -148,6 +158,12 @@ class SWEBenchInstanceRequest(BaseModel):
     # SWE-bench Multimodal only. Its evaluation script restores the test patch's binary files (reference images)
     # from here, so the field must reach make_test_spec.
     image_assets: Optional[SWEBenchImageAssets] = None
+    # A row's own evaluation, read when the server's evaluation_spec_source is `row`: the prebuilt image, the full
+    # evaluation script, the name of the log parser, and `pass_and_fail` or `fail_only`.
+    image: str | None = None
+    eval_script: str | None = None
+    log_parser: str | None = None
+    eval_type: str | None = None
 
     @field_validator("image_assets", mode="before")
     @classmethod
@@ -156,6 +172,43 @@ class SWEBenchInstanceRequest(BaseModel):
 
     def test_assets(self) -> list[SWEBenchTestAsset]:
         return self.image_assets.test_patch if self.image_assets else []
+
+
+# The fields of a row's own evaluation, which only the `row` evaluation spec source reads.
+_ROW_EVALUATION_FIELDS = frozenset({"image", "eval_script", "log_parser", "eval_type"})
+
+# SWE-bench Multimodal test tasks whose FAIL_TO_PASS lists only OpenLayers rendering cases (`./cases/<name>/main.js`)
+# and no test that the test patch adds. The unpatched code passes those cases too, so these tasks score as resolved
+# without a fix. The dataset keeps them; RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC reports the score
+# without them next to the official one.
+OPENLAYERS_RENDERING_ONLY_INSTANCE_IDS = frozenset(
+    f"openlayers__openlayers-{number}"
+    for number in (
+        *(12194, 12373, 12393, 12467, 12683, 12962, 12965, 13013, 13020, 13069),
+        *(13119, 13150, 13198, 13212, 13226, 13269, 13333, 13509, 13547, 13648),
+        *(13654, 13669, 13823, 13974, 13975, 13981, 14015, 14051, 14066, 14332),
+        *(14414, 14619, 14659, 14719, 14932, 14945, 15114, 15168, 15229, 15234),
+        *(15271, 15365, 15466, 15484, 15614, 15683, 15685, 15787, 15796, 15825),
+    )
+)
+RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC = "mean/resolved_without_openlayers_rendering_only"
+
+
+def resolved_without_openlayers_rendering_only(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+    """The mean `resolved` over the rollouts of every task except the OpenLayers rendering-only ones.
+
+    Returns nothing unless the run includes one of those tasks, so other SWE-bench benchmarks gain no metric.
+    """
+    rollouts = [rollout for task in tasks for rollout in task if rollout.get("instance_id")]
+    if not any(rollout["instance_id"] in OPENLAYERS_RENDERING_ONLY_INSTANCE_IDS for rollout in rollouts):
+        return {}
+    kept = [rollout for rollout in rollouts if rollout["instance_id"] not in OPENLAYERS_RENDERING_ONLY_INSTANCE_IDS]
+    if not kept:
+        return {}
+    return {
+        RESOLVED_WITHOUT_OPENLAYERS_RENDERING_ONLY_METRIC: sum(bool(rollout.get("resolved")) for rollout in kept)
+        / len(kept)
+    }
 
 
 class SWEBenchVerifyRequest(SWEBenchInstanceRequest, BaseVerifyRequest):
@@ -256,8 +309,10 @@ class DockerContainer(BaseModel):
 
     async def copy(self, src: Path, dest: Path) -> None:
         if "eval.sh" in str(src):
-            data = src.read_text()
-            src.write_text(patch_swebench_multilingual_golden_patch_pass(data, self.instance_id))
+            # newline="": a test patch for a file with CRLF line endings must keep its carriage returns, or it no
+            # longer applies.
+            data = src.read_text(newline="")
+            src.write_text(patch_swebench_multilingual_golden_patch_pass(data, self.instance_id), newline="")
 
         try:
             await self._inner_container.upload(local_path=src, remote_path=str(dest))
@@ -353,9 +408,15 @@ class SwebenchResourcesServer(CheckpointedSandboxSessionResourcesServer):
 
         self._session_id_to_seed_head: Dict[str, str] = dict()
 
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return resolved_without_openlayers_rendering_only(tasks)
+
+    def compute_repeat_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return resolved_without_openlayers_rendering_only(tasks)
+
     async def _create_sandbox(
         self,
-        test_spec: TestSpec,
+        test_spec: TestSpec | RowTestSpec,
         *,
         test_assets: Sequence[SWEBenchTestAsset] = (),
         task_session_id: str | None = None,
@@ -421,12 +482,35 @@ class SwebenchResourcesServer(CheckpointedSandboxSessionResourcesServer):
 
         return eval_sandbox
 
-    def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec:
+    def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec | RowTestSpec:
+        if self.config.evaluation_spec_source == "row":
+            row_test_spec = make_row_test_spec(
+                instance_id=body.instance_id,
+                repo=body.repo,
+                version=body.version,
+                base_commit=body.base_commit,
+                image=body.image,
+                eval_script=body.eval_script,
+                log_parser=body.log_parser,
+                eval_type=body.eval_type,
+                fail_to_pass=body.FAIL_TO_PASS,
+                pass_to_pass=body.PASS_TO_PASS,
+            )
+            insert_test_asset_restore(
+                row_test_spec,
+                [(staged_test_asset_path(index), asset.path) for index, asset in enumerate(body.test_assets())],
+            )
+            patch_swebench_openlayers_software_webgl(row_test_spec)
+            patch_swebench_xvfb_run_wait(row_test_spec)
+            return row_test_spec
         test_spec = make_test_spec(
             # This accepts a SWEbenchInstance: our body's instance fields, without the agent's request and response.
             # SWE-bench reads some optional keys whenever they are present, such as image_assets for JavaScript,
-            # so an unset optional field is left out rather than sent as null.
-            body.model_dump(include=set(SWEBenchInstanceRequest.model_fields), exclude_none=True),
+            # so an unset optional field is left out rather than sent as null. The row's own evaluation fields are
+            # left out too: the harness derives its own.
+            body.model_dump(
+                include=set(SWEBenchInstanceRequest.model_fields) - _ROW_EVALUATION_FIELDS, exclude_none=True
+            ),
             namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
             env_image_tag=LATEST,
