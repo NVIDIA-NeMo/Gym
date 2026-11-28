@@ -9,7 +9,9 @@ is accepted and dropped, as Harbor drops it. Keys this mirror does not know are 
 them; :meth:`HarborSettings.unknown_keys` lists them so the loader can say so.
 """
 
+import os
 import re
+from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import Any, ClassVar, Literal, get_args
 
@@ -70,12 +72,78 @@ class HarborHealthcheck(HarborSettings):
     retries: int = 3
 
 
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SENSITIVE_HEADER_RE = re.compile(r"(KEY|SECRET|TOKEN(?!S)|PASSWORD|CREDENTIAL|AUTH)", re.IGNORECASE)
+_COOKIE_HEADER_NAMES = frozenset({"cookie", "set-cookie"})
+_AUTH_SCHEME_RE = re.compile(r"^[A-Za-z]+$")
+
+
+def _parse_header_templates(value: str) -> list[tuple[int, int, str, str | None]]:
+    """Return ``(start, end, var_name, default_or_none)`` spans for ``${VAR}`` references in ``value``."""
+    spans: list[tuple[int, int, str, str | None]] = []
+    pos = 0
+    while (start := value.find("${", pos)) != -1:
+        end = value.find("}", start + 2)
+        if end == -1:
+            raise ValueError("unclosed '${' environment variable reference")
+        inner = value[start + 2 : end]
+        if "${" in inner:
+            raise ValueError("nested '${' environment variable references are not supported")
+        var_name, has_default, default = inner.partition(":-")
+        if not _ENV_VAR_NAME_RE.fullmatch(var_name):
+            raise ValueError(f"invalid environment variable name {var_name!r}")
+        spans.append((start, end + 1, var_name, default if has_default else None))
+        pos = end + 1
+    return spans
+
+
+def _has_literal_credential(header_name: str, value: str, spans: list[tuple[int, int, str, str | None]]) -> bool:
+    """Whether ``value`` contains a literal credential outside ``${VAR}`` references."""
+    sensitive_header = bool(_SENSITIVE_HEADER_RE.search(header_name)) or header_name.lower() in _COOKIE_HEADER_NAMES
+    if any(
+        default and (sensitive_header or bool(_SENSITIVE_HEADER_RE.search(var_name)))
+        for _, _, var_name, default in spans
+    ):
+        return True
+    if not sensitive_header or not value.strip():
+        return False
+    if not spans:
+        return True
+    prefix = value[: spans[0][0]]
+    if prefix.strip() and not (prefix[-1].isspace() and _AUTH_SCHEME_RE.fullmatch(prefix.strip())):
+        return True
+    for prev, nxt in zip(spans, spans[1:]):
+        if value[prev[1] : nxt[0]].strip(" \t\r\n:-"):
+            return True
+    return bool(value[spans[-1][1] :].strip())
+
+
+def _validate_mcp_headers(headers: Mapping[str, str]) -> None:
+    """Validate MCP HTTP header names, line-break safety, template syntax, and credential placeholders."""
+    for header_name, value in headers.items():
+        if not _HTTP_HEADER_NAME_RE.fullmatch(header_name):
+            raise ValueError(f"Invalid MCP HTTP header name: {header_name!r}")
+        if "\r" in value or "\n" in value or "\0" in value:
+            raise ValueError(f"MCP HTTP header {header_name!r} must not contain newlines")
+        try:
+            spans = _parse_header_templates(value)
+        except ValueError as exc:
+            raise ValueError(f"MCP HTTP header {header_name!r}: {exc}") from exc
+        if _has_literal_credential(header_name, value, spans):
+            raise ValueError(
+                f"MCP HTTP header {header_name!r} must reference credentials as ${{VAR}} without a literal "
+                "default, such as 'Bearer ${TOKEN}'"
+            )
+
+
 class HarborMCPServer(HarborSettings):
     name: str
     transport: Literal["stdio", "sse", "streamable-http"] = "sse"
     url: str | None = None
     command: str | None = None
     args: list[str] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
 
     @model_validator(mode="before")
     @classmethod
@@ -88,7 +156,40 @@ class HarborMCPServer(HarborSettings):
     def require_endpoint(self) -> "HarborMCPServer":
         if not (self.command if self.transport == "stdio" else self.url):
             raise ValueError(f"MCP server {self.name!r}: stdio needs `command`, other transports need `url`")
+        if self.transport == "stdio" and self.headers:
+            raise ValueError(
+                f"MCP server {self.name!r}: `headers` is only supported for HTTP transports (`sse`, `streamable-http`)"
+            )
+        _validate_mcp_headers(self.headers)
         return self
+
+    def resolved_headers(self, env: Mapping[str, str] | None = None) -> dict[str, str]:
+        """Return HTTP headers with embedded ``${VAR}`` and ``${VAR:-default}`` references resolved."""
+        if not self.headers:
+            return {}
+        source = os.environ if env is None else env
+        resolved: dict[str, str] = {}
+        for header_name, raw_value in self.headers.items():
+            spans = _parse_header_templates(raw_value)
+            parts: list[str] = []
+            pos = 0
+            for start, end, var_name, default in spans:
+                parts.append(raw_value[pos:start])
+                if var_name in source:
+                    parts.append(source[var_name])
+                elif default is not None:
+                    parts.append(default)
+                else:
+                    raise ValueError(
+                        f"Environment variable {var_name!r} is required by MCP server {self.name!r} header {header_name!r}"
+                    )
+                pos = end
+            parts.append(raw_value[pos:])
+            value = "".join(parts)
+            if "\r" in value or "\n" in value or "\0" in value:
+                raise ValueError(f"MCP HTTP header {header_name!r} must not contain newlines")
+            resolved[header_name] = value
+        return resolved
 
 
 class HarborPhaseSettings(HarborSettings):

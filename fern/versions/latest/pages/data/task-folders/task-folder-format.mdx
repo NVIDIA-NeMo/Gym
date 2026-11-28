@@ -59,7 +59,7 @@ Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy sp
 | `env` | `{}` | Variables for the agent's sandbox. A whole value `${NAME}` or `${NAME:-default}` is read from the server's host, and an unset `${NAME}` fails the episode at seed. |
 | `workdir` | none | The working directory. Unset, the Dockerfile's final `WORKDIR`, else the image's. |
 | `healthcheck` | none | A `command` polled at seed. After `start_period_sec` (`0`), `retries` (`3`) consecutive failures `interval_sec` (`5`) apart fail the seed (retryable). `timeout_sec` (`30`) bounds each attempt; `start_interval_sec` (`5`) paces the start period. |
-| `mcp_servers` | `[]` | Tool servers for the task. See [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool). |
+| `mcp_servers` | `[]` | Tool servers for the task (`name`, `transport`, `command`, `args`, `url`, `headers`). See [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool). |
 | `skills_dir` | none | A skills folder for harnesses that read one; a relative path resolves in the working directory. When the sandbox's folder is missing or empty and the task ships `environment/skills/`, the server uploads it there at seed. |
 
 A task whose `environment/` holds `docker-compose.yaml` runs as a group of sandboxes, one per service, on

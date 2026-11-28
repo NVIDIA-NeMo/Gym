@@ -55,7 +55,7 @@ from nemo_gym.data.tasks.harbor.materialize import (
     run_config,
     write_rows,
 )
-from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.data.tasks.harbor.models import HarborMCPServer, HarborTaskConfig
 from nemo_gym.data.tasks.harbor.package_store import PackageStoreError
 from nemo_gym.data.tasks.harbor.prepare import (
     AgentSelection,
@@ -4919,3 +4919,83 @@ class TestHarborOutputRoot:
         expected = root if overrides else Path("results/harbor")
         assert seen["output_root"] == expected / "validation"
         assert seen["render_root"] == expected
+
+
+class TestMCPServerHeaders:
+    def test_load_task_keeps_mcp_headers_without_unknown_key_warning(self, tmp_path, caplog):
+        root = write_task(
+            tmp_path / "search",
+            toml=(
+                "[environment]\n"
+                'docker_image = "ubuntu:24.04"\n\n'
+                "[[environment.mcp_servers]]\n"
+                'name = "search"\n'
+                'transport = "streamable-http"\n'
+                'url = "http://mcp.example/mcp"\n'
+                'headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }\n'
+            ),
+        )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
+            task = load_task(root)
+        assert "unknown key" not in caplog.text
+        [server] = task.config.environment.mcp_servers
+        assert server.headers == {"Authorization": "Bearer ${SEARCH_TOKEN}"}
+
+    def test_empty_headers_are_omitted_from_model_dump(self):
+        plain = HarborMCPServer(name="plain", url="http://plain/mcp")
+        assert "headers" not in plain.model_dump(mode="json")
+        with_headers = HarborMCPServer(name="with_headers", url="http://x/mcp", headers={"X-Region": "eu"})
+        assert with_headers.model_dump(mode="json")["headers"] == {"X-Region": "eu"}
+
+    def test_stdio_rejects_headers(self):
+        with pytest.raises(ValueError, match="only supported for HTTP"):
+            HarborMCPServer(name="t", transport="stdio", command="tool", headers={"X-Test": "1"})
+
+    @pytest.mark.parametrize(
+        ("headers", "match"),
+        [
+            ({"Bad Header": "value"}, "Invalid MCP HTTP header name"),
+            ({"X-Test": "a\r\nb"}, "must not contain newlines"),
+            ({"X-Test": "a\x00b"}, "must not contain newlines"),
+            ({"Authorization": "Bearer ${BAD-NAME}"}, "invalid environment variable name"),
+            ({"Authorization": "Bearer ${TOKEN"}, "unclosed"),
+            ({"Authorization": "Bearer ${A:-${B}}"}, "nested"),
+            ({"Authorization": "Bearer sk-live"}, "must reference credentials"),
+            ({"Cookie": "sid=${SID}"}, "must reference credentials"),
+            ({"X-Trace": "${API_KEY:-secret}"}, "must reference credentials"),
+        ],
+    )
+    def test_invalid_headers_are_rejected(self, headers, match):
+        with pytest.raises(ValueError, match=match):
+            HarborMCPServer(name="t", url="https://example.com/mcp", headers=headers)
+
+    def test_valid_header_patterns_and_resolution(self):
+        server = HarborMCPServer(
+            name="search",
+            transport="streamable-http",
+            url="https://example.com/mcp",
+            headers={
+                "Authorization": "Bearer ${SEARCH_TOKEN}",
+                "Proxy-Authorization": "Basic ${USER}:${PASS}",
+                "Cookie": "${SESSION_COOKIE}",
+                "X-Region": "${REGION:-eu}",
+                "X-Tokens-Limit": "100",
+                "X-Optional-Auth": "Bearer ${EMPTY_OK:-}",
+            },
+        )
+        assert server.resolved_headers(
+            {"SEARCH_TOKEN": "tok", "USER": "alice", "PASS": "pw", "SESSION_COOKIE": "s=1"}
+        ) == {
+            "Authorization": "Bearer tok",
+            "Proxy-Authorization": "Basic alice:pw",
+            "Cookie": "s=1",
+            "X-Region": "eu",
+            "X-Tokens-Limit": "100",
+            "X-Optional-Auth": "Bearer ",
+        }
+        with pytest.raises(ValueError, match="SEARCH_TOKEN"):
+            server.resolved_headers({"USER": "a", "PASS": "b", "SESSION_COOKIE": "s=1"})
+        with pytest.raises(ValueError, match="must not contain newlines"):
+            server.resolved_headers(
+                {"SEARCH_TOKEN": "tok\nInjected: yes", "USER": "a", "PASS": "b", "SESSION_COOKIE": "s=1"}
+            )

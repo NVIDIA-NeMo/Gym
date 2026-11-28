@@ -168,6 +168,18 @@ def resolve_env_templates(env: dict[str, str], secrets: Mapping[str, str] | None
     return resolved
 
 
+def resolve_mcp_server_headers(server: HarborMCPServer, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Resolve ``${VAR}`` / ``${VAR:-default}`` templates in ``server.headers`` against the host environment.
+
+    Uses ``os.environ`` (never the verifier's ``secrets`` block) and turns missing variables or newline-bearing
+    values into HTTP 422 before seeding the agent.
+    """
+    try:
+        return server.resolved_headers(env)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _skills_path(skills_dir: str, workdir: str) -> str | None:
     """``skills_dir`` as the absolute path the seed uploads to, a relative one read from ``workdir``; ``None`` for one
     only a shell resolves (``~``, ``$``), which the server cannot place."""
@@ -361,11 +373,14 @@ class HarborSessionMixin:
         the episode protocol needs to change for that.
         """
         environment = task.config.environment
-        servers = self._task_mcp_servers(task)
+        servers = [
+            server.model_copy(update={"headers": resolve_mcp_server_headers(server)}).model_dump(mode="json")
+            for server in self._task_mcp_servers(task)
+        ]
         if not servers and not environment.skills_dir:
             return
         context = {
-            "mcp_servers": [server.model_dump(mode="json") for server in servers],
+            "mcp_servers": servers,
             "skills_dir": environment.skills_dir
             and (_skills_path(environment.skills_dir, workdir) or environment.skills_dir),
         }

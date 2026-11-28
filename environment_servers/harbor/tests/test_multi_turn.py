@@ -1701,6 +1701,105 @@ async def test_task_mcp_servers_are_granted_on_request(tmp_path, monkeypatch, gr
         ]
 
 
+MCP_HEADER_TOML = """
+[[environment.mcp_servers]]
+name = "search"
+transport = "streamable-http"
+url = "http://mcp.example/mcp"
+headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }
+
+[[environment.mcp_servers]]
+name = "events"
+transport = "sse"
+url = "http://events.example/sse"
+headers = { X-Api-Key = "${SSE_KEY}", X-Region = "${REGION:-eu}" }
+"""
+
+
+@pytest.mark.parametrize("grants", ["off", "optional", "required"])
+async def test_task_mcp_headers_reach_tool_accesses_and_task_json(tmp_path, monkeypatch, grants):
+    monkeypatch.setenv("SEARCH_TOKEN", "host-search-token")
+    monkeypatch.setenv("SSE_KEY", "host-sse-key")
+    monkeypatch.delenv("REGION", raising=False)
+    server, task, sandbox, _ = make_server(
+        tmp_path,
+        monkeypatch,
+        toml=TASK_TOML + MCP_HEADER_TOML,
+        task_mcp_grants=grants,
+        # Verifier secrets must never supply agent MCP headers: host env wins.
+        secrets={"SEARCH_TOKEN": "verifier-only-secret"},
+    )
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert "host-search-token" not in response.model_dump_json()
+    assert "host-sse-key" not in response.model_dump_json()
+    # The stored task snapshot retains the raw template.
+    assert task.config.environment.mcp_servers[0].headers == {"Authorization": "Bearer ${SEARCH_TOKEN}"}
+
+    context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+    written = json.loads(context_write["command"].split("printf %s ", 1)[1].split(" > ", 1)[0].strip("'"))
+    assert written["mcp_servers"] == [
+        {
+            "name": "search",
+            "transport": "streamable-http",
+            "url": "http://mcp.example/mcp",
+            "command": None,
+            "args": [],
+            "headers": {"Authorization": "Bearer host-search-token"},
+        },
+        {
+            "name": "events",
+            "transport": "sse",
+            "url": "http://events.example/sse",
+            "command": None,
+            "args": [],
+            "headers": {"X-Api-Key": "host-sse-key", "X-Region": "eu"},
+        },
+    ]
+
+    (seed,) = server.server_client.seed_bodies()
+    if grants == "off":
+        assert seed["tool_accesses"] == []
+    else:
+        assert seed["tool_accesses"] == [
+            {
+                "kind": "mcp",
+                "name": "search",
+                "required": grants == "required",
+                "connection": {
+                    "transport": "streamable_http",
+                    "url": "http://mcp.example/mcp",
+                    "headers": {"Authorization": "Bearer host-search-token"},
+                },
+            }
+        ]
+
+
+async def test_missing_or_newline_mcp_header_env_refuses_seed_before_sandbox(tmp_path, monkeypatch):
+    monkeypatch.delenv("SEARCH_TOKEN", raising=False)
+    monkeypatch.setenv("SSE_KEY", "host-sse-key")
+    server, task, _, created = make_server(
+        tmp_path,
+        monkeypatch,
+        toml=TASK_TOML + MCP_HEADER_TOML,
+        task_mcp_grants="off",
+        secrets={"SEARCH_TOKEN": "verifier-only-secret"},
+    )
+
+    missing = await server.run_request(request_for(task))
+    assert missing.result is None and missing.failure.stage == "seed" and missing.failure.terminal
+    assert "SEARCH_TOKEN" in missing.failure.failure_reason
+    assert created == []
+
+    monkeypatch.setenv("SEARCH_TOKEN", "bad\r\nInjected: yes")
+    injected = await server.run_request(request_for(task, rollout="r2"))
+    assert injected.result is None and injected.failure.stage == "seed" and injected.failure.terminal
+    assert "newlines" in injected.failure.failure_reason
+    assert created == []
+
+
 def turn(
     name: str,
     rewards: dict[str, float] | None,

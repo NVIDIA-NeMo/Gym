@@ -73,7 +73,12 @@ from environment_servers.harbor.sandboxes import (
     SEED_CREATE_GRACE_S,
     HarborSandboxMixin,
 )
-from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
+from environment_servers.harbor.session import (
+    HarborSession,
+    HarborSessionMixin,
+    resolve_env_templates,
+    resolve_mcp_server_headers,
+)
 from environment_servers.harbor.steps import HarborStepsMixin, StepPrepareError
 from environment_servers.harbor.users import HarborUsersMixin
 from environment_servers.harbor.verifier import (
@@ -1756,7 +1761,10 @@ class HarborEnvironmentServer(
                 MCPToolAccess(
                     name=server.name,
                     required=self.config.task_mcp_grants == "required",
-                    connection=MCPStreamableHTTPConnection(url=server.url),
+                    connection=MCPStreamableHTTPConnection(
+                        url=server.url,
+                        headers=resolve_mcp_server_headers(server),
+                    ),
                 )
             )
         return accesses
@@ -1867,6 +1875,8 @@ class HarborEnvironmentServer(
         # Fail before provisioning; retain templates in the snapshot and resolve at use time. Only the task.toml
         # layers are templates: a Dockerfile ENV in task.env is the literal docker build left (`_task_sandbox_env`).
         resolve_env_templates(task.config.environment.env)
+        for server in self._task_mcp_servers(task):
+            resolve_mcp_server_headers(server)
         resolve_env_templates(task.config.verifier.env, self.config.secrets)
         if task.config.verifier.environment is not None:
             resolve_env_templates(task.config.verifier.environment.env)

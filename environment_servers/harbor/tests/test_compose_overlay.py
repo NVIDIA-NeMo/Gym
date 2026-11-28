@@ -1120,6 +1120,39 @@ class TestMcpGrants:
         context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
         assert "http://memory:9000/mcp" in context_write["command"]
 
+    async def test_overlay_mcp_headers_override_task_headers(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TASK_TOKEN", "task-secret")
+        monkeypatch.setenv("OVERLAY_TOKEN", "overlay-secret")
+        task_mcp = (
+            "[[environment.mcp_servers]]\n"
+            'name = "user-server"\n'
+            'transport = "streamable-http"\n'
+            'url = "http://user-server:8000/mcp"\n'
+            'headers = { Authorization = "Bearer ${TASK_TOKEN}" }\n'
+        )
+        overlay = HarborComposeOverlay(
+            mcp_servers=[
+                {
+                    "name": "user-server",
+                    "transport": "streamable-http",
+                    "url": "http://overlay-server:9000/mcp",
+                    "headers": {"Authorization": "Bearer ${OVERLAY_TOKEN}"},
+                }
+            ]
+        )
+        server, task, sandbox, _, _ = overlay_server(
+            tmp_path, monkeypatch, toml=TASK_TOML + task_mcp, overlay=overlay, task_mcp_grants="optional"
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        written = json.loads(context_write["command"].split("printf %s ", 1)[1].split(" > ", 1)[0].strip("'"))
+        assert written["mcp_servers"][0]["headers"] == {"Authorization": "Bearer overlay-secret"}
+        (seed,) = server.server_client.seed_bodies()
+        assert seed["tool_accesses"][0]["connection"]["headers"] == {"Authorization": "Bearer overlay-secret"}
+
 
 class TestPromptTemplate:
     async def test_the_first_turn_instruction_is_rendered_into_the_template(self, tmp_path, monkeypatch):
