@@ -1,0 +1,16 @@
+{
+  "defaults": {
+    "prompt_override": {
+      "system_prompt": ""
+    },
+    "request": "greedy",
+    "skills": {
+      "EVAL_ARGS": "++eval_type=nemo_skills.dataset.preference-asr-public.scorer::PreferenceASREvaluator ++eval_config.cleanup_generation_loops=true",
+      "METRICS_TYPE": "nemo_skills.dataset.preference-asr-public.scorer::PreferenceASRMetrics"
+    }
+  },
+  "profiles": {
+    "preference-asr-public.default": {},
+    "preference-asr-public.instructed": {}
+  }
+}
