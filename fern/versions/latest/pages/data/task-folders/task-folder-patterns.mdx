@@ -9,16 +9,16 @@ folders. Each has a committed example under `environments/` to copy.
 
 | Pattern | Use it when | Example |
 | --- | --- | --- |
-| [Parameterized tasks](#parameterized-tasks) | Many tasks share one environment, instruction pattern and verifier. | `hello_parameterized_tasks` |
-| [Typed task fields](#typed-task-fields) | Each task carries values its verifier reads, and you want them checked. | `hello_parameterized_tasks` |
-| [A task with its own MCP tool](#a-task-with-its-own-mcp-tool) | The agent needs a tool that only this task provides. | `hello_mcp_tool` |
-| [Shared verifier code](#shared-verifier-code) | Several tasks check their results the same way. | `hello_verifier_reuse` |
+| [Parameterized tasks](#parameterized-tasks) | Many tasks share one environment, instruction pattern and verifier. | `parameterized_tasks` |
+| [Typed task fields](#typed-task-fields) | Each task carries values its verifier reads, and you want them checked. | `parameterized_tasks` |
+| [A task with its own MCP tool](#a-task-with-its-own-mcp-tool) | The agent needs a tool that only this task provides. | `mcp_tool` |
+| [Shared verifier code](#shared-verifier-code) | Several tasks check their results the same way. | `shared_verifier` |
 
-For a dataset of independent hand-written tasks, start from `environments/hello_dataset`. Every example ships a
+For a dataset of independent hand-written tasks, start from `cookbook/tasks/dataset`. Every example ships a
 reference solution, so you can check it end to end:
 
 ```bash
-gym dataset validate environments/hello_parameterized_tasks --sandbox docker
+gym dataset validate cookbook/tasks/parameterized_tasks --sandbox docker
 ```
 
 ## Parameterized tasks
@@ -27,7 +27,7 @@ When tasks differ only in a few values, such as a question and its answer, write
 row per task. The template is a task folder with `tasks.jsonl` beside its `task.toml`:
 
 ```text
-hello_parameterized_tasks/
+parameterized_tasks/
 ├── dataset.toml
 ├── task_data.py                  # optional: types the rows
 ├── task.toml                     # shared by every task
@@ -106,7 +106,7 @@ it to the model.
 
 ## A task with its own MCP tool
 
-A task can declare tool servers with the Model Context Protocol (MCP). `environments/hello_mcp_tool` ships a stdio
+A task can declare tool servers with the Model Context Protocol (MCP). `cookbook/tasks/mcp_tool` ships a stdio
 server in its image and declares it in `task.toml`:
 
 ```toml
@@ -145,7 +145,7 @@ Keep scoring logic in one place in one of three ways.
 **Gym's verifier helpers.** `nemo_gym.verifiers` (`final_text`, `exact_match`, `numeric_match`) and
 `nemo_gym.verifiers.files` (`read_text`, `file_exists`, `text_file_equals`) are copied into the sandbox with every
 Python verifier, so the task image needs no Gym package, only `python3` or `python` 3.8 or newer.
-`environments/hello_verifier_reuse` uses them both ways. One task reuses a complete verifier with its own settings:
+`cookbook/tasks/shared_verifier` uses them both ways. One task reuses a complete verifier with its own settings:
 
 ```python
 # exact-greeting/tests/verifier.py

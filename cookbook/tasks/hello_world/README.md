@@ -2,6 +2,8 @@
 
 Hello World gives you a minimal starting point for creating your first NeMo Gym task.
 
+Install NeMo Gym first: see [Installation](https://docs.nvidia.com/nemo/gym/main/get-started/installation).
+
 ## Concept
 
 A task folder keeps the instruction, execution environment, scoring logic, and resource requirements together, making the complete task easy to inspect, share, and run. Task folders written for Harbor also run in NeMo Gym as they are.
@@ -27,7 +29,7 @@ These files form one complete task folder.
 ## Run it
 
 ```bash
-gym eval run environments/hello_world --agent opencode_agent --sandbox docker \
+gym eval run cookbook/tasks/hello_world --agent opencode_agent --sandbox docker \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
@@ -50,7 +52,7 @@ Every task ships a `solution/` (a `solve.sh` here; the parameterized dataset shi
 row instead). The oracle plays it through the task's verifier and expects reward 1:
 
 ```bash
-gym dataset validate environments/hello_world --sandbox docker
+gym dataset validate cookbook/tasks/hello_world --sandbox docker
 ```
 
 On a cluster, pass `--sandbox opensandbox` instead.
@@ -61,21 +63,17 @@ On a cluster, pass `--sandbox opensandbox` instead.
 
 Each command writes its results to its own folder: `results/harbor/validation/hello_world/` for validate and `results/harbor/hello_world/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what `tests/test.sh` wrote.
 
-## Other examples
+## Next steps
 
-### Tasks and datasets
+Pick the goal that fits what you want to do next. Each links to its section of the [cookbook index](../../README.md).
 
-- [Hello Dataset](../hello_dataset/README.md): Run multiple distinct tasks as one dataset.
-
-### Add tools
-
-- [Hello MCP Tool](../hello_mcp_tool/README.md): Give an agent an additional tool over MCP.
-
-### Python scoring
-
-- [Hello Python Verifier](../hello_python_verifier/README.md): Write task-specific scoring logic in Python.
-- [Hello Verifier Reuse](../hello_verifier_reuse/README.md): Reuse Python verifiers and shared helper functions.
-
-### Parameterized tasks
-
-- [Hello Parameterized Tasks](../hello_parameterized_tasks/README.md): Generate many tasks from shared files and JSONL records.
+- Build more tasks and verifiers:
+  - [Dataset](../dataset/README.md): run several different tasks together.
+  - [MCP Tool](../mcp_tool/README.md): give the agent a tool it needs for the task.
+  - [Python Verifier](../python_verifier/README.md): check the agent's work with Python.
+  - [Shared Verifier](../shared_verifier/README.md): use the same checks in many tasks.
+  - [Parameterized Tasks](../parameterized_tasks/README.md): make many versions of one task that differ only in their inputs.
+- [Run an evaluation](../../README.md#run-an-evaluation) of an agent or model on existing tasks.
+- [Analyze failures and compare results](../../README.md#analyze-failures-and-compare-results), such as why an agent failed a task or how two versions of your agent differ.
+- [Optimize an agent](../../README.md#optimize-an-agent) without training.
+- [Train a model](../../README.md#train-a-model).
