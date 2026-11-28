@@ -72,6 +72,7 @@ from nemo_gym.agents import (
     resolve_agent_timeout,
     restrict_sandbox_network,
     run_with_checkpoint_pauses,
+    stage_task_skills,
     stop_and_confirm_cleanup,
     verification_failure_fields,
 )
@@ -458,6 +459,18 @@ def _without_empty_tools(opencode_config: dict[str, Any]) -> dict[str, Any]:
     OpenCode 1.17.11 turns ``tools`` into base permission rules and merges ``permission`` on top.
     """
     return {key: value for key, value in opencode_config.items() if key != "tools" or value}
+
+
+def _allow_skill_tool(permission: Mapping[str, Any] | str | None) -> dict[str, Any]:
+    """``permission`` with OpenCode's ``skill`` tool allowed, for a session whose task declares ``skills_dir``.
+
+    The default permission profile denies the tool. OpenCode applies the last matching rule, so the ``skill`` rule
+    moves after every other one, ``"*"`` included. A bare action is OpenCode's rule for every tool.
+    """
+    if isinstance(permission, str):
+        permission = {"*": permission}
+    rules = {key: copy.deepcopy(value) for key, value in (permission or {}).items() if key != "skill"}
+    return {**rules, "skill": "allow"}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1037,6 +1050,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """Whether ``opencode_version`` selects OpenCode 2, whose interfaces the ``opencode2`` package covers."""
         return _is_opencode2(self.config.opencode_version)
 
+    def supports_task_skills(self) -> bool:
+        """OpenCode 1 copies the task's ``skills_dir`` into ``<XDG_CONFIG_HOME>/opencode/skills`` at seed and allows
+        its ``skill`` tool for that session. OpenCode 2 discovers skills elsewhere and is not staged."""
+        return not self._opencode2
+
     async def _ensure_local_runtime(self) -> str | None:
         """Install the local runtime once; for OpenCode 2, return the pinned release binary to run."""
         if self._local_setup_task is None:
@@ -1542,8 +1560,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if not isinstance(state, OpenCodeSandboxSession):
                 raise TypeError(f"no open OpenCode session {key!r}")
             if state.session is None:
-                # Restored and not re-bound yet: what the checkpoint it came from kept is still its state.
+                # Restored and not re-bound yet: what the checkpoint it came from kept is still its state. Skills a
+                # failed re-bind still owes stay owed: the snapshot may hold the files that re-bind put back.
                 exported[key] = dict(state.restored or {})
+                if state.task_skills_pending:
+                    exported[key]["task_skills_pending"] = True
                 continue
             session_state = dict(state.session.checkpoint_state())
             if state.adoption is not None:
@@ -1572,6 +1593,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "completed_activation": state.completed_activation,
                 "completed_reply": state.completed_reply,
                 "completed_request_digest": state.completed_request_digest,
+                # The skills the seed staged; without it a restored session falls back to the profile's rule for
+                # the skill tool.
+                "task_skills": state.task_skills,
             }
             if state.keeps_processes:
                 exported[key] |= {
@@ -1608,6 +1632,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 completed_activation=int(saved.get("completed_activation") or 0),
                 completed_reply=saved.get("completed_reply"),
                 completed_request_digest=saved.get("completed_request_digest"),
+                task_skills=saved.get("task_skills"),
+                task_skills_pending=bool(saved.get("task_skills_pending")),
                 restored=dict(saved),
                 keeps_processes=bool(saved.get("keeps_processes", False)),
                 relay_gen=int(saved.get("relay_gen") or 0),
@@ -1677,6 +1703,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(check, present)
             if present.return_code != 0:
                 LOG.warning("Restored OpenCode session %s lacks its runtime or files; installing them again", root)
+                # The fork may lack the skills the seed copied under the session root as well. They stay owed until
+                # a copy succeeds, although a seed retried after this attempt fails finds the files it put back.
+                state.task_skills_pending = state.task_skills is not None
                 command = _sandbox_prepare_command(
                     access.workdir,
                     root,
@@ -1704,6 +1733,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     plugin_dependencies=self._pinned_file("plugin_dependencies"),
                     model_relay=state.keeps_processes,
                 )
+            if state.task_skills_pending:
+                # Copied again from the folder the checkpoint names. task.json is under /tmp too, so the fork has
+                # usually lost it, and reading it would leave the session without its skills. A copy that timed out
+                # may have copied only some of them, so only one that succeeds settles what is owed.
+                await stage_task_skills(sandbox, f"{root}/config/opencode/skills", skills_dir=state.task_skills)
+                state.task_skills_pending = False
         except BaseException:
             # The seed that re-binds is retried: do not leave one connection behind per attempt.
             try:
@@ -2131,6 +2166,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 plugin_dependencies=plugin_dependencies,
                 model_relay=keeps_processes,
             )
+            if not owns_sandbox and self.supports_task_skills():
+                # A task sandbox seeded by an Environment Server names the task's skills in task.json. OpenCode 1 finds
+                # skills in a skills folder of its configuration directory, XDG_CONFIG_HOME/opencode.
+                state.task_skills = await stage_task_skills(
+                    sandbox, f"{state.persistent_directory}/config/opencode/skills"
+                )
             if self.config.session_import_path is not None:
                 await self._import_session(state)
         except BaseException as error:
@@ -3193,6 +3234,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             # the shared configuration.
             **copy.deepcopy(_without_empty_tools(self.config.opencode_config)),
         }
+        if state.task_skills is not None:
+            # Only a task that declares skills gets the skill tool; every other task keeps the profile's rule.
+            config["permission"] = _allow_skill_tool(config.get("permission"))
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
             # Merged into each agent, the session's own subagents included, so a configured agent.build.steps stays.

@@ -284,6 +284,43 @@ async def test_a_declared_folder_that_holds_no_skills_is_copied_all_the_same(loc
     assert emptied.is_dir() and list(emptied.iterdir()) == []
 
 
+@pytest.mark.parametrize("context", [None, json.dumps({"mcp_servers": []})], ids=["task_json_lost", "no_skills_dir"])
+async def test_a_folder_the_caller_names_is_copied_without_reading_task_json(local_sandbox, context) -> None:
+    """A session re-bound after a checkpoint restore names the folder its seed staged: the fork may have lost
+    ``task.json`` with the rest of ``/tmp``."""
+    source = _skills_folder(local_sandbox.root)
+    if context is not None:
+        local_sandbox.context.write_text(context)
+    destination = local_sandbox.root / "config" / "skills"
+
+    assert await stage_task_skills(local_sandbox.sandbox, str(destination), skills_dir=str(source)) == str(source)
+    assert (destination / "demo" / "SKILL.md").read_text() == (source / "demo" / "SKILL.md").read_text()
+
+
+async def test_a_folder_the_caller_names_must_be_an_absolute_path(local_sandbox) -> None:
+    destination = local_sandbox.root / "config" / "skills"
+
+    with pytest.raises(AgentSeedRejectedError, match="is not an absolute path"):
+        await stage_task_skills(local_sandbox.sandbox, str(destination), skills_dir="skills")
+
+    assert not destination.exists()
+
+
+async def test_read_only_skills_copied_again_over_an_earlier_copy_are_staged(local_sandbox, read_only_skills) -> None:
+    """A re-bound OpenCode session copies its skills again over what the fork kept, which can be the copy its seed
+    made. A copy that kept the task's read-only modes could not be written over, and the re-bind kept failing."""
+    session_dir = local_sandbox.root / "session"
+    destination = session_dir / "config" / "opencode" / "skills"
+    await stage_task_skills(local_sandbox.sandbox, str(destination), skills_dir=str(read_only_skills))
+
+    staged = await stage_task_skills(local_sandbox.sandbox, str(destination), skills_dir=str(read_only_skills))
+
+    assert staged == str(read_only_skills)
+    assert (destination / "demo" / "SKILL.md").read_text() == (read_only_skills / "demo" / "SKILL.md").read_text()
+    assert _lacking_owner_access(destination) == []
+    await _close_seeded_session(local_sandbox.sandbox, session_dir)
+
+
 @pytest.mark.parametrize(
     "context",
     [

@@ -48,6 +48,7 @@ from nemo_gym.agents import (
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
     restrict_sandbox_network,
+    stage_task_skills,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -106,6 +107,9 @@ from responses_api_agents.hermes_agent.sandbox import (
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
 _HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
+# Hermes' toolset of skills_list, skill_view and skill_manage; with its tools on, Hermes lists the skills in its
+# HERMES_HOME's skills folder in the system prompt.
+_SKILLS_TOOLSET = "skills"
 # Upstream truncation exits, including the previous pin's three-attempt limit.
 _OUTPUT_LIMIT_ERRORS = frozenset(
     {
@@ -451,6 +455,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    def supports_task_skills(self) -> bool:
+        """A sandbox session copies the task's ``skills_dir`` into ``<HERMES_HOME>/skills`` at seed, and its
+        activation turns on the ``skills`` toolset, which lists the skills in the system prompt and loads them."""
+        return True
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> HermesSandboxSession:
         tool_accesses = self.effective_tool_accesses(body)
         unsupported = [
@@ -651,6 +660,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         )
         try:
             await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
+            if not owns_sandbox:
+                # A task sandbox seeded by an Environment Server names the task's skills in task.json.
+                state.task_skills = await stage_task_skills(sandbox, f"{state.hermes_home}/skills")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -773,18 +785,27 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_session_id: str,
         rollout_id: str | None,
         mcp_accesses: list[MCPToolAccess],
+        task_skills: str | None = None,
     ) -> dict[str, Any]:
         params = self._conversation_params(body)
         enabled_toolsets = self.config.enabled_toolsets
+        disabled_toolsets = self.config.disabled_toolsets
         if enabled_toolsets is not None:
             # A restricted tool list would otherwise hide the tools this episode was granted.
             enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
+        if task_skills is not None:
+            # Only a task that declares skills gets the skills toolset, which a restricted list (a Harbor run keeps
+            # `terminal` only) or a disabled one would otherwise leave out.
+            if enabled_toolsets is not None and _SKILLS_TOOLSET not in enabled_toolsets:
+                enabled_toolsets.append(_SKILLS_TOOLSET)
+            if disabled_toolsets is not None:
+                disabled_toolsets = [name for name in disabled_toolsets if name != _SKILLS_TOOLSET]
         return {
             "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(mcp_accesses),
-            "disabled_toolsets": self.config.disabled_toolsets,
+            "disabled_toolsets": disabled_toolsets,
             "enabled_toolsets": enabled_toolsets,
             "mcp_servers": [access.name for access in mcp_accesses],
             "required_mcp_servers": [access.name for access in mcp_accesses if access.required],
@@ -816,6 +837,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             agent_session_id=agent_session_id,
             rollout_id=state.request.episode_id.capture_key,
             mcp_accesses=mcp_accesses,
+            task_skills=state.task_skills,
         )
         timeout = self._agent_timeout_sec(body)
         timed_out = False

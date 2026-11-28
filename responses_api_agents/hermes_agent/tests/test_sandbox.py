@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -2089,3 +2090,124 @@ def test_portable_runtime_refuses_an_image_whose_glibc_cannot_load_it(monkeypatc
     else:
         with pytest.raises(RuntimeError, match=r"Hermes requires glibc 2\.28 or newer"):
             runtime._require_supported_glibc()
+
+
+def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
+    """Make ``sandbox`` hold ``context`` as ``/tmp/.nemo-gym/task.json``, and answer the copy of the task's skills
+    with exit code ``copy_code``; every other command succeeds."""
+
+    async def run(command, **kwargs):
+        if "task.json" in command:
+            return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
+        if " cp -RL -- " in command:
+            return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
+        return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
+
+    sandbox.exec.side_effect = run
+
+
+async def seed_task_sandbox(agent, state, monkeypatch, context: str, *, copy_code: int = 0):
+    """Seed a session on a borrowed task sandbox whose ``task.json`` is ``context``; return its state and commands."""
+    import responses_api_agents.hermes_agent.app as module
+
+    sandbox = state.session.sandbox
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
+    monkeypatch.setattr(HermesSandboxSession, "install_runtime", AsyncMock())
+    hold_task_context(sandbox, context, copy_code=copy_code)
+    await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    seeded = agent._session_records["session"].state
+    return seeded, [call.args[0] for call in sandbox.exec.await_args_list]
+
+
+async def test_a_task_that_declares_skills_gets_them_in_hermes_home(agent, state, monkeypatch):
+    seeded, commands = await seed_task_sandbox(
+        agent, state, monkeypatch, json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"})
+    )
+    assert seeded.task_skills == "/workspace/skills"
+    # The runner sets HERMES_HOME to this folder of the session directory, so Hermes finds the skills it holds.
+    assert seeded.hermes_home == f"{seeded.session.session_dir}/hermes-home"
+    (copy,) = [command for command in commands if " cp -RL -- " in command]
+    skills = f"{seeded.hermes_home}/skills"
+    assert f"mkdir -p -- {skills} && " in copy
+    assert f"cp -RL -- /workspace/skills/. {skills}/;" in copy
+
+
+@pytest.mark.parametrize("context", ["", json.dumps({"mcp_servers": [{"name": "search"}], "skills_dir": None})])
+async def test_a_task_without_skills_copies_nothing(agent, state, monkeypatch, context):
+    seeded, commands = await seed_task_sandbox(agent, state, monkeypatch, context)
+    assert seeded.task_skills is None
+    assert not any(" cp -RL -- " in command for command in commands)
+
+
+async def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(agent, state, monkeypatch):
+    with pytest.raises(AgentSeedRejectedError, match="Could not stage the task's skills_dir '/workspace/skills'"):
+        await seed_task_sandbox(
+            agent, state, monkeypatch, json.dumps({"skills_dir": "/workspace/skills"}), copy_code=2
+        )
+    state.session.sandbox.disconnect.assert_awaited_once()
+    assert all(record.state is None for record in agent._session_records.values())
+
+
+@pytest.mark.parametrize(
+    ("enabled", "disabled", "skills", "expected_enabled", "expected_disabled"),
+    [
+        # A Harbor run keeps `terminal` only; a task that declares skills adds the skills toolset.
+        (["terminal"], None, "/workspace/skills", ["terminal", "skills"], None),
+        (["terminal", "skills"], None, "/workspace/skills", ["terminal", "skills"], None),
+        (None, ["skills", "web"], "/workspace/skills", None, ["web"]),
+        # Every other task keeps the configured toolsets.
+        (["terminal"], None, None, ["terminal"], None),
+        (None, ["skills", "web"], None, None, ["skills", "web"]),
+    ],
+)
+async def test_only_a_task_that_declares_skills_gets_the_skills_toolset(
+    agent, state, enabled, disabled, skills, expected_enabled, expected_disabled
+):
+    agent.config.enabled_toolsets = enabled
+    agent.config.disabled_toolsets = disabled
+    state.task_skills = skills
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}}
+    )
+    await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+    payload = state.execute.await_args.args[0]
+    assert payload["enabled_toolsets"] == expected_enabled
+    assert payload["disabled_toolsets"] == expected_disabled
+    # The shared configuration is unchanged for the next task.
+    assert agent.config.enabled_toolsets == enabled and agent.config.disabled_toolsets == disabled
+
+
+def test_hermes_lists_and_loads_a_skill_staged_in_its_home(tmp_path):
+    """Hermes itself, given the runner's HERMES_HOME, lists the staged skill in its system prompt and loads it."""
+    skill = tmp_path / hermes_sandbox.HERMES_HOME_FOLDER / "skills" / "demo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\ndescription: Demo skill.\n---\n\nThe magic word is pineapple.\n")
+    script = (
+        "import json\n"
+        "from agent.prompt_builder import build_skills_system_prompt\n"
+        "from tools.skills_tool import skill_view\n"
+        "print(json.dumps({'prompt': build_skills_system_prompt({'skills_list', 'skill_view'}, {'skills'}),"
+        " 'view': json.loads(skill_view('demo'))}))\n"
+    )
+    env = {**os.environ, "HERMES_HOME": str(tmp_path / hermes_sandbox.HERMES_HOME_FOLDER), "HOME": str(tmp_path)}
+    # The pinned Hermes runs in its own host environment, not the Agent Server's.
+    from responses_api_agents.hermes_agent.runtime import host_python
+
+    result = json.loads(
+        subprocess.run([str(host_python()), "-c", script], env=env, capture_output=True, text=True, check=True).stdout
+    )
+    assert "<available_skills>" in result["prompt"] and "demo: Demo skill." in result["prompt"]
+    assert result["view"]["success"] is True and "The magic word is pineapple." in result["view"]["content"]
+
+
+def test_the_harness_declares_that_it_stages_task_skills(agent):
+    assert agent.supports_task_skills() is True
+    assert asyncio.run(agent.agent_session_capabilities()).supports_task_skills is True
+    assert agent.supports_task_tool_context() is False

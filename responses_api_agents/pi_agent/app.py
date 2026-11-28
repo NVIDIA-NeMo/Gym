@@ -52,6 +52,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
     restrict_sandbox_network,
+    stage_task_skills,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -860,6 +861,12 @@ class PiAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
+    def supports_task_skills(self) -> bool:
+        """A sandbox session copies the task's ``skills_dir`` into ``<PI_CODING_AGENT_DIR>/skills`` at seed and
+        passes that folder to Pi with ``--skill``. Pi lists skills in its system prompt only when its ``read`` tool
+        is on, so a configuration without tools (``enable_tools: false``) takes no task skills."""
+        return self.config.enable_tools
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PiSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
@@ -1005,6 +1012,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                         f"error_type={installed.error_type}): {details[-16000:]}"
                     )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+            if not owns_sandbox and self.supports_task_skills():
+                # A task sandbox seeded by an Environment Server names the task's skills in task.json.
+                state.task_skills = await stage_task_skills(sandbox, state.task_skills_dir)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -1142,7 +1152,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         ]
         for extension in extensions:
             command += ["--extension", f"{directory}/{extension}"]
-        command += ["--no-skills", "--no-prompt-templates", "--no-themes"]
+        command.append("--no-skills")
+        if state.task_skills is not None:
+            # Discovery stays off; Pi loads an explicit --skill folder all the same.
+            command += ["--skill", state.task_skills_dir]
+        command += ["--no-prompt-templates", "--no-themes"]
         if not self.config.enable_tools:
             command.append("--no-builtin-tools")
         if self.config.thinking:
