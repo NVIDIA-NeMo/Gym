@@ -27,9 +27,10 @@ packages=(
 # Keep tools already supplied by the runner. Upgrading Git can select its
 # git-core PPA and make unrelated tests depend on that service being available.
 # The bwrap sandbox tests need unprivileged user namespaces, which Ubuntu 24.04's AppArmor default refuses
-# ("setting up uid map: Permission denied"). Lift that for the job; NEMO_GYM_REQUIRE_BWRAP makes a runner where
+# ("setting up uid map: Permission denied"). Lift that only for jobs that set NEMO_GYM_REQUIRE_BWRAP (the sandbox
+# job), so other jobs keep the default even on a reused runner. NEMO_GYM_REQUIRE_BWRAP also makes a runner where
 # it cannot be lifted fail those tests instead of skipping them.
-if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+if [[ "${NEMO_GYM_REQUIRE_BWRAP:-}" == 1 && -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
     sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 ||
         echo "Could not allow unprivileged user namespaces; the bwrap tests will fail"
 fi

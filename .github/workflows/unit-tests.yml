@@ -151,6 +151,9 @@ jobs:
     env:
       NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
       NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
+      # The install step allows unprivileged user namespaces only for this job, and the real-bwrap tests fail
+      # here instead of skipping when bwrap or user namespaces are missing.
+      NEMO_GYM_REQUIRE_BWRAP: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -179,8 +182,6 @@ jobs:
       - name: Sandbox unit tests
         env:
           COVERAGE_FILE: results/.coverage.sandbox
-          # The real-bwrap tests fail here instead of skipping when bwrap or user namespaces are missing.
-          NEMO_GYM_REQUIRE_BWRAP: "1"
         run: |
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra mlflow --extra wandb
