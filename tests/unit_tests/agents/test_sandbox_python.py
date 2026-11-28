@@ -111,8 +111,10 @@ async def test_probe_prefers_glibc_over_an_optional_musl_loader(getconf, ldd, mu
 async def test_the_probe_rejects_platforms_without_a_runtime(stdout: str, return_code: int, match: str) -> None:
     sandbox = _ProbedSandbox(SandboxExecResult(stdout=stdout, stderr="", return_code=return_code))
 
-    with pytest.raises(RuntimeError, match=match):
+    with pytest.raises(RuntimeError, match=match) as error:
         await probe_sandbox_platform(sandbox)
+    # Only a sandbox that answered is told apart as unsupported: callers may refuse it instead of retrying.
+    assert isinstance(error.value, sandbox_python.UnsupportedSandboxPlatformError) is (return_code == 0)
 
 
 @pytest.mark.parametrize(
@@ -350,6 +352,7 @@ async def test_the_host_cache_is_rebuilt_when_the_runtime_inputs_change(host, mo
 def test_the_host_cache_lives_in_gyms_cache_dir(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(sandbox_python, "maybe_get_global_config_dict", lambda: {"cache_dir": str(tmp_path)})
     assert sandbox_python._cache_dir() == tmp_path / "sandbox_python"
+    assert sandbox_python.sandbox_cache_dir("sandbox_opencode") == tmp_path / "sandbox_opencode"
 
     monkeypatch.setattr(sandbox_python, "maybe_get_global_config_dict", lambda: None)
     assert sandbox_python._cache_dir() == sandbox_python.CACHE_DIR / "sandbox_python"

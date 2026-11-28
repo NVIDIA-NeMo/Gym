@@ -65,10 +65,12 @@ from nemo_gym.agents import (
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    UnsupportedSandboxPlatformError,
     abandon_launch,
     check_restored,
     exec_idempotent,
     is_harness_termination_failure,
+    probe_sandbox_platform,
     resolve_agent_timeout,
     restrict_sandbox_network,
     run_with_checkpoint_pauses,
@@ -132,6 +134,7 @@ from responses_api_agents.opencode_agent.continuation import (
     classify_opencode_run,
     opencode_error_event_error,
 )
+from responses_api_agents.opencode_agent.host_runtime import HostExecutable, opencode_executable, ripgrep_executable
 from responses_api_agents.opencode_agent.opencode2 import LABEL_FILE as OPENCODE2_LABEL_FILE
 from responses_api_agents.opencode_agent.opencode2 import PLUGIN_DIRECTORY as OPENCODE2_PLUGIN_DIRECTORY
 from responses_api_agents.opencode_agent.opencode2 import PLUGIN_SOURCE as OPENCODE2_PLUGIN_SOURCE
@@ -817,6 +820,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_path_prefix: list[str] = Field(default_factory=list)
     sandbox_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # Sandbox sessions only. Download the pinned OpenCode release and a pinned ripgrep on the agent server host, for
+    # the sandbox's architecture and C library, and upload them, so the sandbox needs no curl, GitHub access, root or
+    # package manager. Replaces `sandbox_executable_path`; a ripgrep pinned with `sandbox_ripgrep_path` is kept.
+    sandbox_runtime_upload: bool = False
     # The native model ID affects OpenCode's model-family prompts and tools.
     # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
     sandbox_model_id: str = "dummy_model"
@@ -2014,6 +2021,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError("OpenCode session_import_path must be an absolute, normalized sandbox path")
         ripgrep = self._pinned_file("ripgrep")
         plugin_dependencies = self._pinned_file("plugin_dependencies")
+        if self.config.sandbox_runtime_upload and (
+            self.config.sandbox_executable_path or self.config.sandbox_executable_sha256
+        ):
+            raise AgentSeedRejectedError(
+                "sandbox_runtime_upload supplies the OpenCode executable; unset sandbox_executable_path and "
+                "sandbox_executable_sha256"
+            )
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             try:
@@ -2159,8 +2173,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(f"{path_field} must be an absolute, normalized sandbox path")
         return _PinnedFile(digest=digest.lower(), sandbox_path=path)
 
-    async def _stage_executable(self, sandbox: AsyncSandbox, pin: _PinnedFile, *, target: str, what: str) -> None:
-        """Install a pinned executable at ``target`` once a private copy matches its SHA-256 and answers ``--version``."""
+    async def _stage_executable(
+        self, sandbox: AsyncSandbox, pin: _PinnedFile, *, target: str, what: str | None
+    ) -> None:
+        """Install a pinned executable at ``target`` once a private copy matches its SHA-256 and answers ``--version``.
+
+        ``what`` names an owner's file, whose failed checks refuse the seed. It is None for a file this host uploaded,
+        whose failed checks are a setup failure to retry.
+        """
         command = (
             f"set -- {quote(pin.sandbox_path)} {pin.digest} {quote(_pinned_copy(target))} {quote(target)}\n"
             + STAGE_EXECUTABLE
@@ -2185,6 +2205,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(f"Pinned {what} rejected: {error}") from error
         command = f"set -- {quote(copy)} {quote(target)}\n" + UNPACK_ARCHIVE
         self._check_sandbox_setup(command, await sandbox.exec(command, cwd="/", timeout_s=timeout))
+
+    async def _upload_runtime(
+        self, sandbox: AsyncSandbox, directory: str, *, with_ripgrep: bool
+    ) -> tuple[_PinnedFile, _PinnedFile | None]:
+        """Upload OpenCode, and ripgrep if ``with_ripgrep``, for the sandbox's platform from this host to ``directory``.
+
+        Returns them as pinned files with the SHA-256 this host computed, for the installer and ``_stage_executable``
+        to check. ripgrep is None where its release has no build for the platform. Raises ``AgentSeedRejectedError``
+        when OpenCode has no pinned build for the platform, which every attempt on its image would repeat. A probe
+        that did not answer, a failed host download and the setup timeout stay setup failures to retry.
+        """
+
+        async def upload(executable: HostExecutable, name: str) -> _PinnedFile:
+            await sandbox.upload(executable.path, f"{directory}/{name}")
+            return _PinnedFile(digest=executable.sha256, sandbox_path=f"{directory}/{name}")
+
+        async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+            try:
+                platform = await probe_sandbox_platform(sandbox)
+            except UnsupportedSandboxPlatformError as error:
+                raise AgentSeedRejectedError(
+                    "sandbox_runtime_upload: OpenCode has release builds for Linux on x86_64 and aarch64 only; "
+                    f"the sandbox is {error.system} on {error.machine}"
+                ) from error
+            opencode = await upload(
+                await opencode_executable(self.config.opencode_version, platform), "uploaded-opencode"
+            )
+            ripgrep = await ripgrep_executable(platform) if with_ripgrep else None
+            return opencode, ripgrep and await upload(ripgrep, "uploaded-rg")
 
     async def _import_session(self, state: OpenCodeSandboxSession) -> None:
         """Import the owner's staged export, if present, so the first activation continues that session.
@@ -2340,6 +2389,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._check_sandbox_setup(command, result)
         installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
         await sandbox.upload(RUNTIME_INSTALLER_SOURCE, installer)
+        executable_path = self.config.sandbox_executable_path or ""
+        executable_sha256 = self.config.sandbox_executable_sha256 or ""
+        uploads: list[str] = []
+        uploaded_ripgrep = None
+        if self.config.sandbox_runtime_upload:
+            # The uploads take the routes of an owner's pinned files: the installer checks and installs the
+            # executable, and the rg is staged below. An rg the owner pinned is kept.
+            opencode, uploaded_ripgrep = await self._upload_runtime(sandbox, directory, with_ripgrep=ripgrep is None)
+            executable_path, executable_sha256 = opencode.sandbox_path, opencode.digest
+            uploads = [pin.sandbox_path for pin in (opencode, uploaded_ripgrep) if pin is not None]
+            ripgrep = ripgrep or uploaded_ripgrep
         # A pinned rg (below) replaces the installer's package install of ripgrep.
         if ripgrep is not None:
             command = "NG_OPENCODE_SKIP_RIPGREP=1 "
@@ -2353,8 +2413,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 installer,
                 runtime,
                 self.config.opencode_version,
-                self.config.sandbox_executable_path or "",
-                self.config.sandbox_executable_sha256 or "",
+                executable_path,
+                executable_sha256,
                 ":".join(self.config.sandbox_path_prefix),
                 " ".join(
                     f"{arch}={digest}"
@@ -2379,8 +2439,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 sandbox,
                 ripgrep,
                 target=f"{directory}/cache/opencode/bin/rg",
-                what="ripgrep executable",
+                what=None if ripgrep is uploaded_ripgrep else "ripgrep executable",
             )
+        if uploads:
+            # Both are installed from copies; the uploads would only take space in the session directory.
+            command = f"rm -f -- {' '.join(map(quote, uploads))}"
+            result = await exec_idempotent(sandbox, command, what="OpenCode upload removal", cwd="/", timeout_s=30)
+            self._check_sandbox_setup(command, result)
         if plugin_dependencies is not None:
             # With any plugin configured, OpenCode installs @opencode-ai/plugin into XDG_CONFIG_HOME/opencode
             # unless node_modules exists and package-lock.json covers package.json.

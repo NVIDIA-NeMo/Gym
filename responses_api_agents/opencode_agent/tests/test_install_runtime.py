@@ -365,6 +365,20 @@ def test_preinstalled_binary_needs_no_download_and_checks_digest(sandbox, valid_
         assert not (root / "runtime/opencode").exists()
 
 
+def test_supplied_binary_and_ripgrep_need_no_root_download_archive_tool_or_package_manager(sandbox):
+    """What the installer needs of an image when the agent server host uploads OpenCode and ripgrep."""
+    root, env = sandbox
+    for tool in ("rg", "tar", "gzip", "apt-get"):
+        (root / "bin" / tool).unlink()
+    (root / "debian-ca.crt").unlink()
+    binary = root / "uploaded-opencode"
+    binary.write_text("#!/bin/bash\necho 1.17.11\n")
+    result = seed_binary(root, env | {"TEST_UID": "1000", "NG_OPENCODE_SKIP_RIPGREP": "1"}, binary)
+    assert result.returncode == 0, result.stderr
+    assert (root / "runtime/opencode").read_bytes() == binary.read_bytes()
+    assert not (root / "download.log").exists() and not (root / "packages.log").exists()
+
+
 def seed_binary(
     root: Path, env: dict[str, str], binary: Path, *, version: str = "1.17.11", digest: str | None = None
 ) -> subprocess.CompletedProcess[str]:
