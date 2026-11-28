@@ -112,6 +112,9 @@ ENVIRONMENT_PROTOCOL_VIOLATION = "environment_protocol_violation"
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
 JUDGE_FAILED = "judge_failed"
 JUDGE_UNPARSEABLE = "judge_unparseable"
+# The judge answered, and asked again still gave no verdict: a counted evaluation-side failure of the row, bounded by
+# the verifier's failure-rate limit. It is final: the row is not masked and its answer is never judged again.
+JUDGE_NO_VERDICT = "judge_no_verdict"
 VERIFIER_ERROR = "verifier_error"
 # Verification was skipped by configuration (a smoke mode): a masked result of this kind is complete and is never
 # re-judged or rerun; the run is UNVERIFIED by construction.
@@ -243,6 +246,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
+        JUDGE_NO_VERDICT,
         VERIFIER_ERROR,
         JUDGE_SKIPPED,
         *PROVIDER_FAILURE_KINDS,

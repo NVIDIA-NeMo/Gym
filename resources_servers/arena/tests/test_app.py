@@ -26,20 +26,24 @@ from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
+    JUDGE_NO_VERDICT,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    rollout_context,
 )
-from nemo_gym.verification import JudgeError, judge_failsafe
+from nemo_gym.server_runtime import observe_verifier
+from nemo_gym.verification import judge_failsafe
 from resources_servers.arena.app import (
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
     ArenaVerifyRequest,
+    ArenaVerifyResponse,
 )
 from resources_servers.arena.arena import (
     _ALL_VERDICT_LABELS,
@@ -563,6 +567,7 @@ class TestArenaResourcesServer:
             ("judge_concurrency", 0),
             ("judge_timeout_secs", 0),
             ("bootstrap_rounds", 0),
+            ("judge_max_attempts_per_game", 0),
         ],
     )
     def test_invalid_numeric_config_is_rejected(self, config, field, value):
@@ -818,41 +823,113 @@ class TestArenaResourcesServer:
         "texts,reasons,expected",
         [
             (
-                ["I cannot decide.", "unclear"],
+                ["I cannot decide.", "unclear", "still unclear", "no idea"],
                 None,
                 "game 1 (no verdict label in the judge output) and game 2 (no verdict label in the judge output)",
             ),
             (
-                ["[[A>B]]", "The answer is [[B"],
-                [None, "max_output_tokens"],
+                ["[[A>B]]", "The answer is [[B", "The answer is [[B"],
+                [None, "max_output_tokens", "max_output_tokens"],
                 "game 2 (judge output incomplete: max_output_tokens)",
             ),
-            (["", "[[B>A]]"], ["content_filter", None], "game 1 (judge output incomplete: content_filter)"),
+            (
+                ["", "[[B>A]]", ""],
+                ["content_filter", None, "content_filter"],
+                "game 1 (judge output incomplete: content_filter)",
+            ),
         ],
     )
-    async def test_verify_a_game_without_verdict_is_a_judge_failure_not_a_loss(
+    async def test_verify_a_game_still_without_verdict_is_a_counted_failure_not_a_masked_row(
         self, server: ArenaResourcesServer, texts, reasons, expected
     ):
-        self._setup_judge_texts(server, texts, reasons)
-
-        with raises(JudgeError) as failure:
-            await server.verify(self._make_verify_request("Answer."))
-
-        assert str(failure.value) == f"The judge gave no verdict for {expected}"
-
-    async def test_verify_a_game_without_verdict_is_masked_and_typed_judge_failed(self, server: ArenaResourcesServer):
+        server.config.judge_max_attempts_per_game = 2
         request = self._make_verify_request("Answer.")
-        self._setup_judge_texts(server, ["[[A>B]]", "cut off mid-sentence"], [None, "max_output_tokens"])
+        self._setup_judge_texts(server, texts, reasons)
 
         result = await judge_failsafe(server.verify)(body=request)
 
-        data = json.loads(result.body)
-        assert data["_ng_failure_class"] == "judge_failed"
-        assert data["failure_kind"] == "judge_failed"
-        assert data["mask_sample"] is True
-        assert data["reward"] == 0.0
-        assert "game 2 (judge output incomplete: max_output_tokens)" in data["failure_reason"]
-        assert data["response"] == request.response.model_dump(mode="json")  # kept for re-judging
+        # Each game without a verdict is asked until its attempts run out, then the row stays in the main output.
+        assert server.server_client.post.await_count == len(texts)
+        assert isinstance(result, ArenaVerifyResponse)
+        assert "_ng_failure_class" not in result.model_dump()
+        assert result.mask_sample is False
+        assert result.failure_kind == JUDGE_NO_VERDICT
+        assert result.failure_reason == f"The judge gave no verdict for {expected}"
+        assert result.reward == 0.0
+        assert any(game.verdict is None for game in result.games)
+        assert result.policy_answer == "Answer."
+        assert result.response == request.response
+
+    async def test_verify_a_game_that_gets_a_verdict_when_asked_again_is_scored(self, server: ArenaResourcesServer):
+        self._setup_judge_texts(server, ["[[A>B]]", "The answer is [[B", "[[B>A]]"], [None, "max_output_tokens", None])
+
+        result = await server.verify(self._make_verify_request("Answer."))
+
+        assert server.server_client.post.await_count == 3
+        assert [game.verdict for game in result.games] == ["[[A>B]]", "[[B>A]]"]
+        assert result.reward == approx(1.0)
+        assert result.failure_kind is None
+        assert result.mask_sample is False
+
+    async def test_a_game_is_asked_until_a_verdict_up_to_its_attempts(self, server: ArenaResourcesServer):
+        # Game 1 answers at once; game 2's judge replies empty twice, then gives a verdict on its third call.
+        self._setup_judge_texts(server, ["[[A>B]]", "", "", "[[B>A]]"])
+
+        result = await server.verify(self._make_verify_request("Answer."))
+
+        assert server.server_client.post.await_count == 4
+        assert [game.verdict for game in result.games] == ["[[A>B]]", "[[B>A]]"]
+        assert result.reward == approx(1.0)
+        assert result.failure_kind is None
+
+    async def test_one_attempt_per_game_asks_no_game_again(self, server: ArenaResourcesServer):
+        server.config.judge_max_attempts_per_game = 1
+        self._setup_judge_texts(server, ["[[A>B]]", ""])
+
+        result = await server.verify(self._make_verify_request("Answer."))
+
+        assert server.server_client.post.await_count == 2
+        assert result.failure_kind == JUDGE_NO_VERDICT
+
+    async def test_a_game_that_gets_a_verdict_when_asked_again_completes_its_grading(
+        self, server: ArenaResourcesServer
+    ):
+        self._setup_judge_texts(server, ["[[A>B]]", "The answer is [[B", "[[B>A]]"], [None, "max_output_tokens", None])
+        verify = observe_verifier(server.verify, enabled=True)
+
+        with rollout_context("rescued"):
+            result = await verify(self._make_verify_request("Answer."))
+
+        # The rejected reply stays a dependency, but the grading completes on the verdict that replaced it.
+        (invocation,) = result.ng_verifier_invocations
+        (operation,) = invocation.grading_operations
+        assert operation.outcome == "completed"
+        assert sorted(dependency.response_id for dependency in operation.dependencies) == [
+            "judge-0",
+            "judge-1",
+            "judge-2",
+        ]
+        assert result.reward == approx(1.0)
+
+    async def test_a_row_without_verdict_counts_against_max_rollout_failure_rate(self, server: ArenaResourcesServer):
+        server.config.judge_max_attempts_per_game = 2
+        self._setup_judge_texts(server, ["", "[[B>A]]", ""], ["content_filter", None, "content_filter"])
+        failed = (await server.verify(self._make_verify_request("Answer."))).model_dump(mode="json")
+        scored = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        rows = [failed | {"_ng_task_index": 0, "_ng_rollout_index": 0}] + [
+            scored | {"_ng_task_index": index, "_ng_rollout_index": 0} for index in range(1, 101)
+        ]
+
+        # 1 of 101 rows is within the 1% cap: the run scores, and the row is counted, not masked.
+        metrics = (await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
+
+        assert metrics.get("coverage/masked_rollouts", 0) == 0
+        assert metrics["rollout_failure_rate"] == approx(1 / 101)
+        assert metrics["parse_failure_rate"] == approx(1 / 101)
+        assert metrics["mean/reward"] == approx(100 / 101)
+        # 1 of 2 rows is above it: scoring fails instead of withholding the row.
+        with raises(ValueError, match="Too many failed rollouts"):
+            server.compute_metrics([[failed], [scored]])
 
     @mark.parametrize(
         "texts,reward",
