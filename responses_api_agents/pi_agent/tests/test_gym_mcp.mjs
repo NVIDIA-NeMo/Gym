@@ -219,39 +219,58 @@ test("a failed terminal tool call does not end the run", async (t) => {
   await assert.rejects(a.tools[0].execute("a", { query: "x" }), /Files do not exist/);
 });
 
-test("names the failed server and reports a skipped optional one as an event", async (t) => {
-  const port = await closedPort();
-  const unreachable = { url: `http://127.0.0.1:${port}/mcp?key=secret`, headers: {}, timeout: 1000 };
-  const cause = `TypeError (ECONNREFUSED) at http://127.0.0.1:${port}`;
-  await assert.rejects(registerGymTools(agent(), { gdpval: unreachable }), (error) => error.message === `gdpval: ${cause}`);
-  const events = [];
-  await registerGymTools(agent(), { extra: { ...unreachable, required: false } }, { emit: (event) => events.push(event) });
-  assert.deepEqual(events, [{ type: "ng_gym_mcp_server_skipped", server: "extra", error: cause }]);
-});
-
-test("a required server failure exits 78 and reports its cause past Pi's redirected stdout", async (t) => {
-  const port = await closedPort();
-  const config = serversFile(t, { resources: { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 } });
-  // Pi's JSON mode points process.stdout.write and console.log at stderr before it loads extensions.
-  const script = `
-    process.stdout.write = (chunk) => process.stderr.write(chunk);
-    console.log = (...args) => process.stderr.write(args.join(" ") + "\\n");
-    const { default: extension } = await import(${GYM_MCP});
-    const handlers = {};
-    extension({ on: (name, handler) => { handlers[name] = handler; }, getAllTools: () => [], registerTool: () => {} });
-    await handlers.session_start();
-    process.stderr.write("model call would start here\\n");
-  `;
-  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-    encoding: "utf8",
-    env: { ...process.env, NEMO_GYM_PI_MCP_CONFIG: config },
-    timeout: 20000,
+// Error reporting must not depend on whether a real connection fails before its deadline.
+for (const { name, makeError, description } of [
+  {
+    name: "connection refusal",
+    makeError: () => new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } }),
+    description: "TypeError (ECONNREFUSED)",
+  },
+  {
+    name: "timeout",
+    makeError: () => new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+    description: "TimeoutError",
+  },
+]) {
+  test(`names the failed server and reports an optional ${name} as an event`, async (t) => {
+    t.mock.method(globalThis, "fetch", async () => { throw makeError(); });
+    const unreachable = { url: "http://resources.invalid/mcp?key=secret", headers: {}, timeout: 1000 };
+    const cause = `${description} at http://resources.invalid`;
+    const required = agent();
+    await assert.rejects(registerGymTools(required, { gdpval: unreachable }), (error) => error.message === `gdpval: ${cause}`);
+    assert.deepEqual(required.tools, []);
+    const optional = agent();
+    const events = [];
+    await registerGymTools(optional, { extra: { ...unreachable, required: false } }, { emit: (event) => events.push(event) });
+    assert.deepEqual(optional.tools, []);
+    assert.deepEqual(events, [{ type: "ng_gym_mcp_server_skipped", server: "extra", error: cause }]);
   });
-  assert.equal(child.status, 78, child.stderr);
-  const event = { type: "ng_gym_mcp_setup_failed", error: `resources: TypeError (ECONNREFUSED) at http://127.0.0.1:${port}` };
-  assert.equal(child.stdout, JSON.stringify(event) + "\n");
-  assert.ok(!child.stderr.includes("model call would start here"));
-});
+
+  test(`a required server ${name} exits 78 and reports its cause past Pi's redirected stdout`, (t) => {
+    const config = serversFile(t, { resources: { url: "http://resources.invalid/mcp?key=secret", headers: {}, timeout: 1000 } });
+    // Pi's JSON mode points process.stdout.write and console.log at stderr before it loads extensions.
+    const script = `
+      process.stdout.write = (chunk) => process.stderr.write(chunk);
+      console.log = (...args) => process.stderr.write(args.join(" ") + "\\n");
+      globalThis.fetch = async () => { throw (${makeError.toString()})(); };
+      const { default: extension } = await import(${GYM_MCP});
+      const handlers = {};
+      extension({ on: (name, handler) => { handlers[name] = handler; }, getAllTools: () => [], registerTool: () => {} });
+      await handlers.session_start();
+      process.stderr.write("model call would start here\\n");
+    `;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, NEMO_GYM_PI_MCP_CONFIG: config },
+      timeout: 20000,
+    });
+    assert.equal(child.status, 78, child.stderr);
+    const event = { type: "ng_gym_mcp_setup_failed", error: `resources: ${description} at http://resources.invalid` };
+    assert.equal(child.stdout, JSON.stringify(event) + "\n");
+    assert.ok(!child.stderr.includes("model call would start here"));
+    assert.ok(!child.stderr.includes("secret"));
+  });
+}
 
 test("the default event writer reaches stdout past Pi's redirect", async () => {
   const port = await closedPort();
