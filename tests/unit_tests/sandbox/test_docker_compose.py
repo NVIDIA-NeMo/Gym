@@ -3123,7 +3123,7 @@ async def test_docker_runs_the_declaring_container_privileged_only_with_allow_pr
 
     calls = []
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, spawned=None):
         calls.append(argv)
         return (0, docker_provider.READY_PROBE_EXPECTED, "") if argv[1] == "exec" else (0, "", "")
 
