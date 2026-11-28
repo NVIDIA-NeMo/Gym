@@ -12,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, IterationLimitExceeded
 from nooa.strategies import CodeActV2
 from nooa.strategies.codeact import CodeActSession
 
@@ -266,13 +266,15 @@ async def test_real_codeact_environment_verifies_partial_response_once(
         assert result.result.response.status == "completed"
         assert result.result.response.error is None
         assert result.result.response.incomplete_details is None
-        assert result.result.response.output[-1].content[0].text == "recovered"
+        assert result.result.verifier_response.output[-1].content[0].text == "recovered"
         assert len(model_calls) == 2
     else:
         assert_partial_evidence(result.result.response, scenario=scenario)
         assert len(model_calls) == 1
     assert len(verified) == _paths(client).count("/verify") == 1
-    assert verified[0]["response"] == result.result.response.model_dump(mode="json")
+    assert verified[0]["response"] == (result.result.verifier_response or result.result.response).model_dump(
+        mode="json"
+    )
     record = _episode_record(result.model_dump(mode="json"))
     assert "_ng_failure_class" not in record
     assert record["reward"] == 0.75
@@ -329,14 +331,24 @@ async def test_text_only_replies_are_invalid_output_only_when_codeact_guard_stop
 
 
 @pytest.mark.parametrize(
-    "message",
+    ("message", "error_type"),
     [
-        "Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.",
-        "CodeAct aborted: LLM returned plain text without a tool call {count} times in a row "
-        "(max_consecutive_text_only={count}) for `analyze`.",
+        ("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.", GenerationError),
+        # NOOA's own iteration stop type, raised from outside the CodeAct loop, is not gradable either.
+        (
+            "Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.",
+            IterationLimitExceeded,
+        ),
+        (
+            "CodeAct aborted: LLM returned plain text without a tool call {count} times in a row "
+            "(max_consecutive_text_only={count}) for `analyze`.",
+            GenerationError,
+        ),
     ],
 )
-async def test_generation_error_outside_codeact_frame_is_not_a_gradable_execution_limit(message: str) -> None:
+async def test_generation_error_outside_codeact_frame_is_not_a_gradable_execution_limit(
+    message: str, error_type: type[GenerationError]
+) -> None:
     instance, model_calls = iteration_agent()
 
     async def invoke_error(agent: object, request: object) -> object:
@@ -345,7 +357,7 @@ async def test_generation_error_outside_codeact_frame_is_not_a_gradable_executio
         session.record_iteration()
         session.record_text_only()
         max_text_only = session.consecutive_text_only
-        raise GenerationError(message.format(count=max_text_only))
+        raise error_type(message.format(count=max_text_only))
 
     req = await open_session(instance)
     instance._require_agent_session("session").runner._invocation_adapter = invoke_error

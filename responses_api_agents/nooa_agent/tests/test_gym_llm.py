@@ -102,6 +102,7 @@ def make_llm(
     max_policy_calls: int | None = 2,
     sampling_overrides: dict | None = None,
     context_window: int | None = None,
+    media_inputs: tuple[str, ...] = (),
 ) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
@@ -114,6 +115,7 @@ def make_llm(
         cookies={},
         sampling_overrides=sampling_overrides,
         context_window=context_window,
+        media_inputs=media_inputs,
     )
     return llm, server_client, state
 
@@ -723,6 +725,29 @@ def test_rejects_synchronous_policy_calls() -> None:
 
     with pytest.raises(RuntimeError, match="async"):
         llm.call([])
+    with pytest.raises(RuntimeError, match="async"):
+        llm._call_once([])
+
+
+@pytest.mark.asyncio
+async def test_one_request_hooks_send_the_same_gym_request() -> None:
+    # NOOA releases after the pinned one build UnifiedLLM.acall on _acall_once and refuse a subclass without it.
+    assert not GymResponsesLLM.__abstractmethods__
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold", logprobs=[])],
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.2],
+    )
+    llm, client, state = make_llm(model_response(output))
+
+    result = await llm._acall_once([{"role": "user", "content": "Weather?"}], temperature=0.3)
+
+    assert result.content == "Cold"
+    assert client.post.await_args.kwargs["json"].temperature == 0.3
+    assert llm.calls == 1
+    assert [call.response_id for call in state.model_calls] == ["resp-1"]
 
 
 @pytest.mark.asyncio
@@ -1294,3 +1319,37 @@ async def test_invalid_reply_caps_fail_planning_and_call_before_model_transport(
         await llm.acall([{"role": "user", "content": "hello"}], **params)
     client.post.assert_not_awaited()
     assert state.used == 0
+
+
+# What NOOA's show() puts in a message: portable Chat-style blocks, not Responses blocks.
+SHOWN_IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo=", "format": "image/png"}}
+
+
+@pytest.mark.asyncio
+async def test_media_the_declared_model_does_not_accept_is_replaced_with_nooas_note() -> None:
+    llm, client, _ = make_llm(model_response())
+    await llm.acall(
+        [
+            {"role": "user", "content": [{"type": "text", "text": "Output:"}, SHOWN_IMAGE]},
+            {"role": "tool", "tool_call_id": "call-1", "content": [{"type": "text", "text": "ran"}, SHOWN_IMAGE]},
+        ]
+    )
+    request = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)
+    user, tool = request["input"]
+    assert user["content"][0] == {"type": "input_text", "text": "Output:"}
+    assert user["content"][1]["type"] == "input_text" and "image was removed" in user["content"][1]["text"]
+    assert tool["output"][0] == {"type": "input_text", "text": "ran"}
+    assert "image was removed" in tool["output"][1]["text"]
+    assert "data:image/png" not in json.dumps(request)
+
+
+@pytest.mark.asyncio
+async def test_images_the_declared_model_accepts_reach_it_as_responses_input_images() -> None:
+    llm, client, _ = make_llm(model_response(), media_inputs=("image",))
+    await llm.acall([{"role": "user", "content": [{"type": "text", "text": "Output:"}, SHOWN_IMAGE]}])
+    (user,) = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"]
+    assert user["content"][1] == {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,iVBORw0KGgo=",
+        "detail": "auto",
+    }

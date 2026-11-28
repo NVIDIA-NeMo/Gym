@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseOutputMessage
 from nemo_gym.server_runtime.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyResponse,
@@ -43,6 +43,21 @@ def test_single_agent_turn_result_preserves_benchmark_fields() -> None:
         }
     )
     assert response.model_dump()["benchmark_diagnostic"] == "kept"
+
+
+def test_result_separates_synthetic_verifier_text_without_changing_captured_actions() -> None:
+    sampled = NeMoGymResponseOutputMessage(
+        id="served-item", content=[{"type": "output_text", "text": "sampled", "annotations": []}]
+    )
+    synthetic = NeMoGymResponseOutputMessage(
+        id="harness-item", synthetic=True, content=[{"type": "output_text", "text": "graded", "annotations": []}]
+    )
+    original = NeMoGymResponse.model_construct(id="served-response", output=[sampled, synthetic])
+    result = SingleAgentTurnResult(responses_create_params={"input": "task"}, response=original, reward=0.5)
+    assert original.output == [sampled, synthetic]
+    assert result.response.id == "served-response" and result.response.output == [sampled]
+    assert result.verifier_response.output == [sampled, synthetic]
+    assert result.reward == 0.5
 
 
 def test_resources_seed_response_omits_unset_observation_without_changing_other_defaults() -> None:

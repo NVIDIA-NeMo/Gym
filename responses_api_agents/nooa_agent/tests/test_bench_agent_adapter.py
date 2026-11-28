@@ -19,6 +19,7 @@ from nooa.tools.shell_tools import ShellTools
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from responses_api_agents.nooa_agent.bench_agent_adapter import invoke_bench_agent
+from responses_api_agents.nooa_agent.tests.test_config import policy_settings
 
 
 @pytest.mark.asyncio
@@ -331,7 +332,7 @@ async def test_real_benchagent_delegation_uses_gym_trace_and_shared_call_budget(
         server_client=client,
         model_server_name="policy",
         max_policy_calls=limit,
-        context_window=262144,
+        policy=policy_settings(context_window=262144),
     )
     result = await runner.run(
         NOOARunRequest(
@@ -831,6 +832,9 @@ async def test_real_benchagent_preserves_full_task_across_model_calls(
         llm=llm,
         working_dir=str(tmp_path),
         truncation=TruncationConfig(max_context_tokens=context_limit),
+        # The eviction below is the renderer's dynamic-context budget; NOOA's default `append` policy records the
+        # live blocks as history events before that budget applies.
+        render_config={"live_context": "dynamic"},
     )
     agent.context.set("volatile_probe", volatile)
     result = await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input=task))

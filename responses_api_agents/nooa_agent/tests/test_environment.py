@@ -168,7 +168,8 @@ async def test_resource_client_error_feedback_allows_correction_and_verification
 
     assert response.failure is None
     assert response.result.reward == 1
-    assert response.result.response.output[-1].content[0].text == "sunny in Paris"
+    assert response.result.verifier_response.output[-1].content[0].text == "sunny in Paris"
+    assert all(not getattr(item, "synthetic", False) for item in response.result.response.output)
     outputs = [item for item in response.result.response.output if item.type == "function_call_output"]
     assert (outputs[0].output if isinstance(feedback, str) else orjson.loads(outputs[0].output)) == feedback
     assert orjson.loads(outputs[1].output) == {"weather": "sunny"}
@@ -252,7 +253,7 @@ async def test_nooa_close_precedes_verification_with_final_cookies_and_evidence(
         "/close_session",
     ]
     assert response.failure is None
-    assert response.result.response.output[-1].content[0].text == "answer"
+    assert response.result.verifier_response.output[-1].content[0].text == "answer"
     assert response.result.reward == 1
     assert response.result.ng_agent_observations.source == "nooa"
     calls = client.post.call_args_list

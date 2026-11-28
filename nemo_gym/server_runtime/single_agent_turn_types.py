@@ -9,7 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, m
 
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.core.failure_records import EpisodeFailure
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+)
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME, AgentContext
 from nemo_gym.server_runtime.base_resources_server import BaseVerifyResponse
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
@@ -101,6 +105,25 @@ class SingleAgentTurnResult(BaseVerifyResponse):
     # The harness's own turns from its session close. Rollout collection takes them over rebuilding turns from
     # the captured model calls; absent, the key stays out of the result as before.
     ng_trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
+    verifier_response: NeMoGymResponse | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def separate_synthetic_verifier_output(self) -> "SingleAgentTurnResult":
+        """Keep the graded text while returning only model actions to capture consumers.
+
+        Resources receives the full agent response before this result is constructed.
+        A synthetic message is a harness result, not a sampled action. All other
+        items and the actual served response ID retain their exact values.
+        """
+        output = [
+            item
+            for item in self.response.output
+            if not isinstance(item, NeMoGymResponseOutputMessage) or not item.synthetic
+        ]
+        if len(output) != len(self.response.output):
+            self.verifier_response = self.response
+            self.response = self.response.model_copy(update={"output": output})
+        return self
 
 
 class SingleAgentTurnFailure(EpisodeFailure):

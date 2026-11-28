@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SWE-bench Pro with Atom (nooa_atom.gym:AtomHarness) through the sandboxed NOOA adapter.
+# nooa.yaml declares the benchmark on `swebench_pro_nooa_resources_server`, whose only agent is
+# `swebench_pro_nooa_agent`; this file swaps that agent's class.
+config_paths:
+  - benchmarks/swebench/pro/nooa.yaml
+
+swebench_pro_nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      nooa:
+        agent_class: nooa_atom.gym:AtomHarness
+        invocation_adapter: responses_api_agents.nooa_agent.atom_adapter:invoke_atom
+        execution_mode: sandboxed
+        init_kwargs:
+          turn_method: handle_batch

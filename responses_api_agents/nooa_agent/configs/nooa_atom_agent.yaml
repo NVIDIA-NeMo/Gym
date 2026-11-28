@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Atom (nooa_atom) as the NOOA agent. Load together with nooa_agent.yaml; recipes inherit from
+# nooa_atom_agent the way they inherit from nooa_agent.
+nooa_atom_agent:
+  _inherit_from: nooa_agent
+  responses_api_agents:
+    nooa_agent:
+      nooa:
+        agent_class: nooa_atom.gym:AtomHarness
+        invocation_adapter: responses_api_agents.nooa_agent.atom_adapter:invoke_atom
+        # The root session's turn method: handle_batch runs one agent unattended (default);
+        # handle_orchestrate lets the root delegate to child agents, each a model-calling session.
+        init_kwargs:
+          turn_method: handle_batch

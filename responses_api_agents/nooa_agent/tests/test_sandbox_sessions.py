@@ -39,6 +39,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
     monkeypatch.setattr(app_module, "resolve_provider_config", MagicMock())
     monkeypatch.setattr(app_module, "create_provider", MagicMock())
+    app_module.create_provider.return_value.aclose = AsyncMock()
     monkeypatch.setattr(app_module, "prepare_nooa_runtime", staging)
     return instance, sandbox, staging, connect
 
@@ -51,11 +52,88 @@ async def close(instance: NOOAAgent, session: str = "session"):
 
 async def test_missing_resources_sandbox_is_rejected(setup) -> None:
     instance, sandbox, staging, connect = setup
-    with pytest.raises(HTTPException, match="requires Resources-provided"):
+    with pytest.raises(HTTPException, match="requires sandbox_access or a configured sandbox_provider"):
         await instance.seed_agent_session(request(), seed())
     connect.assert_not_awaited()
     staging.assert_not_awaited()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [None, "start", "runtime", "cancelled"])
+async def test_owned_sandbox_uses_configured_spec_and_is_stopped_on_close(setup, monkeypatch, failure):
+    instance, sandbox, staging, connect = setup
+    instance.config.sandbox_provider = "provider"
+    instance.config.sandbox_config = {"image": "task-image", "metadata": {"owner": "agent"}}
+    monkeypatch.setattr(
+        app_module, "resolve_provider_metadata", lambda *args: {"provider": "default", "owner": "default"}
+    )
+    sandbox.start = AsyncMock()
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = connect
+    monkeypatch.setattr(app_module, "AsyncSandbox", factory)
+    if failure == "start":
+        sandbox.start.side_effect = RuntimeError("start failed")
+    elif failure == "runtime":
+        staging.side_effect = RuntimeError("runtime failed")
+    elif failure == "cancelled":
+        staging.side_effect = asyncio.CancelledError()
+    if failure:
+        with pytest.raises(asyncio.CancelledError if failure == "cancelled" else RuntimeError):
+            await instance.seed_agent_session(request(), seed())
+    else:
+        await instance.seed_agent_session(request(), seed())
+    spec = sandbox.start.await_args.args[0]
+    assert spec.image == "task-image" and spec.workdir == "/app" and spec.ttl_s > 0
+    assert spec.metadata["provider"] == "default" and spec.metadata["owner"] == "agent"
+    connect.assert_not_awaited()
+    assert instance._session_records["session"].state.runner.session.owns_sandbox
+    await close(instance)
+    sandbox.stop.assert_awaited_once()
+    sandbox.disconnect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("policy", ["model_only", "model_and_tools"])
+async def test_owned_network_policy_is_enforced_before_creation(setup, monkeypatch, policy):
+    instance, sandbox, _, connect = setup
+    instance.config.sandbox_provider = "provider"
+    instance.config.runtime_wheelhouse = Path("/prepared/nooa")
+    instance.config.network_access = policy
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *args: {})
+    app_module.create_provider.return_value.name = "opensandbox"
+    sandbox.start = AsyncMock()
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = connect
+    monkeypatch.setattr(app_module, "AsyncSandbox", factory)
+    body = seed(
+        tool_accesses=[{"kind": "direct_http", "name": "tools", "required": False, "base_url": "http://tools:8001"}]
+    )
+    await instance.seed_agent_session(request(), body)
+    spec = sandbox.start.await_args.args[0]
+    assert spec.provider_options["network_policy"]
+    hosts = {rule["target"] for rule in spec.provider_options["network_policy"]["egress"]}
+    assert "model" in hosts
+    assert ("tools" in hosts) == (policy == "model_and_tools")
+    await close(instance)
+
+
+@pytest.mark.parametrize("case", ["borrowed", "no_bundle", "unsupported_provider", "explicit_policy"])
+async def test_invalid_network_configuration_never_starts_a_sandbox(setup, monkeypatch, case):
+    instance, sandbox, _, connect = setup
+    instance.config.sandbox_provider = "provider"
+    instance.config.network_access = "model_only"
+    instance.config.runtime_wheelhouse = None if case == "no_bundle" else Path("/prepared/nooa")
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *args: {})
+    app_module.create_provider.return_value.name = "local" if case == "unsupported_provider" else "opensandbox"
+    if case == "explicit_policy":
+        instance.config.sandbox_config = {"provider_options": {"network_policy": {}}}
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = connect
+    monkeypatch.setattr(app_module, "AsyncSandbox", factory)
+    with pytest.raises(HTTPException):
+        await instance.seed_agent_session(request(), seed(sandbox_access=access()) if case == "borrowed" else seed())
+    factory.assert_not_called()
+    connect.assert_not_awaited()
+    instance.server_client.post.assert_not_called()
 
 
 async def test_sandbox_session_forwards_configured_context_window(setup) -> None:
@@ -65,7 +143,7 @@ async def test_sandbox_session_forwards_configured_context_window(setup) -> None
     instance.config.session_close_timeout_seconds = 1.25
     await instance.seed_agent_session(request(), seed(sandbox_access=access()))
     state = instance._require_agent_session("session")
-    assert state.runner.context_window == 262144
+    assert state.runner.policy.context_window == 262144
     assert state.runner.timeout == 60.5
     assert state.runner.close_timeout == 1.25
     await close(instance)
@@ -289,6 +367,17 @@ async def test_active_shared_session_retries_unknown_cleanup_before_cancelling_p
     sandbox.stop.assert_not_awaited()
 
 
+async def test_seed_keeps_the_trace_segment_out_of_the_sandbox_model_url(setup, monkeypatch) -> None:
+    # The runner appends /ng-rollout/<id>/v1/... itself; a trace segment before it is refused as out of order.
+    monkeypatch.setattr(
+        "nemo_gym.client.server_client.trace_context_path_segment",
+        lambda: "/ng-trace/00-" + "1" * 32 + "-" + "2" * 16 + "-01",
+    )
+    instance, sandbox, staging, connect = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    assert instance._require_agent_session("session").runner.model_base_url == "http://model:8000"
+
+
 async def test_seed_wires_resolved_endpoint_runtime_and_limits_into_one_runner(setup) -> None:
     instance, sandbox, staging, connect = setup
     instance.config.sandbox_runner_timeout_seconds = 1234
@@ -329,10 +418,9 @@ async def test_failed_connect_closes_provider_without_retaining_seeded_state(set
     sandbox.disconnect.assert_not_awaited()
 
 
-async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_outage(setup) -> None:
+async def test_worker_budget_exhaustion_is_graded_as_a_timeout_not_retried(setup) -> None:
     import json
 
-    from responses_api_agents.nooa_agent.runner import NOOARunFailure
     from responses_api_agents.nooa_agent.tests.test_sandbox_runner import checkpoint_artifact, cleanup_receipt
 
     instance, sandbox, _, _ = setup
@@ -340,10 +428,16 @@ async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_out
     runner = instance._require_agent_session("session").runner
     sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
     sandbox.files[runner.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline"):
-        await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    # The exhausted worker budget ends the rollout as a timeout the benchmark grades; no error reaches Gym.
+    response = await instance.responses(
+        request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task")
+    )
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.output == checkpoint_artifact().response.output
     receipt = await close(instance)
-    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+    assert NOOATerminationReason.TIMEOUT_EXCEEDED in {gap.code for gap in receipt.agent_observations.gaps}
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR not in {gap.code for gap in receipt.agent_observations.gaps}
 
 
 async def test_cancelled_request_stays_cancelled_even_when_session_is_closing(setup) -> None:

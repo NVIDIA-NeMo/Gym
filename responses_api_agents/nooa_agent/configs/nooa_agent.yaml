@@ -15,6 +15,16 @@ nooa_agent:
         execution_mode: embedded
         # execution_mode: sandboxed  # Requires Resources-provided sandbox_access.
       max_policy_calls: null
+      # The policy model as NOOA must know it. A run declares the model it evaluates (the Eval Factory fragment
+      # or the benchmark config sets these); the config does not resolve without them.
+      context_window: ???
+      max_output_tokens: ???
+      temperature: ???
+      top_p: ???
+      # none | minimal | low | medium | high | max; `none` sends no reasoning setting.
+      reasoning_effort: ???
+      # Media the model accepts (image, audio, video, pdf); [] is text only.
+      media_inputs: ???
       # Worker ceiling is below the episode timeout; setup can still make the episode deadline fire first.
       sandbox_runner_timeout_seconds: 21420
       session_close_timeout_seconds: 30

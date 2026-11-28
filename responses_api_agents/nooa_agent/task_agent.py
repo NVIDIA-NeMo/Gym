@@ -61,6 +61,27 @@ def _latest_user_text(request: NeMoGymResponseCreateParamsNonStreaming) -> str:
     raise ValueError("NOOA task input must contain a user message")
 
 
+def _task_instructions(request: NeMoGymResponseCreateParamsNonStreaming) -> str | None:
+    """Keep benchmark instructions separate from the user task and harness prompt."""
+    instructions = [request.instructions] if request.instructions else []
+    if not isinstance(request.input, str):
+        for raw_item in request.input:
+            item = _as_dict(raw_item)
+            if item.get("role") not in {"system", "developer"}:
+                break
+            content = item.get("content")
+            if isinstance(content, str):
+                instructions.append(content)
+            elif isinstance(content, list):
+                parts = [_as_dict(part) for part in content]
+                if any(part.get("type") not in {"input_text", "text"} for part in parts):
+                    raise ValueError("NOOA system/developer instructions must contain text only")
+                instructions.append("\n".join(part["text"] for part in parts))
+            else:
+                raise ValueError("NOOA system/developer instructions must contain text only")
+    return "\n\n".join(instructions) or None
+
+
 async def invoke_solve_task(agent: TaskAgent, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
     """Translate standard Responses input into ``TaskAgent.solve_task``."""
 
