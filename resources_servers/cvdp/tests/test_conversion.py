@@ -4,6 +4,7 @@
 import hashlib
 import json
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -242,7 +243,7 @@ async def test_public_category_envelope_reaches_verification(public_task, catego
         }
     )
 
-    reply = await server.verify(body)
+    reply = await server.verify(SimpleNamespace(session={}), body)
 
     assert reply.reward == 1.0 and not reply.mask_sample and reply.evaluation_completed
     assert reply.difficulty == expected_difficulty

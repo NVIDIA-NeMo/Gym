@@ -1,3 +1,6 @@
+# Deprecated legacy relay path: cvdp_agent runs Hermes in a sandbox of its own behind legacy_agent.
+# Use resources_servers/cvdp/configs/cvdp_agentic_hermes.yaml, where the cvdp resources server lends the task
+# sandbox to hermes_agent through an agent session. This config stays for existing runs.
 cvdp_agent_generic_hermes:
   responses_api_agents:
     cvdp_agent:

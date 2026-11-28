@@ -1,0 +1,47 @@
+# CVDP agentic tasks with Claude Code in the lent task sandbox; see cvdp_agentic.yaml. Replaces
+# responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_claude.yaml, whose turn limit and budget it keeps.
+# Claude Code calls the policy model server's /v1/messages route, so any served model works, not only Anthropic's.
+config_paths:
+  - resources_servers/cvdp/configs/cvdp_agentic.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+cvdp_agentic_claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cvdp_agentic_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      # Sandbox sessions install this exact version into the lent sandbox.
+      claude_code_version: 2.1.285
+      # No web tools, as with Hermes and OpenCode: the tasks need none, and a tool reached over HTTP belongs in a
+      # sidecar, not in the task sandbox.
+      disallowed_tools: WebFetch,WebSearch
+      max_turns: 30
+      # cvdp_agent's harness timeout.
+      timeout: 900
+      sandbox_install_timeout_seconds: 600
+      session_close_timeout_seconds: 60
+
+cvdp_agentic_claude_code:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: cvdp_agentic_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: cvdp_agentic_claude_code_agent
+      # Sandbox start (an image conversion on first use), the agent's 900 s, then the harness's container_timeout.
+      default_episode_timeout_seconds: 3600
+      # Admit episodes at cvdp_agent's rate (its concurrency: 4). An admitted episode seeds its task sandbox at once,
+      # and the episode clock is running, so admitting more than the agent runs would leave episodes holding a
+      # sandbox and spending their budget in the agent's queue. Raise it to run faster, up to the agent's own
+      # concurrency (32).
+      max_concurrent_episodes: 4
+      queue_timeout_seconds: 604800

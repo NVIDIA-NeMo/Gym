@@ -9,14 +9,14 @@ import pytest
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 
-from .test_app import SAMPLE_RTL, _make_body, _make_request, _make_server
+from .test_app import _NO_SESSION, SAMPLE_RTL, _make_body, _make_request, _make_server
 
 
 async def _verify(server, body_dict):
     invocation = VerifierInvocation(invocation_id="verify-cvdp")
     token = verifier_observability._active_verifier.set(invocation)
     try:
-        result = await server.verify(_make_request(body_dict))
+        result = await server.verify(_NO_SESSION, _make_request(body_dict))
     finally:
         verifier_observability._active_verifier.reset(token)
     return result, invocation

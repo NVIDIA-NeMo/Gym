@@ -21,6 +21,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -313,6 +314,14 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             getattr(self.server_client, "global_config_dict", None),
         )
         self._setup_lock = asyncio.Lock()
+        if not self.config.simple_agent and not self.config.prepared_repository_dir:
+            # Heavy-agentic repository tasks (prepared_repository_dir) have no session replacement yet.
+            logging.getLogger(__name__).warning(
+                "cvdp_agent's sandboxed-harness flavor (simple_agent: false) is deprecated. Run the same tasks "
+                "through agent sessions with resources_servers/cvdp/configs/cvdp_agentic_{hermes,opencode,"
+                'claude_code}.yaml; resources_servers/cvdp/README.md, "Migrating from cvdp_agent_generic_*", maps '
+                "each legacy config and command to its replacement."
+            )
 
     async def run(self, request: Request, body: CVDPAgentRunRequest):
         if self.config.simple_agent:

@@ -1,0 +1,70 @@
+# CVDP agentic code generation through agent sessions, shared by cvdp_agentic_{hermes,opencode,claude_code}.yaml.
+#
+# The resources server starts a task sandbox from the CVDP simulation image with the task's context files (spec, RTL,
+# testbenches) under /code, never its hidden harness files, and lends it to a harness agent through an agent session.
+# The agent edits and simulates there. Verify copies out the RTL and verification files it changed and the task's
+# target files, stops the sandbox, and grades them in the task's harness as before.
+#
+# This replaces responses_api_agents/cvdp_agent's agentic flavor (configs/cvdp_agent_generic_*.yaml), which runs the
+# harness in a sandbox of its own behind the legacy relay. Those configs keep working.
+#
+# Apptainer reattaches a sandbox only on the host and as the user that started it, so run the resources server and the
+# agent on one node, as a single `gym env start` does. Set cvdp_sim_image to the simulation image
+# (resources_servers/cvdp/README.md, "Build the Open-Source Simulation Image"), e.g. a local .sif path.
+
+# The task sandbox's provider; the agent reattaches through the same block.
+cvdp_agentic_sandbox:
+  apptainer:
+    create:
+      mount_point: /code
+      # The image is read-only; the agent writes outside /code too (its runtime, caches, simulator output).
+      # Hide the host's /tmp, home, working directory and site-wide binds, as cvdp_agent_generic_*.yaml and the
+      # grader do: they hold other episodes' workspaces (each /code is a host temporary directory), the grader's
+      # hidden test files and the servers' data. With containment the provider gives each sandbox a private /tmp
+      # and home on disk (its --workdir), owned by the user that started it.
+      # --no-mount bind-paths also drops the host's /etc/resolv.conf and /etc/hosts, leaving the sandbox no name
+      # resolution; bind them back read-only. OpenCode downloads its runtime and ripgrep into the sandbox from GitHub.
+      extra_start_args:
+        - --writable-tmpfs
+        - --containall
+        - --no-mount
+        - hostfs,bind-paths,cwd
+        - --bind
+        - /etc/resolv.conf:/etc/resolv.conf:ro,/etc/hosts:/etc/hosts:ro
+    exec:
+      # Harness agents install their runtime under /tmp, outside /code. The provider copies such uploads in as "root"
+      # through --fakeroot, which fails where the user has no /etc/subuid entry ("Failed to enter in user namespace").
+      # The sandbox's private /tmp belongs to the user that started it, so that user can write there without it.
+      fakeroot_for_root: false
+
+cvdp_agentic_resources_server:
+  resources_servers:
+    cvdp:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: CVDP agentic code generation; a harness agent edits RTL in a lent sandbox
+      value: Evaluate agentic RTL design and verification in a simulator-equipped workspace
+      allowed_agents: [hermes_agent, opencode_agent, claude_code_agent]
+      oss_sim_image: ${cvdp_sim_image}
+      eda_sim_image: ""
+      container_timeout: 600
+      num_processes: 16
+      primary_service: direct
+      # Sessions are process-local.
+      num_workers: 1
+      agent_sandbox_provider: cvdp_agentic_sandbox
+      agent_sandbox_config:
+        # The whole episode (default_episode_timeout_seconds): providers that expire sandboxes would otherwise end
+        # it early, as OpenSandbox does 10 minutes after creation. Apptainer ignores it.
+        ttl_s: 3600
+        # Commands in an Apptainer instance inherit the caller's environment, and a host TMPDIR is not visible in a
+        # contained sandbox: the simulators would fail to write their temporary files.
+        env:
+          TMPDIR: /tmp
+      # The agentic prompts name /code paths.
+      agent_workdir: /code
+      datasets:
+        - name: example_agentic
+          type: example
+          jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl

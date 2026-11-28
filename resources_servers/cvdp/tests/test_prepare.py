@@ -223,6 +223,24 @@ def test_server_checks_selected_dataset_images_at_startup(tmp_path, selected_spl
         CVDPResourcesServer(config=_config(), server_client=client)
 
 
+@pytest.mark.parametrize("selected_split", ["validation", "benchmark"])
+def test_server_checks_its_own_dataset_images_at_startup(tmp_path, selected_split) -> None:
+    # The session configs (cvdp_agentic_*.yaml) declare their dataset on the resources server, not the agent.
+    dataset = _build_dataset(tmp_path)
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {
+        "split": selected_split,
+        "cvdp": {"resources_servers": {"cvdp": {"datasets": [{"type": "validation", "jsonl_fpath": str(dataset)}]}}},
+        # Another resources server's dataset is not this server's to check.
+        "other": {"resources_servers": {"cvdp": {"datasets": [{"type": "benchmark", "jsonl_fpath": str(dataset)}]}}},
+    }
+    if selected_split == "validation":
+        with pytest.raises(ValueError, match="missing prepared image mapping"):
+            CVDPResourcesServer(config=_config(), server_client=client)
+    else:
+        CVDPResourcesServer(config=_config(), server_client=client)
+
+
 def test_cocotb_compatibility_pin_is_opt_in_and_changes_build_identity(tmp_path):
     from resources_servers.cvdp.testbench_runner import _normalize_build_file, _service_build_key
 
