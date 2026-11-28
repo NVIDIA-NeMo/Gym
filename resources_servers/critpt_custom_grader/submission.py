@@ -83,11 +83,14 @@ def _object(text: str) -> dict[str, Any]:
 def _termination(response: dict[str, Any]) -> Submission | None:
     """Preserve failure evidence before considering a source or a scored no-answer.
 
-    Declared response-budget exhaustion or an explicit content-filter outcome establishes a no-answer attempt, and
-    so does a failed response the agent classified as unusable model output (``agent_invalid_output``, such as
-    Stirrup's ``compaction_failed``): the default outcome policy grades it as the model's result and never retries it.
-    A wall deadline, cancellation, provider failure or undifferentiated limit does not. HTTP model rejection codes
-    alone likewise do not distinguish a model refusal from a request/configuration fault.
+    Declared response-budget exhaustion, the agent's own turn or wall-clock limit (``stop_reason`` ``max_turns`` or
+    ``wall_time``) or an explicit content-filter outcome establishes a no-answer attempt, and so does a failed
+    response the agent classified as unusable model output (``agent_invalid_output``, such as Stirrup's
+    ``compaction_failed``): the default outcome policy grades it as the model's result and never retries it. A
+    wall-clock no-answer is scored too, with the ``agent_timeout`` kind (app.py), so recovery can still run again a
+    timeout whose window held an infrastructure fault. Cancellation,
+    a provider failure or an undifferentiated limit does not establish a no-answer. HTTP model rejection codes alone
+    likewise do not distinguish a model refusal from a request/configuration fault.
     """
     metadata = response.get("metadata")
     if metadata is None:
@@ -102,7 +105,12 @@ def _termination(response: dict[str, Any]) -> Submission | None:
             return _INVALID
         if outcome.failure_kind not in (AGENT_LIMIT, AGENT_INVALID_OUTPUT):
             return _INCOMPLETE
-    if response.get("error") or metadata.get("stop_reason") in ("cancelled", "wall_time"):
+    # The agent stopped after the finish tool accepted an answer it could not report: the evidence is lost, not absent.
+    if (
+        response.get("error")
+        or metadata.get("stop_reason") == "cancelled"
+        or metadata.get("finish_accepted_unreported")
+    ):
         return _INCOMPLETE
     status = response.get("status")
     details = response.get("incomplete_details")
@@ -111,7 +119,7 @@ def _termination(response: dict[str, Any]) -> Submission | None:
     if status == "failed" and outcome is not None and outcome.failure_kind == AGENT_INVALID_OUTPUT:
         return _NO_ANSWER
     if status == "incomplete" or (status == "failed" and outcome is not None):
-        if metadata.get("stop_reason") == "max_turns" or (
+        if metadata.get("stop_reason") in ("max_turns", "wall_time") or (
             type(details) is dict and details.get("reason") in ("max_output_tokens", "content_filter")
         ):
             return _NO_ANSWER
@@ -179,7 +187,10 @@ def extract_finish_source(response: dict[str, Any]) -> Submission:
 
     if not accepted:
         return _NO_ANSWER
-    if len(accepted) != 1 or termination is not None:
+    # A wall-clock stop can land after the tool accepted the finish, while sibling calls of that response still run;
+    # the accepted answer stands. A turn limit is reached only by a run that returned without one.
+    wall_time = (response.get("metadata") or {}).get("stop_reason") == "wall_time"
+    if len(accepted) != 1 or (termination is not None and not wall_time):
         return _INVALID
     result_index, body = accepted[0]
     # Stirrup can execute other calls from the same finishing response. Their results may follow the finish

@@ -154,6 +154,50 @@ def test_a_cancelled_run_reports_the_turns_it_completed(tmp_path, resources, mar
     assert (workdir / "report.txt").read_text() == "draft\n"
 
 
+def test_a_stop_after_an_accepted_finish_reports_that_the_answer_was_lost(tmp_path, calls, resources):
+    # The finishing response also runs a slow command; the stop lands after the finish tool accepted the answer.
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    finish = _call("finish", json.dumps({"reason": "done", "paths": []}))["tool_calls"][0]
+    slow = _call("code_exec", json.dumps({"cmd": "sleep 600"}))["tool_calls"][0]
+    model = _ModelServer([{"role": "assistant", "content": None, "tool_calls": [finish, slow]}])
+
+    async def stopped_after_the_finish() -> dict:
+        task = asyncio.ensure_future(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+        for _ in range(600):
+            if any(name == "finish" for name, *_ in calls):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("the finish tool was never called")
+        await asyncio.sleep(0.5)
+        task.cancel()
+        return await task
+
+    try:
+        output = asyncio.run(stopped_after_the_finish())
+    finally:
+        model.close()
+
+    assert output["stop_reason"] == "wall_time" and output["finish_accepted"] is True
+    # The reported history is the snapshot from the start of the turn: the accepted finish is not in it.
+    assert not any(item.get("name") == "finish" for item in output["output_items"])
+
+
+def test_a_stop_without_an_accepted_finish_reports_none(tmp_path, resources):
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), None])
+    try:
+        output = asyncio.run(
+            _cancelled_after_the_model_hangs(_payload(model.base_url, resources.base_url, workdir), tmp_path, model)
+        )
+    finally:
+        model.close()
+
+    assert output["stop_reason"] == "wall_time" and output["finish_accepted"] is False
+
+
 def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
     workdir = tmp_path / "root"
     workdir.mkdir()

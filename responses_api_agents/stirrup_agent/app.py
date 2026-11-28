@@ -476,6 +476,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "elapsed_seconds": str(output["elapsed_seconds"]),
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
+                # A stop that lost an accepted finish's turn; graders must not score the episode as a no-answer.
+                **({"finish_accepted_unreported": "true"} if output.get("finish_accepted") else {}),
             },
             status=output["observations"]["status"],
             error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,

@@ -257,6 +257,10 @@ class Observer:
         self._tools: dict[int, dict[str, Any]] = {}
         self._observed: list[Any] = []
         self._clock_offset = time.time() - time.perf_counter()
+        # Set when a finish tool accepted a call. A finish ends the run, so an accepted one is always in the turn that
+        # was running: a stop during that turn's other calls loses it from the reported history.
+        self.finish_names: set[str] = set()
+        self.finish_accepted = False
 
     def watch_model_calls(self, client: DynamicMaxTokensChatCompletionsClient) -> None:
         # ``_client`` is the ``openai.AsyncOpenAI`` client Stirrup's ChatCompletionsClient sends every call with.
@@ -316,6 +320,8 @@ class Observer:
             shell = self.shell
             shell.last_exit_code, shell.last_timed_out = None, False
             message = await run_tool(agent, tool_call, run_metadata)
+            if message.success and tool_call.name in self.finish_names:
+                self.finish_accepted = True
             if shell.last_timed_out:
                 status = ToolStatus.TIMEOUT
             elif not message.success or shell.last_exit_code not in (None, 0):
@@ -397,6 +403,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         transport=httpx.AsyncHTTPTransport(retries=_TOOL_CONNECT_RETRIES),
     ) as http:
         finish_names = payload["finish_tool_names"]
+        observer.finish_names = set(finish_names or [])
         task_tools = [remote_tool(spec, http) for spec in payload["tools"]]
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
         shell = LocalShell(payload["workdir"], scratch)
@@ -469,6 +476,8 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             "model_error": model_error,
             "model_error_status": model_error_status,
             "invalid_output": invalid_output,
+            # A stop after an accepted finish whose turn the history lost: the answer exists but is not reported.
+            "finish_accepted": finish_params is None and observer.finish_accepted,
             **observer.report(status, history, output_items),
         }
 

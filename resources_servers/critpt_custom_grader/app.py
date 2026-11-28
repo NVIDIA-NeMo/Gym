@@ -23,10 +23,8 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
-    SerializerFunctionWrapHandler,
     ValidationInfo,
     field_validator,
-    model_serializer,
     model_validator,
 )
 
@@ -38,7 +36,13 @@ from nemo_gym.config import (
     DatasetConfig,
     get_global_config_dict,  # same import as resources_servers/swebench_pro/app.py
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, failure_kinds
+from nemo_gym.core import (
+    FailureClass,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    OutcomeAction,
+    failure_kinds,
+)
 from nemo_gym.data import normalize_task_fields
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import (
@@ -96,6 +100,7 @@ from resources_servers.critpt_custom_grader.task_data import (
 
 
 logger = logging.getLogger(__name__)
+_AGENT_TIMEOUT_REASON = "The agent reached its wall-clock limit without an accepted finish answer"
 
 _DOMAINS = frozenset({"reference", "comparator", "candidate"})
 _RESOLVED = frozenset({"deleted", "not_created"})
@@ -117,10 +122,8 @@ _FRAMEWORK_ROW_KEYS = frozenset(
         "failure_report",
     }
 )
-_NG_FAILURE_CLASS_RESPONSE_INCOMPLETE = "critpt_custom_grader:response_incomplete"
+_RESPONSE_INCOMPLETE_KIND = "critpt_custom_grader:response_incomplete"
 _NEEDS_REGENERATION_CATEGORIES = frozenset({"response_incomplete"})
-# Verify-response fields written only when they carry a value.
-_OMITTED_WHEN_UNSET = ("failure_class", "failure_subcategory", "failure_terminal")
 
 
 def _error(category: str, status: int) -> JSONResponse:
@@ -277,7 +280,7 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
 
 
 class CritPtVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid")
 
     responses_create_params: dict[str, Any]
     response: dict[str, Any]
@@ -287,19 +290,6 @@ class CritPtVerifyResponse(BaseVerifyResponse):
     cleanup_status: str
     candidate_uncertainty_reasons: tuple[str, ...] = ()
     sandbox_observations: list[dict[str, Any]] = Field(default_factory=list)
-    failure_class: str | None = Field(default=None, alias="_ng_failure_class")
-    failure_subcategory: str | None = Field(default=None, alias="_ng_failure_subcategory")
-    failure_terminal: bool | None = Field(default=None, alias="_ng_failure_terminal")
-
-    @model_serializer(mode="wrap")
-    def _omit_unset_failure_keys(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """A scored row carries no ``_ng_failure_*`` keys and a nonterminal row no ``_ng_failure_terminal``."""
-        data = handler(self)
-        for name in _OMITTED_WHEN_UNSET:
-            if getattr(self, name) is None:
-                data.pop(name, None)
-                data.pop(type(self).model_fields[name].alias, None)
-        return data
 
 
 def _task(body: CritPtRunRequest) -> TaskData:
@@ -633,15 +623,26 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         cleanup: str = "not_started",
         sandboxes: list[dict[str, Any]] | None = None,
         candidate_uncertainty_reasons: tuple[str, ...] = (),
+        agent_timeout: bool = False,
     ) -> CritPtVerifyResponse:
-        if scored:
-            failure_class = None
+        """A scored verdict, or a masked one that names its failure_kind and the action already decided for it.
+
+        An unscored verdict is a masked result, not a failed rollout: ``fail`` when grading this response again can
+        never succeed, ``retry`` otherwise. Rollout collection and recovery read those fields; this server never
+        writes collection's ``_ng_*`` keys. A no-answer at the agent's wall-clock limit is scored as the model's
+        result but keeps the ``agent_timeout`` kind and no outcome action, so recovery can still run again a timeout
+        whose window held an infrastructure fault.
+        """
+        if scored and agent_timeout:
+            failure_kind = failure_kinds.AGENT_TIMEOUT
+        elif scored:
+            failure_kind = None
         elif terminal:
-            failure_class = failure_kinds.VERIFIER_ERROR
+            failure_kind = failure_kinds.VERIFIER_ERROR
         elif category in _NEEDS_REGENERATION_CATEGORIES:
-            failure_class = _NG_FAILURE_CLASS_RESPONSE_INCOMPLETE
+            failure_kind = _RESPONSE_INCOMPLETE_KIND
         else:
-            failure_class = failure_kinds.PROVIDER_UNAVAILABLE
+            failure_kind = failure_kinds.PROVIDER_UNAVAILABLE
         return CritPtVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
@@ -653,11 +654,14 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             cleanup_status=cleanup,
             candidate_uncertainty_reasons=candidate_uncertainty_reasons,
             sandbox_observations=sandboxes or [],
-            failure_class=failure_class,
-            failure_kind=failure_class,
-            failure_reason=None if scored else category,
-            failure_subcategory=None if scored else category,
-            failure_terminal=True if terminal else None,
+            failure_kind=failure_kind,
+            failure_reason=_AGENT_TIMEOUT_REASON
+            if failure_kind == failure_kinds.AGENT_TIMEOUT
+            else None
+            if scored
+            else category,
+            failure_outcome_action=None if scored else OutcomeAction.FAIL if terminal else OutcomeAction.RETRY,
+            failure_outcome_attribution=FailureClass.MODEL if failure_kind == failure_kinds.AGENT_TIMEOUT else None,
         )
 
     def _project(self, body: CritPtVerifyRequest, task: TaskData, result: GradeResult) -> CritPtVerifyResponse:
@@ -739,6 +743,8 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
                     submission.category,
                     scored=submission.scored,
                     terminal=submission.category == "submission_invalid",
+                    agent_timeout=submission.category == "candidate_no_answer"
+                    and (body.response.get("metadata") or {}).get("stop_reason") == "wall_time",
                 )
             source = submission.source
         else:

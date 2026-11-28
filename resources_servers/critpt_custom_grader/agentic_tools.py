@@ -9,13 +9,13 @@ import logging
 import math
 import shlex
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.core import SESSION_EXPIRED, EpisodeId, TaskId
+from nemo_gym.core import PROVIDER_OOM_KILLED, SESSION_EXPIRED, EpisodeId, NgFailureEvent, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxConfig, SandboxSpec, create_provider
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
@@ -218,17 +218,27 @@ def _validate_offline(provider_config: dict[str, Any], spec: SandboxSpec) -> Non
         raise ValueError("Offline execution requires a finite positive sandbox TTL")
 
 
+def _ended_by_memory_limit(error: BaseException) -> bool:
+    """The provider confirmed that the sandbox's own workload exhausted its memory and the sandbox ended."""
+    return (
+        isinstance(error, NgFailureEvent) and error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED
+    )
+
+
 @dataclass
 class _ExecutionSession:
     episode_id: EpisodeId
     task_id: TaskId
     task_digest: str
+    spec: SandboxSpec
     sandbox: AsyncSandbox
     expires_at: float
     usable: bool = False
     discard_requested: bool = False
     creation_task: asyncio.Task[None] | None = None
     stop_task: asyncio.Task[None] | None = None
+    # Sandboxes ended by the memory limit whose delete has not succeeded yet; closing the session retries them.
+    ended: list[tuple[AsyncSandbox, asyncio.Task[None]]] = field(default_factory=list)
 
 
 class AgenticExecutionSessions:
@@ -294,6 +304,23 @@ class AgenticExecutionSessions:
                 # A failed create can still leave a facade handle available for cleanup.
                 pass
         await self._stop_started(state)
+        await self._stop_ended(state)
+
+    async def _stop_ended(self, state: _ExecutionSession) -> None:
+        """Delete the sandboxes the memory limit ended; one that still fails keeps the session for a later retry."""
+        remaining = []
+        for sandbox, stop in state.ended:
+            if stop.done() and (stop.cancelled() or stop.exception() is not None):
+                stop = asyncio.create_task(sandbox.stop())
+                stop.add_done_callback(self._observe_background_result)
+            try:
+                await asyncio.wait_for(asyncio.shield(stop), self.config.close_timeout_s)
+            except Exception as error:
+                LOGGER.warning("Ended execution sandbox cleanup failed (%s)", type(error).__name__)
+                remaining.append((sandbox, stop))
+        state.ended = remaining
+        if remaining:
+            raise AgenticExecutionError("execution_cleanup_failed")
 
     async def _abort(self, state: _ExecutionSession) -> None:
         # Keep the unusable record after cleanup until a close or the reaper fences it: a retry must not recreate it.
@@ -353,23 +380,63 @@ class AgenticExecutionSessions:
                 body.episode_id,
                 body.task_id,
                 digest,
+                spec,
                 AsyncSandbox(self._provider, spec, owns_provider=False),
                 time.monotonic() + float(spec.ttl_s),
             )
             self._sessions[session_id] = state
-            state.creation_task = asyncio.create_task(self._start_owned(state))
-            state.creation_task.add_done_callback(self._observe_background_result)
-            try:
-                await asyncio.wait_for(asyncio.shield(state.creation_task), self.config.create_timeout_s)
-            except BaseException as error:
-                await self._abort(state)
-                if not isinstance(error, Exception):
-                    raise
-                LOGGER.warning("Execution sandbox creation failed (%s)", type(error).__name__)
-                raise AgenticExecutionError("execution_create_failed") from None
+            await self._start_sandbox(state)
             state.usable = True
         # Lending the execution sandbox would make the agent run its networked orchestration inside it.
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    async def _start_sandbox(self, state: _ExecutionSession) -> None:
+        state.creation_task = asyncio.create_task(self._start_owned(state))
+        state.creation_task.add_done_callback(self._observe_background_result)
+        try:
+            await asyncio.wait_for(asyncio.shield(state.creation_task), self.config.create_timeout_s)
+        except BaseException as error:
+            await self._abort(state)
+            if not isinstance(error, Exception):
+                raise
+            LOGGER.warning("Execution sandbox creation failed (%s)", type(error).__name__)
+            raise AgenticExecutionError("execution_create_failed") from None
+
+    async def _replace_ended_by_memory_limit(self, state: _ExecutionSession) -> str:
+        """Give the episode a fresh sandbox after its own command used up the memory, and tell the model so.
+
+        The command's memory use is the candidate's action, not an infrastructure failure: like a crashed notebook
+        kernel, it is reported to the model, which can continue. The ended sandbox takes the episode's files with it.
+        """
+        ended = asyncio.create_task(state.sandbox.stop())
+        ended.add_done_callback(self._observe_background_result)
+        try:
+            await asyncio.wait_for(asyncio.shield(ended), self.config.close_timeout_s)
+        except asyncio.CancelledError:
+            # The request went away mid-delete. The session keeps the delete as its stop and is no longer usable, so
+            # the reaper or a close releases its capacity once the delete finishes; no replacement is started.
+            state.usable = False
+            state.discard_requested = True
+            state.stop_task = ended
+            raise
+        except Exception as error:
+            # The provider record can outlive its container until deleted: closing the session retries the delete.
+            LOGGER.warning("Ended execution sandbox cleanup deferred (%s)", type(error).__name__)
+            state.ended.append((state.sandbox, ended))
+        if self._shutting_down:
+            await self._abort(state)
+            raise AgenticExecutionError("execution_shutdown")
+        state.sandbox = AsyncSandbox(self._provider, state.spec, owns_provider=False)
+        await self._start_sandbox(state)
+        memory_mib = state.spec.resources.memory_mib
+        limit = f" ({memory_mib} MiB)" if memory_mib else ""
+        return _format_result(
+            error_kind="out_of_memory",
+            stderr=(
+                f"The command exceeded the execution environment's memory limit{limit}, which ended the environment. "
+                "A new environment replaced it: files and installed packages from earlier commands are gone."
+            ),
+        )
 
     async def execute(self, session_id: str, cmd: str) -> str:
         """Run one bounded command in a fresh shell, preserving only the episode's filesystem."""
@@ -420,6 +487,9 @@ class AgenticExecutionSessions:
                 ):
                     raise AgenticExecutionError("execution_provider_failed")
             except BaseException as error:
+                if _ended_by_memory_limit(error):
+                    LOGGER.info("Execution sandbox ended by its memory limit; starting a replacement")
+                    return await self._replace_ended_by_memory_limit(state)
                 await self._abort(state)
                 if not isinstance(error, Exception):
                     raise

@@ -4,13 +4,22 @@
 
 import asyncio
 import shlex
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import SESSION_EXPIRED, EpisodeId, TaskId
+from nemo_gym.core import (
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
+    SESSION_EXPIRED,
+    EpisodeId,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    TaskId,
+)
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
@@ -34,9 +43,15 @@ class DirectoryProvider:
         self.stop_failures = 0
         self.create_failure = False
         self.exec_failure = None
+        self.exec_error = None
         self.active_commands = 0
         self.peak_commands = 0
         self.closed = False
+        # Provider records deleted by a successful stop; an ended sandbox's record stays until then.
+        self.deleted = []
+        # When set, a stop waits for the gate, so a test can act while a delete is in flight.
+        self.stop_gate = None
+        self.stop_started = asyncio.Event()
 
     async def create(self, spec):
         if self.create_failure:
@@ -51,6 +66,11 @@ class DirectoryProvider:
     async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
         if self.exec_failure is not None:
             return self.exec_failure
+        if self.exec_error is not None:
+            # One command fails; a provider that reports the sandbox ended has also ended it.
+            error, self.exec_error = self.exec_error, None
+            self.live.discard(handle.sandbox_id)
+            raise error
         self.active_commands += 1
         self.peak_commands = max(self.peak_commands, self.active_commands)
         try:
@@ -70,10 +90,14 @@ class DirectoryProvider:
             self.active_commands -= 1
 
     async def close(self, handle):
+        if self.stop_gate is not None:
+            self.stop_started.set()
+            await self.stop_gate.wait()
         if self.stop_failures:
             self.stop_failures -= 1
             raise RuntimeError("synthetic provider stop failure")
         self.live.discard(handle.sandbox_id)
+        self.deleted.append(handle.sandbox_id)
 
     async def aclose(self):
         self.closed = True
@@ -265,6 +289,105 @@ async def test_command_exit_timeout_and_provider_timeout_are_distinct(api, make_
         await sessions.execute("s1", "true")
     with pytest.raises(ResourcesSessionLostError):
         await sessions.execute("s1", "true")
+    await sessions.shutdown()
+
+
+def sandbox_ended(failure_kind):
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=failure_kind,
+        failure_reason="synthetic sandbox end",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="1"),
+    )
+
+
+async def test_command_that_exhausts_memory_is_reported_and_the_episode_continues_in_a_fresh_sandbox(make_sessions):
+    sessions, provider = make_sessions()
+    await sessions.seed(seed())
+    await sessions.execute("s1", "printf value > saved.txt")
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    result = await sessions.execute("s1", "allocate more than the limit")
+    assert "<error_kind>out_of_memory</error_kind>" in result
+    assert "files and installed packages from earlier commands are gone" in result
+    assert len(provider.created) == 2 and provider.live == {"2"}
+    assert "<exit_code>1</exit_code>" in await sessions.execute("s1", "test -f saved.txt")
+    assert "<stdout>alive</stdout>" in await sessions.execute("s1", "printf alive")
+    await sessions.close(close())
+    assert not provider.live
+    await sessions.shutdown()
+
+
+async def test_a_failed_delete_of_the_ended_sandbox_is_retried_when_the_session_closes(api, make_sessions):
+    sessions, provider = make_sessions()
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    provider.stop_failures = 1
+    assert "out_of_memory" in await sessions.execute("s1", "allocate more than the limit")
+    assert "<stdout>alive</stdout>" in await sessions.execute("s1", "printf alive")
+    assert provider.deleted == []
+    # A stop that fails at close keeps the session; the next close deletes the replacement and the ended record.
+    provider.stop_failures = 1
+    with pytest.raises(api.AgenticExecutionError, match="cleanup"):
+        await sessions.close(close())
+    await sessions.close(close())
+    assert sorted(provider.deleted) == ["1", "2"]
+    await sessions.shutdown()
+
+
+async def test_a_request_cancelled_during_the_ended_sandbox_delete_leaves_no_usable_session(api, make_sessions):
+    sessions, provider = make_sessions(max_sessions=1)
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    provider.stop_gate = asyncio.Event()
+    command = asyncio.create_task(sessions.execute("s1", "allocate more than the limit"))
+    await asyncio.wait_for(provider.stop_started.wait(), 10)
+    command.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await command
+    # No replacement was started, and a replayed seed does not revive the dead sandbox.
+    assert len(provider.created) == 1
+    with pytest.raises(ResourcesSessionConflictError):
+        await sessions.seed(seed())
+    with pytest.raises(api.AgenticExecutionError, match="capacity"):
+        await sessions.seed(seed("s2", episode="r2"))
+    # Once the delete finishes, its capacity goes to another episode.
+    provider.stop_gate.set()
+    await asyncio.sleep(0)
+    for _ in range(100):
+        if provider.deleted:
+            break
+        await asyncio.sleep(0.01)
+    provider.stop_gate = None
+    await sessions.seed(seed("s2", episode="r2"))
+    assert provider.deleted[0] == "1"
+    await sessions.shutdown()
+
+
+async def test_memory_message_names_the_configured_limit(api, make_sessions):
+    sessions, provider = make_sessions()
+    sessions._spec = replace(sessions._spec, resources={"memory_mib": 8192})
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    assert "memory limit (8192 MiB)" in await sessions.execute("s1", "allocate more than the limit")
+    await sessions.shutdown()
+
+
+async def test_other_sandbox_failures_and_a_failed_replacement_end_the_session(api, make_sessions):
+    sessions, provider = make_sessions()
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_UNAVAILABLE)
+    with pytest.raises(api.AgenticExecutionError, match="provider"):
+        await sessions.execute("s1", "true")
+    with pytest.raises(ResourcesSessionLostError):
+        await sessions.execute("s1", "true")
+    await sessions.seed(seed("s2", episode="r2"))
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    provider.create_failure = True
+    with pytest.raises(api.AgenticExecutionError, match="create"):
+        await sessions.execute("s2", "allocate more than the limit")
+    with pytest.raises(ResourcesSessionLostError):
+        await sessions.execute("s2", "true")
+    assert not provider.live
     await sessions.shutdown()
 
 
