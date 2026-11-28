@@ -1,0 +1,33 @@
+name: birdbench/spark
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Text-to-SQL with execution-based evaluation on BIRD dev (1534 tasks) in the Spark SQL dialect, on a
+  local PySpark copy of the databases. Binary reward from unordered result-set equality.
+modality: text
+licensing: unknown
+authors:
+- gwarmstrong
+- dkmisra
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../spark.yaml
+resources_server: bird_sql
+agent_server: simple_agent
+datasets:
+- name: birdbench_spark
+  type: benchmark
+  jsonl_fpath: benchmarks/birdbench/data/birdbench_spark_dev.jsonl
+  prepare_script: benchmarks/birdbench/prepare.py
+  prompt_config: benchmarks/birdbench/prompts/default_spark.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/birdbench/prompts/default_spark.yaml
+lifecycle: active

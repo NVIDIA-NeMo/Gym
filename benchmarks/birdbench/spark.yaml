@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD dev in the Spark SQL dialect (birdbench/spark): config.yaml with the Spark prompt and prepared file, and bird_sql
+# running the model's SQL on a local PySpark copy of the databases, which needs a JDK. A dialect changes the prompt and
+# the engine, so it is a benchmark of its own, with its own taskset. See README.md, "Installation" and "Dialects and
+# splits".
+#
+#   ./benchmarks/birdbench/eval.sh --model <name> --dialect spark
+
+config_paths:
+  - benchmarks/birdbench/config.yaml
+
+prepare_script_args:
+  dialect: spark
+
+birdbench_bird_sql_resources_server:
+  resources_servers:
+    bird_sql:
+      dialect: spark
+
+birdbench_bird_sql_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: birdbench_spark
+          type: benchmark
+          jsonl_fpath: benchmarks/birdbench/data/birdbench_spark_dev.jsonl
+          prompt_config: benchmarks/birdbench/prompts/default_spark.yaml
+          prepare_script: benchmarks/birdbench/prepare.py
+          prepare_project: benchmarks/birdbench
+          num_repeats: 1  # Never repeat the dataset; see config.yaml.
+          taskset: birdbench/spark
+
+environment_server_routes:
+  birdbench/spark: birdbench_bird_sql_environment_server

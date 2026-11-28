@@ -7,6 +7,11 @@ Execution-based text-to-SQL on BIRD, bound to the `bird_sql` resource server. Tw
 | **dialect** | `sqlite` (default), `spark`, `postgres` | the SQL the model writes, the prompt, and the engine that runs it |
 | **split** | `dev` (default), `train` | the questions and databases: `dev` is the 1534-task benchmark, `train` is BIRD's train split (not an evaluation set) |
 
+Each dialect is a benchmark of its own, with its own config, manifest and taskset: `birdbench` (`config.yaml`),
+`birdbench/spark` (`spark.yaml`) and `birdbench/postgres` (`postgres.yaml`). A dialect changes the prompt and the
+engine, so its scores are reported apart from the other dialects' scores. The split is not a benchmark: `--split train`
+overrides the dialect's config.
+
 Reward is binary: unordered result-set equality between the model's query and BIRD's gold query. Metrics are overall
 plus per-difficulty (simple / moderate / challenging; `train` has no difficulty labels).
 
@@ -66,6 +71,7 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
 
 | | sqlite | spark | postgres |
 |---|---|---|---|
+| Benchmark (config) | `birdbench` (`config.yaml`) | `birdbench/spark` (`spark.yaml`) | `birdbench/postgres` (`postgres.yaml`) |
 | Prompt | `prompts/default_sqlite.yaml` | `prompts/default_spark.yaml` | `prompts/default_postgres.yaml` |
 | `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types | PostgreSQL schema: `"db_id"."table"` names, double-quoted identifiers, column names in lower case as loaded, the loaded column types |
 | Model's SQL runs on | the SQLite databases | a local PySpark copy (Parquet under `resources_servers/bird_sql/.bird_sql/spark_warehouse[_train]/`, built on first start) | a PostgreSQL server you provide (one schema per `db_id`, loaded on first start when `BIRD_PG_ADMIN_DSN` is set) |
@@ -123,7 +129,8 @@ per-column sample with per-question BM25 hits on the question text; see `build_d
 - **Column descriptions** come from `--dscp`, an ordered list of `name`, `col_dscp` (column_description) and `val_dscp`
   (value_description). The default, `name_or_col_dscp`, shows exactly one of name or description (name if non-blank);
   e.g. `--dscp name,col_dscp,val_dscp` shows all three.
-- Through `gym eval prepare` these are `prepare_script_args.{dialect,split,dscp,include_evidence}`.
+- Through `gym eval prepare --benchmark <benchmark>`, the benchmark's config sets the dialect, and the others are
+  `prepare_script_args.{split,dscp,include_evidence}`.
 
 ## Files
 
