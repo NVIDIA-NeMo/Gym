@@ -296,6 +296,28 @@ def test_a_judge_failure_of_either_class_binds_its_rejudgment_and_a_repeat_failu
     assert not is_rejudgment_failure_of(classless, again)  # a classless saved result is not a judge failure
 
 
+def test_a_rejudgment_binds_its_saved_answer_when_a_newer_schema_adds_empty_fields(tmp_path):
+    _, (first, *_) = _run(tmp_path, judge_failures=1)
+    failure = first | {"_ng_run_id": "run-1", "_ng_attempt_index": 0}
+    scored = {k: v for k, v in failure.items() if not k.startswith("_ng_failure")} | {
+        "failure_kind": None,
+        "mask_sample": False,
+        "reward": 1.0,
+        "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+    }
+    # The verifier parses the saved response again with its own schema, which may add fields with no value.
+    reparsed = failure["response"] | {"prompt_cache_options": None, "usage": None}
+    again = failure | {"_ng_failure_id": "judge-again", "_ng_rejudged_failure_id": failure["_ng_failure_id"]}
+    assert is_rejudgment_of(failure, scored | {"response": reparsed})
+    assert is_rejudgment_failure_of(failure, again | {"response": reparsed})
+    # A field with a value, or a changed one, is another answer.
+    assert not is_rejudgment_of(failure, scored | {"response": reparsed | {"prompt_cache_options": {"key": "k"}}})
+    assert not is_rejudgment_of(failure, scored | {"response": failure["response"] | {"id": "resp_other"}})
+    assert not is_rejudgment_of(
+        failure, scored | {"response": {k: v for k, v in failure["response"].items() if k != "output"}}
+    )
+
+
 async def test_a_run_without_due_judge_failures_judges_nothing(tmp_path, monkeypatch):
     output, _ = _run(tmp_path, judge_failures=0)
 

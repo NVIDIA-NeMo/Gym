@@ -534,6 +534,18 @@ def is_parsed_judge_abstention(result: dict) -> bool:
     )
 
 
+def _same_saved_answer(saved: object, judged: object) -> bool:
+    """Whether ``judged`` carries the saved answer ``saved``. The verifier parses the saved response again, so a newer
+    response schema may add fields with no value (None); those do not change the answer."""
+    if isinstance(saved, dict) and isinstance(judged, dict):
+        return all(key in judged and _same_saved_answer(value, judged[key]) for key, value in saved.items()) and all(
+            value is None for key, value in judged.items() if key not in saved
+        )
+    if isinstance(saved, list) and isinstance(judged, list):
+        return len(saved) == len(judged) and all(map(_same_saved_answer, saved, judged))
+    return saved == judged
+
+
 def is_rejudgment_of(failure: dict, result: dict) -> bool:
     """Whether ``result`` re-scores the saved answer of ``failure`` without a new model attempt.
 
@@ -554,7 +566,7 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
         and result.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and result.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
         and result.get(REJUDGED_FAILURE_ID_KEY) == predecessor_id
-        and result.get("response") == failure.get("response")
+        and _same_saved_answer(failure.get("response"), result.get("response"))
     )
 
 
@@ -569,7 +581,7 @@ def is_rejudgment_failure_of(failure: dict, row: dict) -> bool:
         and row.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
         and row.get(REJUDGED_FAILURE_ID_KEY) == failure["_ng_failure_id"]
-        and row.get("response") == failure.get("response")
+        and _same_saved_answer(failure.get("response"), row.get("response"))
     )
 
 
