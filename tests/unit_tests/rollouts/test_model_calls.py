@@ -311,3 +311,25 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
 
     assert store.has_pending("5-0") is False
+
+
+def test_clear_captures_for_rollouts_scans_pending_markers_once_per_directory(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    for rollout_id in ("1-0", "1-0-retry1", "2-0", "3-0"):
+        store.mark_pending(rollout_id, "call-1")
+    store.mark_pending("1-0", "call-2")
+
+    scans = []
+    real_glob = Path.glob
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: scans.append(pattern) or real_glob(self, pattern))
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in (1, 2)]
+    clear_model_call_captures_for_rollouts(rows, [tmp_path])
+
+    # One scan for the whole batch, not one per row; `1-0` does not clear its retry `1-0-retry1`.
+    assert len(scans) == 1
+    assert not store.has_pending("1-0") and not store.has_pending("2-0")
+    assert store.has_pending("1-0-retry1") and store.has_pending("3-0")
