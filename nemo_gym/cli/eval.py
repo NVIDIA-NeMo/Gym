@@ -962,7 +962,8 @@ def _rejudge_saved_judge_failures(
     ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
     incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
     (always False without ``complete_only``). Recomputed metrics also refresh the per-agent completion files written
-    during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
+    during collection; when they cannot be refreshed, the files are removed rather than left with the old scores. The
+    pass recounts the run status collection wrote before it, while it still owns the run.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
@@ -1186,6 +1187,7 @@ def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], c
     happened. A pass that fails (the source changed while the job was queued, a verifier that cannot be reached)
     leaves a failed receipt naming the error and counting what it settled and withdrew before it failed: a grade it
     settled stays and counts as progress, the other saved answers stay as they were, and the error is raised as before.
+    Either way, a job that owned the run recounts the run status collection wrote before it; a refused job does not.
     """
     from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper, write_settle_receipt
 

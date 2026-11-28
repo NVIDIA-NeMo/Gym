@@ -5,20 +5,26 @@ run's coverage, aggregate metrics and quality summary, and ends with a receipt; 
 
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.cli import eval as eval_cli
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.eval.rollout_reverification import (
     RolloutReverificationConfig,
     RolloutReverificationHelper,
     due_judge_failures,
     read_settle_receipt,
 )
-from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
+from nemo_gym.rollouts import rollout_collection
+from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper, refresh_run_status
 from nemo_gym.rollouts.rollout_records import materialized_path_for
+from nemo_gym.rollouts.rollout_recovery import run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.utils.path_utils import batch_status_path_for
+from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _run as _run_with_judge_failures
 from tests.unit_tests.eval.test_reverify_saved_results import (
     ANSWER,
     _run,
@@ -172,6 +178,124 @@ def test_the_job_settles_refreshes_the_run_and_ends_with_a_receipt(tmp_path, mon
     assert digests["rollouts_jsonl_fpath"] == hashlib.sha256(output.read_bytes()).hexdigest()
     assert summary["run"]["artifacts"]["expected"] == 2
     assert due_judge_failures(output) == []
+
+
+@pytest.mark.parametrize(
+    "judge_failures, before_counts, after_counts",
+    [
+        pytest.param(1, (2, {"judge_failed": 1}), (3, {}), id="every-failure-settles"),
+        pytest.param(2, (1, {"judge_failed": 2}), (2, {"judge_failed": 1}), id="one-settles-one-fails-again"),
+    ],
+)
+def test_the_settled_run_recounts_its_run_status(
+    tmp_path, verifier, aggregation, judge_failures, before_counts, after_counts
+) -> None:  # noqa: F811
+    """The run status counts the rows as collection left them; the job settles rows after that, so it recounts them
+    and keeps the aggregation status the run's aggregation recorded."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=judge_failures)
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    seeded = json.loads(status.read_text())
+    seeded["members"]["agent"]["aggregation_status"] = "deferred"
+    status.write_text(json.dumps(seeded))
+    before = seeded["members"]["agent"]
+    event = {"event_id": "judge-again", "boundary": "resources_server", "failure_kind": "judge_failed"}
+    judge_failed_again = {
+        "_ng_failure_events": {"judge-again": event},
+        "_ng_failure_id": "judge-again",
+        "_ng_failure_class": "judge_failed",
+        "failure_kind": "judge_failed",
+        "mask_sample": True,
+        "reward": 0.0,
+    }
+    verifier["grade"] = lambda json: json | (judge_failed_again if json["_ng_task_index"] == 1 else {"reward": 1.0})
+    config = _job_config(output, settle_source_snapshot_json=_snapshot(output))
+
+    eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
+
+    after = json.loads(status.read_text())["members"]["agent"]
+    assert (before["completed_rollout_count"], before["failures_by_class"]) == before_counts
+    assert (after["completed_rollout_count"], after["failures_by_class"]) == after_counts
+    assert after["aggregation_status"] == "deferred"
+
+
+def test_the_recount_keeps_an_aggregation_status_written_while_it_scanned(tmp_path, monkeypatch) -> None:
+    """Aggregation rewrites the status under the same lock, so the recount reads it there, not before its scan."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    real_lock = rollout_collection.run_status_lock
+
+    @contextmanager
+    def lock_after_aggregation(status_fpath):
+        with real_lock(status_fpath):
+            aggregated = json.loads(status_fpath.read_text())
+            aggregated["members"]["agent"]["aggregation_status"] = "complete"
+            status_fpath.write_text(json.dumps(aggregated))
+            yield
+
+    monkeypatch.setattr(rollout_collection, "run_status_lock", lock_after_aggregation)
+
+    refresh_run_status(output)
+
+    assert json.loads(status.read_text())["members"]["agent"]["aggregation_status"] == "complete"
+
+
+def test_a_job_refused_the_run_never_writes_its_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
+    """Another writer owns the run, so a refused job must not replace that writer's status with its own snapshot."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    owned = status.read_bytes()
+
+    with run_lock(output), pytest.raises(ConfigError, match="Another collector owns this run"):
+        eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"]}, _job_config(output))
+
+    assert status.read_bytes() == owned
+
+
+def test_a_job_whose_run_changed_while_queued_never_writes_its_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
+    """The run that replaced the queued one keeps the status its own collection wrote."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    stale = json.loads(_snapshot(output))
+    stale["rollouts.jsonl"] = "0" * 64
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    replacement = status.read_bytes()
+
+    with pytest.raises(ConfigError, match="changed while queued"):
+        eval_cli._reverify_with_receipt(
+            {"config_paths": ["fixture.yaml"]}, _job_config(output, settle_source_snapshot_json=json.dumps(stale))
+        )
+
+    assert status.read_bytes() == replacement
+
+
+def test_a_job_through_a_rollout_alias_recounts_the_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
+    """The status sits beside the resolved run, which settlement writes, not beside the alias the job was given."""
+    run = tmp_path / "real"
+    run.mkdir()
+    output, _ = _run_with_judge_failures(run, judge_failures=1)
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    alias = tmp_path / "alias.jsonl"
+    alias.symlink_to(output)
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    config = _job_config(alias, settle_source_snapshot_json=_snapshot(output)).model_copy(
+        update={"materialized_inputs_jsonl_fpath": str(materialized_path_for(output))}
+    )
+
+    eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
+
+    after = json.loads(status.read_text())["members"]["agent"]
+    assert (after["completed_rollout_count"], after["failures_by_class"]) == (3, {})
+    assert not batch_status_path_for(alias).exists()
 
 
 def test_a_job_that_cannot_judge_leaves_a_failed_receipt_and_the_run_as_it_was(
