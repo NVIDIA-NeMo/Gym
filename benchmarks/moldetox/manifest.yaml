@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: Toxicity-aware molecular editing on task3_smiles_gen_single, scored by
   exact match after canonical SMILES normalization.
-modality: text
+modality:
+- text
 licensing: CC-BY-4.0
 authors:
 - Rima Shahbazyan

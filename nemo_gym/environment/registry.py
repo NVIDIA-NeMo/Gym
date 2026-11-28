@@ -65,7 +65,7 @@ class EnvironmentCatalogEntry:
     manifest_path: Optional[Path] = None
     version: Optional[str] = None
     integration_profile: Optional[str] = None
-    modality: Optional[str] = None
+    modality: Optional[tuple[str, ...]] = None
     licensing: Optional[str] = None
     lifecycle: Optional[str] = None
     resources_server_selector: Optional[str] = None
@@ -134,7 +134,7 @@ def _manifest_entry(
         "manifest_path": manifest_path,
         "version": manifest.version,
         "integration_profile": _enum_value(manifest.integration_profile),
-        "modality": manifest.modality,
+        "modality": tuple(modality.value for modality in manifest.modality),
         "licensing": manifest.licensing,
         "lifecycle": _enum_value(manifest.lifecycle),
         "resources_server": manifest.resources_server,

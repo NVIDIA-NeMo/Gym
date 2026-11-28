@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: games
 description: Multi-step Wordle. The model guesses a 5-letter word in 6 attempts with
   tool calls and is rewarded for winning in fewer turns.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - yyu22

@@ -8,7 +8,8 @@ kind: benchmark
 integration_profile: external-agent-loop
 domain: coding
 description: Interactive repository tasks with a simulated user and a frozen-goal agentic judge.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
   - Frederic Lafrance

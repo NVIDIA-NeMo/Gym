@@ -686,7 +686,7 @@ def _manifest(*, kind: str = "environment", profile: str = "custom-gym-verifier"
         "integration_profile": profile,
         "domain": "math",
         "description": "A small exact-match evaluation.",
-        "modality": "text",
+        "modality": ["text"],
         "licensing": "Apache-2.0",
         "authors": ["contributor"],
         "reward": {"range": [0, 1], "higher_is_better": True},
@@ -930,6 +930,18 @@ def test_profile_mismatch_is_reported_as_a_warning(tmp_path: Path) -> None:
     assert report.warnings == (
         "Declared integration_profile 'custom-gym-verifier' does not match inferred profile 'custom-gym-agent-loop' "
         "(agent overrides responses() with measured behavior).",
+    )
+
+
+def test_modality_written_as_text_validates_and_asks_for_the_list(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    _replace_manifest(manifest_path, modality="vision")
+
+    report = validate_environment(manifest_path)
+
+    assert report.warnings == (
+        f"{manifest_path.resolve()}: modality 'vision' is text; write the list [text, image] instead. Gym reads the "
+        "text form until 0.9.0.",
     )
 
 

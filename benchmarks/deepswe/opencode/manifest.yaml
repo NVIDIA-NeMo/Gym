@@ -7,7 +7,8 @@ domain: coding
 description: DeepSWE v1.1 software engineering tasks with prepared instructions, OpenCode
   working in the no-network task sandbox through an agent session, and execution-based
   patch verification.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

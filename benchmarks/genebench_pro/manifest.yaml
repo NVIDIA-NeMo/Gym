@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
 description: GeneBench-Pro public case studies adapted to Harbor and evaluated with the deterministic reference grader.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - Sanyam Kapoor

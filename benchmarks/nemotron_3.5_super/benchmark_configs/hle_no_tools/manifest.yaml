@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
 description: HLE without tools using a dedicated LLM judge with structured JSON verdicts.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - fsiino-nvidia

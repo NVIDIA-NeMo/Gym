@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
 description: BixBench-Hypothesis bioinformatics tasks adapted to Harbor and evaluated with a rubric-based LLM judge.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - Sanyam Kapoor

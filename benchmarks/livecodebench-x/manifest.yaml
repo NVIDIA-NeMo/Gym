@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: coding
 description: Model must submit the right code to solve a problem
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

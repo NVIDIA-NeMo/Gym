@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: external-agent-loop
 domain: agent
 description: Collaborative Intelligence, AI agents as teammates (upstream harness, self-hosted partners and judges)
-modality: text
+modality:
+- text
 licensing: CC-BY-4.0 AND CC-BY-NC-SA-4.0 AND MIT
 authors:
 - cmunley1

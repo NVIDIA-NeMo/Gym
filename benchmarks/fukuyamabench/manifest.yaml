@@ -7,7 +7,8 @@ domain: knowledge
 description: Organic reaction-mechanism prediction over sets B and C, with binary
   exact-match rewards reported per tier and eight draws per case. Dataset rights remain
   unresolved.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - Rima Shahbazyan

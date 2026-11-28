@@ -7,7 +7,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: agent
 description: Model identity disclosure and resistance to false attribution, using UserSim's identity openings and pressure strategies.
-modality: text
+modality:
+- text
 licensing: LicenseRef-NVIDIA-Evaluation-Dataset-License-Agreement
 authors: [Julien Veron Vialard]
 reward:

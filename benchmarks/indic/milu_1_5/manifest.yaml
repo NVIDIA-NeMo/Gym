@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
 description: Zero-shot generated-answer evaluation on the multilingual MILU-1.5 benchmark
-modality: text
+modality:
+- text
 licensing: CC-BY-4.0
 authors:
 - anushaknvidia

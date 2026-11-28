@@ -7,7 +7,8 @@ domain: coding
 description: The pinned 70-task Terminal-Bench-Science v0.1 dataset with mini-SWE 2.4.6's own agent loop, run by
   miniswe_sandboxed_agent over the legacy_agent /run relay, and separate offline official verification. Superseded
   by terminal_bench_science/miniswe.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - NVIDIA NeMo Gym contributors

@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: coding
 description: Function-completion code judged by EvalPlus base + plus tests (HumanEval+,
   MBPP+)
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

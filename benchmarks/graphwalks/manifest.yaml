@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: other
 description: GraphWalks BFS frontier and parent-node retrieval scored by node-set
   F1.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - laszkiewiczp

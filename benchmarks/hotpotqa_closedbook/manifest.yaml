@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: Short-answer QA with deterministic SQuAD-style + alternative-aware substring
   verification (HotpotQA closed-book).
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

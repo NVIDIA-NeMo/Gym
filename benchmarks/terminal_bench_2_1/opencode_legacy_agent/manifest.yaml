@@ -7,7 +7,8 @@ domain: coding
 description: Terminal-Bench 2.1 tasks with prepared instruction messages, OpenCode over the legacy /run
   relay of the terminal_bench_2_1 resources server, and task-provided verification. Superseded by
   terminal_bench_2_1/opencode.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

@@ -7,7 +7,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
 description: Translated AIME 2026 using the English AIME prompt, simple agent, and math verifier.
-modality: text
+modality:
+- text
 licensing: Apache-2.0 AND CC-BY-NC-SA-4.0
 authors: [NVIDIA NeMo Gym contributors]
 reward:

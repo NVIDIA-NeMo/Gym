@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: knowledge
 description: Broad web research with official strict table and item matching using
   the cline harness and Exa search.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - Christian Munley

@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: math
 description: 'Binary judgement of math proofs — the policy model reads a problem plus
   a candidate proof and outputs Judgement: Yes/No.'
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

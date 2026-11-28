@@ -5,7 +5,9 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: other
 description: Native SaaS Bench evaluation using opencode
-modality: text, image
+modality:
+- text
+- image
 licensing: CC-BY-4.0
 authors:
 - SaaS-Bench Authors

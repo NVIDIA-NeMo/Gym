@@ -7,7 +7,9 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: other
 description: AgentVista visual search and Python tasks, using the pinned original tools and answer judge with separate original-loop and OpenCode evaluation protocols.
-modality: multimodal
+modality:
+- text
+- image
 licensing: CC-BY-4.0
 authors:
 - NVIDIA

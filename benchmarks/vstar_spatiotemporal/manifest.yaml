@@ -7,7 +7,9 @@ domain: other
 description: V-STaR video spatio-temporal reasoning (2,094 items, each asked as five tasks - what, when and where
   in two orders). Up to 16 frames 1 second apart are sent as images; the answer is judged, the time span scored by
   temporal IoU and the 0-1000 grid boxes by per-second IoU, combined into mAM and mLGM.
-modality: text, image
+modality:
+- text
+- image
 licensing: CC-BY-NC-SA-4.0
 authors:
 - Pulkit Khandelwal

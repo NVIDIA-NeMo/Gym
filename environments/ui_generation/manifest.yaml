@@ -7,7 +7,8 @@ domain: coding
 description: Single-turn front-end UI generation. An LLM judge reads only the fenced code of the answer and scores
   prompt adherence and quality from 0 to 4, with the task's reference answer as a guideline; the reward is the
   quality score divided by 4.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - titu1994

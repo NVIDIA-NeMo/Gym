@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: rlhf
 description: LMArena proxy v3 chat evaluation against baseline responses with pairwise
   judge verdicts.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - Julien Veron Vialard

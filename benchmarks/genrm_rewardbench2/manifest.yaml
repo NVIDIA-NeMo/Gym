@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: rlhf
 description: GenRM judge evaluation on RewardBench 2 best-of-n response sets
-modality: text
+modality:
+- text
 licensing: ODC-BY-1.0
 authors:
 - Daniel Egert

@@ -5,7 +5,9 @@ kind: environment
 integration_profile: custom-gym-verifier
 domain: coding
 description: Single-answer training for Chart2Code, MMSVG Img2SVG/Text2SVG, Image2Struct LaTeX and Design2Code.
-modality: image,text
+modality:
+- text
+- image
 licensing: Apache-2.0
 authors:
 - Fuxiao Liu

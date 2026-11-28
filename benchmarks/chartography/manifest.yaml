@@ -6,7 +6,9 @@ integration_profile: custom-gym-verifier
 domain: other
 description: Chartography professional chart reading, graded by the benchmark's own LLM judge; the
   headline metric is the all-pass rate over ten runs per task.
-modality: multimodal
+modality:
+- text
+- image
 licensing: CC-BY-4.0
 authors:
 - Tuomas Rintamaki

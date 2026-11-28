@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: rlhf
 description: GenRM evaluation on public RM-Bench response pairs
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
   - Julien Veron Vialard

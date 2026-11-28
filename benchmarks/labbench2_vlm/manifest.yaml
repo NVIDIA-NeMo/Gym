@@ -6,7 +6,9 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: LabBench2 scientific figure, table, and protocol questions across five
   tags with binary judge scoring.
-modality: multimodal
+modality:
+- text
+- image
 licensing: CC-BY-SA-4.0
 authors:
 - Sergey Kolchenko

@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: The pinned 66-task Terminal-Bench 4.1 dataset with the mini-SWE 2.4.6
   native loop over the legacy /run relay of the TB4 resources server. Superseded by terminal_bench_4/miniswe.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

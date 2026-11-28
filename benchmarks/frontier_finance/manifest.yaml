@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: agent
 description: FrontierFinance investor-research queries on the Finance Agent v2 tools, scored by the official
   three-judge rubric panel.
-modality: text
+modality:
+- text
 licensing: CC-BY-4.0
 authors:
 - ushnish-de

@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: Litmus-Bench ADME Tier-5 comparison held-out evaluation,
   scored with per-row comparison rules.
-modality: text
+modality:
+- text
 licensing: LicenseRef-OpenMDW-1.1
 authors:
 - Olivia Viessmann

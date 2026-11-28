@@ -10,7 +10,8 @@ domain: other
 description: SPEED-Bench throughput_100k speculative-decoding workload. Prepared multi-turn
   prompts measure acceptance length and acceptance rate from model-server counters;
   reward is a constant zero placeholder, not a correctness score.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

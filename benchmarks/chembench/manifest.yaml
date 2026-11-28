@@ -7,7 +7,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
 description: ChemBench chemistry multiple-choice and numeric questions
-modality: text
+modality:
+- text
 licensing: Apache-2.0 AND MIT
 authors:
 - gnalbandyan

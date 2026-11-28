@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: math
 description: APEX 2025 math problems with a system prompt and symbolic-only math-verify
   grading.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - wedu-nvidia

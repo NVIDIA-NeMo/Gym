@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: other
 description: MRCR multi-round coreference resolution with prefix-gated SequenceMatcher
   grading. Uses the Nemotron-3-Super tokenizer with a 131072 token cap.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - laszkiewiczp

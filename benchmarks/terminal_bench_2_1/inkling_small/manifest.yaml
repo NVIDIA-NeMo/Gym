@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: Terminal-Bench 2.1 with the Terminus 2 agent configured for Inkling-Small, using pinned
   task inputs and a terminal-interaction note appended to every task prompt.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

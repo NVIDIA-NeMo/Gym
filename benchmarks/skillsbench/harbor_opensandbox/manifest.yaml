@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: external-agent-loop
 domain: agent
 description: Official benchflow-ai/skillsbench tasks through Harbor and OpenSandbox.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
   - benchflow-ai

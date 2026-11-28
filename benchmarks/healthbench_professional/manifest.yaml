@@ -8,7 +8,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: healthbench professional clinical conversations scored by a rubric LLM
   judge.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - cparisien
@@ -26,7 +27,7 @@ prompt_source: prepared
 state: none
 adopted_from:
   source: https://huggingface.co/datasets/openai/healthbench-professional
-  ref: 349962fd46dd02343a0d8a606491baf59154ea1a
+  ref: 349962fd46dd02343a0d8a606491baf59154ea1a  # pragma: allowlist secret
   reconciled: '2026-10-14'
 datasets:
 - name: healthbench_professional

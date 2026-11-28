@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: safety
 description: XSTest exaggerated refusal evaluation using the WildGuard judge on safe
   and unsafe prompts.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - bxyu-nvidia

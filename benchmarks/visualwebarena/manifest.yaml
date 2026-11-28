@@ -7,7 +7,9 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
 description: VisualWebArena's maintained 908 visually grounded browser tasks on self-hosted sites, using WebAgent and the reference rules, semantic judge and image evaluator.
-modality: multimodal
+modality:
+- text
+- image
 licensing: Apache-2.0
 authors:
   - Jeff Peng

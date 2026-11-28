@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
 description: Multi-choice question answering problems
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

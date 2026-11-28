@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: other
 description: Research-level physics problems scored by the Artificial Analysis API
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - fsiino-nvidia

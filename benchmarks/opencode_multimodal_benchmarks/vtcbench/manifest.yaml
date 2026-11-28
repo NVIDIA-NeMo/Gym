@@ -7,7 +7,9 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: agent
 description: 680 visual tool-use questions scored with public rules and judge fallback.
-modality: image
+modality:
+- text
+- image
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

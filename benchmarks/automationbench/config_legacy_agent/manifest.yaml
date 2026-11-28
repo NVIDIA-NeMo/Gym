@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: other
 description: AutomationBench enterprise workflows scored by guardrail-gated objective
   completion.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - Christian Munley

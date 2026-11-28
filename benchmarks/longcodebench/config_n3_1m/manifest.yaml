@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: knowledge
 description: LongCodeBench multiple-choice questions filtered to at most 1048576 prompt
   tokens using the Nemotron-3-Super tokenizer.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong

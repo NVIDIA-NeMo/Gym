@@ -5,7 +5,9 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: asr
 description: ASR with WER scoring (standard, case-sensitive, punctuation+capitalization)
-modality: audio
+modality:
+- text
+- audio
 licensing: unknown
 authors:
 - gwarmstrong

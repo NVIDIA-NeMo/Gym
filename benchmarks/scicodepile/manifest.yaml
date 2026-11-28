@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: coding
 description: The 200-task executable SciCodePile stratum, with unmodified HumanEval-style
   prompts and binary test-execution rewards.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - Rima Shahbazyan

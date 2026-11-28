@@ -7,7 +7,9 @@ kind: environment
 integration_profile: custom-gym-verifier
 domain: coding
 description: Recreate images with Python in Enroot and score them with 16 dataset rubrics or a generic rubric.
-modality: multimodal
+modality:
+- text
+- image
 licensing: Apache-2.0
 authors:
   - slikhite-1

@@ -7,7 +7,9 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: agent
 description: High-resolution multiple-choice questions with cycle-averaged accuracy.
-modality: image
+modality:
+- text
+- image
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

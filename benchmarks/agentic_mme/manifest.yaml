@@ -6,7 +6,9 @@ integration_profile: custom-gym-agent-loop
 domain: other
 description: Agentic-MME multimodal agentic reasoning (418 tasks) with atomic image tools, optional
   web retrieval, and task-only answer scoring by an LLM judge.
-modality: text, image
+modality:
+- text
+- image
 licensing: Apache-2.0
 authors:
 - DanialTaheri

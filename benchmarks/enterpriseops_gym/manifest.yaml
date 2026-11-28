@@ -7,7 +7,8 @@ domain: agent
 description: ServiceNow EnterpriseOps-Gym oracle-mode tasks across eight enterprise
   domains, run with the Stirrup agent against live MCP gym servers in per-task sandboxes
   and scored by SQL checks on the final database state.
-modality: text
+modality:
+- text
 licensing: Apache-2.0
 authors:
 - Khushi Bhardwaj

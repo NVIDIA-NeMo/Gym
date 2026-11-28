@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: math
 description: Sycophancy grader for prove-the-false-statement benchmarks, using MathArena's
   0-2 judge rubric
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - wedu-nvidia

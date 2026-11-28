@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: other
 description: GraphWalks BFS frontier and parent-node retrieval scored by node-set
   F1. Uses the Nemotron-3-Super tokenizer with a 1048576 token cap.
-modality: text
+modality:
+- text
 licensing: MIT
 authors:
 - Cheng-Ping Hsieh

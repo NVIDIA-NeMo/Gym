@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: The 89 pinned Terminal-Bench 2.1 task folders in their Harbor format, run by Terminus 2 agent
   sessions through the Harbor environment server and graded by each task's own tests.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

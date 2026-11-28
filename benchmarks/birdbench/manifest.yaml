@@ -6,7 +6,8 @@ integration_profile: custom-gym-verifier
 domain: coding
 description: Text-to-SQL with execution-based evaluation on BIRD dev (1534 SQLite
   tasks). Binary reward from unordered result-set equality.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - gwarmstrong
