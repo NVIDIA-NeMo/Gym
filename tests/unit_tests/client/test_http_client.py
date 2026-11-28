@@ -29,6 +29,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
 import json
 import logging
 import multiprocessing
@@ -38,6 +39,7 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1253,6 +1255,59 @@ class TestHTTPClient:
         finally:
             await client.close()
             monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+
+    @mark.parametrize("download", ["miniswe", "sandbox_python"])
+    async def test_release_downloads_read_long_redirect_headers_without_relaxing_other_requests(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, download: str
+    ) -> None:
+        from nemo_gym.agents.utils import sandbox_python
+        from responses_api_agents.miniswe_sandboxed_agent import bootstrap
+
+        long_value = "a" * 16384
+        body = b"pinned bootstrap asset"
+        checksum = hashlib.sha256(body).hexdigest()
+
+        async def redirect(_request: web.Request) -> web.Response:
+            raise web.HTTPFound("/asset", headers={"X-Release-Metadata": long_value})
+
+        async def asset(_request: web.Request) -> web.Response:
+            return web.Response(body=body, headers={"X-Release-Metadata": long_value})
+
+        app = web.Application()
+        app.router.add_get("/release/{name:.*}", redirect)
+        app.router.add_get("/asset", asset)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        monkeypatch.setattr(nemo_gym.client.http_client, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.client.http_client, "maybe_get_global_config_dict", lambda: None)
+        monkeypatch.setattr(nemo_gym.client.http_client, "get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: False)
+        monkeypatch.setattr(nemo_gym.client.http_client, "is_nemo_gym_fastapi_worker", lambda: True)
+
+        try:
+            await web.TCPSite(runner, "127.0.0.1", 0).start()
+            url = f"http://127.0.0.1:{runner.addresses[0][1]}/release/archive.tar.gz"
+            with raises(ClientResponseError, match="Got more than 8190 bytes"):
+                await nemo_gym.client.http_client.request("GET", url, _max_num_tries=1)
+
+            if download == "miniswe":
+                monkeypatch.setattr(bootstrap, "CACHE_DIR", tmp_path)
+                monkeypatch.setattr(bootstrap, "_DOWNLOAD_LOCK", asyncio.Lock())
+                path = await bootstrap.cached_download(url, sha256=checksum)
+            else:
+                monkeypatch.setattr(sandbox_python, "_cache_dir", lambda: tmp_path)
+                monkeypatch.setattr(sandbox_python, "_PYTHON_DOWNLOADS", url.rsplit("/", 1)[0])
+                monkeypatch.setattr(sandbox_python, "_PYTHON_SHA256", {"x86_64/gnu": checksum})
+                monkeypatch.setattr(sandbox_python, "_environment_proxy", lambda _url: None)
+                monkeypatch.delenv("UV_PYTHON_INSTALL_MIRROR", raising=False)
+                path = await sandbox_python._python_archive(sandbox_python.SandboxPlatform("x86_64", "gnu", 35))
+
+            assert path.read_bytes() == body
+            with raises(ClientResponseError, match="Got more than 8190 bytes"):
+                await nemo_gym.client.http_client.request("GET", url, _max_num_tries=1)
+        finally:
+            await nemo_gym.client.http_client.close_global_aiohttp_client()
+            await runner.cleanup()
 
     async def test_connection_pool_telemetry_is_installed_when_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
