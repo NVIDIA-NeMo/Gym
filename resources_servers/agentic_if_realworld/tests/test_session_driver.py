@@ -267,3 +267,127 @@ async def test_configured_session_driver(tmp_path, monkeypatch, unused_tcp_port_
     finally:
         await http_client.close_global_aiohttp_client()
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_raw_receipt_profile_runs_each_attempt_through_agent_sessions(
+    tmp_path, monkeypatch, unused_tcp_port_factory
+):
+    """raw_receipt.yaml keeps its streaming model client, and each attempt is an agent session, never /run."""
+    from http.server import ThreadingHTTPServer
+    from threading import Thread
+
+    from resources_servers.agentic_if_realworld.benchmark import mock_endpoint
+    from responses_api_models.agentic_if_text.app import TextModel, TextModelConfig
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("NEMO_GYM_EXTRA_ROOTS", raising=False)
+    monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
+    monkeypatch.setenv("AGENTIC_IF_POLICY_API_KEY", "synthetic")
+    runtime = core.runtime_identity()
+    monkeypatch.setattr(rollout_driver, "runtime_identity", lambda: copy.deepcopy(runtime))
+    create(tmp_path / "data", examples=True)
+    dataset = core.Dataset(tmp_path / "data", synthetic=True)
+    prepared = tmp_path / "prepared.jsonl"
+    prepared.write_text("".join(json.dumps(row) + "\n" for row in dataset.prepared()))
+    receipts = tmp_path / "receipts"
+    events = []
+
+    # The synthetic policy streams each task's literal (two of five on purpose wrong); the synthetic judge grades it.
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), mock_endpoint.Handler)
+    Thread(target=upstream.serve_forever, daemon=True).start()
+    endpoint = f"http://127.0.0.1:{upstream.server_address[1]}"
+    monkeypatch.setenv("AGENTIC_IF_POLICY_ENDPOINT", endpoint + "/v1/chat/completions")
+    monkeypatch.setenv("AGENTIC_IF_POLICY_MODEL", "synthetic-policy")
+    initial = {
+        "config_paths": ["benchmarks/agentic_if_realworld/raw_receipt.yaml"],
+        "agentic_if_realworld_resources": {
+            "resources_servers": {
+                "agentic_if_realworld": {
+                    "dataset_dir": str(dataset.directory),
+                    "synthetic": True,
+                    "receipt_dir": str(receipts),
+                    "judge_endpoint": endpoint + "/v1/chat/completions",
+                    "judge_model": "synthetic-judge",
+                }
+            }
+        },
+    }
+    settings = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(initial),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    components = [
+        (
+            "agentic_if_realworld_resources",
+            "resources_servers",
+            "agentic_if_realworld",
+            ResourcesConfig,
+            ResourcesServer,
+        ),
+        ("policy_model", "responses_api_models", "agentic_if_text", TextModelConfig, TextModel),
+        ("agentic_if_realworld_agent", "responses_api_agents", "simple_agent", SimpleAgentConfig, SimpleAgent),
+        (
+            "agentic_if_realworld_environment",
+            "environment_servers",
+            "single_agent_turn_legacy",
+            SingleAgentTurnLegacyEnvironmentServerConfig,
+            SingleAgentTurnLegacyEnvironmentServer,
+        ),
+    ]
+    for name, group, kind, _, _ in components:
+        settings[name][group][kind].update(host="127.0.0.1", port=unused_tcp_port_factory())
+    client = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=0), global_config_dict=settings)
+    monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda self, *args: client)
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(prepared), output_jsonl_fpath=str(tmp_path / "out.jsonl"), num_samples_in_parallel=2
+    )
+
+    def observe(app, name):
+        @app.middleware("http")
+        async def record(request, call_next):
+            if request.method == "POST":
+                events.append((name, request.url.path, await request.json()))
+            return await call_next(request)
+
+    try:
+        async with AsyncExitStack() as stack:
+            for name, group, kind, config_type, server_type in components:
+                server_config = config_type.model_validate(
+                    {**OmegaConf.to_container(settings[name][group][kind], resolve=True), "name": name}
+                )
+                app = server_type(config=server_config, server_client=client).setup_webserver()
+                observe(app, name)
+                await stack.enter_async_context(serve(app, server_config.port))
+            await rollout_driver.run_rollout_collection(config, settings)
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        await http_client.close_global_aiohttp_client()
+
+    records = {row["task_id"]: row for row in map(json.loads, (tmp_path / "out.jsonl").read_text().splitlines())}
+    assert {task: row["reward"] for task, row in records.items()} == {
+        "synthetic": 1.0,
+        "synthetic-ready": 1.0,
+        "synthetic-done": 1.0,
+        "synthetic-yes": 0.0,
+        "synthetic-no": 0.0,
+    }
+    assert not any(row.get("mask_sample") for row in records.values())
+    # Every attempt's answer came from the raw streaming client, whose receipt the driver read.
+    assert len(list((receipts / "model").glob("*.binding.json"))) == len(records)
+    # Each attempt seeded and closed one Resources session and one agent session, granted no tools,
+    # and never reached Simple Agent's own /run.
+    for name, seed_path, close_path, key in [
+        ("agentic_if_realworld_resources", "/seed_session", "/close_session", "resources_session_id"),
+        ("agentic_if_realworld_agent", "/v1/agent_sessions", "/v1/agent_sessions/close", "agent_session_id"),
+    ]:
+        seeds = [body[key] for server, path, body in events if server == name and path.endswith(seed_path)]
+        closes = [body[key] for server, path, body in events if server == name and path.endswith(close_path)]
+        assert len(seeds) == len(records) and sorted(seeds) == sorted(closes)
+    assert all(body["tool_accesses"] == [] for _, path, body in events if path.endswith("/v1/agent_sessions"))
+    assert not any(name == "agentic_if_realworld_agent" and path.endswith("/run") for name, path, _ in events)
