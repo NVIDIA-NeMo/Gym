@@ -154,7 +154,7 @@ def build_observations(
                 s = 1.0
             elif hw in ("opponent", "baseline"):
                 s = 0.0
-            elif hw == "tie" or (hw == "both_bad" and benchmark == "lmarena_v3"):
+            elif hw == "tie" or (hw == "both_bad" and benchmark in {"lmarena_v3", "lmarena_v4"}):
                 s = 0.5
             else:
                 n_no_human += 1
@@ -177,7 +177,11 @@ def build_observations(
                 if not g or g.get("verdict") is None:
                     break
                 verdict = g["verdict"].strip("[]")
-                a_score = 0.5 if verdict == "BB" and benchmark == "lmarena_v3" else VERDICT_TO_A_SCORE.get(verdict)
+                a_score = (
+                    0.5
+                    if verdict == "BB" and benchmark in {"lmarena_v3", "lmarena_v4"}
+                    else VERDICT_TO_A_SCORE.get(verdict)
+                )
                 if a_score is None:
                     break
                 # The second game swaps the policy and opponent positions.
@@ -207,7 +211,7 @@ def main():
     p.add_argument("--verdicts", help="judge verdicts JSONL (omit for human-only fit)")
     p.add_argument("--policy-name", required=True)
     p.add_argument("--label", choices=["human", "judge"], required=True)
-    p.add_argument("--version", choices=["lmarena_v2", "lmarena_v3"], required=True)
+    p.add_argument("--version", choices=["lmarena_v2", "lmarena_v3", "lmarena_v4"], required=True)
     p.add_argument("--bootstrap", type=int, default=1000)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
