@@ -1,0 +1,47 @@
+{
+  "defaults": {
+    "prompt_override": {
+      "system_prompt": ""
+    },
+    "request": {
+      "max_output_tokens": 4096,
+      "preset": "greedy"
+    },
+    "skills": {
+      "EVAL_ARGS": "++eval_type=contextasr ++eval_config.cleanup_generation_loops=true",
+      "METRICS_TYPE": "contextasr"
+    }
+  },
+  "profiles": {
+    "contextasr-bench.contextless": {
+      "request": "greedy"
+    },
+    "contextasr-bench.coarse": {
+      "request": "greedy"
+    },
+    "contextasr-bench.fine": {
+      "request": "greedy"
+    },
+    "contextasr-bench-mandarin.contextless": {
+      "request": {
+        "max_output_tokens": 1024
+      }
+    },
+    "contextasr-bench-mandarin.coarse": {
+      "request": {
+        "max_output_tokens": 1024
+      }
+    },
+    "contextasr-bench-mandarin.fine": {
+      "request": {
+        "max_output_tokens": 1024
+      }
+    },
+    "contextasr-bench-dialogue.contextless": {},
+    "contextasr-bench-dialogue.coarse": {},
+    "contextasr-bench-dialogue.fine": {},
+    "contextasr-bench-dialogue-mandarin.contextless": {},
+    "contextasr-bench-dialogue-mandarin.coarse": {},
+    "contextasr-bench-dialogue-mandarin.fine": {}
+  }
+}
