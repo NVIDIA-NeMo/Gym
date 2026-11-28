@@ -1,0 +1,3 @@
+# A structured transcription instruction (no system message), as an alternative to the neutral prompt of default.yaml.
+# Use it for the `numb3rs` profile only: `--prompt-config benchmarks/numb3rs/prompts/structured.yaml`.
+user: "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only."

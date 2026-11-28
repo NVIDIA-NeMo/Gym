@@ -1,89 +1,61 @@
 # Numb3rs
 
-ASR benchmark for text normalization (TN) and inverse text normalization
-(ITN). Each row from
-[`nvidia/Numb3rs`](https://huggingface.co/datasets/nvidia/Numb3rs)
-carries paired written and spoken references — `text_tn` (e.g.
-`"$100"`) and `text_itn` (e.g. `"one hundred dollars"`) — across 12
-number-shaped categories: `ADDRESS`, `CARDINAL`, `DATE`, `DECIMAL`,
-`DIGIT`, `FRACTION`, `MEASURE`, `MONEY`, `ORDINAL`, `PLAIN`,
-`TELEPHONE`, `TIME`. Pairs with the
-[`asr_with_pc`](../../resources_servers/asr_with_pc/) resource server
-in `task_type=ASR_LEADERBOARD` mode, which scores standard WER against
-the primary `expected_answer` plus per-reference `wer_tn` / `wer_itn`
-against the dual references.
+Text-normalization (TN) and inverse-text-normalization (ITN) ASR on
+[`nvidia/Numb3rs`](https://huggingface.co/datasets/nvidia/Numb3rs): 10,131 synthetic clips (about 4.9 hours, TTS audio
+checked by human annotators) in 12 number-shaped categories (`ADDRESS`, `CARDINAL`, `DATE`, `DECIMAL`, `DIGIT`,
+`FRACTION`, `MEASURE`, `MONEY`, `ORDINAL`, `PLAIN`, `TELEPHONE`, `TIME`), each with a written reference (`text_tn`,
+`"$100"`) and a spoken reference (`text_itn`, `"one hundred dollars"`).
 
-## Variant: neutral only
+- **Source:** the dataset `manifest.jsonl` and WAV files at revision `192908075e1bd293914cc7b508f4a183ba6ef2b8`.
+  `prepare()` downloads data files only and fails if the manifest does not hold 10,131 rows or a clip path is
+  unexpected.
+- **License:** CC-BY-NC-SA-4.0, as stated in the dataset card. The dataset links no separate source repository. The card
+  says the text pairs derive from the Google Text Normalization dataset; its terms were not checked here. The
+  non-commercial and share-alike terms apply to anything that redistributes the data.
 
-The upstream benchmark exposes three prompt variants (`neutral`, `tn`,
-`itn`) but the canonical Gym dataset is the **neutral** variant only —
-the same default Skills evaluates against (`EVAL_SPLIT = "test_neutral"`).
-For the `tn` / `itn` prompt variants, re-run `prepare.py` with a
-different prompt template and a different `expected_answer` policy:
+## Profiles
 
-* `tn`: prompt asks for written form; `expected_answer = text_tn`.
-* `itn`: prompt asks for spoken form; `expected_answer = text_itn`
-  (same as neutral).
+One JSONL holds three profiles over the same clips, told apart by `benchmark_profile`:
 
-Those alternate variants are reproducible from the same HF source and
-are not committed here to keep the JSONL lean.
+| Profile | Prompt | Scored against |
+|---|---|---|
+| `numb3rs` | neutral transcription | `text_itn` |
+| `numb3rs.tn` | written form, digits | `text_tn` |
+| `numb3rs.itn` | spoken form, numbers spelled out | `text_itn` |
 
-## Audio handling
+Each row carries its prompt text in `prompt`; [`prompts/default.yaml`](prompts/default.yaml) renders it, with the
+system message `You are a helpful assistant. /no_think`, at rollout time. [`prompts/structured.yaml`](prompts/structured.yaml)
+is an alternative structured instruction for the `numb3rs` profile (`--prompt-config`). The rows set no sampling
+controls: pass them to `gym eval run`, for example `--temperature 0 --top-p 1 --max-output-tokens 256`, with
+`chat_template_kwargs.enable_thinking: false` on the policy model.
 
-`prepare.py` writes the WAV tree under
-`benchmarks/numb3rs/data/Numb3rs/<CATEGORY>/<filename>.wav` and the
-JSONL stores
-`responses_create_params.metadata.audio_path =
-"<audio_prefix>/Numb3rs/<CATEGORY>/<filename>.wav"`. The
-`vllm_model` audio sidechannel reads `audio_path`, base64-encodes the
-file at rollout time, and splices an `audio_url` content block into the
-user message before forwarding to vLLM Chat Completions.
+## Scoring
 
-The default `--audio-prefix` (`/data/numb3rs`) is the path Skills'
-prepare also writes, so the same shared mount works for both
-pipelines.
+The [`asr_with_pc`](../../resources_servers/asr_with_pc/) server scores each row in `ASR_LEADERBOARD` mode with
+`normalization: numb3rs` (the `category` is required; a row without one is rejected with HTTP 422). That normalizer is
+conservative: it ignores case, prose punctuation, `oh`/`o` zeros and conventional initialisms, but keeps number words and
+numeric symbols (`$`, `%`, `/`, `:`, signs). Whisper's normalizer would turn spoken numbers into digits on both sides and hide
+the errors this benchmark measures. The server also collapses runaway repetition before scoring
+(`cleanup_generation_loops`).
 
-## Prompt
+Corpus-level metrics (percent):
 
-System + user templates live in [`prompts/default.yaml`](prompts/default.yaml)
-and match Skills' `PROMPT_NEUTRAL` character-for-character.
-`prompt_config` materializes them into `responses_create_params.input`
-at rollout time, so `prepare.py` doesn't bake the messages into each
-row.
+| Key | Meaning |
+|---|---|
+| `wer::profile::<profile>@k=1` | WER of one profile, against that profile's reference |
+| `wer::subset::<profile>_<CATEGORY>@k=1` | WER of one category within one profile |
+| `wer`, `wer_tn`, `wer_itn` | Headline WER and the WER against each form, **pooled over all profiles run**: read the per-profile keys |
 
-## Prepare benchmark data
+## Run
 
 ```bash
 gym eval prepare --benchmark numb3rs
+gym eval run --benchmark numb3rs --model-type vllm_model --split benchmark --num-repeats 1 \
+    --output results/numb3rs_rollouts.jsonl
 ```
 
-Downloads `nvidia/Numb3rs` (split=`test`), iterates the 12 categories,
-writes WAVs under `benchmarks/numb3rs/data/Numb3rs/<CAT>/` and a single
-combined `benchmarks/numb3rs/data/numb3rs_benchmark.jsonl`.
+`+prepare_script_args.profiles='[numb3rs]'` writes one profile; `+prepare_script_args.audio_root=/data/numb3rs` is for a
+model server that sees `data/` elsewhere. `+prepare_script_args.max_samples_per_profile=<n>` keeps the first `n` clips in
+category order, so a small cap covers only the first categories (`ADDRESS` has 885 clips); it is for smoke runs.
 
-## Running servers
-
-```bash
-gym env start \
-    --model-type vllm_model \
-    --benchmark numb3rs
-```
-
-## Collecting rollouts
-
-```bash
-gym eval run --no-serve \
-    --agent numb3rs_asr_with_pc_simple_agent \
-    --output results/numb3rs_rollouts.jsonl \
-    --num-repeats 4
-```
-
-## Verification
-
-`task_type=ASR_LEADERBOARD` runs standard Whisper-normalized WER against
-`expected_answer` (the spoken form), then iterates
-`reference_fields = ["text_tn", "text_itn"]` and emits per-reference
-`wer_tn` / `wer_itn` plus `is_correct_<suffix>` flags. Corpus-level
-`wer`, `wer_tn` and `wer_itn` are aggregated across the eval set by
-`compute_metrics()` on the `asr_with_pc` server; per-category
-breakdowns ride on `subset_for_metrics = "numb3rs_<CATEGORY>"`.
+No score has been compared with a published number for this benchmark.
