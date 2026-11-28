@@ -13,3 +13,18 @@ env = { CIRCLE_NODE_TOTAL = "3" }
 
 [gym.tasks."nextjs-performance".verifier.environment]
 env = { CIRCLE_NODE_TOTAL = "3" }
+
+# These two 4.1 tasks state their verifier's network restriction on the verifier's own sandbox
+# (`[verifier.environment] allow_internet = false`), a placement the loader refuses. The same restriction on
+# `[verifier]` is applied to the separate verifier's sandbox when it is created, so the tests still run offline.
+[gym.tasks."batched-eval-parity".verifier]
+network_mode = "no-network"
+
+[gym.tasks."batched-eval-parity".verifier.environment]
+network_mode = "public"
+
+[gym.tasks."lake-temp-glm".verifier]
+network_mode = "no-network"
+
+[gym.tasks."lake-temp-glm".verifier.environment]
+network_mode = "public"
