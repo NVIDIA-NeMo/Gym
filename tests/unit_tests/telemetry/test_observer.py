@@ -32,6 +32,11 @@ from nemo_gym.telemetry import observer  # noqa: E402
 from nemo_gym.telemetry import setup as telemetry_setup  # noqa: E402
 
 
+# How long a test waits for an in-process request to send its response or to end after its client disconnects.
+# It only catches a hang: on a loaded CI runner, either step can take longer than a second.
+REQUEST_STEP_TIMEOUT_SECONDS = 30
+
+
 @pytest.fixture
 def collected(monkeypatch):
     """A live meter installed as the process handle, with metrics exporting."""
@@ -366,9 +371,9 @@ def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(colle
                         "http_version": "1.1",
                     }
                     task = asyncio.create_task(app(scope, incoming.get, send))
-                    await asyncio.wait_for(ready.wait(), timeout=1)
+                    await asyncio.wait_for(ready.wait(), timeout=REQUEST_STEP_TIMEOUT_SECONDS)
                     await incoming.put({"type": "http.disconnect"})
-                    await asyncio.wait_for(task, timeout=1)
+                    await asyncio.wait_for(task, timeout=REQUEST_STEP_TIMEOUT_SECONDS)
 
             counts = observer.request_counts()
             assert counts.cancelled == 6
@@ -459,9 +464,9 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
                 incoming = asyncio.Queue()
                 await incoming.put({"type": "http.request", "body": b"", "more_body": False})
                 task = asyncio.create_task(app(scope, incoming.get, send))
-                await asyncio.wait_for(ready.wait(), timeout=1)
+                await asyncio.wait_for(ready.wait(), timeout=REQUEST_STEP_TIMEOUT_SECONDS)
                 await incoming.put({"type": "http.disconnect"})
-                await asyncio.wait_for(task, timeout=1)
+                await asyncio.wait_for(task, timeout=REQUEST_STEP_TIMEOUT_SECONDS)
                 assert scope["path"] == path
                 assert scope["raw_path"] == path.encode()
                 assert scope["state"]["existing"] == "preserved"
@@ -501,9 +506,9 @@ def test_cancellation_before_routing_uses_one_unmatched_bucket(collected, monkey
                 task = asyncio.create_task(
                     middleware({"type": "http", "method": "POST", "path": f"/unknown/{index}"}, incoming.get, send)
                 )
-                await asyncio.wait_for(ready.wait(), timeout=1)
+                await asyncio.wait_for(ready.wait(), timeout=REQUEST_STEP_TIMEOUT_SECONDS)
                 await incoming.put({"type": "http.disconnect"})
-                await asyncio.wait_for(task, timeout=1)
+                await asyncio.wait_for(task, timeout=REQUEST_STEP_TIMEOUT_SECONDS)
             (point,) = collected()[observer.REQUESTS_CANCELLED_INSTRUMENT]
             assert point.value == 3
             assert point.attributes == {
