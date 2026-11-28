@@ -136,11 +136,14 @@ from nemo_gym.rollouts.batch_status import (
 )
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
+    CaptureSnapshot,
     await_model_call_capture_quiescence,
+    clear_model_call_capture_after_snapshot,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
+    snapshot_model_call_capture,
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
@@ -1028,10 +1031,43 @@ async def enrich_run_result(
     from the record. Harness output and reward are never modified. A row that names no task (no task id field,
     task index or trajectory identity) gets no ``ng_trajectory`` rather than a guessed task id.
     ``include_payloads=False`` keeps call metadata only; ``delete_capture`` removes the rollout's capture file once it
-    has been merged, so it requires the payloads to be kept.
+    has been merged, so it requires the payloads to be kept. The deletion starts in a worker thread as this returns
+    and is not awaited, so a cancel cannot drop a result whose capture is already gone.
     """
+    snapshot = await _enrich_run_result(
+        row,
+        result,
+        capture_dirs=capture_dirs,
+        observability_enabled=observability_enabled,
+        include_payloads=include_payloads,
+        rollout_latency_ms=rollout_latency_ms,
+        delete_capture=delete_capture,
+        trajectory_schema_version=trajectory_schema_version,
+    )
+    _start_capture_deletion(snapshot)
+    return result
+
+
+def _start_capture_deletion(snapshot: Optional[CaptureSnapshot]) -> None:
+    """Delete a merged capture in a worker thread, without waiting for it."""
+    if snapshot is not None:
+        asyncio.get_running_loop().run_in_executor(None, clear_model_call_capture_after_snapshot, snapshot)
+
+
+async def _enrich_run_result(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    capture_dirs: list[Path],
+    observability_enabled: bool,
+    include_payloads: bool = True,
+    rollout_latency_ms: Optional[float] = None,
+    delete_capture: bool = False,
+    trajectory_schema_version: Literal["1.0", "2.0"] = "1.0",
+) -> Optional[CaptureSnapshot]:
+    """``enrich_run_result`` without the deletion: the snapshot of the capture to delete once the result is safe."""
     if not isinstance(result, dict):
-        return result
+        return None
     if delete_capture and not include_payloads:
         raise ValueError(
             "delete_capture would drop the model-call bodies that include_payloads=False leaves in the store"
@@ -1047,6 +1083,7 @@ async def enrich_run_result(
     # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
     # nothing unreadable, and the bodies kept (not redacted).
     safe_to_delete = False
+    snapshot = None
     redacted = _has_observation_gap(result, "multimodal_history_redacted")
     payloads_kept = include_payloads and not redacted
     if capture_dirs and (
@@ -1062,8 +1099,13 @@ async def enrich_run_result(
         quiesced = False
         if rollout_id_for_capture is not None:
             quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
+            if delete_capture:
+                # Before the merge reads: every row the deletion could remove is then one the merge read.
+                snapshot = await asyncio.to_thread(snapshot_model_call_capture, rollout_id_for_capture, capture_dirs)
         # Available unredacted responses verify exact tool requests before output omission.
-        merge_model_call_capture_into_record(
+        # Off the event loop: the merge reads the capture and waits on the claims file's lock.
+        await asyncio.to_thread(
+            merge_model_call_capture_into_record,
             result,
             capture_dirs,
             include_payloads=not redacted if trajectory_schema_version == "2.0" else payloads_kept,
@@ -1111,9 +1153,7 @@ async def enrich_run_result(
     # Assembles ng_perf from ng_trajectory when observability is enabled.
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
-    if delete_capture and safe_to_delete:
-        clear_model_call_captures_for_rollouts([result], capture_dirs)
-    return result
+    return snapshot if delete_capture and safe_to_delete else None
 
 
 _ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
@@ -1390,6 +1430,8 @@ class _RunRecordWriter:
         # The kinds of the staged records not yet handed to the sink, in write order, and the rows settled so far.
         self._undelivered: List[str] = []
         self._settled = 0
+        # Merged captures of staged records, deleted once the shard is published.
+        self._captures_to_delete: List[CaptureSnapshot] = []
         with self._locked() as lock:
             if self._staging is None:
                 self.failures_fpath.unlink(missing_ok=True)
@@ -1558,6 +1600,15 @@ class _RunRecordWriter:
             self.sink(kind, orjson.loads(line))
         return fpath
 
+    @property
+    def staged(self) -> bool:
+        """Whether records still go to the staging folder, so they reach the run folder only when it is published."""
+        return self._staging is not None
+
+    def delete_capture_on_publish(self, snapshot: CaptureSnapshot) -> None:
+        """Delete a staged record's merged capture once the shard is published; never if it is not."""
+        self._captures_to_delete.append(snapshot)
+
     def row_settled(self) -> None:
         """Count one of the shard's rows as settled, whether it wrote a record or raised; end the shard after the last.
 
@@ -1646,6 +1697,9 @@ class _RunRecordWriter:
         self._staging = None
         if self._status is not None:
             self._status.status_fpath = self.status_fpath
+        captures, self._captures_to_delete = self._captures_to_delete, []
+        for snapshot in captures:
+            _start_capture_deletion(snapshot)
         try:
             self._deliver(staging)
         finally:
@@ -6530,9 +6584,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
         (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
         the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
-        enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
-        is merged, and needs the payloads kept. With ``enrich_results`` the rows are dispatched as collection
-        dispatches them, on copies that name this call's run: results are validated, and under
+        enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file once it
+        is merged and its row is saved (with ``record_staging_dir``, once the shard is published; never for a row the
+        shard does not keep), or as its result is returned, and needs the payloads kept. With ``enrich_results`` the
+        rows are dispatched as collection dispatches them, on copies that name this call's run: results are
+        validated, and under
         ``route_failures_to_sidecar`` a failed `/run` comes back as the typed ``RolloutFailureRecord``, as
         ``run_outcomes`` returns it; rows without a rollout identity keep the plain dispatch. With ``enrich_results``
         off, results are exactly what `/run` returned.
@@ -6626,11 +6682,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     global_config=global_config,
                     agent_name=self._agent_name_for_row(completed.row, global_config),
                 )
-                await enrich_run_result(
+                snapshot = await _enrich_run_result(
                     completed.row, record, rollout_latency_ms=completed.rollout_latency_ms, **options
                 )
                 _reflect_enrichment(completed.result, record)
-                writer.write(record)
+                # Deleted only once the row is saved: never for a row the shard does not keep, and for a staged row
+                # only when its shard is published.
+                if writer.write(record) is not None and snapshot is not None:
+                    if writer.staged:
+                        writer.delete_capture_on_publish(snapshot)
+                    else:
+                        await asyncio.to_thread(clear_model_call_capture_after_snapshot, snapshot)
 
         else:
             returned_schema = trajectory_schema_version

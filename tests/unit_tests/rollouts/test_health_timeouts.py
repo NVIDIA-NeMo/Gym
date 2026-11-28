@@ -558,7 +558,9 @@ class TestCapturesOfFailedRollouts:
 
         assert timeouts["time_split"]["rollouts_with_captures"] == 3
 
-    @pytest.mark.parametrize("partial", ["torn record", "pending write", "failed write"])
+    @pytest.mark.parametrize(
+        "partial", ["torn record", "pending write", "earlier version's pending write", "failed write"]
+    )
     def test_a_partial_capture_leaves_the_rollout_unmeasured(self, tmp_path: Path, partial: str) -> None:
         """Each capture here lacks the second of two 40 s calls, so timing it would halve the policy share."""
         store = CaptureStore(tmp_path / "model-calls")
@@ -566,12 +568,49 @@ class TestCapturesOfFailedRollouts:
             store.path_for("0-0").write_bytes(orjson.dumps(exchange(40, 80))[:40] + b"\n")
         elif partial == "pending write":
             store.mark_pending("0-0", "second-call")
+        elif partial == "earlier version's pending write":
+            (store.root / "0-0.second_call.capture.pending").touch()
         else:
             store.mark_incomplete("0-0")
 
         timeouts = self.timeouts(tmp_path, [deadline_failure(0)], {"0-0": [exchange(0, 40)]})
 
         assert (timeouts["timed_out"], timeouts["time_split"]["rollouts_with_captures"]) == (1, 0)
+
+    def test_clearing_a_key_before_dispatch_lets_its_fresh_capture_be_measured(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+
+        capture_dir = tmp_path / "model-calls"
+        store = CaptureStore(capture_dir)
+        for rollout_id in ("0-0", "0-0-a1", "1-0"):
+            (capture_dir / f"{rollout_id}.old.capture.pending").touch()
+        store.record("0-0", exchange(0, 90))
+        store.mark_incomplete("0-0")
+        store.mark_pending("0-0", "stale")
+
+        clear_model_call_captures_for_rollouts([{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}], [capture_dir])
+
+        assert sorted(path.name for path in capture_dir.iterdir()) == [
+            "0-0-a1.old.capture.pending",
+            "1-0.old.capture.pending",
+        ]
+        store.mark_pending("0-0", "fresh")
+        store.clear_pending("0-0", "fresh")
+        timeouts = self.timeouts(
+            tmp_path, [deadline_failure(0)], {"0-0": [{"model_call_id": "fresh", **exchange(0, 40)}]}
+        )
+        assert timeouts["time_split"]["rollouts_with_captures"] == 1
+
+    def test_a_released_claim_leaves_the_rollout_measured(self, tmp_path: Path) -> None:
+        store = CaptureStore(tmp_path / "model-calls")
+        store.mark_pending("0-0", "only-call")
+        store.clear_pending("0-0", "only-call")
+
+        timeouts = self.timeouts(
+            tmp_path, [deadline_failure(0)], {"0-0": [{"model_call_id": "only-call", **exchange(0, 40)}]}
+        )
+
+        assert timeouts["time_split"]["rollouts_with_captures"] == 1
 
     def test_a_malformed_failure_row_leaves_only_itself_unmeasured(self, tmp_path: Path) -> None:
         failures = [deadline_failure(0, **{ATTEMPT_INDEX_KEY_NAME: [1]}), deadline_failure(1)]

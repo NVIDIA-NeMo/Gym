@@ -4434,6 +4434,17 @@ class TestCachedDeliverableReuse:
         # An earlier session wrote the calls of the reused stage-1 row, whose task index is offset by the stride.
         reused_key = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0}
         CaptureStore(capture_dir).record(maybe_rollout_id_from_run_body(reused_key), _capture_exchange("seeded"))
+        import threading
+
+        loop_thread = threading.get_ident()
+        merge = multistage_module.merge_model_call_capture_into_record
+        merged_on_loop = []
+
+        def observed_merge(*args, **kwargs):
+            merged_on_loop.append(threading.get_ident() == loop_thread)
+            return merge(*args, **kwargs)
+
+        monkeypatch.setattr(multistage_module, "merge_model_call_capture_into_record", observed_merge)
 
         _, _, persisted = await self._run_two_stages(tmp_path, monkeypatch, cached=True, capture_dir=capture_dir)
 
@@ -4442,6 +4453,41 @@ class TestCachedDeliverableReuse:
             for row in persisted
         }
         assert calls_by_stage == {0: ["dispatched"], 1: ["seeded"]}
+        # The merge waits on the claims file's lock, so it runs off the event loop.
+        assert merged_on_loop == [False, False]
+
+    @pytest.mark.parametrize("held", [0, 1], ids=["dispatched", "reused"])
+    async def test_a_cancel_while_calls_are_joined_still_saves_the_finished_rollout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held: int
+    ) -> None:
+        import asyncio
+        import threading
+
+        merge = multistage_module.merge_model_call_capture_into_record
+        entered, gate = threading.Event(), threading.Event()
+        merges = []
+
+        def held_merge(*args, **kwargs):
+            merges.append(None)
+            if len(merges) == held + 1:
+                entered.set()
+                gate.wait(5)
+            return merge(*args, **kwargs)
+
+        monkeypatch.setattr(multistage_module, "merge_model_call_capture_into_record", held_merge)
+        run = asyncio.ensure_future(
+            self._run_two_stages(tmp_path, monkeypatch, cached=True, capture_dir=tmp_path / "capture")
+        )
+        assert await asyncio.to_thread(entered.wait, 5)
+        run.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+        output = tmp_path / "rollouts.jsonl"
+        saved = [json.loads(line) for line in output.read_text().splitlines()] if output.exists() else []
+        # The rollout whose calls were being joined is saved before the cancel goes on, so a resume skips it.
+        assert sorted(row["stage_index"] for row in saved) == list(range(held + 1))
 
     async def test_a_reused_row_without_a_capture_has_no_calls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
