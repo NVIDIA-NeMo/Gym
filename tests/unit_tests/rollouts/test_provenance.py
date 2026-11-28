@@ -9,11 +9,32 @@ from threading import Thread
 
 import orjson
 import pytest
-from omegaconf import OmegaConf
+import yaml
+from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.config.config_types import HeadServerUnreachableError
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollouts import provenance
+from nemo_gym.rollouts.provenance import AgentServerHarness
 from nemo_gym.utils.path_utils import materialized_path_for, provenance_path_for
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _resolve(config_path: str, **overrides: object) -> DictConfig:
+    """A repository config resolved as a run resolves it, with no model behind the policy."""
+    return GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {"config_paths": [str(ROOT / config_path)], **overrides},
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -470,3 +491,151 @@ def test_backends_are_asked_at_once(monkeypatch) -> None:
     assert time.monotonic() - started < 2
     assert [backend.id for backend in served["policy_model"]] == urls
     assert [backend.id for backend in served["judge_model"]] == urls[:2]
+
+
+@pytest.mark.parametrize(
+    ("config_path", "agent_server", "expected"),
+    [
+        (
+            "benchmarks/gpqa/config.yaml",
+            "gpqa_mcqa_simple_agent",
+            AgentServerHarness(agent_type="simple_agent", model_server="policy_model"),
+        ),
+        # OpenCode at the version the agent pins by default: the config pins none.
+        (
+            "benchmarks/swebench/verified/opencode.yaml",
+            "swebench_verified_opencode_agent",
+            AgentServerHarness(agent_type="opencode_agent", model_server="policy_model"),
+        ),
+        (
+            "benchmarks/swebench/verified/opencode_legacy_agent.yaml",
+            "swebench_verified_opencode_sandboxed_agent",
+            AgentServerHarness(
+                agent_type="opencode_sandboxed_agent",
+                harness={"opencode_version": "1.17.11"},
+                model_server="policy_model",
+            ),
+        ),
+    ],
+)
+def test_a_benchmark_config_records_the_harness_of_its_agent_server(
+    config_path: str, agent_server: str, expected: AgentServerHarness
+) -> None:
+    record = provenance.build_provenance(_resolve(config_path))
+
+    assert record.agent_servers[agent_server] == expected
+
+
+def test_each_agent_server_of_a_run_records_its_own_harness_and_model_server() -> None:
+    config = _resolve("benchmarks/partner_if/config.yaml")
+
+    agents = provenance.build_provenance(config).agent_servers
+
+    assert agents["partner_if_simple_agent"] == AgentServerHarness(
+        agent_type="simple_agent", model_server="partner_if_policy_model"
+    )
+    assert agents["partner_if_swe_agent"] == AgentServerHarness(
+        agent_type="opencode_agent", harness={"opencode_version": "1.17.11"}, model_server="partner_if_policy_model"
+    )
+    assert agents["partner_if_prime_agent"] == AgentServerHarness(
+        agent_type="prime_agent", harness={"prime_agent_version": "0.7.0"}, model_server="partner_if_prime_model"
+    )
+    # Each names a model server of the run, as `served_models` is keyed.
+    model_servers = {
+        name for name, node in config.items() if isinstance(node, DictConfig) and "responses_api_models" in node
+    }
+    assert {agent.model_server for agent in agents.values()} - {None} <= model_servers
+
+
+def test_harness_presets_that_share_an_agent_type_record_which_harness_ran(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DeepSearchQA's harness presets all run `harness_exa_search`; only its `agent` and `agent_kwargs` differ."""
+    monkeypatch.setenv("EXA_API_KEY", "exa-provenance-key")
+    agents = {}
+    for preset in ("opencode", "hermes"):
+        config = _resolve(f"benchmarks/deepsearchqa/configs/deepsearchqa_{preset}.yaml")
+        assert config["deepsearchqa_agent"]["responses_api_agents"]["harness_exa_search"]["exa_api_key"] == (
+            "exa-provenance-key"
+        )
+        record = provenance.build_provenance(config)
+        assert "exa-provenance-key" not in record.model_dump_json()
+        agents[preset] = record.agent_servers["deepsearchqa_agent"]
+
+    assert agents["opencode"] == AgentServerHarness(
+        agent_type="harness_exa_search",
+        harness={"agent": "opencode", "opencode_version": "1.17.11"},
+        model_server="policy_model",
+    )
+    assert (agents["hermes"].agent_type, agents["hermes"].harness["agent"]) == ("harness_exa_search", "hermes")
+
+
+def test_a_harness_setting_never_carries_url_credentials() -> None:
+    config = {
+        "swe_agent": {
+            "responses_api_agents": {
+                "swe_agents": {
+                    "agent_framework": "openhands",
+                    "agent_framework_repo": "https://user:hunter2@git.example/org/OpenHands.git",  # pragma: allowlist secret
+                    "agent_framework_commit": "54d2a95",
+                    "agent_kwargs": {"openai_api_key": "sk-wrapped", "opencode_version": "1.17.8"},
+                    "openhands_token": "sk-own",
+                }
+            }
+        }
+    }
+
+    record = provenance.build_provenance(config)
+
+    assert record.agent_servers["swe_agent"].harness == {
+        "agent_framework": "openhands",
+        "agent_framework_commit": "54d2a95",
+        "agent_framework_repo": "https://git.example/org/OpenHands.git",
+        "opencode_version": "1.17.8",
+    }
+    assert all(secret not in record.model_dump_json() for secret in ("hunter2", "sk-wrapped", "sk-own"))
+
+
+def test_a_no_serve_collection_records_the_head_servers_agent_servers(tmp_path: Path) -> None:
+    """`gym eval run --no-serve` holds no agent server entries; the running head server's config does."""
+    head_config = _resolve("benchmarks/gpqa/config.yaml")
+    materialized_path_for(tmp_path / "rollouts.jsonl").write_text("{}\n")
+
+    path = provenance.write_run_provenance(
+        tmp_path / "rollouts.jsonl", {"policy_model_name": "super-3.5"}, model_server_config=lambda: head_config
+    )
+
+    written = orjson.loads(path.read_bytes())
+    assert written["agent_servers"]["gpqa_mcqa_simple_agent"] == {
+        "agent_type": "simple_agent",
+        "harness": {},
+        "model_server": "policy_model",
+    }
+
+
+# `*_version` settings of agent servers that version something other than the harness.
+_NOT_HARNESS_VERSIONS = {"exact_trace_transport_version"}
+
+
+def test_every_harness_version_a_repository_config_pins_is_recorded() -> None:
+    pinned: dict[str, Path] = {}
+    for pattern in (
+        "benchmarks/**/*.yaml",
+        "environments/**/*.yaml",
+        "resources_servers/*/configs/**/*.yaml",
+        "responses_api_agents/*/configs/**/*.yaml",
+    ):
+        for path in ROOT.glob(pattern):
+            try:
+                config = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError:
+                continue
+            for node in config.values() if isinstance(config, dict) else ():
+                agents = node.get("responses_api_agents") if isinstance(node, dict) else None
+                for settings in agents.values() if isinstance(agents, dict) else ():
+                    wrapped = settings.get("agent_kwargs") if isinstance(settings, dict) else None
+                    for block in (settings, wrapped):
+                        for key in block if isinstance(block, dict) else ():
+                            if str(key).endswith("_version"):
+                                pinned.setdefault(str(key), path.relative_to(ROOT))
+
+    missing = {key: str(path) for key, path in pinned.items() if key not in provenance._HARNESS_KEYS}
+    assert set(missing) <= _NOT_HARNESS_VERSIONS, f"add each harness version key to _HARNESS_KEYS: {missing}"
