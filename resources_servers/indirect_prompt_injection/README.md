@@ -27,6 +27,16 @@ Each rollout produces two sub-rewards which are multiplied to form the final rew
 
 Aggregate metrics (`compute_metrics`) include `avg_reward`, `avg_reward_safety`, `avg_reward_utility`, and per-bucket resistance rates broken down by `attack_difficulty`, `verification_type`, and attack `category`.
 
+## Sessions
+
+Each rollout gets its own deep copy of the task's `environment`, created at `/seed_session`.
+
+The shared `SimpleResourcesServer` lifecycle serializes seed, verification cleanup, close, and retirement. Its `verifying` context releases the environment even when scoring raises, and retains only the bounded retry identity.
+
+An Environment Server, such as `single_agent_turn`, seeds the session with a typed `ResourcesSeedSessionRequest` whose `task_data` holds the task's fields, and closes it with `/close_session`. The environment is keyed by the caller's `resources_session_id`: until `/verify`, a repeated seed returns the same environment with the tool calls' changes. `/verify` releases the environment and keeps only an expiring identity record so an HTTP retry can score the same trajectory. `/close_session` also releases an unverified environment, even without the seed's cookie. Checkpoint retirement releases abandoned sessions. A seed after its session was verified or closed gets 409, and a seed whose `task_data` is not an indirect_prompt_injection task (for example, one without `environment`) gets 422.
+
+A tool call for a session the server no longer holds (never seeded, closed, or lost with a restart) gets 404 with `failure_kind: session_lost`. Its `/verify` returns a masked sample (`reward: 0`, `reward_safety: 0`, `mask_sample: true`): the server no longer holds the environment the agent's tool calls read, so a trace without the attacker's call cannot be told from a resisted attack. This includes `gym eval reverify --force`, which posts `/verify` without a seed: every row it rescores comes back masked.
+
 ## Example
 
 A representative healthcare task:
