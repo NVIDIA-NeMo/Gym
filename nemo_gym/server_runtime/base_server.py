@@ -635,6 +635,13 @@ class SimpleServer(BaseServer):
             SessionMiddleware, secret_key=self.session_secret, session_cookie=self.get_session_cookie_name()
         )
 
+    def setup_request_timing(self, app: FastAPI) -> None:
+        """Install middleware that times whole requests, outside checkpoint admission and exception handling.
+
+        Called right after the exception middleware and inside session routing, so a request forwarded between the
+        workers of one server is timed once, by the worker that serves it. Servers without such timing add nothing.
+        """
+
     def setup_exception_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ExceptionHandlingMiddleware, failure_reply=partial(SimpleServer._failure_reply, self))
 
@@ -838,6 +845,7 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
+        server.setup_request_timing(app)
         backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
         # A worker of a multi-worker server serves a private socket in this directory and records session owners in it.
         # The main process of a multi-worker server never serves the app.
