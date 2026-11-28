@@ -1,0 +1,3 @@
+{"verifier_metadata": {"scenario": "twilight_andalusia", "agent": "agent1"}, "responses_create_params": {"input": [{"role": "user", "content": "Let's negotiate over Twilight Over Andalusia."}]}}
+{"verifier_metadata": {"scenario": "pmri_battle", "agent": "agent1"}, "responses_create_params": {"input": [{"role": "user", "content": "We need to discuss the future of the Pacifica Marine Research Institute."}]}}
+{"verifier_metadata": {"scenario": "solwave_energy", "agent": "agent2"}, "responses_create_params": {"input": [{"role": "user", "content": "I am here to discuss the acquisition of SolWave Energy."}]}}
