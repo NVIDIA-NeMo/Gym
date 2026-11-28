@@ -101,7 +101,7 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
    - Resolve any prompt/agent-class override (see [Prompt and agent-class diversity](#prompt-and-agent-class-diversity)).
    - Build both Apptainer command strings.
 2. **Spawn agent + eval containers** in parallel via `asyncio.create_subprocess_shell`, each streaming logs to `<persistent_dir>/apptainer_logs/<instance_id>_{agent,eval}.log`.
-3. **Wait for the agent** to finish or hit `swebench_agent_timeout` (default 45 min). Copy the produced `output.jsonl` and the most recent `llm_completions/*.json` back from OpenHands' eval-output dir into the per-instance trajectories root.
+3. **Wait for the agent** to finish or hit `swebench_agent_timeout` (default 45 min). An OpenHands agent that reported completion and wrote its output is stopped and scored on that output, even if a command it left running keeps the container open. Copy the produced `output.jsonl` and the most recent `llm_completions/*.json` back from OpenHands' eval-output dir into the per-instance trajectories root.
 4. **Extract the patch** from `out_dict["test_result"]["git_patch"]` and rewrite it in SWE-bench-prediction format at `output_for_eval.jsonl`. This file is what the eval container is waiting for.
 5. **Wait for the eval container** to finish or hit `swebench_tests_timeout` (default 30 min). It produces a `report.json` whose location is dataset-specific.
 6. **Postprocess** the report (per-dataset; e.g. SWE-rebench / NV-internal / SWE-bench-Ext do their parsing host-side because the eval images may not have python3).
@@ -667,21 +667,23 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 
 ## GRPO masking and failure modes
 
-`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when one of these happens. The verify response carries `mask_sample` too, with a `failure_kind` and `failure_reason` for the first match in this order:
+`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when the reward was not measured, or was measured by accident. The verify response carries `mask_sample` too, with a `failure_kind` and `failure_reason` for the first match in this order:
 
-| Condition | `failure_kind` |
-|---|---|
-| The evaluator failed before its startup marker, so no reward was measured | `provider_unavailable` |
-| The memory watchdog killed the **agent** container (OOM) | `provider_oom_killed` |
-| The memory watchdog killed the **eval** container (OOM) | `provider_oom_killed` |
-| The eval container hit `swebench_tests_timeout` | `swe_agents:eval_timeout` |
-| The agent hit `swebench_agent_timeout` (wall-clock) | `agent_timeout` |
-| The agent ended in a `max_iteration` error | `agent_limit` |
-| The agent ended in a `context_window` error | `model_context_limit` |
+| Condition | `failure_kind` | Masked |
+|---|---|---|
+| The evaluator failed before its startup marker, so no reward was measured | `provider_unavailable` | yes |
+| The memory watchdog killed the **agent** container (OOM) | `provider_oom_killed` | yes |
+| The memory watchdog killed the **eval** container (OOM) | `provider_oom_killed` | yes |
+| The eval container hit `swebench_tests_timeout` | `swe_agents:eval_timeout` | yes |
+| The agent hit `swebench_agent_timeout` (wall-clock) | `agent_timeout` | yes |
+| The agent command failed before the model acted | `provider_unavailable` | yes |
+| The agent command failed after the model acted, and left no output | `swe_agents:agent_command_failed` | yes |
+| The agent ended in a `max_iteration` error | `agent_limit` | only if `resolved` |
+| The agent ended in a `context_window` error | `model_context_limit` | only if `resolved` |
 
-Each condition masks regardless of `resolved`. A patch that resolves the tests after the agent hit its iteration limit or context window is accidental.
+A run that reached its iteration limit or context window was measured. Unresolved, its reward of 0 counts and the row keeps its `failure_kind`. Resolved, it is masked: a patch that resolves the tests after the agent hit its limit is accidental.
 
-Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not reported as a measured policy failure. An eval timeout gets its own `swe_agents:` name because the model's patch can make the tests hang, and so can a slow host.
+Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not reported as a measured policy failure. An eval timeout gets its own `swe_agents:` name because the model's patch can make the tests hang, and so can a slow host. A failed agent command is the provider's when nothing the model chose had run: no model call was recorded and the request carried no replay prefix. Otherwise it gets its own name too, because a model action can end the harness, and so can the host.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
