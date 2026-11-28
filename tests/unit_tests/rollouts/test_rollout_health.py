@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import math
 import sys
+import tracemalloc
 from asyncio import Future
 from copy import deepcopy
 from pathlib import Path
@@ -1765,6 +1767,82 @@ def test_journal_health_workers_read_selected_offsets_from_original_shards(tmp_p
     assert result.summary["run"]["issues"]["record_unreadable"] == 1
     assert {digest.task_index for digest in result.rollouts} == {0, 10, 100, "__unreadable_record__:input-2:line-3"}
     assert [path.read_bytes() for path in paths] == original_bytes
+
+
+_LARGE_ROW_BYTES = 1 << 20
+
+
+def _write_large_run(root: Path, tasks: int, *, managed: bool) -> Path:
+    """A run whose rows each carry a model call of about 1 MiB; every other rollout failed with its trajectory."""
+    root.mkdir()
+    rows = [{"_ng_task_index": task, "_ng_rollout_index": 0} for task in range(tasks)]
+
+    def outcome(row: dict) -> dict:
+        task = row["_ng_task_index"]
+        record = _record(task, 0)
+        call = _call(request={"input": f"{task}" + "x" * _LARGE_ROW_BYTES})
+        record["ng_trajectory"]["model_calls"] = [_trajectory_call(call)]
+        return row | record | ({"_ng_failure_class": "agent_timeout"} if task % 2 else {})
+
+    output = root / "rollouts.jsonl"
+    if managed:
+        source = root / "source.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        manifest = RunManifest.create(source, rows, {}, {})
+        with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+            for row in store.pending(3):
+                store.record_dispatch(row)
+                store.record_outcome(outcome(row))
+    else:
+        outcomes = [outcome(row) for row in rows]
+        output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in outcomes if "_ng_failure_class" not in row))
+        (root / "rollouts_failures.jsonl").write_bytes(
+            b"".join(orjson.dumps(row) + b"\n" for row in outcomes if "_ng_failure_class" in row)
+        )
+        (root / "rollouts_materialized_inputs.jsonl").write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    return output
+
+
+@pytest.mark.parametrize("managed", [True, False], ids=["manifest", "legacy"])
+def test_health_check_peak_memory_does_not_grow_with_the_run(tmp_path: Path, managed: bool) -> None:
+    """Rows are read and tallied one at a time: four times the rows and failures must not raise the peak by more
+    than a row or two. Holding the failed rows together raised it by one row per failure (12 here)."""
+
+    def peak_bytes(output: Path) -> int:
+        tracemalloc.start()
+        try:
+            result = run_health_checks(output, workers=1)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert result.summary["run"]["artifacts"]["failed"]["total"] == len(result.rollouts)
+        return peak
+
+    small = peak_bytes(_write_large_run(tmp_path / "small", 8, managed=managed))
+    large = peak_bytes(_write_large_run(tmp_path / "large", 32, managed=managed))
+
+    assert large - small < 3 * _LARGE_ROW_BYTES
+
+
+def test_request_effort_counts_an_operation_only_when_its_observations_agree() -> None:
+    effort = health._RequestEffort()
+    for operation in (
+        {"operation_id": "agree", "http_attempts": 2, "retry_wait_s": 1},
+        {"operation_id": "agree", "http_attempts": 2, "retry_wait_s": 1.0},
+        {"operation_id": "conflict", "http_attempts": 1, "retry_wait_s": 0.5},
+        {"operation_id": "conflict", "http_attempts": 3, "retry_wait_s": 0.5},
+        {"operation_id": "conflict", "http_attempts": 1},
+        # Not a measurement: a bool, NaN and a negative value are each left out.
+        {"operation_id": "invalid", "http_attempts": True, "retry_wait_s": math.nan, "request_elapsed_ms": -1.0},
+    ):
+        effort.add(operation)
+
+    assert effort.summary() == {
+        "http_attempts": {"sum_observed": 2, "operations_observed": 1, "operations_unknown": 2},
+        "transport_failures": {"sum_observed": None, "operations_observed": 0, "operations_unknown": 3},
+        "retry_wait_s": {"sum_observed": 1.5, "operations_observed": 2, "operations_unknown": 1},
+        "request_elapsed_ms": {"sum_observed": None, "operations_observed": 0, "operations_unknown": 3},
+    }
 
 
 @pytest.mark.parametrize(
