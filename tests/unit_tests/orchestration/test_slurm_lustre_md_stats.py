@@ -176,7 +176,8 @@ intent_lock               $((1000 * f * n)) samples [reqs]
 EOF
 """
 
-# The snapshot step (the only one with --ntasks-per-node=1) runs its command once per node, as nodeN.
+# The snapshot step (the only one with --ntasks-per-node=1) runs its command once per node, as nodeN. The service
+# declaration's GPU listing step finds no GPUs.
 _FAKE_SRUN = """#!/bin/bash
 case "$*" in
     *--ntasks-per-node=1*)
@@ -185,6 +186,7 @@ case "$*" in
         echo "md step on $nodes nodes" >> "$FAKE_STATE/srun.log"
         for i in $(seq 1 "$nodes"); do SLURMD_NODENAME=node$i "$@" || rc=$?; done
         exit "${{rc:-0}}" ;;
+    *nvidia-smi*) exit 0 ;;
     *logs/driver-*) {driver} ;;
     *) {service} ;;
 esac

@@ -49,6 +49,7 @@ from nemo_gym.orchestration.executors.connection import (
     get_connection,
 )
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
+from nemo_gym.orchestration.executors.otel import collector_config_path, otel_active, render_collector_config
 from nemo_gym.orchestration.executors.slurm.judge_profile import (
     JUDGE_POOL_NAME,
     NO_CPU_PARTITION,
@@ -78,6 +79,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
 from nemo_gym.orchestration.executors.slurm.script import (
     _with_default_capture_dir,
     build_sbatch_script,
+    collector_scrape_hosts,
 )
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -87,6 +89,7 @@ from nemo_gym.orchestration.jobs import (
     utc_timestamp,
 )
 from nemo_gym.utils.gym_commit import installed_gym_commit
+from nemo_gym.utils.path_utils import service_declaration_path_for
 
 
 # Settings of the run's own collection that a judge-only job's `gym eval reverify` replaces with its own.
@@ -469,8 +472,35 @@ class JudgeJobs:
         if repin is not None:
             validate_gym_install_ref(bound)
         bench = bound.driver.benchmarks[benchmark]
-        script = build_sbatch_script(bound, benchmark, bench, bound.compute[record.cluster], job_dir)
+        bound_compute = bound.compute[record.cluster]
+        # Its placement and scrape targets are its own allocation's, not the run's: both go in its own folder.
+        collector_config = collector_config_path(folder)
+        script = build_sbatch_script(
+            bound,
+            benchmark,
+            bench,
+            bound_compute,
+            job_dir,
+            service_declaration_path=service_declaration_path_for(output),
+            collector_config=collector_config,
+        )
         script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
+        stage_collector = (
+            [
+                f"mkdir -p {shlex.quote(str(collector_config.parent))} && printf %s "
+                + shlex.quote(
+                    render_collector_config(
+                        bound,
+                        benchmark,
+                        job_dir,
+                        scrape_hosts=collector_scrape_hosts(bound, bound_compute),
+                    )
+                )
+                + f" > {shlex.quote(str(collector_config))} || fail 'cannot stage the collector configuration'"
+            ]
+            if otel_active(bound)
+            else []
+        )
         script_path = job_dir / f"reverify-{nonce}.sh"
         config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
         config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
@@ -538,6 +568,7 @@ class JudgeJobs:
             # the journals written below, are readable by the run's other readers like the run's other artifacts.
             f"(umask 077; printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))}) "
             "|| fail 'cannot stage the judge driver'",
+            *stage_collector,
             _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
             'if [ "$rc" != 0 ]; then fail "judge allocation not admitted: $out"; fi',
             "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",

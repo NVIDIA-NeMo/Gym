@@ -78,6 +78,7 @@ from nemo_gym.orchestration.executors.connection import (
 )
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
+    SCRAPE_HOST_VAR_PREFIX,
     collector_config_path,
     otel_active,
     render_collector_config,
@@ -119,6 +120,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
 from nemo_gym.orchestration.executors.slurm.script import (
     COLLECTOR_LOCAL_DIR_MARKER,
     build_sbatch_script,
+    collector_scrape_hosts,
 )
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
@@ -725,14 +727,19 @@ class ChainRecovery:
             if otel_active(config):
                 collector_path = shlex.quote(str(collector_config_path(job_dir)))
 
-                def write_collector_config(node_local: bool) -> str:
-                    collector_yaml = render_collector_config(config, benchmark, job_dir, node_local=node_local)
+                def write_collector_config(node_local: bool, other_nodes: bool) -> str:
+                    hosts = collector_scrape_hosts(config, config.compute[record.cluster], other_nodes=other_nodes)
+                    collector_yaml = render_collector_config(
+                        config, benchmark, job_dir, node_local=node_local, scrape_hosts=hosts
+                    )
                     return f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
 
-                # An older job.sh never copies node-local jsonl into the job dir, so its collector writes there.
+                # An older job.sh never copies node-local jsonl into the job dir, so its collector writes there; one
+                # whose collector step exports no other node's hostname has it scrape only the services beside it.
                 collector_update = [
-                    f"if grep -qF -- {shlex.quote(COLLECTOR_LOCAL_DIR_MARKER)} job.sh; "
-                    f"then {write_collector_config(True)}; else {write_collector_config(False)}; fi"
+                    f"if grep -qF -- {shlex.quote(SCRAPE_HOST_VAR_PREFIX)} job.sh; then {write_collector_config(True, True)}; "
+                    f"elif grep -qF -- {shlex.quote(COLLECTOR_LOCAL_DIR_MARKER)} job.sh; "
+                    f"then {write_collector_config(True, False)}; else {write_collector_config(False, False)}; fi"
                 ]
             snapshot_check = []
             reconciled = keep_budget and accounting_reconciled and accounted_walltime_s is not None

@@ -25,6 +25,7 @@ from nemo_gym.data.gitlab_utils import gitlab_storage_extras
 from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
+    BaseModelServiceConfig,
     BenchmarkRunConfig,
     NodePool,
     RayServiceConfig,
@@ -51,6 +52,7 @@ from nemo_gym.orchestration.executors.otel import (
     driver_telemetry_env,
     gym_telemetry_active,
     otel_active,
+    scrape_host_var,
     vllm_traces_env,
     vllm_traces_flag,
 )
@@ -67,6 +69,11 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
+)
+from nemo_gym.orchestration.executors.service_declaration import (
+    DECLARATION_WAIT,
+    declared_service,
+    render_declaration_writer,
 )
 from nemo_gym.orchestration.executors.slurm.lustre_md_stats import (
     DRIVER_END,
@@ -93,6 +100,7 @@ from nemo_gym.orchestration.jobs import (
     ROLLOUTS_FILENAME,
     LogSource,
 )
+from nemo_gym.utils.path_utils import service_declaration_path_for
 
 
 _SCRIPT_TEMPLATE = """\
@@ -767,15 +775,17 @@ def _with_vllm_traces(
 COLLECTOR_LOCAL_DIR_MARKER = f"export {COLLECTOR_LOCAL_DIR_ENV}="
 
 
-def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
+def _collector_command(config: SubmitConfig, remote_bench_dir: Path, collector_config: Path | None = None) -> str:
     """Run a node-local copy of the collector binary, then append its node-local jsonl into `<job dir>/otel/`.
 
     The copy-out runs in the collector's own step, the one place that sees its node-local directory: the
-    collector may run on another node than the batch script, or in a container.
+    collector may run on another node than the batch script, or in a container. `collector_config` is the
+    configuration it reads, `<job dir>/otel/collector.yaml` by default.
     """
     binary = shlex.quote(config.otel.binary)
     name = shlex.quote(Path(config.otel.binary).name)
     otel_dir = shlex.quote(str(remote_bench_dir / COLLECTOR_DIR))
+    collector_config = collector_config or collector_config_path(remote_bench_dir)
     script = "; ".join(
         [
             f'src=$(command -v {binary}) || {{ echo "OTel collector binary not found: "{binary} >&2; exit 127; }}',
@@ -783,7 +793,7 @@ def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
             f'{COLLECTOR_LOCAL_DIR_MARKER}"$dir"',
             # Slurm's TERM at the time limit reaches this shell too: pass it on and wait for the flush.
             'trap "kill -TERM \\$pid 2>/dev/null" TERM INT',
-            f'"$dir"/{name} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))} & pid=$!',
+            f'"$dir"/{name} --config {shlex.quote(str(collector_config))} & pid=$!',
             "wait $pid; rc=$?",
             "while kill -0 $pid 2>/dev/null; do wait $pid; rc=$?; done",
             # Appended, so the files keep every segment of a resumed run; ignoring TERM keeps the copy whole.
@@ -804,18 +814,20 @@ def _render_collector_service(
     is_multi_node: bool,
     driver_node: int | None = None,
     account: str | None = None,
+    other_scrape_nodes: list[int] | None = None,
+    collector_config: Path | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
 
-    Runs on exactly one node, the batch host. That is the first node of the allocation, which is
-    also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
-    so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
-    container the job directory is mounted for the config and the copied `otel/*.jsonl`; on the
-    node it is simply there, so no mounts or workdir are passed.
+    Runs on exactly one node, beside the driver, so `localhost` reaches the OTLP endpoints and every
+    model service API on that node. `other_scrape_nodes` are the nodes whose model services it scrapes
+    by hostname (see `collector_scrape_hosts`); the step exports each one's hostname for the config to
+    expand. In a container the job directory is mounted for the config (which lies under it) and the copied
+    `otel/*.jsonl`; on the node it is simply there, so no mounts or workdir are passed.
     """
     obs = config.otel
-    command = _collector_command(config, remote_bench_dir)
+    command = _collector_command(config, remote_bench_dir, collector_config)
     container_kwargs = (
         {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
         if obs.container is not None
@@ -828,6 +840,7 @@ def _render_collector_service(
         env={
             **({obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}"} if obs.remote_export else {}),
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
+            **{scrape_host_var(node): f"{RUNTIME_ENV_PREFIX}gym_nodes[{node}]" for node in other_scrape_nodes or []},
         },
         single_node=is_multi_node,
         # Beside the driver: it scrapes the policy API on localhost, as the driver calls it.
@@ -853,7 +866,12 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
 
 
 def _render_collector_shutdown(
-    config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None, *, before_exit: str = ""
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    driver_node: int | None = None,
+    *,
+    before_exit: str = "",
+    collector_config: Path | None = None,
 ) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
     graceful stop, keeping the driver's exit code. `before_exit` runs last, just before the exit.
@@ -866,7 +884,7 @@ def _render_collector_shutdown(
     # Anchored to the node-local copy of the binary: the srun and the shell that launched it carry the same
     # `--config <path>` on their own command lines, and a TERM to srun makes Slurm kill the step outright.
     name = re.escape(Path(config.otel.binary).name)
-    config_path = re.escape(str(collector_config_path(remote_bench_dir)))
+    config_path = re.escape(str(collector_config or collector_config_path(remote_bench_dir)))
     pattern = (
         shlex.quote(f"^{re.escape(COLLECTOR_LOCAL_DIR_PREFIX)}")
         + '"$SLURM_JOB_ID"'
@@ -1003,6 +1021,104 @@ def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nod
     if driver_node is not None and not _vllm_spans_multiple_nodes(service, total_nodes):
         return f"gym_nodes[{driver_node}]"
     return None
+
+
+def _service_node_indices(
+    service: ServiceConfig, compute: SlurmComputeConfig, driver_node: int | None, total_nodes: int
+) -> list[int]:
+    """The allocation nodes a service's step runs on, as _service_nodelist and _srun_nodes place it."""
+    if service.node_pool is not None:
+        start, count = _pool_offsets(compute)[service.node_pool]
+        return list(range(start, start + count))
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return list(range(total_nodes))
+    return [driver_node if driver_node is not None else 0]
+
+
+def _scrape_nodes(config: SubmitConfig, compute: SlurmComputeConfig) -> dict[str, list[int]]:
+    """Each model service's nodes that serve its `/metrics`: every node of a per-node server, else its API node."""
+    total_nodes, _ = _node_totals(compute)
+    driver_node = _driver_node(config, compute) if total_nodes > 1 else None
+    nodes = {}
+    for name, service in config.deployed_services.items():
+        if not isinstance(service, BaseModelServiceConfig):
+            continue
+        on = _service_node_indices(service, compute, driver_node, total_nodes)
+        per_node = isinstance(service, (VllmNodeServiceConfig, VllmPDTierConfig)) and service.server_per_node
+        nodes[name] = on if per_node else on[:1]
+    return nodes
+
+
+def _collector_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int:
+    """The node the collector runs on: beside the driver (see _render_collector_service)."""
+    return _driver_node(config, compute) if _node_totals(compute)[0] > 1 else 0
+
+
+def _other_scrape_nodes(config: SubmitConfig, compute: SlurmComputeConfig) -> list[int]:
+    collector = _collector_node(config, compute)
+    return sorted({node for nodes in _scrape_nodes(config, compute).values() for node in nodes} - {collector})
+
+
+def collector_scrape_hosts(
+    config: SubmitConfig, compute: SlurmComputeConfig, *, other_nodes: bool = True
+) -> dict[str, list[str]]:
+    """The hosts the collector scrapes each model service's `/metrics` on, for `render_collector_config`.
+
+    A node beside the collector is `localhost`; another node is the hostname its step exports. A service on
+    another node is never scraped through `localhost`, which would reach whatever answers on that port beside
+    the collector, such as the other tier of a prefill/decode pair. `other_nodes=False` is for a job.sh
+    whose collector step does not export other nodes' hostnames: services there are not scraped.
+    """
+    collector = _collector_node(config, compute)
+    return {
+        name: [
+            "localhost" if node == collector else f"${{env:{scrape_host_var(node)}}}"
+            for node in nodes
+            if other_nodes or node == collector
+        ]
+        for name, nodes in _scrape_nodes(config, compute).items()
+    }
+
+
+def _render_service_declaration(
+    config: SubmitConfig,
+    compute: SlurmComputeConfig,
+    benchmark_name: str,
+    remote_bench_dir: Path,
+    declaration_path: Path,
+    *,
+    is_multi_node: bool,
+    driver_node: int | None,
+) -> str:
+    """The job-start step that writes which model service runs on which node and GPUs (see service_declaration)."""
+    total_nodes, _ = _node_totals(compute)
+    gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+    services = [
+        declared_service(
+            name,
+            service,
+            component=config.otel.component,
+            node_indices=_service_node_indices(service, compute, driver_node, total_nodes),
+            service_nodes=_service_nodes(service, compute, total_nodes),
+            ray_serve=isinstance(service, VllmServiceConfig)
+            and effective_ray_serve(service, _build_nodes(service, compute, total_nodes), gpus_per_node_values),
+        )
+        for name, service in config.deployed_services.items()
+        if isinstance(service, BaseModelServiceConfig)
+    ]
+    if not services:
+        return ""
+    # A job that places nothing runs everything on its one node: the batch host.
+    placed = _places_services(config, is_multi_node)
+    return render_declaration_writer(
+        services,
+        hosts={i: f"${{gym_nodes[{i}]}}" for i in range(total_nodes)} if placed else {0: "$SLURMD_NODENAME"},
+        pin_nodes=placed,
+        run_id=remote_bench_dir.parent.name,
+        benchmark=benchmark_name,
+        declaration_path=declaration_path,
+        account=compute.account,
+    )
 
 
 def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
@@ -1170,7 +1286,16 @@ def build_sbatch_script(
     benchmark: BenchmarkRunConfig,
     compute: SlurmComputeConfig,
     remote_bench_dir: Path,
+    *,
+    service_declaration_path: Path | None = None,
+    collector_config: Path | None = None,
 ) -> str:
+    """The batch script of one benchmark job in `remote_bench_dir`.
+
+    A job that is not the run's own, such as a judge-only job, passes where it writes its service declaration and
+    which collector configuration it reads, instead of the run's `artifacts/rollouts_service_declaration.json` and
+    `otel/collector.yaml`.
+    """
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     resume = benchmark.resume_config
@@ -1182,6 +1307,18 @@ def build_sbatch_script(
         pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
     ]
 
+    driver_node = _driver_node(config, compute) if is_multi_node else None
+    # ABSOLUTE, not relative: see output_path below.
+    rollouts_fpath = remote_bench_dir / ARTIFACTS_DIRNAME / ROLLOUTS_FILENAME
+    declaration = _render_service_declaration(
+        config,
+        compute,
+        benchmark_name,
+        remote_bench_dir,
+        service_declaration_path or service_declaration_path_for(rollouts_fpath),
+        is_multi_node=is_multi_node,
+        driver_node=driver_node,
+    )
     ray_prelude = "\n".join(
         block
         for block in (
@@ -1190,6 +1327,7 @@ def build_sbatch_script(
             else "",
             _render_pool_nodes(config, compute, is_multi_node),
             _render_ray_head_addresses(config, compute),
+            declaration,
         )
         if block
     )
@@ -1198,7 +1336,6 @@ def build_sbatch_script(
     observed = otel_active(config)
     instrumented = gym_telemetry_active(config)
 
-    driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
         (
             [
@@ -1208,6 +1345,8 @@ def build_sbatch_script(
                     is_multi_node=is_multi_node,
                     driver_node=driver_node,
                     account=compute.account,
+                    other_scrape_nodes=_other_scrape_nodes(config, compute),
+                    collector_config=collector_config,
                 )
             ]
             if observed
@@ -1288,7 +1427,7 @@ def build_sbatch_script(
     # checkout instead of the job directory -- the run completes, exits 0, and
     # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
     # in the job directory without constraining cwd.
-    output_path = f"+output_jsonl_fpath={remote_bench_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
+    output_path = f"+output_jsonl_fpath={rollouts_fpath}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)
@@ -1450,7 +1589,8 @@ def build_sbatch_script(
     )
     md_stats = compute.lustre_md_stats
     driver_command = (
-        marker_definition
+        (f"{DECLARATION_WAIT}\n" if declaration else "")
+        + marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")
         + (f"_gym_md_stats {SERVICES_READY}\n" if md_stats else "")
         + _render_watched_driver(driver_srun, watched)
@@ -1462,7 +1602,7 @@ def build_sbatch_script(
     end_snapshot = f"_gym_md_stats {END}\n" if md_stats else ""
     if observed:
         driver_command += "\n" + _render_collector_shutdown(
-            config, remote_bench_dir, driver_node, before_exit=end_snapshot
+            config, remote_bench_dir, driver_node, before_exit=end_snapshot, collector_config=collector_config
         )
     elif md_stats:
         # The snapshot returns the status before it, so the job's exit status is unchanged.
