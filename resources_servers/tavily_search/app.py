@@ -42,11 +42,20 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
-from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
 logger = logging.getLogger(__name__)
+
+# Judge verdict line. The hosted judge (azure/anthropic/claude-sonnet-4-5) sometimes wraps the
+# label and/or value in markdown emphasis (``**correct:** yes``, ``**correct**: yes``,
+# ``correct: **yes**``, ``*correct:* yes``) even though the prompt asks for plain ``correct: yes``;
+# a literal ``"correct: (yes|no)"`` scan returned no match for those forms, so a correct answer
+# silently scored reward 0. ``\b`` keeps the label the ``correct`` field (not the ``correct``
+# inside ``incorrect``); the value stays exactly yes/no. ``re.search`` keeps the first-match
+# behavior of the previous parser.
+_JUDGE_VERDICT_RE = re.compile(r"\**\bcorrect\**\s*:\s*\**\s*(yes|no)\b", re.IGNORECASE)
 
 # Tavily's /search rejects more than 150 ``exclude_domains`` with HTTP 400 ("Max 150 domains are allowed";
 # https://docs.tavily.com/documentation/api-reference/endpoint/search, confirmed by direct probes on 2026-10-16:
@@ -676,22 +685,23 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         def _grade_sample(
             judge_create_params: NeMoGymResponseCreateParamsNonStreaming, judge_response: NeMoGymResponse
-        ) -> JudgeEvaluation:
+        ) -> tuple[JudgeEvaluation, bool]:
             # Taken from: https://github.com/openai/simple-evals/blob/5e623c2b400af62a1278e23595f95b0853d7fe8a/browsecomp_eval.py#L79-L93
             grading_response = judge_response.output[-1].content[-1].text
             if self.config.debug:
                 print("\n\n grading_response \n\n")
                 print(grading_response)
-            match = re.search(r"correct: (yes|no)", grading_response)
-            extracted_final_answer = match.group(1) if match else ""
-            reward = 1.0 if extracted_final_answer == "yes" else 0.0
-            return JudgeEvaluation(
+            match = _JUDGE_VERDICT_RE.search(grading_response)
+            verdict = match.group(1).lower() if match else ""
+            reward = 1.0 if verdict == "yes" else 0.0
+            evaluation = JudgeEvaluation(
                 judge_response_create_params=judge_create_params,
                 reasoning=grading_response,
-                extracted_final_answer=extracted_final_answer,
+                extracted_final_answer=verdict,
                 reward=reward,
                 judge_response=judge_response,
             )
+            return evaluation, match is not None
 
         try:
             judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
@@ -699,7 +709,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             if not is_judge_failure(e):
                 raise
             return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), e
-        judge_evaluation = _grade_sample(judge_create_params, judge_response)
+        judge_evaluation, parsed_ok = _grade_sample(judge_create_params, judge_response)
+        if not parsed_ok:
+            # A judge reply with no parseable ``correct: yes|no`` verdict is an unusable grade, not a
+            # wrong answer: raising JudgeError routes the row to the judge_failed sidecar (reward excluded
+            # from aggregate metrics) instead of silently scoring a correct answer 0 with no mask. This
+            # matches the sibling search-judge servers (opencode_search, browsecomp_advanced_harness),
+            # which share this judge prompt and treat an invalid verdict as the documented exception in
+            # nemo_gym.verification.judge.
+            return judge_evaluation, JudgeError("tavily_search judge reply had no parseable 'correct: yes|no' verdict")
         return judge_evaluation, None
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:
