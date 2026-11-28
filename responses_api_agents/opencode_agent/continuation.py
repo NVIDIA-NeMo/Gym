@@ -10,6 +10,8 @@ from nemo_gym.agents import CleanupReceipt
 
 
 ERROR_EVENT_CHARS = 4000
+# OpenCode 1's name for an aborted step, which the OpenCode 2 store translation also gives one.
+_ABORTED_ERROR = "MessageAbortedError"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -38,8 +40,19 @@ def classify_opencode_run(
         error = error or f"OpenCode exited with code {cleanup['return_code']}"
     assistants = [message for message in export.get("messages", []) if message["info"].get("role") == "assistant"]
     for message in assistants:
-        if message["info"].get("error"):
-            error = error or json.dumps(message["info"]["error"])
+        reported = message["info"].get("error")
+        if not reported:
+            continue
+        if (
+            timed_out
+            and message is assistants[-1]
+            and isinstance(reported, dict)
+            and reported.get("name") == _ABORTED_ERROR
+        ):
+            # OpenCode 2 handles the stop signal sent at the time limit by saving the step it interrupted as
+            # aborted. That abort is the timeout itself; OpenCode 1 leaves the same step unfinished.
+            continue
+        error = error or json.dumps(reported)
     if continuation and timed_out and (event := opencode_error_event(stdout)) is not None:
         error = error or f"OpenCode emitted an error event: {event}"
     resumable_checkpoint = bool(

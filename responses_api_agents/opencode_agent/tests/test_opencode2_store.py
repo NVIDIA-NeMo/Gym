@@ -10,6 +10,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from nemo_gym.core import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.trajectory import ContextCompactionObservation, ToolCallObservation, TrajectoryRecord
 from responses_api_agents.opencode_agent.app import OpenCodeAgent
@@ -455,3 +457,52 @@ def test_an_error_on_the_last_reply_still_ends_the_run(tmp_path: Path):
         continuation=False,
     )
     assert outcome.status == "failed" and "socket hang up" in outcome.error
+
+
+STEP_INTERRUPTED = {"type": "aborted", "message": "Step interrupted"}
+
+
+@pytest.mark.parametrize(
+    ("error", "timed_out", "status", "error_type"),
+    [
+        # The stop at the time limit interrupted this step: the run timed out and is scored as it stands.
+        (STEP_INTERRUPTED, True, "incomplete", "timeout"),
+        # Gym did not stop it, so something else aborted the step.
+        (STEP_INTERRUPTED, False, "failed", "server_error"),
+        # A provider failure saved before the time limit is not the timeout.
+        ({"type": "provider.transport", "message": "socket hang up"}, True, "failed", "server_error"),
+    ],
+)
+def test_the_step_a_timeout_interrupts_is_the_timeout(tmp_path: Path, error, timed_out, status, error_type):
+    """OpenCode 2 saves the step that its stop signal interrupted with an aborted error; OpenCode 1 saved none."""
+    running = {
+        **shell("call_2", ""),
+        "state": {
+            "status": "error",
+            "input": {"command": "sleep 600", "description": "wait"},
+            "error": {"type": "aborted", "message": "Tool execution interrupted"},
+            "content": [],
+        },
+    }
+    interrupted = assistant(13, [{"type": "reasoning", "text": "wait"}, running], finish=None, error=error)
+    export, _, _ = conversation(
+        tmp_path,
+        [
+            (ROOT, "msg_user", *user("go", 1)),
+            (ROOT, "msg_a1", *assistant(3, [shell("call_1", "out.txt\n")], finish="tool-calls")),
+            (ROOT, "msg_a2", *interrupted),
+        ],
+    )
+    assert export["messages"][-1]["info"]["error"]["name"] == (
+        "MessageAbortedError" if error["type"] == "aborted" else "APIError"
+    )
+    outcome = classify_opencode_run(
+        export,
+        cleanup={"return_code": 0, "timed_out": timed_out, "cleanup_confirmed": True, "error": None},
+        previous_session_id=None,
+        session_id=ROOT,
+        stdout="",
+        continuation=False,
+    )
+    assert (outcome.status, outcome.error_type) == (status, error_type)
+    assert (outcome.error is None) == (status == "incomplete")
