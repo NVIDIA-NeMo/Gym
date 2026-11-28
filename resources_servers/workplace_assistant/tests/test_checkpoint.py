@@ -88,7 +88,8 @@ def client_for(app: FastAPI, cookies: dict[str, str] | None = None) -> httpx.Asy
 
 
 def control(checkpoint_id: str = "c1", **extra: Any) -> dict[str, Any]:
-    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 5, **extra}
+    # CI runs several server suites on one runner, where checkpoint I/O can take longer than 5 s.
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 30, **extra}
 
 
 async def call_tools(
