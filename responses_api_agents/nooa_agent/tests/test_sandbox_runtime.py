@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
 import tomllib
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.agents import AgentSeedRejectedError
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.nooa_agent import sandbox_runtime
 
@@ -277,6 +279,149 @@ async def test_cached_runtime_requires_successful_health_check(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("warm", [False, True])
+async def test_unwritable_default_root_uses_a_private_fallback_root(
+    sandbox: AsyncMock, runtime_package: tuple[bytes, str], portable_download: AsyncMock, warm: bool
+) -> None:
+    source, fingerprint = runtime_package
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "not a writable directory", sandbox_runtime._CANNOT_INSTALL),
+        SandboxExecResult("/tmp/nemo-gym-nooa-runtime-65534\n", "", 0),
+        SandboxExecResult("", "", 0 if warm else 1),
+        *([] if warm else [SandboxExecResult("ready", "", 0)]),
+        SandboxExecResult("", "", 0),
+    ]
+    python = await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    name = f"{fingerprint}-x86_64-gnu"
+    fallback = f"/tmp/nemo-gym-nooa-runtime-65534/{name}"
+    assert python == f"{fallback}/python/bin/python3"
+    script = sandbox.upload.await_args_list[0].args[1]
+    commands = [shlex.split(call.args[0]) for call in sandbox.exec.await_args_list]
+    # The default root is always consulted first, so a runtime already there wins.
+    assert commands[1] == [
+        "bash",
+        script,
+        "check",
+        f"/opt/nemo-gym-nooa/{name}",
+        fingerprint,
+        sandbox_runtime._IMPORT_CHECK,
+    ]
+    assert commands[2] == ["bash", script, "private-root", "/tmp/nemo-gym-nooa-runtime"]
+    assert commands[3] == ["bash", script, "check", fallback, fingerprint, sandbox_runtime._IMPORT_CHECK]
+    if warm:
+        # A fallback runtime left by an earlier session is reused without another upload.
+        assert set(sandbox.uploaded) == {script}
+        portable_download.assert_not_awaited()
+    else:
+        assert commands[4][:4] == ["bash", script, "install", fallback]
+        assert sandbox.uploaded[f"{script.removesuffix('.sh')}/source.tar.gz"] == source
+    assert commands[-1][0] == "rm" and len(commands) == (5 if warm else 6)
+    assert not any("/opt/" in argument for command in commands[2:] for argument in command)
+
+
+_REFUSAL = "refusing /tmp/nemo-gym-nooa-runtime-65534: other users can write /tmp and it has no sticky bit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fallback", "reason"),
+    [
+        ([SandboxExecResult("", f"NOOA runtime: {_REFUSAL}\n", sandbox_runtime._CANNOT_INSTALL)], _REFUSAL),
+        # A provider that merges the command's streams delivers the installer's reason on stdout.
+        ([SandboxExecResult(f"NOOA runtime: {_REFUSAL}\n", None, sandbox_runtime._CANNOT_INSTALL)], _REFUSAL),
+        (
+            [
+                SandboxExecResult("/tmp/nemo-gym-nooa-runtime-65534\n", "", 0),
+                SandboxExecResult("not a writable directory", "", sandbox_runtime._CANNOT_INSTALL),
+            ],
+            "neither /opt/nemo-gym-nooa nor /tmp/nemo-gym-nooa-runtime-65534",
+        ),
+    ],
+)
+async def test_image_without_a_usable_runtime_location_is_refused_once(
+    sandbox: AsyncMock,
+    runtime_package: tuple[bytes, str],
+    portable_download: AsyncMock,
+    fallback: list[SandboxExecResult],
+    reason: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "", sandbox_runtime._CANNOT_INSTALL),
+        *fallback,
+    ]
+    # The image decides this, so the seed is refused (HTTP 422, terminal) rather than failed and retried.
+    with pytest.raises(AgentSeedRejectedError) as error:
+        await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    assert error.value.status_code == 422
+    assert error.value.detail.startswith("NOOA runtime cannot be installed in this sandbox: ")
+    assert reason in error.value.detail and len(error.value.detail) < 500
+    # The agent server's own log names the reason too.
+    assert f"Refusing the agent session seed: {error.value.detail}" in caplog.text
+    assert sandbox.exec.await_count == 2 + len(fallback)
+    sandbox.upload.assert_awaited_once()
+    portable_download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "claimed",
+    [
+        # The installer failed for another reason, such as a missing tool.
+        SandboxExecResult("", "NOOA runtime: requires 'stat'; use a task image with it preinstalled", 1),
+        # The provider could not run the command or it timed out; its status is not the installer's.
+        SandboxExecResult("", "", -1, "timeout"),
+        SandboxExecResult("", "", sandbox_runtime._CANNOT_INSTALL, "sandbox_error"),
+        # Only the installer's own answer below the fallback prefix is trusted as a path.
+        SandboxExecResult("/home/other/runtime-0\n", "", 0),
+    ],
+)
+async def test_fallback_root_failure_that_may_not_repeat_stays_retryable(
+    sandbox: AsyncMock, runtime_package: tuple[bytes, str], portable_download: AsyncMock, claimed: SandboxExecResult
+) -> None:
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "", sandbox_runtime._CANNOT_INSTALL),
+        claimed,
+    ]
+    with pytest.raises(RuntimeError, match="NOOA fallback runtime root could not be prepared") as error:
+        await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    assert not isinstance(error.value, AgentSeedRejectedError)
+    assert f"exit={claimed.return_code}; error_type={claimed.error_type}" in str(error.value)
+    assert sandbox.exec.await_count == 3
+    sandbox.upload.assert_awaited_once()
+    portable_download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["default check", "fallback check", "fallback install"])
+async def test_provider_failures_around_the_fallback_are_not_refusals(
+    sandbox: AsyncMock, runtime_package: tuple[bytes, str], portable_download: AsyncMock, step: str
+) -> None:
+    lost = SandboxExecResult("", "", sandbox_runtime._CANNOT_INSTALL, "timeout")
+    refused = SandboxExecResult("", "", sandbox_runtime._CANNOT_INSTALL)
+    claimed = SandboxExecResult("/tmp/nemo-gym-nooa-runtime-65534\n", "", 0)
+    probe = SandboxExecResult("x86_64/gnu", "", 0)
+    sandbox.exec.side_effect = {
+        # A check the provider lost is a cache miss, as before: setup goes on to install at that location.
+        "default check": [probe, lost, SandboxExecResult("", "pip failed", 17)],
+        "fallback check": [probe, refused, claimed, lost, SandboxExecResult("", "pip failed", 17)],
+        # Once a location is chosen, a failed install stays an ordinary setup failure.
+        "fallback install": [probe, refused, claimed, SandboxExecResult("", "", 1), lost],
+    }[step]
+    with pytest.raises(RuntimeError, match="NOOA runtime preparation failed") as error:
+        await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    assert not isinstance(error.value, AgentSeedRejectedError)
+    install = shlex.split(sandbox.exec.await_args.args[0])
+    assert install[2] == "install"
+    assert install[3].startswith(
+        "/opt/nemo-gym-nooa/" if step == "default check" else "/tmp/nemo-gym-nooa-runtime-65534/"
+    )
+
+
+@pytest.mark.asyncio
 async def test_unhealthy_runtime_stages_verified_archives_and_installs(
     sandbox: AsyncMock, runtime_package: tuple[bytes, str], portable_download: AsyncMock
 ) -> None:
@@ -311,6 +456,9 @@ async def test_unhealthy_runtime_stages_verified_archives_and_installs(
         sandbox_runtime._IMPORT_CHECK,
     ]
     assert install.kwargs == {"cwd": "/", "timeout_s": 1800}
+    # A sandbox user who can write the default root installs there, with no extra command.
+    assert python == f"/opt/nemo-gym-nooa/{fingerprint}-x86_64-gnu/python/bin/python3"
+    assert sandbox.exec.await_count == 4
 
 
 @pytest.mark.asyncio
@@ -711,3 +859,31 @@ async def test_glibc_217_bundle_accepts_ubuntu_1804_task_image(
     ]
     assert (await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)).endswith("/bin/python3")
     portable_download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uploads_are_readable_in_the_sandbox_under_a_restrictive_controller_umask(
+    sandbox: AsyncMock, wheelhouse: Path
+) -> None:
+    modes: dict[str, int] = {}
+
+    async def upload(local: Path, remote: str) -> None:
+        name = remote.rsplit("/", 1)[1]
+        modes["installer" if name.endswith(".sh") else name] = stat.S_IMODE(local.stat().st_mode)
+
+    sandbox.upload.side_effect = upload
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.31", "", 0),
+        SandboxExecResult("", "", 1),
+        SandboxExecResult("ready", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    previous = os.umask(0o077)
+    try:
+        await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
+    finally:
+        os.umask(previous)
+    # A provider that keeps the controller's file mode would otherwise hand a non-root
+    # sandbox user an installer and archives it cannot read.
+    assert modes == {name: 0o644 for name in ("installer", "wheels.tar.gz", "source.tar.gz", "python.tar.gz")}

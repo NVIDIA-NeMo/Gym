@@ -37,6 +37,16 @@ The runtime packages the launching Gym checkout with its unchanged root `pyproje
 Tracked package source and assets are copied with their current contents; untracked files, Git metadata, and caches are excluded.
 The controller therefore needs a Git checkout and Git installed. The package is installed into NOOA's private Python,
 leaving the task's Python environment unchanged. Offline wheelhouses must be rebuilt whenever these packaged bytes change.
+The runtime is installed under `/opt/nemo-gym-nooa`, and a healthy runtime already there, such as one built into the
+task image, is reused without writing to it. When the sandbox user cannot create or write that directory, as in a
+task image that runs as a non-root user, the runtime is installed under `/tmp/nemo-gym-nooa-runtime-<uid>` instead:
+a directory only that user can write, on a `/tmp` that must allow executable files. Setup refuses a `/tmp` where
+another user could replace that directory: one that other users can write without the sticky bit (the usual mode
+is `1777`), one that belongs to neither root nor the sandbox user, or one that is a symbolic link. When these
+ownership, permission and path checks rule out both locations, the agent session seed is refused once (HTTP 422,
+with the reason) instead of failing as a setup error that is retried, because every attempt on the same task image
+would end the same way. A location that passes the checks and then fails during installation, such as a `/tmp`
+mounted `noexec`, is still an ordinary setup error.
 Agent and resource sessions use Gym's existing `single_agent_turn` environment. Agent close returns the evidence and final
 Resources cookies before verification; Resources closes its sandbox afterward.
 

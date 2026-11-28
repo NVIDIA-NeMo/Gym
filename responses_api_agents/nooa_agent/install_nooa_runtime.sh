@@ -5,6 +5,7 @@ set -Eeuo pipefail
 umask 077
 
 fail() { printf 'NOOA runtime: %s\n' "$*" >&2; exit 1; }
+refuse() { printf 'NOOA runtime: %s\n' "$*" >&2; exit 73; }
 require() {
   local tool
   for tool in "$@"; do
@@ -31,13 +32,49 @@ probe() {
   [[ "$libc" = gnu ]] || fail 'current NOOA runtime requires glibc; musl task images are unsupported'
   printf '%s/%s\n' "$arch" "$libc"
 }
+# Print <prefix>-<uid> once it is a directory that only this user can change. Other users can
+# write a shared location such as /tmp, and a runtime one of them placed there must never run.
+# Exit 73 (EX_CANTCREAT) when the location itself rules that out, which every attempt on the
+# same image would repeat; any other failure exits 1.
+private_root() {
+  require id stat mkdir
+  local uid root parent owner mode
+  uid=$(id -u)
+  root="$1-$uid"
+  # Whoever can write the parent can rename this directory away and put another in its place
+  # after it was checked. Only the sticky bit stops that, and not for the parent's owner.
+  # A parent that is a symbolic link could itself lead elsewhere after the check.
+  parent=${root%/*}
+  [[ -n "$parent" ]] || parent=/
+  [[ ! -L "$parent" ]] \
+    || refuse "refusing $root: $parent is a symbolic link, so the directory behind it could be replaced"
+  owner=$(stat -c %u "$parent") && mode=$(stat -c %a "$parent") || fail "cannot inspect $parent"
+  [[ "$owner" = 0 || "$owner" = "$uid" ]] \
+    || refuse "refusing $root: $parent belongs to uid $owner, who could replace the runtime placed there"
+  (( !(8#$mode & 8#022) || (8#$mode & 8#1000) )) \
+    || refuse "refusing $root: other users can write $parent and it has no sticky bit, so they could replace the runtime placed there"
+  if [[ ! -e "$root" && ! -L "$root" ]]; then
+    [[ -w "$parent" && -x "$parent" ]] || refuse "refusing $root: uid $uid cannot write $parent"
+    # A concurrent setup by the same user may create it first.
+    mkdir "$root" 2>/dev/null || [[ -d "$root" ]] || fail "cannot create $root"
+  fi
+  # Only an answer that was read refuses: a read that fails says nothing about the directory.
+  [[ -d "$root" && ! -L "$root" ]] || refuse "refusing $root: it must be a directory"
+  owner=$(stat -c %u "$root") && mode=$(stat -c %a "$root") || fail "cannot inspect $root"
+  [[ "$owner:$mode" =~ ^$uid:[0-7]?7[0145][0145]$ ]] \
+    || refuse "refusing $root: it must be a directory that uid $uid owns and no other user can write"
+  printf '%s\n' "$root"
+}
 
 mode=${1:-}
 case "$mode" in
   probe) [[ $# = 1 ]] || fail 'usage: probe'; probe; exit 0 ;;
+  private-root)
+    [[ $# = 2 && "$2" = /* && "$2" != */ ]] || fail 'usage: private-root <absolute path prefix>'
+    private_root "$2"; exit 0 ;;
   check) [[ $# = 4 ]] || fail 'usage: check <runtime> <fingerprint> <health code>' ;;
   install) [[ $# = 6 || $# = 7 ]] || fail 'usage: install <runtime> <fingerprint> <source sha256> <python sha256> <health code> [wheels sha256]' ;;
-  *) fail 'expected probe, check, or install' ;;
+  *) fail 'expected probe, private-root, check, or install' ;;
 esac
 runtime=$2
 fingerprint=$3
@@ -74,6 +111,15 @@ ready() {
 if [[ "$mode" = check ]]; then
   if ready; then exit 0; fi
   printf 'NOOA runtime is absent or unhealthy: %s\n' "$runtime" >&2
+  # An install creates the missing directories below the nearest existing one.
+  # Exit 73 (EX_CANTCREAT) when this user cannot, so the caller can choose another location.
+  existing=${runtime%/*}
+  while [[ -n "$existing" && ! -e "$existing" ]]; do existing=${existing%/*}; done
+  [[ -n "$existing" ]] || existing=/
+  if [[ ! -d "$existing" || ! -w "$existing" || ! -x "$existing" ]]; then
+    printf 'NOOA runtime cannot be installed there: %s is not a writable directory\n' "$existing" >&2
+    exit 73
+  fi
   exit 1
 fi
 
