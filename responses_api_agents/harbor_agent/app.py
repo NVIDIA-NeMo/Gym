@@ -203,6 +203,55 @@ async def run_harbor_job(job_config_dict: dict) -> str:
 _RAY_WORKER_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 
+_SECRET_METADATA_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token"}
+
+
+def _secret_metadata_key(key: object) -> bool:
+    name = str(key).lower()
+    return name in _SECRET_METADATA_KEYS or name.endswith(
+        ("_api_key", "_inf_key", "_access_token", "_password", "_secret", "_pat")
+    )
+
+
+def _metadata_secret_values(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        values = {
+            str(item) for key, item in value.items() if _secret_metadata_key(key) and isinstance(item, str) and item
+        }
+        for item in value.values():
+            values.update(_metadata_secret_values(item))
+        return values
+    if isinstance(value, (list, tuple)):
+        return set().union(*(_metadata_secret_values(item) for item in value)) if value else set()
+    return set()
+
+
+def _redact_metadata_secrets(value: Any, *, secret_values: set[str] | None = None) -> Any:
+    """Keep Harbor diagnostics while removing structured and echoed credentials."""
+    if secret_values is None:
+        secret_values = _metadata_secret_values(value)
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]"
+            if _secret_metadata_key(key)
+            else _redact_metadata_secrets(item, secret_values=secret_values)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_metadata_secrets(item, secret_values=secret_values) for item in value]
+    if isinstance(value, str):
+        for secret in sorted(secret_values, key=len, reverse=True):
+            value = value.replace(secret, "[REDACTED]")
+        value = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", value)
+        return re.sub(
+            r"(?i)(\b[a-z0-9_]*(?:api_?key|inf_key|access_token|password|secret)\s*[:=]\s*)"
+            r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+            r"\1[REDACTED]",
+            value,
+        )
+    return value
+
+
 def _run_harbor_job_sync(job_config_dict: dict) -> str:
     """Synchronous wrapper for run_harbor_job for use in Ray remote.
 
@@ -359,7 +408,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 reward=reward,
                 response=response,
                 instance_id=instance_id,
-                metadata=trial_result if trial_result else {},
+                metadata=_redact_metadata_secrets(
+                    trial_result or {},
+                    secret_values=_metadata_secret_values(job_config_dict) | _metadata_secret_values(trial_result),
+                ),
                 context_length_exceeded_error=int(agent_error_flags.get("context_length_exceeded", False)),
                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
                 agent_timeout_error=int(
