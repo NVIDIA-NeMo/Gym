@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "prompt_override": {
+      "system_prompt": "",
+      "user_prompt": "Produce a verbatim transcript of the audio."
+    },
+    "request": "greedy",
+    "skills": {
+      "EVAL_ARGS": "++eval_type=audio ++eval_config.normalization_mode=multilingual ++eval_config.cleanup_generation_loops=true",
+      "METRICS_TYPE": "audio"
+    }
+  },
+  "profiles": {
+    "cs-fleurs.read": {},
+    "cs-fleurs.mms": {},
+    "cs-fleurs.xtts-test1": {},
+    "cs-fleurs.xtts-test2": {}
+  }
+}
