@@ -745,8 +745,10 @@ class HarborEnvironmentServer(
         The harness's setup, `[agent].timeout_sec`, the `[[verifier.collect]]` hooks (run one after the
         other in both verifier modes, each within its own `timeout_sec` plus the exec grace), then
         `[verifier].timeout_sec` with its grace, plus a second sandbox start (and overlay) for a separate
-        verifier. A multi-step task sums that per step, plus the bound of each step's `setup.sh` when it ships
-        one (:meth:`_step_setup_budget_s`) and the worst case of its `[steps.healthcheck]` when it declares one
+        verifier, with the time its provider may hold a cancelled create when task timeouts are enforced
+        (:meth:`_verifier_start_hold_s`). A multi-step task sums that per step, plus the bound of each step's
+        `setup.sh` when it ships one (:meth:`_step_setup_budget_s`) and the worst case of its `[steps.healthcheck]`
+        when it declares one
         (:meth:`_step_healthcheck_budget_s`). The seed is not counted: its own bounds are the sandbox ready timeout
         per start and the image pull retries, so a start that recovered on a retry begins the task with its whole
         budget.
@@ -769,7 +771,9 @@ class HarborEnvironmentServer(
             )
             for turn in task.turns:
                 if self._turn_separate(task, turn):
-                    budget += self.config.sandbox_ready_timeout_s
+                    # The turn's verifier may start on another provider than the task's (GPU routing).
+                    view = self._turn_verifier_view(task, turn)
+                    budget += self.config.sandbox_ready_timeout_s + self._verifier_start_hold_s(view)
                     if _verifier_gets_overlay(self._turn_verifier_view(task, turn), True):
                         budget += task.config.environment.build_timeout_sec
             return budget
@@ -782,10 +786,21 @@ class HarborEnvironmentServer(
         )
         separate = self._separate_verifier(task)
         if separate:
-            budget += self.config.sandbox_ready_timeout_s
+            budget += self.config.sandbox_ready_timeout_s + self._verifier_start_hold_s(task)
             if _verifier_gets_overlay(task, separate):
                 budget += task.config.environment.build_timeout_sec
         return budget
+
+    def _verifier_start_hold_s(self, task: HarborTask) -> float:
+        """What a separate verifier start of ``task`` (a turn's verifier view for a step) adds to the budget beyond
+        its ready timeout when task timeouts are enforced: the time its provider may keep a create running after
+        that timeout cancelled it (``cancelled_create_hold_s``), so a held first create ends masked before the task
+        deadline rather than at it. Nothing without enforcement, where no task deadline exists to protect and the
+        budget is only compared with ``default_episode_timeout_seconds``. A provider whose hold has no bound adds
+        nothing either, since none can be reserved; its verifier creates are never retried."""
+        if not self.config.enforce_task_timeouts:
+            return 0.0
+        return self._cancelled_create_hold_s(task) or 0.0
 
     def _seed_bound_s(self, task: HarborTask) -> float:
         """The most the seed may take before the task's own deadline opens: every sandbox start it may make
