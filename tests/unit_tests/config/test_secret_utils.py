@@ -18,9 +18,12 @@ from omegaconf import OmegaConf
 from nemo_gym.config.secret_utils import (
     MASKED_VALUE,
     hide_secrets_in_container,
+    hide_secrets_in_overrides,
+    is_credential_name,
     mask_credentials,
     mask_url_passwords,
     recursively_hide_secrets,
+    url_without_credentials,
 )
 
 
@@ -70,6 +73,38 @@ def test_text_without_a_url_password_is_left_alone(text: str) -> None:
 
 def test_an_interpolated_user_name_is_not_cut_in_two() -> None:
     assert mask_url_passwords("https://${oc.env:DB_USER}:literal@h") == "https://${oc.env:DB_USER}:****@h"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "https://user:secret@host.example/v1?token=secret#frag",  # pragma: allowlist secret
+            "https://host.example/v1",
+        ),
+        ("//user:secret@host.example/v1?token=secret", "//host.example/v1"),  # pragma: allowlist secret
+        ("user:p@ss@host/model", "host/model"),  # pragma: allowlist secret
+        ("user:secret@host/model?token=secret", "host/model"),  # pragma: allowlist secret
+        ("ghp_TOKEN@github.com/org/repo", "github.com/org/repo"),
+        ("ghp_TOKEN@localhost:8080/model", "localhost:8080/model"),
+        ("nvidia-eval-factory-benchmarking/configs/benchmarks/gpqa@v3", None),
+        ("model@v3", None),
+        ("meta/llama-3.1-70b-instruct", None),
+        ("/checkpoints/super-3/step-900", None),
+    ],
+)
+def test_a_recorded_name_keeps_no_url_credentials(value: str, expected: str | None) -> None:
+    assert url_without_credentials(value) == (value if expected is None else expected)
+
+
+@pytest.mark.parametrize("name", ["api_key", "X-Api-Key", "auth", "Authorization", "secrets", "HF_TOKEN", "cookie"])
+def test_a_credential_is_named_as_one(name: str) -> None:
+    assert is_credential_name(name)
+
+
+@pytest.mark.parametrize("name", ["max_tokens", "author", "authors", "reference_key", "vllm_serve_env_vars", "env"])
+def test_a_setting_is_not_named_as_a_credential(name: str) -> None:
+    assert not is_credential_name(name)
 
 
 def test_masking_twice_changes_nothing() -> None:
@@ -168,6 +203,7 @@ def test_public_capture_projection_fields_match_the_supported_schema():
     source = {
         "token_id_capture": {
             "enabled": True,
+            "allow_system_suffix": True,
             "auth": "diagnostic-canary",
             "access": {"opaque": "diagnostic-canary"},
             "arbitrary": ["diagnostic-canary"],
@@ -176,11 +212,101 @@ def test_public_capture_projection_fields_match_the_supported_schema():
     assert hide_secrets_in_container(source) == {
         "token_id_capture": {
             "enabled": True,
+            "allow_system_suffix": True,
             "auth": MASKED_VALUE,
             "access": {"opaque": MASKED_VALUE},
             "arbitrary": [MASKED_VALUE],
         }
     }
+
+
+_TOKEN_SETTINGS = {
+    "policy": {
+        "max_tokens": None,
+        "max_output_tokens": 4096,
+        "num_speculative_tokens": 3,
+        "max_num_batched_tokens": 8192,
+        "token_budget_fraction": 0.5,
+        "return_token_ids": True,
+    },
+    "hf_token": "hf-FAKE-CANARY",  # pragma: allowlist secret
+    "api_token": "${oc.env:API_TOKEN}",
+    "limits": {"cap": 7},
+    "capped_token": "${limits.cap}",
+    "string_max_tokens": "4096",
+    "token_key": 3,
+    "secrets": {"max_tokens": 4096, "enabled": True},
+    "auth_tokens": {"max_tokens": 1},
+    "stop_tokens": [1, 2],
+}
+
+_TOKEN_SETTINGS_MASKED = {
+    "policy": {
+        "max_tokens": None,
+        "max_output_tokens": 4096,
+        "num_speculative_tokens": 3,
+        "max_num_batched_tokens": 8192,
+        "token_budget_fraction": 0.5,
+        "return_token_ids": True,
+    },
+    "hf_token": MASKED_VALUE,
+    "api_token": MASKED_VALUE,
+    "limits": {"cap": 7},
+    "capped_token": MASKED_VALUE,
+    "string_max_tokens": MASKED_VALUE,
+    "token_key": MASKED_VALUE,
+    "secrets": {"max_tokens": MASKED_VALUE, "enabled": MASKED_VALUE},
+    "auth_tokens": {"max_tokens": MASKED_VALUE},
+    "stop_tokens": [MASKED_VALUE, MASKED_VALUE],
+}
+
+
+def test_the_saved_config_shows_token_counts_and_flags_and_masks_token_credentials() -> None:
+    assert hide_secrets_in_container(_TOKEN_SETTINGS) == _TOKEN_SETTINGS_MASKED
+
+
+def test_the_exporters_config_shows_token_counts_and_flags_and_masks_token_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("API_TOKEN", "tok-FAKE-CANARY")  # pragma: allowlist secret
+    config = OmegaConf.create(_TOKEN_SETTINGS)
+
+    recursively_hide_secrets(config)
+
+    # `capped_token` resolves to an int, but it is an interpolation in the source config, so it stays masked.
+    assert OmegaConf.to_container(config) == _TOKEN_SETTINGS_MASKED
+
+
+def test_overrides_show_token_counts_and_flags_and_mask_token_credentials() -> None:
+    overrides = [
+        "++policy.max_tokens=4096",
+        "++policy.max_output_tokens=null",
+        "+num_speculative_tokens=-1",
+        "++policy.token_budget_fraction=0.5",
+        "++policy.return_token_ids=True",
+        "++hf_token=hf-FAKE-CANARY",  # pragma: allowlist secret
+        "++api_token=${oc.env:API_TOKEN}",
+        "++hf_token='4096'",
+        "++token_key=3",
+        "++harbor.secrets.max_tokens=4096",
+        "++auth_tokens.max_tokens=1",
+        "++stop_tokens=[1,2]",
+    ]
+
+    assert hide_secrets_in_overrides(overrides) == [
+        "++policy.max_tokens=4096",
+        "++policy.max_output_tokens=null",
+        "+num_speculative_tokens=-1",
+        "++policy.token_budget_fraction=0.5",
+        "++policy.return_token_ids=True",
+        "++hf_token=****",
+        "++api_token=****",
+        "++hf_token=****",
+        "++token_key=****",
+        "++harbor.secrets.max_tokens=****",
+        "++auth_tokens.max_tokens=****",
+        "++stop_tokens=****",
+    ]
 
 
 def test_mask_credentials_masks_only_credential_values() -> None:

@@ -345,7 +345,8 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         """
         task = self._stop_tasks.get(sandbox)
         if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
-            task = asyncio.create_task(sandbox.stop())
+            # No limit of the sandbox's own: this wait bounds the caller, and the stop goes on after it.
+            task = asyncio.create_task(sandbox.stop(timeout_s=None))
             # Retrieve the error of a stop nobody waits for anymore, so it is not reported as never retrieved.
             task.add_done_callback(lambda done: done.cancelled() or done.exception())
             self._stop_tasks[sandbox] = task

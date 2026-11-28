@@ -79,6 +79,8 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+import anyio
+
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxPtyError
 
 
@@ -627,7 +629,15 @@ class DockerPtySession:
         A write still waiting for room in the pty is failed first and given the turn it needs to leave (see
         :func:`_write_fd`), so the master is closed with no writer and no readiness callback left on its descriptor
         number: a session opened right after may get that number for its own pty.
+
+        Shielded from cancellation: a session is marked closed before its cleanup starts, so a later ``close()`` or
+        ``abandon()`` does nothing, and this release must finish even when a time limit cut the in-container cleanup
+        short. Its own steps are bounded, so the shield cannot hold its caller for long.
         """
+        with anyio.CancelScope(shield=True):
+            await self._release_local()
+
+    async def _release_local(self) -> None:
         if not self._released.done():
             self._released.set_result(None)
         if self._writes:

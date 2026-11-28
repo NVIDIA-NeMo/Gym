@@ -12,9 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
+from pathlib import Path
 from unittest.mock import MagicMock
 
-from app import SWEJudgeResourcesServer, SWEJudgeResourcesServerConfig, SWEJudgeVerifyRequest
+from app import SWEJudgeResourcesServer, SWEJudgeResourcesServerConfig, SWEJudgeRunRequest, SWEJudgeVerifyRequest
+from task_data import TaskData
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -241,3 +244,57 @@ class TestApp:
         )
         result6 = await server.verify(verify_request_extra_text_lenient)
         assert result6.reward == 1.0
+
+    async def test_verify_omitted_grading_mode_uses_lenient(self) -> None:
+        response = NeMoGymResponse(
+            id="resp_default",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_default",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "<solution>B because this patch fixes it</solution>",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+        server = SWEJudgeResourcesServer(
+            config=SWEJudgeResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        verify_request = SWEJudgeVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Q?\nA: optA\nB: optB"}]},
+            response=response,
+            options=[{"A": "optA"}, {"B": "optB"}],
+            expected_answer="B",
+        )
+
+        result = await server.verify(verify_request)
+
+        assert verify_request.grading_mode == "lenient"
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    def test_readme_documents_schema_default_grading_mode(self) -> None:
+        # Callers that omit grading_mode get the schema default, so the README must name the same mode.
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+        field_default = re.search(r"`grading_mode`:.*default: `\"(\w+)\"`", readme)
+        section_default = re.search(r"^- `(\w+)` \(default\)$", readme, flags=re.MULTILINE)
+        assert field_default is not None and section_default is not None
+
+        schema_default = SWEJudgeRunRequest.model_fields["grading_mode"].default
+        assert TaskData.model_fields["grading_mode"].default == schema_default
+        assert field_default.group(1) == schema_default
+        assert section_default.group(1) == schema_default

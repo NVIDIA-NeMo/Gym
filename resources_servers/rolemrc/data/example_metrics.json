@@ -6,7 +6,7 @@
     "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": "Creative Commons Attribution 4.0 International",
+    "license": "MIT",
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,

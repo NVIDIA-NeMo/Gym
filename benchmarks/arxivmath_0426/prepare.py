@@ -48,6 +48,7 @@ def prepare() -> Path:
     with open(OUTPUT_FPATH, "w") as f:
         for row in ds:
             out = {
+                "task_id": str(row["problem_idx"]),
                 "question": row["problem"],
                 "expected_answer": str(row["answer"]),
             }

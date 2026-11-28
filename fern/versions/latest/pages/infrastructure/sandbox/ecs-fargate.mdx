@@ -6,6 +6,24 @@ position: 3
 
 The `ecs_fargate` provider runs each sandbox as an AWS ECS Fargate task reached over an SSH sidecar. It implements the provider-neutral `SandboxProvider` contract, so any sandbox-backed agent or resources server can use it by selecting `ecs_fargate` in its sandbox config.
 
+## Borrowed connections (experimental)
+
+An agent on the same host and UID can borrow the owner's exec-server connection.
+The owner must stay alive and keep its SSH forward open; disconnecting a borrower
+leaves the ECS task running. Descriptors include a per-sandbox identity so a stale
+port cannot silently connect to another task. Recreate descriptors after upgrading;
+older descriptors without an identity are rejected.
+
+Fargate borrowing is experimental. Local exec-server and LocalEmu checks cover
+parts of the connection and cleanup behavior, but real AWS provisioning and SSH
+networking have not been validated for borrowed harness sessions.
+
+Borrowed connections do not recover automatically if the owner's SSH tunnel drops.
+Only an execution request from the owner currently triggers tunnel recovery, and
+the owner may be idle while an agent runs. Treat a tunnel drop as an infrastructure
+failure and retry the rollout. Keeping the same port during owner reconnection does
+not provide proactive recovery.
+
 ## Setup
 
 ECS Fargate requires an existing sandbox stack and the AWS SDK:

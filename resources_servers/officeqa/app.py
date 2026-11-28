@@ -209,8 +209,7 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
     async def _stop_session(self, session_id: str) -> None:
         session = self._sessions.get(session_id)
         if session is not None:
-            async with asyncio.timeout(self.config.sandbox_stop_timeout):
-                await session.sandbox.stop()
+            await session.sandbox.stop(timeout_s=self.config.sandbox_stop_timeout)
             self._sessions.pop(session_id)
 
     async def close_resources_session(

@@ -32,7 +32,7 @@ from nemo_gym.eval.recovery.evidence import (
     CollectedEvidence,
 )
 from nemo_gym.eval.recovery.planner import decide_from_collected
-from tests.helpers.recovery_cut_runs import _cut_run, _decide, _digests
+from tests.helpers.recovery_cut_runs import _cut_run, _decide, _digests, _hang_until_cut
 
 
 def test_the_in_job_admission_verifies_and_reads_the_store_once(tmp_path, monkeypatch, capsys):
@@ -243,3 +243,40 @@ def test_an_installer_error_with_a_credential_never_leaves_the_run_host(tmp_path
     decision = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
     assert secret not in decision.reason
     assert "driver_install_failed" in decision.reason
+
+
+def test_a_scheduler_cut_with_never_started_rows_stays_a_free_segment_beside_retryable_failures(tmp_path):
+    from nemo_gym.eval.recovery import continuation as recovery
+
+    # Two rows failed on provider errors earlier in the run and the allocation then ran out of walltime with work
+    # never started: the continuation is planned, so it must not spend the run's infra retries even if they are spent.
+    _cut_run(tmp_path, scored=1, in_flight=0, not_started=2, retryable=2)
+    (tmp_path / ".gym_infra_retries").write_text("2\n")
+    assert recovery.continuation_admission(str(tmp_path), 2, None, "0:15", "100", "TIMEOUT") == "segment"
+
+
+def test_a_scheduler_cut_with_only_retryable_failures_left_spends_an_infra_retry(tmp_path):
+    from nemo_gym.eval.recovery import continuation as recovery
+
+    _cut_run(tmp_path, scored=1, in_flight=0, not_started=0, retryable=2)
+    assert recovery.continuation_admission(str(tmp_path), 2, None, "0:15", "100", "TIMEOUT") == "retry"
+    (tmp_path / ".gym_infra_retries").write_text("2\n")
+    assert recovery.continuation_admission(str(tmp_path), 2, None, "0:15", "100", "TIMEOUT") == "stop"
+
+
+@pytest.mark.parametrize("retryable", [0, 2])
+def test_rows_that_hang_until_every_cut_stop_the_chain_without_a_walltime_cap(tmp_path, retryable):
+    from nemo_gym.eval.recovery import continuation as recovery
+
+    # Rows dispatched in every allocation and cut with no outcome: the first end of an allocation is free for a row,
+    # each later one spends an attempt of its cap, so the chain stops after the attempt cap even with no max_walltime
+    # and with the run's infra retries already spent.
+    _cut_run(tmp_path, scored=1, in_flight=2, not_started=0, retryable=retryable)
+    (tmp_path / ".gym_infra_retries").write_text("2\n")
+    admissions = []
+    for allocation in range(100, 110):
+        admissions.append(recovery.continuation_admission(str(tmp_path), 2, None, "0:15", str(allocation), "TIMEOUT"))
+        if admissions[-1] != "segment":
+            break
+        _hang_until_cut(tmp_path, allocation=str(allocation + 1))
+    assert admissions == ["segment"] * 4 + ["stop"]

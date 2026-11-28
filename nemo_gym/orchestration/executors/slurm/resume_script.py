@@ -46,6 +46,7 @@ from nemo_gym.eval.recovery.markers import (
     CANCELLED_FOLLOWUP_MARKER,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
+    DRIVER_FAILURE_NAME,
     FOLLOW_UP_SUBMISSION_REFUSED,
     GUARDED_DRIVER_FAILURE_KINDS,
     NO_ELIGIBLE_RETRY_REASON,
@@ -119,8 +120,6 @@ NO_PROGRESS_SEGMENT_REASON = (
     "the segment saved no rollout: its walltime is shorter than this run's setup (Gym install and server start-up)"
     " plus a rollout, so the next segment would repeat it; the chain does not retry it; raise the walltime"
 )
-# Where the driver step's DRIVER_FAILURE_ENV points: the next segment's guard ends the chain with the kind in it.
-DRIVER_FAILURE_NAME = ".gym_driver_failure"
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
     "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
@@ -996,6 +995,9 @@ _gym_end_own_chain() {{
         fi
     fi
     # The sentinel first: once its follow-up is gone, its afterany dependency is met and it could start.
+    # A chain that ends with nothing eligible for retry is not complete.
+    _why="the run is complete"
+    [[ $_ended != {no_eligible_retry} ]] || _why="no task is eligible for another attempt"
     for _role in sentinel follow_up; do
         _file="$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID"
         [[ $_role == follow_up ]] || _file="$OUTPUT_DIR/.gym_followup_sentinel.$SLURM_JOB_ID"
@@ -1003,7 +1005,7 @@ _gym_end_own_chain() {{
         [[ "$_id" =~ ^[0-9]{{1,15}}$ ]] || continue
         if scancel "$_id"; then
             _result=cancelled
-            echo "Cancelled this chain's queued ${{_role/_/-}} $_id: the run is complete."
+            echo "Cancelled this chain's queued ${{_role/_/-}} $_id: $_why."
         else
             _result=scancel_failed
             echo "WARNING: could not cancel this chain's queued ${{_role/_/-}} $_id; if it starts, its prologue ends it."

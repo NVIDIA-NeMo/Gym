@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from assertion_harness.check import check_assertions
 from lcb_integration.correctness import check_correctness
 
 
@@ -59,9 +60,23 @@ def main(request_path: Path, result_path: Path) -> None:
     request = json.loads(request_path.read_text(encoding="utf-8"))
     # The request holds every expected output, and candidates run in this directory with a real open().
     request_path.unlink()
-    result, metadata = check_correctness(
-        request["sample"], request["generation"], timeout=request["timeout"], debug=request["debug"]
-    )
+    if request.get("format") == "assertions":
+        result, metadata = check_assertions(
+            request["generation"],
+            request["tests"],
+            time_limit_s=request["time_limit_s"],
+            memory_limit_mb=request["memory_limit_mb"],
+            deadline_s=request["deadline_s"],
+        )
+    else:
+        result, metadata = check_correctness(
+            request["sample"],
+            request["generation"],
+            timeout=request["timeout"],
+            debug=request["debug"],
+            memory_limit_mb=request.get("memory_limit_mb"),
+            deadline_s=request.get("deadline_s"),
+        )
     payload = {"result": [_normalize_result_entry(entry) for entry in result], "metadata": metadata}
     # Publish atomically so the server never reads a partially written result.
     pending = result_path.with_name(result_path.name + ".pending")

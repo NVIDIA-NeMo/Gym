@@ -9,12 +9,14 @@ import pytest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import FailureBoundary, NgFailureEvent
 from nemo_gym.verification import JudgeError, is_judge_failure
+from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
 from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig, VisualBenchmarksServer
 from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request
 
 
 @pytest.mark.asyncio
-async def test_native_judge_uses_captured_model_route_without_local_key(monkeypatch):
+@pytest.mark.parametrize("agentx", [False, True])
+async def test_native_judge_uses_captured_model_route_without_local_key(monkeypatch, agentx):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     client = MagicMock(spec=ServerClient)
     http = MagicMock()
@@ -32,7 +34,7 @@ async def test_native_judge_uses_captured_model_route_without_local_key(monkeypa
                         "finish_reason": "stop",
                         "message": {
                             "role": "assistant",
-                            "content": "A",
+                            "content": '{"score": 0.65}' if agentx else "A",
                         },
                     }
                 ],
@@ -41,8 +43,8 @@ async def test_native_judge_uses_captured_model_route_without_local_key(monkeypa
         ).encode()
     )
     client.post = AsyncMock(return_value=http)
-    cfg = VisualBenchmarksConfig
-    cls = VisualBenchmarksServer
+    cfg = AgentXConfig if agentx else VisualBenchmarksConfig
+    cls = AgentXServer if agentx else VisualBenchmarksServer
     server = cls(
         config=cfg(
             host="localhost",
@@ -55,9 +57,11 @@ async def test_native_judge_uses_captured_model_route_without_local_key(monkeypa
         ),
         server_client=client,
     )
-    body = request("VStarBench", "the fuzzy feline")
+    body = request("AgentX" if agentx else "VStarBench", "the fuzzy feline")
+    if agentx:
+        body.verifier_metadata.update(GT_json="reference", query_type="subjective", query_type_raw="Subjective")
     result = await server.verify(body)
-    assert result.reward == (1)
+    assert result.reward == (0.65 if agentx else 1)
     assert client.post.call_args.kwargs["server_name"] == "visual_judge"
     assert client.post.call_args.kwargs["url_path"] == "/v1/chat/completions"
     assert "headers" not in client.post.call_args.kwargs
@@ -72,37 +76,42 @@ async def test_native_judge_uses_captured_model_route_without_local_key(monkeypa
     client.post.side_effect = [RuntimeError("temporary judge failure"), http]
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     recovered = await server.verify(body)
-    assert recovered.reward == (1)
+    assert recovered.reward == (0.65 if agentx else 1)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agentx", [False, True])
 @pytest.mark.parametrize("missing", ["model", "route"])
-async def test_missing_judge_configuration_fails_before_network(monkeypatch, missing):
+async def test_missing_judge_configuration_fails_before_network(monkeypatch, agentx, missing):
     from resources_servers.opencode_multimodal_benchmarks import app as app_module
 
     transport = AsyncMock(side_effect=AssertionError("Must not make a network call"))
     monkeypatch.setattr(app_module, "request", transport)
     monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
-    config_type = VisualBenchmarksConfig
-    server_type = VisualBenchmarksServer
+    config_type = AgentXConfig if agentx else VisualBenchmarksConfig
+    server_type = AgentXServer if agentx else VisualBenchmarksServer
     config = config_type(host="localhost", port=1, name="visual", entrypoint="app.py")
     assert config.judge_endpoint is None and config.judge_model is None
     if missing == "route":
         config.judge_model = "test-judge"
     server = server_type(config=config, server_client=MagicMock(spec=ServerClient))
     with pytest.raises(JudgeError, match="Configure judge_"):
-        await server._judge("prompt")
+        if agentx:
+            await server._judge_answer({}, "answer")
+        else:
+            await server._judge("prompt")
     transport.assert_not_awaited()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("agentx", [False, True])
 @pytest.mark.parametrize("recover", [False, True])
-async def test_native_judge_deadline_cancels_attempt_and_preserves_retry_policy(monkeypatch, recover):
+async def test_native_judge_deadline_cancels_attempt_and_preserves_retry_policy(monkeypatch, agentx, recover):
     from resources_servers.opencode_multimodal_benchmarks import app as app_module
 
     client = MagicMock(spec=ServerClient)
-    config_type = VisualBenchmarksConfig
-    server_type = VisualBenchmarksServer
+    config_type = AgentXConfig if agentx else VisualBenchmarksConfig
+    server_type = AgentXServer if agentx else VisualBenchmarksServer
     server = server_type(
         config=config_type(
             host="localhost",
@@ -143,7 +152,7 @@ async def test_native_judge_deadline_cancels_attempt_and_preserves_retry_policy(
                             "finish_reason": "stop",
                             "message": {
                                 "role": "assistant",
-                                "content": "A",
+                                "content": '{"verdict": "equivalent"}' if agentx else "A",
                             },
                         }
                     ],
@@ -155,7 +164,9 @@ async def test_native_judge_deadline_cancels_attempt_and_preserves_retry_policy(
     client.post = AsyncMock(side_effect=post)
     module = app_module
     monkeypatch.setattr(module.asyncio, "sleep", AsyncMock())
-    body = request("VStarBench", "the fuzzy feline")
+    body = request("AgentX" if agentx else "VStarBench", "the fuzzy feline")
+    if agentx:
+        body.verifier_metadata.update(GT_json="reference", query_type="objective", query_type_raw="Objective")
     if recover:
         result = await asyncio.wait_for(server.verify(body), timeout=1)
         assert result.reward == 1

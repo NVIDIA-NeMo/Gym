@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Canonical source: https://github.com/jayl940712/webarena_benchmarks/blob/6a2977939b157b0ab9de7799bb089c721f1ac115/visualwebarena.jsonl
+# Revision: 6a2977939b157b0ab9de7799bb089c721f1ac115; license: Apache-2.0.
+- runtime_task_id: '568'
+  source:
+    web_name:
+    - reddit
+    id: visualwebarena-568
+    ques: 'How many red keys are in the picture? Leave a comment replying to user "liverblow" with the following
+      format: "It has <number of red key> $%@" (not including the double inverted commas), replacing <number of
+      red key> with the actual number of red key. Remember to use digits.'
+    web:
+    - __REDDIT__/f/MechanicalKeyboards/56362  # pragma: allowlist secret - Public canonical Reddit task URL.
+    eval:
+      eval_types:
+      - program_html
+      reference_answers: null
+      reference_url: ''
+      program_html:
+      - url: __REDDIT__/f/MechanicalKeyboards/56362  # pragma: allowlist secret - Public canonical Reddit task URL.
+        locator: func:reddit_get_parent_comment_username_of_latest_comment_by_username(__page__, 'MarvelsGrantMan136')
+        required_contents:
+          exact_match: liverblow
+      - url: __REDDIT__/f/MechanicalKeyboards/56362  # pragma: allowlist secret - Public canonical Reddit task URL.
+        locator: func:reddit_get_latest_comment_content_by_username(__page__, 'MarvelsGrantMan136')
+        required_contents:
+          exact_match: It has 3 $%@
+- runtime_task_id: '569'
+  source:
+    web_name:
+    - reddit
+    id: visualwebarena-569
+    ques: 'What is the color of the mattress? Leave a comment replying to user "BiAdventureTime" with the following
+      format: "Its color is <color of the mattress> ~~~~``~~~~" (not including the quote marks), replacing <color
+      of the mattress> with the actual color of the mattress. Remember to use basic color names.'
+    web:
+    - __REDDIT__/f/memes/41674
+    eval:
+      eval_types:
+      - program_html
+      reference_answers: null
+      reference_url: ''
+      program_html:
+      - url: __REDDIT__/f/memes/41674
+        locator: func:reddit_get_parent_comment_username_of_latest_comment_by_username(__page__, 'MarvelsGrantMan136')
+        required_contents:
+          exact_match: BiAdventureTime
+      - url: __REDDIT__/f/MechanicalKeyboards/56362  # pragma: allowlist secret - Public canonical Reddit task URL.
+        locator: func:reddit_get_latest_comment_content_by_username(__page__, 'MarvelsGrantMan136')
+        required_contents:
+          exact_match: Its color is blue ~~~~``~~~~

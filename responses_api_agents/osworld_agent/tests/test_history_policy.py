@@ -90,6 +90,52 @@ def test_legacy_3_10_3_and_explicit_policy_resolve_to_same_contract() -> None:
     assert legacy.history_policy == explicit.history_policy
 
 
+def test_raw_live_replay_has_distinct_contract_without_changing_normalized_default() -> None:
+    normalized = resolve_agent_contract(
+        runner_spec=_nemotron_runner(),
+        max_steps=200,
+        max_trajectory_length=3,
+        explicit_history_policy={
+            "name": "hysteresis",
+            "params": {"low_water": 3, "high_water": 10},
+        },
+        model_protocol_id=None,
+        rollout_purpose="training",
+        parity_mode="strict",
+    )
+    raw_live = resolve_agent_contract(
+        runner_spec=_nemotron_runner(assistant_history_replay="raw_live"),
+        max_steps=200,
+        max_trajectory_length=3,
+        explicit_history_policy={
+            "name": "hysteresis",
+            "params": {"low_water": 3, "high_water": 10},
+        },
+        model_protocol_id=None,
+        rollout_purpose="training",
+        parity_mode="strict",
+    )
+
+    raw_full = resolve_agent_contract(
+        runner_spec=_nemotron_runner(assistant_history_replay="raw_full"),
+        max_steps=200,
+        max_trajectory_length=3,
+        explicit_history_policy={
+            "name": "hysteresis",
+            "params": {"low_water": 3, "high_water": 10},
+        },
+        model_protocol_id=None,
+        rollout_purpose="training",
+        parity_mode="strict",
+    )
+
+    assert "assistant_history_replay" not in normalized.contract["agent_options"]
+    assert raw_live.contract["agent_options"]["assistant_history_replay"] == "raw_live"
+    assert raw_live.contract_id != normalized.contract_id
+    assert raw_full.contract["agent_options"]["assistant_history_replay"] == "raw_full"
+    assert len({normalized.contract_id, raw_live.contract_id, raw_full.contract_id}) == 3
+
+
 def test_strict_parity_rejects_and_declared_parity_allows_a_policy_difference() -> None:
     fixed = resolve_agent_contract(
         runner_spec=_nemotron_runner(),

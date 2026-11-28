@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import ClassVar, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.server_runtime import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
@@ -18,6 +18,7 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
     summary_metrics,
 )
 from resources_servers.agentic_if_realworld.benchmark.scoring import validate_judge_config
+from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
 from resources_servers.agentic_if_realworld.verifier import (
     VERIFIER_FIXTURE as VERIFIER_FIXTURE,
 )
@@ -52,7 +53,7 @@ class ResourcesConfig(BaseResourcesServerConfig):
     judge_model: str = DEFAULT_JUDGE_MODEL
     judge_api_key_env: str = "AGENTIC_IF_JUDGE_API_KEY"
     judge_reasoning: str = "medium"
-    judge_evidence_transport: Literal["quotes", "evidence_ids_v1"] = "quotes"
+    judge_evidence_transport: Literal["quotes", "evidence_ids_v1", "evidence_ids_or_quotes_v1"] = "quotes"
     synthetic: bool = False
     split_registry_path: str = ""
     ground_truth_path: str = ""
@@ -82,7 +83,13 @@ class ResourcesServer(SimpleResourcesServer):
             evidence_transport=self.config.judge_evidence_transport,
             response_source=self.config.response_source,
         )
-        return await verifier.verify(body)
+        try:
+            return await verifier.verify(body)
+        except RetryableTransportError as error:
+            if error.http_status in (401, 403):
+                raise HTTPException(status_code=error.http_status, detail=str(error)) from error
+            # 503 tells the driver this task alone waits for a resume; other verify errors stay 500.
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Keep the frozen full-cohort denominator for native, reverify and reaggregate runs."""

@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 
 import pytest
 
@@ -99,7 +100,7 @@ def test_descendant_walk_tolerates_unreadable_children(monkeypatch):
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", fake_open)
-    assert memory_telemetry._descendant_pids(os.getpid()) == {os.getpid()}
+    assert memory_telemetry._descendant_pids(os.getpid()) == [os.getpid()]
 
 
 def test_collects_descendant_processes():
@@ -302,3 +303,440 @@ def test_profiler_suppresses_collection_errors():
         host_collector=lambda: (_ for _ in ()).throw(RuntimeError("host sample failed")),
     )
     profiler.sample_once()
+
+
+def test_cpu_time_counts_new_processes_in_full_and_live_ones_by_their_increase():
+    from nemo_gym.telemetry.memory import ProcessCpuTimes, cpu_time_since
+
+    previous = {(10, 1.0): ProcessCpuTimes(5.0, 1.0), (11, 1.0): ProcessCpuTimes(2.0, 0.5)}
+    current = {
+        (10, 1.0): ProcessCpuTimes(7.0, 1.5),  # live: +2 user, +0.5 system
+        (12, 3.0): ProcessCpuTimes(1.0, 0.25),  # new since the previous sample: all of it
+        (11, 9.0): ProcessCpuTimes(0.5, 0.0),  # pid 11 reused by a new process: counted from zero
+    }
+
+    used = cpu_time_since(previous, current)
+
+    assert used == ProcessCpuTimes(user_seconds=3.5, system_seconds=0.75)
+
+
+def _counted_user_seconds(samples, exited=()):
+    """Feed CPU samples through the profiler's baseline and return the user seconds the counter would add."""
+    from nemo_gym.telemetry.memory import advance_cpu_baseline
+
+    baseline: dict = {}
+    total = 0.0
+    for current in samples:
+        used, baseline = advance_cpu_baseline(
+            baseline, current, has_exited=lambda key: key in exited, parent_pid_of=lambda key: None
+        )
+        assert used.user_seconds >= 0
+        total += used.user_seconds
+    return total
+
+
+def _cpu(user_seconds, parent=None):
+    from nemo_gym.telemetry.memory import ProcessCpuTimes
+
+    return ProcessCpuTimes(user_seconds, 0.0, parent)
+
+
+ROOT, CHILD, GRANDCHILD = (10, 1), (11, 2), (12, 3)
+
+
+def test_a_process_missing_from_one_walk_is_not_counted_again_when_it_reappears():
+    samples = [
+        {(10, 5): _cpu(10.0)},
+        {},  # the walk missed it once
+        {(10, 5): _cpu(12.0)},
+    ]
+
+    assert _counted_user_seconds(samples) == pytest.approx(12.0)
+
+
+def test_children_that_start_and_exit_between_samples_are_counted_through_the_parent_that_waited():
+    # 20 children of 0.3 s each, all started, waited for and gone between the two samples.
+    samples = [{ROOT: _cpu(0.1)}, {ROOT: _cpu(0.1 + 20 * 0.3)}]
+
+    assert _counted_user_seconds(samples) == pytest.approx(6.1)
+
+
+def test_a_child_seen_before_its_parent_waited_for_it_is_not_counted_twice():
+    samples = [
+        {ROOT: _cpu(1.0), CHILD: _cpu(2.0, parent=ROOT)},
+        {ROOT: _cpu(1.5 + 2.5)},  # the child used 0.5 s more, exited, and the root waited for it
+    ]
+
+    assert _counted_user_seconds(samples, exited={CHILD}) == pytest.approx(4.0)
+
+
+def test_a_child_waited_for_by_a_parent_that_exited_in_the_same_interval_is_not_counted_twice():
+    samples = [
+        {ROOT: _cpu(0.0), CHILD: _cpu(1.0, parent=ROOT), GRANDCHILD: _cpu(2.0, parent=CHILD)},
+        # The child waited for the grandchild (2.5 s in all), used 1.2 s itself, exited, and the root waited for it.
+        {ROOT: _cpu(1.2 + 2.5)},
+    ]
+
+    assert _counted_user_seconds(samples, exited={CHILD, GRANDCHILD}) == pytest.approx(3.7)
+
+
+def test_a_child_reparented_out_of_the_tree_keeps_what_was_counted_and_adds_nothing_after():
+    from nemo_gym.telemetry.memory import advance_cpu_baseline
+
+    samples_and_exits = [
+        ({ROOT: _cpu(0.0), CHILD: _cpu(1.0, parent=ROOT), GRANDCHILD: _cpu(2.0, parent=CHILD)}, set()),
+        # The child exited without waiting; the grandchild now runs outside the tree.
+        ({ROOT: _cpu(1.2)}, {CHILD}),
+        # The grandchild exited and was reaped outside the tree.
+        ({ROOT: _cpu(1.2)}, {CHILD, GRANDCHILD}),
+    ]
+    baseline: dict = {}
+    counted = []
+    for current, exited in samples_and_exits:
+        reparented_to_init = lambda key: 1  # noqa: E731
+        used, baseline = advance_cpu_baseline(
+            baseline, current, has_exited=exited.__contains__, parent_pid_of=reparented_to_init
+        )
+        counted.append(used.user_seconds)
+
+    assert counted == pytest.approx([3.0, 0.2, 0.0])
+
+
+def test_time_moved_onto_a_parent_before_its_times_show_it_is_held_back_until_they_do():
+    samples = [
+        {ROOT: _cpu(0.0), CHILD: _cpu(2.0, parent=ROOT)},
+        {ROOT: _cpu(0.1)},  # the root was read just before it waited for the exited child
+        {ROOT: _cpu(0.1 + 2.3)},
+    ]
+
+    assert _counted_user_seconds(samples, exited={CHILD}) == pytest.approx(2.4)
+
+
+def test_a_parent_that_does_not_wait_for_its_children_is_undercounted_not_overcounted():
+    samples = [
+        {ROOT: _cpu(1.0), CHILD: _cpu(2.0, parent=ROOT)},
+        {ROOT: _cpu(1.5)},  # SIGCHLD ignored: the exited child's time never reaches the root
+        {ROOT: _cpu(4.0)},
+    ]
+
+    assert _counted_user_seconds(samples, exited={CHILD}) == pytest.approx(4.0)  # used 4.0 + at least 2.0
+
+
+def test_a_reused_child_pid_is_counted_from_zero_after_the_old_child_is_folded_into_its_parent():
+    samples = [
+        {ROOT: _cpu(0.0), (11, 2): _cpu(2.0, parent=ROOT)},
+        {ROOT: _cpu(2.0), (11, 9): _cpu(0.5, parent=ROOT)},
+    ]
+
+    assert _counted_user_seconds(samples, exited={(11, 2)}) == pytest.approx(2.5)
+
+
+def test_reads_own_and_waited_for_children_times_and_the_parent_from_proc_stat(monkeypatch):
+    from nemo_gym.telemetry.memory import ProcessCpuTimes, collect_process_tree_cpu
+
+    clock_ticks = memory_telemetry._CLOCK_TICKS
+    # pid: (ppid, utime, stime, cutime, cstime, starttime) in clock ticks.
+    stats = {100: (1, 10, 20, 30, 40, 7), 101: (100, 1, 2, 3, 4, 8), 102: (999, 0, 0, 0, 0, 9)}
+
+    def stat_fields(pid):
+        ppid, utime, stime, cutime, cstime, start = stats[pid]
+        return ["S", str(ppid), *["0"] * 9, str(utime), str(stime), str(cutime), str(cstime), *["0"] * 4, str(start)]
+
+    monkeypatch.setattr(memory_telemetry, "_descendant_pids", lambda _pid: [100, 101, 102])
+    monkeypatch.setattr(memory_telemetry, "_stat_fields", stat_fields)
+
+    assert collect_process_tree_cpu(100) == {
+        (100, 7): ProcessCpuTimes(40 / clock_ticks, 60 / clock_ticks, parent=None, parent_pid=1),
+        (101, 8): ProcessCpuTimes(4 / clock_ticks, 6 / clock_ticks, parent=(100, 7), parent_pid=100),
+        (102, 9): ProcessCpuTimes(0.0, 0.0, parent=None, parent_pid=999),
+    }
+
+
+@dataclass
+class _FakeProcess:
+    ppid: int
+    start: int
+    own: float = 0.0
+    children: float = 0.0
+    state: str = "S"
+    threads: int = 1
+    unreadable: bool = False
+    missed_by_walk: bool = False
+
+
+class _FakeProc:
+    """A procfs stand-in for the CPU walk: processes by pid, and the kernel steps that change them."""
+
+    def __init__(self, monkeypatch):
+        self.processes: dict[int, _FakeProcess] = {}
+        self.after_next_read: list = []
+        self.baseline: dict = {}
+        self.counted = 0.0
+        monkeypatch.setattr(memory_telemetry, "_child_pids", self.child_pids)
+        monkeypatch.setattr(memory_telemetry, "_stat_fields", self.stat_fields)
+
+    def spawn(self, pid, ppid, own=0.0):
+        self.processes[pid] = _FakeProcess(ppid=ppid, start=pid, own=own)
+
+    def child_pids(self, pid):
+        return [child for child, p in self.processes.items() if p.ppid == pid and not p.missed_by_walk]
+
+    def stat_fields(self, pid):
+        process = self.processes.get(pid)
+        steps, self.after_next_read = self.after_next_read, []
+        try:
+            if process is None:
+                raise FileNotFoundError(pid)
+            if process.unreadable:
+                raise PermissionError(pid)
+            ticks = memory_telemetry._CLOCK_TICKS
+            return [
+                process.state,
+                str(process.ppid),
+                *["0"] * 9,
+                str(round(process.own * ticks)),
+                "0",
+                str(round(process.children * ticks)),
+                "0",
+                "0",
+                "0",
+                str(process.threads),
+                "0",
+                str(process.start),
+            ]
+        finally:
+            for step in steps:
+                step()
+
+    def begin_reap(self, pid):
+        """``wait_task_zombie`` up to ``release_task``: state ``X``, the total already in the parent's children times."""
+        process = self.processes[pid]
+        process.state = "X"
+        self.processes[process.ppid].children += process.own + process.children
+
+    def reap(self, pid):
+        if self.processes[pid].state != "X":
+            self.begin_reap(pid)
+        del self.processes[pid]
+
+    def sample(self, root):
+        from nemo_gym.telemetry.memory import advance_cpu_baseline, collect_process_tree_cpu
+
+        used, self.baseline = advance_cpu_baseline(self.baseline, collect_process_tree_cpu(root))
+        self.counted += used.user_seconds
+        return self.counted
+
+
+@pytest.mark.parametrize("state", ["X", "Z"], ids=["being reaped", "zombie"])
+def test_a_child_seen_dead_after_its_parent_absorbed_it_is_not_counted_twice(monkeypatch, state):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)
+    proc.spawn(101, ppid=100, own=2.0)
+    assert proc.sample(100) == pytest.approx(2.0)
+
+    proc.processes[101].own = 2.5
+    if state == "X":
+        proc.begin_reap(101)
+    else:
+        proc.processes[101].state = "Z"
+    proc.sample(100)
+    proc.reap(101)
+
+    assert proc.sample(100) == pytest.approx(2.5)
+
+
+def test_a_process_whose_main_thread_exited_while_others_run_is_still_counted(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.sample(100)
+
+    proc.processes[101].state, proc.processes[101].threads, proc.processes[101].own = "Z", 2, 3.0
+
+    assert proc.sample(100) == pytest.approx(3.0)
+
+
+def test_a_parent_that_could_not_be_read_once_keeps_its_child_link(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.spawn(102, ppid=101, own=2.0)
+    proc.sample(100)
+
+    proc.processes[101].unreadable = True
+    proc.sample(100)
+    proc.processes[101].unreadable = False
+    proc.processes[102].own = 2.5
+    proc.reap(102)
+
+    assert proc.sample(100) == pytest.approx(3.5)
+
+
+def test_a_child_reaped_between_two_stat_reads_of_one_walk_is_counted_once(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1, own=1.0)
+    proc.spawn(101, ppid=100, own=2.0)
+    proc.sample(100)
+
+    proc.processes[101].own = 2.5
+    proc.after_next_read.append(lambda: proc.reap(101))
+    proc.sample(100)
+
+    assert proc.sample(100) == pytest.approx(3.5)
+
+
+def test_an_orphan_adopted_by_a_subreaper_and_missed_by_the_walk_is_counted_once(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)  # a child subreaper
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.spawn(102, ppid=101, own=2.0)
+    proc.sample(100)
+
+    proc.processes[101].own = 1.2
+    proc.processes[102].ppid = 100  # its parent exits without waiting; the subreaper adopts it
+    proc.reap(101)
+    proc.processes[102].missed_by_walk = True
+    proc.sample(100)
+    proc.processes[102].own = 2.5
+    proc.reap(102)
+
+    assert proc.sample(100) == pytest.approx(3.7)
+
+
+def test_an_orphan_that_exits_with_its_parent_is_counted_twice_until_its_time_reaches_the_subreaper(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)  # a child subreaper
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.spawn(102, ppid=101, own=0.5)
+    proc.spawn(103, ppid=102, own=2.0)
+    assert proc.sample(100) == pytest.approx(3.5)
+
+    proc.processes[103].ppid = 100  # 102 exits without waiting for 103, which the subreaper adopts and reaps
+    proc.reap(102)
+    proc.processes[103].own = 2.5
+    proc.reap(103)
+    assert proc.sample(100) == pytest.approx(4.0 + 2.0)  # 103's 2.0 already counted is counted again
+
+    proc.processes[101].own = 1.2
+    proc.reap(101)
+    assert proc.sample(100) == pytest.approx(6.0)  # 101 hands the 2.0 on to the subreaper
+
+    proc.processes[100].own = 2.0
+    assert proc.sample(100) == pytest.approx(6.2)  # taken back from the subreaper's own time: 1.2 + 0.5 + 2.5 + 2.0
+
+
+@pytest.mark.parametrize(
+    ("read_error", "exited"),
+    [(FileNotFoundError(), True), (PermissionError(), False), (OSError("I/O"), False)],
+    ids=["pid gone", "unreadable", "I/O error"],
+)
+def test_only_a_missing_proc_entry_confirms_an_exit(monkeypatch, read_error, exited):
+    from nemo_gym.telemetry.memory import process_has_exited
+
+    def unreadable(pid):
+        raise read_error
+
+    monkeypatch.setattr(memory_telemetry, "_stat_fields", unreadable)
+
+    assert process_has_exited((10, 5)) is exited
+
+
+def test_an_exited_process_is_forgotten():
+    from nemo_gym.telemetry.memory import ProcessCpuTimes, advance_cpu_baseline
+
+    _used, baseline = advance_cpu_baseline({(10, 5): ProcessCpuTimes(10.0, 0.0)}, {}, has_exited=lambda key: True)
+
+    assert baseline == {}
+
+
+def test_collects_the_cpu_time_of_a_child_in_a_real_process_tree():
+    if not memory_telemetry.process_tree_memory_supported():
+        pytest.skip("needs Linux procfs")
+    from nemo_gym.telemetry.memory import collect_process_tree_cpu
+
+    # Burns CPU for a moment, then says so and waits, so it is alive and has used CPU when the tree is read.
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time\nwhile time.process_time() < 0.2: pass\nprint(1, flush=True)\ntime.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        child.stdout.readline()
+        times = collect_process_tree_cpu(os.getpid())
+    finally:
+        child.kill()
+        child.wait()
+
+    child_times = [cpu for (pid, _started), cpu in times.items() if pid == child.pid]
+    assert child_times and child_times[0].user_seconds + child_times[0].system_seconds >= 0.1
+
+
+def test_counts_real_children_that_start_and_exit_between_two_samples():
+    if not memory_telemetry.process_tree_memory_supported():
+        pytest.skip("needs Linux procfs")
+    from nemo_gym.telemetry.memory import advance_cpu_baseline, collect_process_tree_cpu
+
+    # After a line on stdin, runs and waits for five children that each burn 0.1 s of CPU, then says so and waits.
+    script = (
+        "import subprocess, sys, time\n"
+        "sys.stdin.readline()\n"
+        "burn = 'import time\\nwhile time.process_time() < 0.1: pass'\n"
+        "for _ in range(5):\n"
+        "    subprocess.run([sys.executable, '-c', burn], check=True)\n"
+        "print(1, flush=True)\n"
+        "time.sleep(30)"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        _used, baseline = advance_cpu_baseline({}, collect_process_tree_cpu(parent.pid))
+        parent.stdin.write("\n")
+        parent.stdin.flush()
+        parent.stdout.readline()
+        used, _baseline = advance_cpu_baseline(baseline, collect_process_tree_cpu(parent.pid))
+    finally:
+        parent.kill()
+        parent.wait()
+
+    assert used.user_seconds + used.system_seconds >= 0.4
+
+
+@requires_lens
+def test_the_profiler_adds_each_servers_cpu_time_since_its_previous_sample(collected_metrics):
+    from nemo_gym.telemetry.memory import MemoryProfiler, ProcessCpuTimes
+
+    samples = iter(
+        [
+            {(10, 1.0): ProcessCpuTimes(2.0, 1.0)},
+            {(10, 1.0): ProcessCpuTimes(5.0, 1.5), (11, 2.0): ProcessCpuTimes(1.0, 0.0)},
+        ]
+    )
+    profiler = MemoryProfiler(
+        [ServerMemoryTarget(name="judge", server_type="resources_servers", pid=10)],
+        interval_seconds=60,
+        collector=lambda pid: ProcessTreeMemory(rss_bytes=1, pss_bytes=1, process_count=1),
+        host_collector=lambda: HostMemory(used_bytes=1, available_bytes=1, total_bytes=2),
+        cpu_collector=lambda pid: next(samples),
+    )
+
+    profiler.sample_once()
+    profiler.sample_once()
+
+    points = {point.attributes["cpu.mode"]: point for point in collected_metrics()["gym.server.cpu.time_total"]}
+    assert points["user"].value == pytest.approx(6.0)  # 2, then +3 and the new child's 1
+    assert points["system"].value == pytest.approx(1.5)
+    assert points["user"].attributes["nemo.gym.server.name"] == "judge"
+
+
+@requires_lens
+def test_records_host_cpu_capacity(collected_metrics):
+    from nemo_gym.telemetry.memory import record_host_cpu_capacity
+
+    record_host_cpu_capacity()
+
+    metrics = collected_metrics()
+    assert metrics["gym.host.cpu.logical"][0].value >= 1
+    if hasattr(os, "sched_getaffinity"):
+        assert 1 <= metrics["gym.host.cpu.allowed"][0].value <= metrics["gym.host.cpu.logical"][0].value

@@ -122,11 +122,19 @@ class _RunControl:
 class OpenSandboxTerminalExecutor(ToolExecutor):
     """Forward an OpenHands terminal action to one Harbor task sandbox."""
 
-    def __init__(self, environment: BaseEnvironment, loop: asyncio.AbstractEventLoop, cwd: str, control: _RunControl):
+    def __init__(
+        self,
+        environment: BaseEnvironment,
+        loop: asyncio.AbstractEventLoop,
+        cwd: str,
+        control: _RunControl,
+        command_timeout_sec: float | None = None,
+    ):
         self.environment = environment
         self.loop = loop
         self.cwd = cwd
         self.control = control
+        self.command_timeout_sec = command_timeout_sec
         self.pending: tuple[str, str, str, Future[Any]] | None = None
         self._call_lock = threading.Lock()
 
@@ -199,10 +207,10 @@ class OpenSandboxTerminalExecutor(ToolExecutor):
                     command=action.command,
                     exit_code=1,
                 )
-            # The longest official task budget is 3600 s. Harbor's earlier
-            # task deadline owns disposal; action.timeout only bounds a poll.
+            # This bound outlasts the trial's agent deadline, so Harbor's earlier
+            # deadline owns disposal; action.timeout only bounds a poll.
             future = asyncio.run_coroutine_threadsafe(
-                self.environment.exec(command, cwd="/", timeout_sec=3660), self.loop
+                self.environment.exec(command, cwd="/", timeout_sec=self.command_timeout_sec), self.loop
             )
             self.control.command_started = True
             self.control.active_commands[command_id] = future
@@ -351,9 +359,11 @@ class SkillsBenchOpenHands(BaseAgent):
         llm_timeout_s: int = 3600,
         llm_num_retries: int = 5,
         llm_timeout_seconds: int | None = None,
+        agent_timeout_sec: float | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
+        self.agent_timeout_sec = agent_timeout_sec
         if not model_name or not api_base:
             raise ValueError("OpenHands requires a model name and the Gym model server URL")
         if skill_mode not in {"with-skill", "no-skill"}:
@@ -425,7 +435,10 @@ class SkillsBenchOpenHands(BaseAgent):
         loop = asyncio.get_running_loop()
         instance_id = uuid.uuid4().hex
         control = _RunControl()
-        _EXECUTORS[instance_id] = OpenSandboxTerminalExecutor(environment, loop, cwd, control)
+        # A command must outlast the agent deadline so the deadline, not the exec bound, ends the trial.
+        # Without a deadline the environment's own exec default applies.
+        command_timeout_sec = None if self.agent_timeout_sec is None else self.agent_timeout_sec + 60
+        _EXECUTORS[instance_id] = OpenSandboxTerminalExecutor(environment, loop, cwd, control, command_timeout_sec)
 
         def run_and_drain() -> None:
             self._run_openhands(instruction, environment, context, instance_id, cwd, control)

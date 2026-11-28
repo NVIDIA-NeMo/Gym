@@ -21,7 +21,7 @@ deepcad_opencode:
       workspace_image: deepcad-opencode:1.17.11
       # Docker bridge cannot enforce model_only; use a provider with network policies to restrict egress.
       workspace_network_access: inherit
-      workspace_model_server: {type: responses_api_models, name: policy_model}
+      workspace_model_server: {type: responses_api_models, name: deepcad_policy_model}
       workspace_sandbox_config:
         ttl_s: 2400
         ready_timeout_s: 600
@@ -38,7 +38,7 @@ deepcad_opencode_agent:
       entrypoint: app.py
       host: 127.0.0.1
       resources_server: {type: resources_servers, name: deepcad_opencode}
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: deepcad_policy_model}
       opencode_version: 1.17.11
       token_id_capture: true
       concurrency: 4
@@ -87,12 +87,13 @@ agent_sandbox:
   docker:
     create:
       network: bridge
-      cap_drop: [ALL]
       security_opt: [no-new-privileges]
       pids_limit: 256
       apply_resource_limits: true
-policy_model:
+deepcad_policy_model:
+  _copy: policy_model
   responses_api_models:
     vllm_model:
+      inline_tool_output_images: true
       supply_prefix_token_ids: true
       return_token_id_information: true

@@ -132,7 +132,7 @@ def test_routes_execute_capture_and_grading(monkeypatch, tmp_path, typed, outcom
         sandbox.stop = AsyncMock()
         sandbox.serialize = AsyncMock(return_value={"sandbox_id": sandbox.sandbox_id})
 
-        async def execute(command, timeout_s=None):
+        async def execute(command, timeout_s=None, **_):
             sandbox.stop.assert_not_awaited()
             code, error_type, output = 0, None, ""
             if verifier_session_id is not None:

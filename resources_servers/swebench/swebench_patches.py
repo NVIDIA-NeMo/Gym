@@ -16,6 +16,7 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
+import re
 from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
@@ -25,6 +26,13 @@ from swebench.harness.run_evaluation import *
 from nemo_gym import PARENT_DIR
 from nemo_gym.sandbox import AsyncSandbox
 from resources_servers.swebench.failure_only_grading import failure_only_suite_completed
+
+
+# The eval script's stderr joins its stdout, in order. SWE-bench's start and end markers are no-op commands that
+# reach the output only through bash's trace, on stderr, and the log parser reads the region between them. A
+# provider that returns a command's stdout and stderr apart (OpenSandbox, E2B) would otherwise put everything the
+# tests print on stdout before the start marker.
+EVAL_SCRIPT_COMMAND = "/bin/bash /eval.sh 2>&1"
 
 
 # @bxyu-nvidia: We modify the run_instance function to:
@@ -192,7 +200,7 @@ async def run_instance(
         #
         # Modified code:
         test_output, timed_out, total_runtime = await container.exec_run_with_timeout(
-            "/bin/bash /eval.sh", timeout=timeout
+            EVAL_SCRIPT_COMMAND, timeout=timeout
         )
         test_output_path = log_dir / LOG_TEST_OUTPUT
         logger.info(f"Test runtime: {total_runtime:_.2f} seconds")
@@ -317,6 +325,34 @@ def patch_swebench_pytest_result_summary(test_spec: TestSpec) -> None:
     test_spec.eval_script_list.insert(test_spec.eval_script_list.index(start), PYTEST_RESULT_SUMMARY)
 
 
+# Chart.js runs its Karma suite in Chrome, which keeps renderer shared memory in /dev/shm. A container's default 64 MB
+# /dev/shm is too small for the suite's 1,100-1,600 canvas tests: Chrome crashes part way, Karma never prints its
+# summary, and the failure-only completion check rejects the run, the gold patch's included. A sandbox cannot enlarge
+# /dev/shm without CAP_SYS_ADMIN, so Chrome is told to keep that memory under /tmp instead.
+CHARTJS_CHROME_FLAG = "--disable-dev-shm-usage"
+_KARMA_CONFIG = re.compile(r"karma start \./(karma\.conf\.c?js)\b")
+
+
+def chartjs_chrome_flag_edit(karma_config: str) -> str:
+    """The command that adds ``CHARTJS_CHROME_FLAG`` to the flags of the Chrome launcher in ``karma_config``."""
+    return f"sed -i \"/flags: \\[/a\\          '{CHARTJS_CHROME_FLAG}',\" ./{karma_config}"
+
+
+def patch_swebench_chartjs_chrome_flag(test_spec: TestSpec) -> None:
+    # SWE-bench runs Chart.js 2.x through Gulp, without a direct Karma invocation.
+    if test_spec.repo != "chartjs/Chart.js" or test_spec.version.startswith("2."):
+        return
+    for index, line in enumerate(test_spec.eval_script_list):
+        karma_config = _KARMA_CONFIG.search(line)
+        if karma_config is None:
+            continue
+        edit = chartjs_chrome_flag_edit(karma_config.group(1))
+        if edit not in test_spec.eval_script_list:
+            test_spec.eval_script_list.insert(index, edit)
+        return
+    raise ValueError(f"The evaluation script of {test_spec.instance_id} does not start Karma")
+
+
 ########################################
 # START SWE Bench Multilingual instance patches
 ########################################
@@ -404,6 +440,7 @@ fi""")
 def patch_swebench_multilingual_log_parsing(stdout: str, stderr: str, instance_id: str) -> Optional[str]:
     test_output = None
 
+    # Only for a command whose stderr comes back apart; EVAL_SCRIPT_COMMAND joins the streams itself.
     # For RuboCop tests in SWE Multilingual specifically, there is an issue with the logs parsing if the stdout and stderr returned is not interleaved.
     # We interleave the stderr inside the start and end tags in the stdout here instead. See `get_logs_eval`
     if "rubocop" in instance_id and START_TEST_OUTPUT in stderr:

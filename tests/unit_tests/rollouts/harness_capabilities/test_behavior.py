@@ -48,7 +48,8 @@ def test_canonical_behavioral_checks_use_the_independent_witness(behavior_episod
     assert issues <= {"model.saved_exchanges", "model.response_metadata", "model.token_counts"}
 
 
-def test_canonical_error_response_cannot_invent_an_id():
+@pytest.mark.parametrize("mutation", ["response_id", "missing_error", "invented_zero"])
+def test_canonical_error_response_retains_exchange_and_unknowns(mutation):
     request = {"input": []}
     response = {"error": {"message": "prescribed HTTP 400"}}
     attempts = [{"request": request, "response": response, "status_code": 400}]
@@ -56,8 +57,15 @@ def test_canonical_error_response_cannot_invent_an_id():
     call = {"request": request, "response": response, "response_metadata": metadata}
     record = {"ng_trajectory": {"model_calls": [call]}}
     assert not failed_model_checks(record, attempts)
-    metadata["response_id"] = "invented"
-    assert failed_model_checks(record, attempts) == {"model.response_metadata"}
+    if mutation == "response_id":
+        metadata["response_id"] = "invented"
+        assert failed_model_checks(record, attempts) == {"model.response_metadata"}
+    elif mutation == "missing_error":
+        record["ng_trajectory"]["model_calls"] = []
+        assert "model.saved_exchanges" in failed_model_checks(record, attempts)
+    else:
+        call["token_stats"] = {"prompt_tokens": 0}
+        assert failed_model_checks(record, attempts) == {"model.token_counts"}
 
 
 @pytest.mark.parametrize(
@@ -91,6 +99,50 @@ def test_canonical_counts_cannot_be_swapped_between_calls(behavior_episode):
     assert failed_model_checks(record, witness["attempts"]) == {"model.token_counts"}
 
 
+@pytest.mark.parametrize("usage", [True, False])
+@pytest.mark.parametrize("mutation", [None, "prompt_tokens", "cached_tokens", "total_tokens", "finish_reason"])
+def test_messages_usage_and_stop_reason_are_checked_independently(usage, mutation):
+    request = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 100}
+    response = {"id": "r", "type": "message", "stop_reason": "end_turn", "content": []}
+    stats = {}
+    if usage:
+        response["usage"] = {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 2,
+        }
+        stats = {"prompt_tokens": 25, "completion_tokens": 8, "total_tokens": 33, "cached_tokens": 3}
+    metadata = {"status_code": 200, "response_id": "r", "finish_reason": "end_turn"}
+    call = {"request": request, "response": response, "response_metadata": metadata, "token_stats": stats}
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    attempts = [{"request": request, "response": response, "status_code": 200}]
+    if mutation == "finish_reason":
+        metadata[mutation] = "stop"
+    elif mutation:
+        stats[mutation] = 0
+    assert failed_model_checks(record, attempts) == (
+        {"model.response_metadata"} if mutation == "finish_reason" else {"model.token_counts"} if mutation else set()
+    )
+
+
+def test_responses_incomplete_reason_matches_the_witness():
+    request = {"input": []}
+    response = {"id": "r", "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+    metadata = {
+        "status_code": 200,
+        "response_id": "r",
+        "response_status": "incomplete",
+        "finish_reason": "max_output_tokens",
+    }
+    call = {"request": request, "response": response, "response_metadata": metadata}
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    attempts = [{"request": request, "response": response, "status_code": 200}]
+    assert not failed_model_checks(record, attempts)
+    metadata["finish_reason"] = None
+    assert failed_model_checks(record, attempts) == {"model.response_metadata"}
+
+
 def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     record, witness = behavior_episode
     inv = record["ng_trajectory"]["invocations"][0]
@@ -100,6 +152,17 @@ def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     assert checks["tools.witness_request"]["status"] == "fail"
     assert checks["tools.witness_status"]["status"] == "pass"
     assert checks["tools.witness_output"]["status"] == "pass"
+
+
+def test_matching_requests_do_not_replace_required_tool_ids(behavior_episode):
+    record, witness = behavior_episode
+    record["ng_trajectory"]["tool_calls"].pop()
+    witness["tool_calls"].pop()
+    for index, expected in enumerate(witness["tool_calls"]):
+        expected["wire_id"] = False
+        expected["id"] = f"independent-command-{index}"
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
+    assert checks["tools.witness_ids"]["status"] == "fail"
 
 
 def test_the_scripted_finish_call_is_not_compared_with_the_shell_witness(behavior_episode):

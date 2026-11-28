@@ -99,6 +99,8 @@ def deploy(tmp_path: Path) -> Iterator[Callable[..., Deployment]]:
     yield start
     for deployment in deployments:
         deployment.stop()
+        # pytest shows what a teardown prints only for a test that failed.
+        print(deployment.log_tails())
 
 
 async def wait_until(predicate: Callable[[], bool | Awaitable[bool]], timeout: float = 30) -> None:
@@ -138,7 +140,8 @@ async def every_rollout_held_at_its_second_call(deployment: Deployment, rollouts
     return counts["returned"] == rollouts and counts["calls"] == 2 * rollouts
 
 
-def deadline(seconds: float = 20) -> float:
+def deadline(seconds: float = 90) -> float:
+    """A control call's deadline: long enough for a prepare that pauses a harness (up to 45 s) on a busy machine."""
     return time.time() + seconds
 
 

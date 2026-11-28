@@ -29,6 +29,7 @@ After the anti-cheat scrub the repo's only branch is ``_nel_work`` and git has n
 identity; :func:`prepare_git_for_commits` fixes the latter at seed time.
 """
 
+import asyncio
 import re
 import shlex
 from collections.abc import Callable, Iterable
@@ -165,22 +166,35 @@ exit 0
 """
 
 
+# A provider error while setting the committer identity is retried: this many attempts, the delay doubling.
+GIT_IDENTITY_ATTEMPTS = 3
+GIT_IDENTITY_RETRY_DELAY_S = 2.0
+
+
 async def prepare_git_for_commits(sandbox: Any, workdir: str, log_prefix: str = "patch_capture") -> None:
     """Give the sandbox a committer identity (globally and in the repo) so the agent can commit.
     Never raises."""
     wd = shlex.quote(workdir)
     email, name = shlex.quote(GIT_COMMIT_IDENTITY_EMAIL), shlex.quote(GIT_COMMIT_IDENTITY_NAME)
-    try:
-        result = await sandbox.exec(
-            f"git config --global user.email {email} && git config --global user.name {name}"
-            f" && git config --global --add safe.directory {wd}"
-            f" ; git -C {wd} config user.email {email} ; git -C {wd} config user.name {name}",
-            timeout_s=60,
-        )
+    command = (
+        f"git config --global user.email {email} && git config --global user.name {name}"
+        f" && git config --global --add safe.directory {wd}"
+        f" ; git -C {wd} config user.email {email} ; git -C {wd} config user.name {name}"
+    )
+    delay = GIT_IDENTITY_RETRY_DELAY_S
+    for attempt in range(1, GIT_IDENTITY_ATTEMPTS + 1):
+        try:
+            result = await sandbox.exec(command, timeout_s=60)
+        except Exception as exc:  # a provider hiccup: setting the same config again is harmless
+            if attempt < GIT_IDENTITY_ATTEMPTS:
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            print(f"[{log_prefix}] git identity setup failed: {exc}", flush=True)
+            return
         if result.return_code != 0:
             print(f"[{log_prefix}] git identity setup returned {result.return_code}: {result.stderr}", flush=True)
-    except Exception as exc:  # pragma: no cover - provider hiccup, not a capture concern
-        print(f"[{log_prefix}] git identity setup failed: {exc}", flush=True)
+        return
 
 
 class CaptureCommandError(RuntimeError):

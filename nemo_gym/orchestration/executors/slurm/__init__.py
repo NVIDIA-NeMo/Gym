@@ -22,16 +22,21 @@ Its parts, each in its own module:
 - ``reader``: the remote Store reader both of them read a run through;
 - ``scheduler``: the Slurm commands they share;
 - ``script``: render a benchmark's sbatch script, and ``resume_script``: the auto-resume prologue and epilogue it
-  includes for a resumable job.
+  includes for a resumable job;
+- ``lustre_md_stats``: read the per-phase Lustre metadata counters a job records with ``lustre_md_stats: true``.
 
 Only Slurm implements resubmit today, so these parts are Slurm code with no scheduler-agnostic interface between
 them; the executor capabilities give resubmit its seam when a second scheduler needs one.
 """
 
-from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.orchestration.executors.slurm.executor import SlurmExecutor
+from typing import TYPE_CHECKING
+
+from nemo_gym._public_api import lazy_exports
 
 
+if TYPE_CHECKING:
+    from nemo_gym.orchestration.executors.slurm.executor import SlurmExecutor
+
+# Loaded on first use, so `gym eval lustre-stats` can import its reader without the whole executor.
+__getattr__, __dir__ = lazy_exports(__name__, {"SlurmExecutor": "executor"})
 __all__ = ["SlurmExecutor"]
-
-__getattr__ = moved_names_getattr(__name__)

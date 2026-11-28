@@ -123,6 +123,10 @@ async def test_compact_cohort_preserves_all_scoring_inputs_and_response_echo(ser
 @pytest.mark.parametrize("size", [2, 16])
 async def test_only_new_members_are_compacted_and_history_is_converted_once(server, monkeypatch, size):
     server.config.num_rollouts_per_prompt = size
+    # Preparing 16 large rollouts (dumps, hashes and garbage collection) can take over a second on a busy runner,
+    # so the fixture's 1 s cohort deadlines must not decide this test.
+    server.config.cohort_collection_timeout_s = 30.0
+    server.config.cohort_evaluation_timeout_s = 30.0
     requests = [training_member(i) for i in range(size)]
     started, release = asyncio.Event(), asyncio.Event()
     dump_modes, compact_ids = [], []
@@ -153,11 +157,11 @@ async def test_only_new_members_are_compacted_and_history_is_converted_once(serv
     monkeypatch.setattr(genrm, "_input_to_conversation_history", history)
     server._run_single_comparison = judge
     tasks = [asyncio.create_task(server.verify(request_with_session(), body)) for body in requests]
-    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.wait_for(started.wait(), 10)
     duplicate = asyncio.create_task(server.verify(request_with_session(), requests[0]))
     await asyncio.sleep(0)
     release.set()
-    await asyncio.gather(*tasks, duplicate)
+    await asyncio.wait_for(asyncio.gather(*tasks, duplicate), 10)
     await server.verify(request_with_session(), requests[0])
     assert dump_modes == ["json"] * (size + 2)
     assert compact_ids == [r.response.id for r in requests]
@@ -530,6 +534,9 @@ async def test_every_required_comparison_finishes_before_publish_without_blockin
     server.config.num_rollouts_per_prompt = 4
     server.config.comparison_strategy = strategy
     server.config.num_judges_per_comparison = judges
+    # The slow group is held open until release; the fixture's 1 s cohort deadlines must not fail it first.
+    server.config.cohort_collection_timeout_s = 30.0
+    server.config.cohort_evaluation_timeout_s = 30.0
     expected = (4 if strategy == "circular" else 6) * judges
     completed = {"slow": 0, "fast": 0}
     release, ready = asyncio.Event(), asyncio.Event()
@@ -552,17 +559,19 @@ async def test_every_required_comparison_finishes_before_publish_without_blockin
     server._run_single_comparison = judge
     slow = [asyncio.create_task(server.verify(request_with_session(), request(i, "slow"))) for i in range(4)]
     try:
-        await asyncio.wait_for(ready.wait(), 1)
+        await asyncio.wait_for(ready.wait(), 10)
         assert all(not t.done() for t in slow)
         fast = await asyncio.wait_for(
-            asyncio.gather(*(server.verify(request_with_session(), request(i, "fast")) for i in range(4))), 1
+            asyncio.gather(*(server.verify(request_with_session(), request(i, "fast")) for i in range(4))), 10
         )
         assert [r.reward for r in fast] == [3.0] * 4
         assert all(not t.done() for t in slow)
         release.set()
-        result = await asyncio.wait_for(asyncio.gather(*slow), 1)
+        result = await asyncio.wait_for(asyncio.gather(*slow), 10)
         assert [r.reward for r in result] == [3.0] * 4
         assert completed == {"slow": expected, "fast": expected}
     finally:
         release.set()
+        for task in slow:
+            task.cancel()
         await asyncio.gather(*slow, return_exceptions=True)

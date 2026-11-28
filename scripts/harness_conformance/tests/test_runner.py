@@ -13,8 +13,8 @@ import sys
 import psutil
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import HARNESSES, _config
-from scripts.harness_conformance.provider import SUMMARY_PROMPTS, OpenClawProbe, Probe, is_compaction_request
+from scripts.harness_conformance.episode import HARNESSES, _config, _settings
+from scripts.harness_conformance.probes import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
@@ -111,7 +111,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-        getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+        getattr(module, HARNESSES[harness].agent).model_fields["config"].annotation.model_validate(agent)
 
 
 def test_session_runtime_does_not_require_host_cli(monkeypatch):
@@ -121,6 +121,22 @@ def test_session_runtime_does_not_require_host_cli(monkeypatch):
     assert episode.check_runtime("pi", use_agent_sessions=True) == {"installation": "agent_session"}
     with pytest.raises(RuntimeError, match="install the pi runtime"):
         episode.check_runtime("pi")
+
+
+def test_hermes_runtime_records_its_pinned_worker_without_importing_hermes(monkeypatch, tmp_path):
+    from scripts.harness_conformance import episode
+
+    from responses_api_agents.hermes_agent import runtime as hermes_runtime
+
+    (tmp_path / "uv.lock").write_text("locked\n")
+    monkeypatch.setattr(hermes_runtime, "source_checkout", lambda: tmp_path)
+    expected = {
+        "hermes_source": hermes_runtime.HERMES_SOURCE,
+        "python_version": hermes_runtime.HERMES_PYTHON_VERSION,
+        "lock_sha256": episode.digest_file(tmp_path / "uv.lock"),
+    }
+    assert episode.check_runtime("hermes", use_agent_sessions=True) == {"installation": "agent_session", **expected}
+    assert episode.check_runtime("hermes") == {"installation": "host_worker", **expected}
 
 
 @pytest.mark.parametrize(
@@ -200,8 +216,17 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     module = SimpleNamespace(
         TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
     )
-    monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
-    monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
+    monkeypatch.setitem(episode.HARNESSES, "codex", dataclasses.replace(HARNESSES["codex"], agent="TestAgent"))
+    import_module = episode.importlib.import_module
+    monkeypatch.setattr(
+        episode,
+        "importlib",
+        SimpleNamespace(
+            import_module=lambda name, **kwargs: module
+            if name == "responses_api_agents.codex_agent.app"
+            else import_module(name, **kwargs)
+        ),
+    )
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
@@ -389,71 +414,97 @@ def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, pro
 
 
 @pytest.mark.parametrize("compaction", [True, False])
-def test_compaction_probe_keeps_summary_separate_from_policy_replies(tmp_path, compaction):
-    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=2)
-    probe = Probe(scenario, tmp_path)
-    messages = [{"role": "user", "content": "Run checks"}]
+@pytest.mark.parametrize(
+    "harness,tool_steps,low_usage",
+    [("opencode", 2, 500), ("hermes", 14, 1000), ("stirrup", 14, 500), ("codex", 14, 500), ("kilocode", 14, 500)],
+)
+def test_compaction_is_scripted_independently_of_request_text(tmp_path, compaction, harness, tool_steps, low_usage):
+    scenario = dataclasses.replace(
+        SCENARIO["context_compaction"],
+        name="context_compaction" if compaction else "no_compaction",
+        compaction=compaction,
+        tool_steps=tool_steps,
+    )
+    settings = _settings(harness, tmp_path, 30, scenario)
+    if not compaction:
+        # This comparison is test-only; its replies are independent of compaction settings.
+        settings["probe_overrides"] = {
+            "responses": [
+                *[
+                    {"kind": "tool", "input_tokens": usage, "output_tokens": 8}
+                    for usage in [low_usage] * (tool_steps - 1) + [27000]
+                ],
+                {"kind": "final", "input_tokens": 100, "output_tokens": 8},
+            ]
+        }
+    probe = Probe(scenario, tmp_path, **settings.probe_overrides)
+    messages = [{"role": "user", "content": "Any task wording"}]
     body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
-        for index in range(2):
-            response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
-            assert response.status_code == 200
-            message = response.json()["choices"][0]["message"]
+        for expected_usage in [low_usage] * (tool_steps - 1) + [27000]:
+            response = client.post("/v1/chat/completions", json=body).json()
+            assert response["usage"]["prompt_tokens"] == expected_usage
+            message = response["choices"][0]["message"]
             call = message["tool_calls"][0]
-            execution = subprocess.run(
-                json.loads(call["function"]["arguments"])["command"],
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=True,
+            output = subprocess.check_output(
+                json.loads(call["function"]["arguments"])["command"], shell=True, text=True
             )
-            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}])
-            if compaction and index == 0:
-                helper = client.post(
-                    "/ng-rollout/0-0/v1/chat/completions",
-                    json={**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]},
-                ).json()
-                assert helper["choices"][0]["message"]["content"] == probe.compaction_summary
-                assert helper["usage"]["total_tokens"] == 511
-                assert not probe.finished and len(probe.tool_calls) == 1
-                messages.append(helper["choices"][0]["message"])
-        final = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
-    assert final.json()["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": output}])
+        if compaction:
+            # The summary instruction can change freely; the fixture uses request position.
+            response = client.post(
+                "/v1/chat/completions", json={**body, "messages": [{"role": "user", "content": "New wording"}]}
+            ).json()
+            assert response["choices"][0]["message"]["content"] == probe.compaction_summary
+            messages.append({"role": "user", "content": probe.compaction_summary})
+        final = client.post("/v1/chat/completions", json=body).json()
+    assert final["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+    assert len(probe.attempts) == tool_steps + 1 + int(compaction)
+    assert len(probe.compaction_response_ids) == int(compaction)
     assert probe.finished and not probe.violations
-    assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
-    witness = json.loads((tmp_path / "witness.json").read_text())
-    assert len(witness["attempts"]) == 3 + int(compaction)
-    assert len(witness["compaction"]["response_ids"]) == int(compaction)
-    assert sum(a["response"]["usage"]["total_tokens"] for a in witness["attempts"]) == (27738 if compaction else 81027)
 
 
-@pytest.mark.parametrize("prompt", SUMMARY_PROMPTS)
-@pytest.mark.parametrize("tools", [[], [TOOL]])
-def test_summary_recognition_requires_an_explicit_last_user_instruction(prompt, tools):
-    body = {"messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "tools": tools}
-    assert is_compaction_request(body)
-    body["messages"].append({"role": "tool", "content": prompt})
-    assert not is_compaction_request(body)
-    assert not is_compaction_request({"messages": [{"role": "user", "content": "Run checks"}], "tools": []})
+def test_reply_schedule_controls_response_kind_and_usage(tmp_path):
+    probe = Probe(
+        SCENARIO["context_compaction"],
+        tmp_path,
+        responses=[{"kind": "final", "input_tokens": 123, "output_tokens": 7}],
+    )
+    with TestClient(probe.model_app()) as client:
+        response = client.post("/v1/chat/completions", json={"messages": [], "tools": [TOOL]}).json()
+        assert response["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+        assert response["usage"]["prompt_tokens"] == 123
+        assert response["usage"]["completion_tokens"] == 7
+        assert not probe.tool_calls and not probe.compaction_response_ids
+        assert client.post("/v1/chat/completions", json={"messages": []}).status_code == 409
+
+
+@pytest.mark.parametrize("responses", [[], [{"kind": "unknown", "input_tokens": 1, "output_tokens": 1}]])
+def test_reply_schedule_rejects_missing_or_unknown_entries(tmp_path, responses):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path, responses=responses)
+    with TestClient(probe.model_app()) as client:
+        assert client.post("/v1/chat/completions", json={"messages": []}).status_code == 409
+    assert probe.violations and not probe.tool_calls
 
 
 def test_summary_does_not_waive_policy_tool_result_requirement(tmp_path):
-    probe = Probe(SCENARIO["context_compaction"], tmp_path)
+    probe = Probe(
+        SCENARIO["context_compaction"],
+        tmp_path,
+        responses=[{"kind": kind, "input_tokens": 500, "output_tokens": 8} for kind in ("tool", "summary", "tool")],
+    )
     body = {"model": "conformance-model", "messages": [{"role": "user", "content": "Run checks"}], "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
         assert client.post("/v1/chat/completions", json=body).status_code == 200
-        helper = {**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]}
+        helper = {**body, "messages": [{"role": "user", "content": "Summarize"}]}
         assert client.post("/v1/chat/completions", json=helper).status_code == 200
         assert client.post("/v1/chat/completions", json=body).status_code == 409
     assert len(probe.compaction_response_ids) == 1
 
 
-def test_compaction_probe_rejects_unexpected_summary_request(tmp_path):
-    probe = Probe(SCENARIO["context_compaction"], tmp_path)
-    with TestClient(probe.model_app()) as client:
-        response = client.post("/v1/chat/completions", json={"model": "conformance-model", "messages": []})
-    assert response.status_code == 409
-    assert probe.violations and not probe.compaction_response_ids
+def test_compaction_requires_an_explicit_schedule(tmp_path):
+    with pytest.raises(ValueError, match="compaction scenario requires an explicit reply schedule"):
+        Probe(SCENARIO["context_compaction"], tmp_path)
 
 
 def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):
@@ -883,8 +934,7 @@ def test_checker_error_preserves_independent_ci_measurements(
     output = tmp_path / "table.mdx"
     ci_table.render_ci(artifacts=artifacts, commit=commit, output=output, run_url="https://example.com/run")
     count = len(scenarios) - 1
-    p1 = "—" if failed_scenario == "context_compaction" else '<Badge intent="launch" minimal>1/1</Badge>'
-    assert f'`pi` | <Badge intent="launch" minimal>{count}/{count}</Badge> | {p1} | —' in output.read_text()
+    assert f'`pi` | <Badge intent="launch" minimal>{count}/{count}</Badge> | 0 | 0 | 0 |' in output.read_text()
 
 
 def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatch):
@@ -901,7 +951,7 @@ def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("gate_tier", ["P0", "P1"])
-def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained_episode, monkeypatch, gate_tier):
+def test_compaction_runs_or_declares_failure_at_its_own_priority(retained_episode, monkeypatch, gate_tier):
     from scripts.harness_conformance import runner
 
     source, _ = retained_episode
@@ -927,13 +977,33 @@ def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained
     summary, code = run_suite(
         harnesses=list(HARNESSES), scenarios=scenarios, output=source / "run", timeout=1, gate_tier=gate_tier
     )
-    assert set(launched) == {(h, s.name) for h in HARNESSES for s in scenarios}
+    unsupported = {"simple", "miniswe_sandboxed"}
+    assert set(launched) == {
+        (h, s.name) for h in HARNESSES for s in scenarios if h not in unsupported or s.name != "context_compaction"
+    }
     assert code == (0 if gate_tier == "P0" else 1)
-    for row in summary["harnesses"].values():
+    from scripts.harness_conformance.rendering import scenario_counts, scenario_details
+
+    for harness, row in summary["harnesses"].items():
         assert row["verdict"] == ("fulfilled" if gate_tier == "P0" else "not_fulfilled")
         result = row["scenarios"][1]
-        assert result["p0_verdict"] == "fulfilled" and result["verdict"] == "not_fulfilled"
-        assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
+        assert result["verdict"] == "not_fulfilled"
+        if harness in unsupported:
+            assert result["exercised"] is False and result["execution"] == {"skipped": True}
+            assert result["model_attempts"] == 0 and result["evidence"] == {}
+            assert result["checks"][0]["id"] == "scenario.supported"
+            assert result["checks"][0]["status"] == "fail"
+            assert "does not implement compaction" in result["issues"][0]
+            assert scenario_counts([result]) == [
+                '<Badge intent="error" minimal>0/1</Badge>',
+                "0",
+                '<Badge intent="error" minimal>1</Badge>',
+                "0",
+            ]
+            assert "✗ (P1:✗) — not run: declared unsupported" in scenario_details([result])
+        else:
+            assert result["p0_verdict"] == "fulfilled"
+            assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
 
 
 def test_compaction_only_run_cannot_pass_an_empty_p0_gate(tmp_path):

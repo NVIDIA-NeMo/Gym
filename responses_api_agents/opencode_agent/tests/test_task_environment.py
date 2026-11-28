@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 from responses_api_agents.opencode_agent.tests.test_sandbox_runner import stage
 
 
@@ -109,11 +110,11 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
     configured_binary = os.environ.get("GYM_TEST_OPENCODE_BINARY")
     binary = configured_binary or shutil.which("opencode")
     if binary is None:
-        pytest.skip("Set GYM_TEST_OPENCODE_BINARY to the pinned OpenCode 1.17.11 executable")
+        pytest.skip(f"Set GYM_TEST_OPENCODE_BINARY to the pinned OpenCode {OPENCODE_VERSION} executable")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
-    if configured_binary is None and (version.returncode != 0 or version.stdout.strip() != "1.17.11"):
-        pytest.skip("PATH OpenCode is not 1.17.11; set GYM_TEST_OPENCODE_BINARY to the pinned executable")
-    assert version.returncode == 0 and version.stdout.strip() == "1.17.11"
+    if configured_binary is None and (version.returncode != 0 or version.stdout.strip() != OPENCODE_VERSION):
+        pytest.skip(f"PATH OpenCode is not {OPENCODE_VERSION}; set GYM_TEST_OPENCODE_BINARY to the pinned executable")
+    assert version.returncode == 0 and version.stdout.strip() == OPENCODE_VERSION
     plugin = tmp_path / "task_environment.mjs"
     shutil.copyfile(PLUGIN, plugin)
     env = {

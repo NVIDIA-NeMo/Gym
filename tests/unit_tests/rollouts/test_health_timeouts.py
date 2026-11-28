@@ -722,7 +722,10 @@ async def test_collection_writes_and_exports_the_section_and_a_recheck_agrees(
 
     await RolloutCollectionHelper().run_from_config(
         RolloutCollectionConfig(
-            input_jsonl_fpath=str(_input(tmp_path, 3)), output_jsonl_fpath=str(output), num_samples_in_parallel=1
+            input_jsonl_fpath=str(_input(tmp_path, 3)),
+            output_jsonl_fpath=str(output),
+            num_samples_in_parallel=1,
+            dispatch_reservation_interval_s=0.0,
         )
     )
 
@@ -743,7 +746,10 @@ async def test_offline_aggregation_writes_the_same_section(
     output = tmp_path / "rollouts.jsonl"
     await RolloutCollectionHelper().run_from_config(
         RolloutCollectionConfig(
-            input_jsonl_fpath=str(_input(tmp_path, 3)), output_jsonl_fpath=str(output), num_samples_in_parallel=1
+            input_jsonl_fpath=str(_input(tmp_path, 3)),
+            output_jsonl_fpath=str(output),
+            num_samples_in_parallel=1,
+            dispatch_reservation_interval_s=0.0,
         )
     )
     after_run = orjson.loads((tmp_path / QUALITY_SUMMARY_FILENAME).read_bytes())["run"]["stats"]["timeouts"]

@@ -19,6 +19,7 @@ MetricValue = float | int | bool | str | None
 
 class SampleMetadataData(TypedDict, total=False):
     sample_id: str
+    split: str | None
 
 
 class MetricRowData(TypedDict, total=False):
@@ -45,6 +46,7 @@ class MetricRow:
     """Aggregation fields with defaults for missing failure-row diagnostics."""
 
     sample_id: str | None
+    split: str | None
     score_valid: bool
     candidate_valid: bool
     scoring_metrics: dict[str, float]
@@ -64,6 +66,7 @@ class MetricRow:
         metadata = values.get("verifier_metadata") or {}
         return cls(
             sample_id=values.get("sample_id") or metadata.get("sample_id"),
+            split=metadata.get("split"),
             score_valid=values.get("score_valid", values.get("judge_valid", False)),
             candidate_valid=values.get("candidate_valid", False),
             scoring_metrics={key: float(value) for key, value in (values.get("scoring_metrics") or {}).items()},
@@ -97,7 +100,10 @@ class MetricBatch:
 
     @classmethod
     def from_tasks(cls, tasks: Sequence[Sequence[Mapping[str, object]]]) -> MetricBatch:
-        rows = [MetricRow.from_data(data) for task in tasks for data in task]
+        return cls.from_rows([MetricRow.from_data(data) for task in tasks for data in task])
+
+    @classmethod
+    def from_rows(cls, rows: list[MetricRow]) -> MetricBatch:
         valid_rows = [row for row in rows if row.score_valid]
         return cls(
             rows=rows,
@@ -181,11 +187,17 @@ def _compute_legacy_score(batch: MetricBatch, scoring_type: ScoringType) -> Aggr
     if scoring_type == "refusal":
         legacy["refusal_rate"] = raw
     elif scoring_type == "reference_qa":
-        legacy |= {"gpt": normalized, "panda": -100.0}
+        # panda is the PEDANT correctness rate when SD-QA PEDANT scoring is enabled; -100 is the legacy placeholder.
+        pedant = 100 * totals["pedant_correct"] / total if total and "pedant_correct" in totals else -100.0
+        legacy |= {"gpt": normalized, "panda": pedant}
     else:
         legacy["acc"] = normalized
         if scoring_type == "mcq":
             legacy["fail"] = 100 * totals.get("parse_failure", 0.0) / total if total else None
+        if total and "correct_parsed" in totals:
+            # Unparseable answers count as wrong (no random guess): the stricter, deterministic accuracy.
+            legacy["acc_unparsed_wrong"] = 100 * totals["correct_parsed"] / total
+            legacy["parse_rate"] = 100 * (1 - totals.get("parse_failure", 0.0) / total)
     return AggregateScore(raw, normalized, legacy)
 
 
@@ -277,4 +289,19 @@ def compute_voicebench_metrics(
     exported = {f"voicebench/{key}": value for key, value in metrics.items()} | {
         f"voicebench/legacy/{key}": value for key, value in score.legacy_metrics.items()
     }
+    exported |= _compute_split_metrics(batch, scoring_type)
     return cast(dict[str, MetricValue], json_safe(cast(dict[str, JsonValue], exported)))
+
+
+def _compute_split_metrics(batch: MetricBatch, scoring_type: ScoringType) -> dict[str, MetricValue]:
+    """Per-split legacy metrics (SD-QA region, speaker voice, MMSU category) for rows that name a split."""
+    splits = sorted({row.split for row in batch.rows if row.split})
+    if len(splits) < 2:
+        return {}
+    exported: dict[str, MetricValue] = {}
+    for split in splits:
+        part = MetricBatch.from_rows([row for row in batch.rows if row.split == split])
+        exported[f"voicebench/split/{split}/count"] = part.count
+        legacy = _compute_legacy_score(part, scoring_type).legacy_metrics
+        exported |= {f"voicebench/split/{split}/legacy/{key}": value for key, value in legacy.items()}
+    return exported

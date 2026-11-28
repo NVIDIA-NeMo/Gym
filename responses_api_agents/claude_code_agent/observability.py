@@ -9,6 +9,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -21,6 +22,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
 )
 from nemo_gym.trajectory import (
@@ -211,7 +213,7 @@ def _compaction(event: dict[str, Any], invocation_id: str) -> ContextCompactionO
     return ContextCompactionObservation(
         invocation_id=invocation_id,
         observed_at=_timestamp(event.get("timestamp")),
-        trigger=trigger if isinstance(trigger, str) else None,
+        trigger="automatic" if trigger == "auto" else trigger if isinstance(trigger, str) else None,
         tokens_before=_integer(metadata, "tokensBefore", "preTokens"),
         tokens_after=_integer(metadata, "tokensAfter", "postTokens"),
         outcome=_compaction_outcome(
@@ -265,15 +267,35 @@ def _tool_result(block: dict[str, Any], status: str) -> NeMoGymFunctionCallOutpu
     )
 
 
-def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int, dict[str, Any]]]:
+@dataclass
+class ClaudeCodeTranscripts:
+    """The records of Claude Code's session and subagent transcripts below one ``CLAUDE_CONFIG_DIR``.
+
+    Read once and shared: token usage reads every record, observation extraction the ones that carry a session
+    id. ``files_read`` counts the transcript files that could be opened; with none, the transcripts are unavailable.
+    """
+
+    records: list[dict[str, Any]] = field(default_factory=list)
+    gaps: list[ObservationGap] = field(default_factory=list)
+    files_read: int = 0
+
+    @property
+    def usage_records(self) -> list[dict[str, Any]] | None:
+        """``records`` when any transcript could be read; None otherwise, so token usage falls back to the stream."""
+        return self.records if self.files_read else None
+
+
+def read_transcripts(config_dir: Path) -> ClaudeCodeTranscripts:
+    """Parse every JSON record of the transcripts below ``config_dir/projects``, noting what could not be read."""
+    transcripts = ClaudeCodeTranscripts()
     if not config_dir.is_dir():
-        gaps.append(_gap("transcript_dir_missing"))
-        return []
+        transcripts.gaps.append(_gap("transcript_dir_missing"))
+        return transcripts
 
     transcript_dir = config_dir / "projects"
     if not transcript_dir.is_dir():
-        gaps.append(_gap("transcript_dir_missing", detail="projects"))
-        return []
+        transcripts.gaps.append(_gap("transcript_dir_missing", detail="projects"))
+        return transcripts
 
     try:
         # Claude Code stores session and subagent transcripts below ``projects``.
@@ -281,32 +303,39 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
         # unrelated CLI state and must not be interpreted as rollout evidence.
         paths = sorted(transcript_dir.rglob("*.jsonl"))
     except OSError:
-        gaps.append(_gap("transcript_dir_unreadable"))
-        return []
+        transcripts.gaps.append(_gap("transcript_dir_unreadable"))
+        return transcripts
 
-    events: list[tuple[int, dict[str, Any]]] = []
     for path in paths:
         try:
             lines = path.open(encoding="utf-8", errors="replace")
         except OSError:
-            gaps.append(_gap("transcript_unreadable", detail=path.name))
+            transcripts.gaps.append(_gap("transcript_unreadable", detail=path.name))
             continue
-        with lines:
-            for line_number, line in enumerate(lines, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except (json.JSONDecodeError, UnicodeError):
-                    gaps.append(_gap("malformed_transcript_line", detail=f"{path.name}:{line_number}"))
-                    continue
-                if not isinstance(event, dict):
-                    gaps.append(_gap("invalid_transcript_record", detail=f"{path.name}:{line_number}"))
-                    continue
-                if not isinstance(event.get("sessionId"), str):
-                    continue
-                events.append((len(events), event))
-    return events
+        transcripts.files_read += 1
+        try:
+            with lines:
+                for line_number, line in enumerate(lines, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeError):
+                        transcripts.gaps.append(_gap("malformed_transcript_line", detail=f"{path.name}:{line_number}"))
+                        continue
+                    if not isinstance(record, dict):
+                        transcripts.gaps.append(_gap("invalid_transcript_record", detail=f"{path.name}:{line_number}"))
+                        continue
+                    transcripts.records.append(record)
+        except OSError:
+            # The records read before the failure are kept.
+            transcripts.gaps.append(_gap("transcript_unreadable", detail=path.name))
+    return transcripts
+
+
+def _read_events(transcripts: ClaudeCodeTranscripts, gaps: list[ObservationGap]) -> list[tuple[int, dict[str, Any]]]:
+    gaps.extend(transcripts.gaps)
+    return list(enumerate(record for record in transcripts.records if isinstance(record.get("sessionId"), str)))
 
 
 def _would_create_parent_cycle(
@@ -325,8 +354,9 @@ def _would_create_parent_cycle(
 
 
 def extract_claude_code_observations(
-    config_dir: Path,
+    config_dir: Path | None = None,
     *,
+    transcripts: ClaudeCodeTranscripts | None = None,
     model_ref: ModelServerRef | None = None,
     root_status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown",
     root_duration_ms: float | None = None,
@@ -337,10 +367,13 @@ def extract_claude_code_observations(
 
     Transcript IDs and timestamps are used directly. Missing or ambiguous evidence
     is reported as a gap; the extractor never joins calls by text or proximity.
+    ``transcripts``, when given, are those already read from ``config_dir``.
     """
 
     gaps: list[ObservationGap] = []
-    raw_events = _read_events(Path(config_dir), gaps)
+    if transcripts is None:
+        transcripts = read_transcripts(Path(config_dir))
+    raw_events = _read_events(transcripts, gaps)
     attempts = [
         ContextCompactionObservation(
             invocation_id=attempt["invocation_id"],
@@ -783,3 +816,48 @@ def associate_claude_code_compaction_calls(
         if gap.code != "compaction_model_call_reference_unavailable" or gap.invocation_id in unresolved
     ]
     return result
+
+
+def captured_claude_code_usage(
+    bundle: AgentObservationBundle, calls: list[ModelCallRecord]
+) -> NeMoGymResponseUsage | None:
+    """Total uniquely resolved invocation calls, including helpers, without counting unrelated calls."""
+    if any(isinstance(record, ContextCompactionObservation) and not record.model_calls for record in bundle.records):
+        return None
+    references = [
+        reference
+        for record in bundle.records
+        if isinstance(record, AgentInvocation)
+        for reference in record.model_calls
+    ]
+    resolved = set()
+    for reference in references:
+        matches = [
+            index
+            for index, call in enumerate(calls)
+            if (
+                reference.model_call_id == call.model_call_id
+                if reference.model_call_id
+                else reference.model_ref == call.model_ref and reference.response_id == call.response_id
+            )
+        ]
+        if len(matches) != 1:
+            return None
+        resolved.add(matches[0])
+    if not resolved or any(
+        calls[index].tokens_in is None or calls[index].tokens_out is None or calls[index].tokens_total is None
+        for index in resolved
+    ):
+        return None
+    return NeMoGymResponseUsage.sum_from_list(
+        [
+            NeMoGymResponseUsage(
+                input_tokens=calls[index].tokens_in,
+                output_tokens=calls[index].tokens_out,
+                total_tokens=calls[index].tokens_total,
+                input_tokens_details={"cached_tokens": calls[index].cached_tokens},
+                output_tokens_details={"reasoning_tokens": calls[index].tokens_reasoning},
+            )
+            for index in resolved
+        ]
+    )

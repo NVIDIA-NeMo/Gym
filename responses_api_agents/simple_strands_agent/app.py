@@ -489,8 +489,12 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         if state.task is not None:
             await asyncio.gather(state.task, return_exceptions=True)
         if not state.released:
-            async with asyncio.timeout(self.config.session_close_timeout_seconds):
-                await (state.sandbox.stop() if state.owns_sandbox else state.sandbox.disconnect())
+            limit = self.config.session_close_timeout_seconds
+            await (
+                state.sandbox.stop(timeout_s=limit)
+                if state.owns_sandbox
+                else state.sandbox.disconnect(timeout_s=limit)
+            )
             state.released = True
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:

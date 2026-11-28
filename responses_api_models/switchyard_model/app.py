@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import aiohttp
 from fastapi import HTTPException
-from pydantic import Field, model_validator
+from pydantic import Field, PositiveFloat, PositiveInt, model_validator
 
 from nemo_gym.client import NeMoGymAsyncOpenAI, request
 from nemo_gym.config import (
@@ -162,6 +162,14 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     # routing label rather than a model id -- which target actually served the call comes back on
     # the response.
     switchyard_model: str
+
+    # Optional bounds on a call to the proxy. Each defaults to None, which keeps the client's unbounded behaviour.
+    # request_timeout_seconds limits each HTTP attempt (a timed-out attempt is retried like any other transport
+    # error), max_connection_retries caps connection-error attempts (N allows N, so 1 means no retry), and
+    # connection_retry_timeout_s caps the wall-clock time it may spend doing so.
+    request_timeout_seconds: Optional[PositiveFloat] = None
+    max_connection_retries: Optional[PositiveInt] = None
+    connection_retry_timeout_s: Optional[PositiveFloat] = None
 
     # Used when hosting. A native Switchyard TOML deployment: llm_clients, targets, and routes,
     # validated by the server when it loads. This is the routing condition an eval runs under --
@@ -295,6 +303,9 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             default_headers=self.config.default_headers,
             # The Switchyard proxy is not a NeMo Gym server, so its retries stay bounded.
             internal=False,
+            request_timeout_seconds=self.config.request_timeout_seconds,
+            max_connection_retries=self.config.max_connection_retries,
+            connection_retry_timeout_s=self.config.connection_retry_timeout_s,
         )
 
     def setup_webserver(self):

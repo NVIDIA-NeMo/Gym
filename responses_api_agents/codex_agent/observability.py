@@ -6,7 +6,7 @@
 import json
 import logging
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -27,6 +27,8 @@ from nemo_gym.trajectory import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
+    normalize_operation_timing,
+    tool_attempt_id,
 )
 
 
@@ -109,7 +111,14 @@ def parse_codex_usage(transcript: str | None) -> NeMoGymResponseUsage | None:
 
 
 def read_codex_observations(
-    home: Path, invocation_id: str, *, returncode: int | None, timed_out: bool
+    home: Path,
+    invocation_id: str,
+    *,
+    returncode: int | None,
+    timed_out: bool,
+    agent_instance: str | None = None,
+    clock_domain: str | None = None,
+    observation_schema_version: Literal["1.0", "2.0"] = "1.0",
 ) -> AgentObservationBundle:
     """Use native call IDs; never join CLI display item IDs to calls by ordering."""
     files = sorted(home.glob("sessions/**/*.jsonl"))
@@ -120,7 +129,161 @@ def read_codex_observations(
         invocation_id,
         returncode=returncode,
         timed_out=timed_out,
+        agent_instance=agent_instance,
+        clock_domain=clock_domain,
+        observation_schema_version=observation_schema_version,
     )
+
+
+def _session_transcripts(transcript: str | None) -> list[tuple[dict, str]] | None:
+    sessions = []
+    metadata = None
+    lines = []
+    for line in _jsonl_lines(transcript or ""):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        if isinstance(event, dict) and event.get("type") == "session_meta":
+            if metadata is not None:
+                sessions.append((metadata, "\n".join(lines)))
+            elif lines:
+                return None  # No reliable boundary for the preceding records.
+            metadata = event.get("payload")
+            if not isinstance(metadata, dict) or not isinstance(metadata.get("id"), str) or not metadata["id"]:
+                return None
+            lines = []
+        lines.append(line)
+    if metadata is not None:
+        sessions.append((metadata, "\n".join(lines)))
+    return sessions
+
+
+def _parent_thread(metadata: dict) -> str | None:
+    source = metadata.get("source")
+    if isinstance(source, dict):
+        subagent = source.get("subagent")
+        spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+        if isinstance(spawn, dict) and isinstance(spawn.get("parent_thread_id"), str):
+            return spawn["parent_thread_id"]
+    return None
+
+
+def _child_status(transcript: str) -> Literal["completed", "incomplete", "unknown"]:
+    status = "unknown"
+    for line in _jsonl_lines(transcript):
+        try:
+            event = json.loads(line)
+            if event.get("type") != "event_msg":
+                continue
+            kind = event["payload"].get("type")
+            if kind == "task_complete":
+                status = "completed"
+            elif kind in {"task_started", "turn_aborted"}:
+                status = "incomplete"
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+    return status
+
+
+_CALL_RECORDS = {"function_call", "custom_tool_call", "web_search_call"}
+_RESULT_RECORDS = {"function_call_output", "custom_tool_call_output"}
+
+
+def _timestamp(event: dict) -> datetime | None:
+    """An absent, malformed or zone-less record time is unknown, not the reader's local time."""
+    try:
+        observed_at = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+    except (TypeError, KeyError, AttributeError, ValueError):
+        return None
+    return observed_at if observed_at.tzinfo is not None else None
+
+
+def _persisted_item_ids(lines: list[str]) -> set[str]:
+    """Every call and item ID any persisted record uses, including records later in the stream."""
+    reserved = set()
+    for line in lines:
+        try:
+            event = json.loads(line)
+            payload = event["payload"] if event["type"] == "response_item" else {}
+        except (ValueError, TypeError, KeyError):
+            continue
+        if isinstance(payload, dict):
+            reserved.update(payload[key] for key in ("id", "call_id") if isinstance(payload.get(key), str))
+    return reserved
+
+
+def _transcript_tools(
+    attempts: list[dict], invocation_id: str, agent_instance: str | None, clock_domain: str | None
+) -> tuple[list[ToolCallObservation], list[ObservationGap]]:
+    """Persisted call/result records are transcript evidence, not executor or lifecycle timing.
+
+    Codex 0.144.4 records no response ID, so the shared normalizer reports the missing model join.
+    """
+    tools, gaps = [], []
+    producer_id = f"codex:{invocation_id}"
+    for attempt in attempts:
+        start, end = attempt["start"], attempt["end"]
+        # Reversed endpoints are a clock discontinuity, not a negative native duration.
+        duration = (end - start).total_seconds() * 1000 if start and end and end >= start else None
+        timing, codes = normalize_operation_timing(
+            boundary="transcript",
+            timing_source="codex.response_item",
+            clock_domain=clock_domain,
+            started_at=start.timestamp() if start else None,
+            completed_at=end.timestamp() if end else None,
+            duration_ms=duration,
+            duration_source="wall_clock" if duration is not None else None,
+        )
+        span_id = tool_attempt_id(producer_id=producer_id, invocation_id=invocation_id, operation_key=attempt["key"])
+        tools.append(
+            ToolCallObservation(
+                invocation_id=invocation_id,
+                agent_instance=agent_instance,
+                tool_call_id=attempt["call_id"],
+                native_tool_call_id=attempt["native"],
+                span_id=span_id,
+                producer_id=producer_id,
+                tool_name=attempt["name"],
+                timings=[timing] if timing is not None else [],
+                status=attempt["status"],
+                error_type=attempt["error_type"],
+            )
+        )
+        codes += [code for code in attempt["gaps"] if code not in codes]
+        if start is None:
+            codes.append("tool_start_unavailable")
+        if end is None:
+            codes.append("tool_completion_unavailable")
+        gaps.extend(
+            ObservationGap(code=code, invocation_id=invocation_id, agent_instance=agent_instance, span_id=span_id)
+            for code in codes
+        )
+        if attempt["status"] == "unknown":
+            # The native ID keeps this gap identifiable after v1 projection drops span IDs.
+            gaps.append(
+                ObservationGap(
+                    code="tool_outcome_unavailable",
+                    invocation_id=invocation_id,
+                    agent_instance=agent_instance,
+                    span_id=span_id,
+                    detail=attempt["native"],
+                )
+            )
+    return tools, gaps
+
+
+def _result_outcome(
+    tool_name: str | None, output: object
+) -> tuple[Literal["completed", "failed", "unknown"], str | None]:
+    # Only the native execution envelope determines the exit code;
+    # command stdout can itself contain arbitrary exit-code text.
+    envelope = output.split("\nOutput:\n", 1)[0] if isinstance(output, str) else ""
+    exit_code = re.search(r"^Process exited with code (-?\d+)$", envelope, re.MULTILINE)
+    if tool_name == "exec_command" and exit_code:
+        return ("completed", None) if int(exit_code[1]) == 0 else ("failed", "nonzero_exit")
+    # Includes a command that returned a live session: that does not establish its process exited.
+    return "unknown", None
 
 
 def parse_codex_observations(
@@ -132,17 +295,154 @@ def parse_codex_observations(
     status: Literal["completed", "failed", "incomplete", "unknown"] | None = None,
     error_type: str | None = None,
     gaps: list[ObservationGap] | None = None,
+    agent_instance: str | None = None,
+    clock_domain: str | None = None,
+    observation_schema_version: Literal["1.0", "2.0"] = "1.0",
 ) -> AgentObservationBundle:
-    """Parse a transcript, using the caller's final outcome and gaps when supplied."""
+    """Keep Codex thread contexts separate and link children using session metadata."""
+    sessions = _session_transcripts(transcript)
+    roots = [meta["id"] for meta, _ in (sessions or []) if meta.get("source") in ("exec", "cli")]
+    ids = [meta["id"] for meta, _ in (sessions or [])]
+    if len(roots) != 1 or len(set(ids)) != len(ids):
+        fallback_gaps = list(gaps or [])
+        if (sessions is None or sessions) and not any(
+            gap.code == "subagent_hierarchy_unavailable" for gap in fallback_gaps
+        ):
+            fallback_gaps.append(ObservationGap(code="subagent_hierarchy_unavailable"))
+        return _parse_codex_transcript(
+            transcript,
+            invocation_id,
+            returncode=returncode,
+            timed_out=timed_out,
+            status=status,
+            error_type=error_type,
+            gaps=fallback_gaps,
+            agent_instance=agent_instance,
+            clock_domain=clock_domain,
+            observation_schema_version=observation_schema_version,
+        )
+    root = roots[0]
+    names = {identity: invocation_id if identity == root else f"{invocation_id}.{identity}" for identity in ids}
+    result = AgentObservationBundle(
+        schema_version=observation_schema_version,
+        source="codex",
+        records=[],
+        gaps=[gap for gap in (gaps or []) if gap.code != "subagent_hierarchy_unavailable"],
+    )
+    parents = {}
+    for metadata, text in sessions:
+        identity = metadata["id"]
+        is_root = identity == root
+        parent = _parent_thread(metadata)
+        if not is_root and (parent not in names or parent == identity):
+            result.gaps.append(ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=names[identity]))
+        parsed = _parse_codex_transcript(
+            text,
+            names[identity],
+            returncode=returncode if is_root else None,
+            timed_out=timed_out if is_root else False,
+            status=status if is_root else _child_status(text),
+            error_type=error_type if is_root else None,
+            agent_instance=agent_instance,
+            clock_domain=clock_domain,
+            observation_schema_version=observation_schema_version,
+        )
+        invocation = next(record for record in parsed.records if isinstance(record, AgentInvocation))
+        invocation.parent_invocation_id = names.get(parent) if not is_root else None
+        parents[identity] = (parent, invocation)
+        result.records.extend(parsed.records)
+        result.gaps.extend(parsed.gaps)
+    for identity, (parent, invocation) in parents.items():
+        ancestor, visited = identity, set()
+        while ancestor != root and ancestor in parents and ancestor not in visited:
+            visited.add(ancestor)
+            ancestor = parents[ancestor][0]
+        if ancestor != root:
+            invocation.parent_invocation_id = None
+            result.gaps.append(ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=names[identity]))
+            continue
+        if parent not in parents:
+            continue
+        conversation = parents[parent][1].conversation or []
+        spawn_calls = {
+            item.call_id for item in conversation if item.type == "function_call" and item.name == "spawn_agent"
+        }
+        matches = []
+        for item in conversation:
+            if (
+                item.type != "function_call_output"
+                or item.call_id not in spawn_calls
+                or not isinstance(item.output, str)
+            ):
+                continue
+            try:
+                output = json.loads(item.output)
+            except ValueError:
+                continue
+            if isinstance(output, dict) and output.get("agent_id") == identity:
+                matches.append(item.call_id)
+        if len(matches) == 1:
+            invocation.spawned_by_tool_call_id = matches[0]
+        else:
+            result.gaps.append(
+                ObservationGap(code="subagent_spawn_reference_unavailable", invocation_id=names[identity])
+            )
+    return result
+
+
+def _parse_codex_transcript(
+    transcript: str | None,
+    invocation_id: str,
+    *,
+    returncode: int | None,
+    timed_out: bool,
+    status: Literal["completed", "failed", "incomplete", "unknown"] | None = None,
+    error_type: str | None = None,
+    gaps: list[ObservationGap] | None = None,
+    agent_instance: str | None = None,
+    clock_domain: str | None = None,
+    observation_schema_version: Literal["1.0", "2.0"] = "1.0",
+) -> AgentObservationBundle:
+    """Parse one session's transcript, using the caller's final outcome and gaps when supplied.
+
+    Written for and tested with the transcript format of Codex 0.144.4 (`TESTED_CODEX_VERSION`, the
+    `codex_version` that `configs/codex_agent.yaml` pins). Recheck it when that pin changes.
+
+    Schema 2.0 keeps one attempt per persisted call record. A request keeps its native call ID
+    unless an earlier record used it; a reuse, or a result that no call can own, gets an ID derived
+    from its record position that no persisted record or earlier allocation uses. Unlike
+    OpenCode, Codex has no exact model-call join, so captured turns keep unproven native IDs that
+    block the v1 projection from restoring qualified ones; qualifying only reuse keeps v1 native.
+    A result closes the only open call with its native ID. A result for concurrent calls sharing
+    that ID belongs to none of them; the group closes once it has had as many results as calls.
+    """
+    if observation_schema_version not in {"1.0", "2.0"}:
+        raise ValueError("observation_schema_version must be 1.0 or 2.0")
+    qualified = observation_schema_version == "2.0"
     conversation = []
     compactions = []
     tools = {}
     patch_outcomes = {}
     gaps = list(gaps or [])
+    attempts = []
+    open_calls = defaultdict(lambda: {"calls": [], "results": 0})
+    used_call_ids = set()
+    lines = _jsonl_lines(transcript or "")
+    reserved_ids = _persisted_item_ids(lines) if qualified else set()
+
+    def record_id(native: str, index: int) -> str:
+        """A replay-stable ID that no persisted record or earlier allocation uses."""
+        candidate, suffix = f"{native}:record-{index}", 0
+        while candidate in reserved_ids:
+            suffix += 1
+            candidate = f"{native}:record-{index}.{suffix}"
+        reserved_ids.add(candidate)
+        return candidate
+
     # A record that could not be read may have been a tool call, unless it is a native event (token usage, a patch
     # outcome): then the tool history read is not complete, and its timing is unknown.
     tool_history_complete = True
-    for line in _jsonl_lines(transcript or ""):
+    for index, line in enumerate(lines):
         native_event = False
         try:
             event = json.loads(line)
@@ -156,7 +456,7 @@ def parse_codex_observations(
                 if payload.get("type") == "token_count":
                     _token_usage(payload)
                 if payload.get("type") == "patch_apply_end" and type(payload.get("success")) is bool:
-                    patch_outcomes[payload["call_id"]] = payload["success"]
+                    patch_outcomes.setdefault(payload["call_id"], []).append(payload["success"])
                 continue
             if event.get("type") == "compacted":
                 native_event = True
@@ -180,11 +480,67 @@ def parse_codex_observations(
             item = dict(event["payload"])
             item.pop("internal_chat_message_metadata_passthrough", None)
             parsed = _ITEM.validate_python(item)
+            if not qualified:
+                timestamp = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()
             conversation.append(parsed)
-            timestamp = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()
         except (ValueError, TypeError, KeyError, ValidationError):
             gaps.append(ObservationGap(code="agent_artifact_record_unparseable", invocation_id=invocation_id))
             tool_history_complete = tool_history_complete and native_event
+            continue
+        kind = item.get("type")
+        if qualified and kind in _CALL_RECORDS | _RESULT_RECORDS:
+            # Validation requires these IDs, so every tool record here has a native identity.
+            native = item["id"] if kind == "web_search_call" else item["call_id"]
+            observed_at = _timestamp(event)
+            group = open_calls[native]
+            if kind in _RESULT_RECORDS and len(group["calls"]) > 1:
+                # A fresh result ID attaches to no attempt, in the group or elsewhere.
+                conversation[-1] = parsed.model_copy(update={"call_id": record_id(native, index)})
+                group["results"] += 1
+                for attempt in group["calls"]:
+                    attempt["status"], attempt["error_type"] = "unknown", None
+                    if "tool_output_ambiguous" not in attempt["gaps"]:
+                        attempt["gaps"].append("tool_output_ambiguous")
+                if group["results"] >= len(group["calls"]):
+                    del open_calls[native]
+                continue
+            if kind in _RESULT_RECORDS and group["calls"]:
+                attempt = open_calls.pop(native)["calls"][0]
+            else:
+                # Persisted record position is stable on replay; native IDs can repeat across responses.
+                # A hosted search has no call_id; its item ID is its conversation identity, which the
+                # shared v1 projection cannot rename, so it stays native.
+                call_id = native
+                if kind != "web_search_call" and native in used_call_ids:
+                    call_id = record_id(native, index)
+                used_call_ids.add(native)
+                attempt = {
+                    "key": f"record:{index}",
+                    "native": native,
+                    "call_id": call_id,
+                    "name": "web_search" if kind == "web_search_call" else item.get("name"),
+                    "start": None,
+                    "end": None,
+                    "status": "incomplete",
+                    "error_type": None,
+                    "gaps": [],
+                }
+                attempts.append(attempt)
+            if kind == "web_search_call":
+                # Hosted search persists one record after it finishes; its request time is unknown.
+                if item.get("status") in {"completed", "failed"}:
+                    attempt["status"], attempt["end"] = item["status"], observed_at
+                continue
+            if kind in _CALL_RECORDS:
+                attempt["start"] = observed_at
+                group["calls"].append(attempt)
+            else:
+                # A result without its call record still keeps its known completion endpoint.
+                attempt["end"] = observed_at
+                attempt["status"], attempt["error_type"] = _result_outcome(attempt["name"], item.get("output"))
+            # Through a Gym model server the item ID repeats the call ID; it is renamed with it.
+            rename = {"call_id": attempt["call_id"]} | ({"id": attempt["call_id"]} if item.get("id") == native else {})
+            conversation[-1] = parsed.model_copy(update=rename)
             continue
         if item.get("type") in {"function_call", "custom_tool_call"}:
             tools[item["call_id"]] = ToolCallObservation(
@@ -208,25 +564,29 @@ def parse_codex_observations(
             tool = tools[item["call_id"]]
             tool.completed_at = max(timestamp, tool.started_at)
             tool.duration_ms = (tool.completed_at - tool.started_at) * 1000
-            # Only the native execution envelope determines the exit code;
-            # command stdout can itself contain arbitrary exit-code text.
-            output = item.get("output")
-            envelope = output.split("\nOutput:\n", 1)[0] if isinstance(output, str) else ""
-            exit_code = re.search(r"^Process exited with code (-?\d+)$", envelope, re.MULTILINE)
-            if tool.tool_name == "exec_command" and exit_code:
-                tool.status = "completed" if int(exit_code[1]) == 0 else "failed"
-                tool.error_type = "nonzero_exit" if tool.status == "failed" else None
-            else:
-                tool.status = "unknown"
+            tool.status, tool.error_type = _result_outcome(tool.tool_name, item.get("output"))
     # Patch success is in native execution events, not in the model-visible output text.
     for tool in tools.values():
         if tool.tool_name == "apply_patch" and tool.tool_call_id in patch_outcomes:
-            tool.status = "completed" if patch_outcomes[tool.tool_call_id] else "failed"
+            tool.status = "completed" if patch_outcomes[tool.tool_call_id][-1] else "failed"
             tool.error_type = "tool_error" if tool.status == "failed" else None
         if tool.status == "unknown":
             gaps.append(
                 ObservationGap(code="tool_outcome_unavailable", invocation_id=invocation_id, detail=tool.tool_call_id)
             )
+    native_ids = Counter(attempt["native"] for attempt in attempts)
+    for attempt in attempts:
+        # Events carry only the native call ID, so they classify a patch only when that ID is unique.
+        # A spawned agent's fork copies parent events (not tool records) into its own session file,
+        # so identical copies agree; conflicting outcomes leave the patch unknown.
+        outcomes = set(patch_outcomes.get(attempt["native"], []))
+        if attempt["name"] == "apply_patch" and native_ids[attempt["native"]] == 1 and len(outcomes) == 1:
+            succeeded = next(iter(outcomes))
+            attempt["status"], attempt["error_type"] = ("completed", None) if succeeded else ("failed", "tool_error")
+    if qualified:
+        transcript_tools, transcript_gaps = _transcript_tools(attempts, invocation_id, agent_instance, clock_domain)
+        tools = {tool.span_id: tool for tool in transcript_tools}
+        gaps.extend(transcript_gaps)
     if not tool_history_complete:
         gaps.append(ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id))
     if transcript is None:
@@ -234,10 +594,12 @@ def parse_codex_observations(
     if status is None:
         status = "incomplete" if timed_out else "completed" if returncode == 0 else "failed"
     return AgentObservationBundle(
+        schema_version=observation_schema_version,
         source="codex",
         records=[
             AgentInvocation(
                 invocation_id=invocation_id,
+                agent_instance=agent_instance if qualified else None,
                 conversation=conversation,
                 status=status,
                 error_type=error_type,
