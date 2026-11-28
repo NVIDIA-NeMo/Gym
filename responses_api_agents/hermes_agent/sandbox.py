@@ -9,7 +9,7 @@ import os
 import subprocess
 import tarfile
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 
@@ -140,6 +140,8 @@ class HermesSandboxSession(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
+    # The task's own MCP servers and skills directory, as the borrowed sandbox's task context file declares them.
+    task_context: dict[str, JsonValue] = field(default_factory=dict)
 
     async def install_runtime(self, *, install_timeout: float) -> None:
         """Reuse or install the pinned runtime and stage the Hermes harness files.
