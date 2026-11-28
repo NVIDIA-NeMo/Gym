@@ -389,6 +389,43 @@ def test_reports_missing_response_id_and_unsupported_content_blocks(tmp_path: Pa
     assert _records(bundle, AgentInvocation)[0].model_calls == []
 
 
+def test_api_request_blob_record_is_no_event(tmp_path: Path) -> None:
+    """Claude Code 2.1.312 records a message of a model request that no event holds as it was sent, here the tool
+    result joined with its own text and an assistant message. The record has no id of an event or of a response."""
+    session = "session"
+    tool_use = {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "true"}}
+    result = {"type": "tool_result", "tool_use_id": "toolu_1", "content": "result"}
+    request_messages = [
+        {"role": "user", "content": [result, {"type": "text", "text": "Output token limit hit."}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "I think."}, {"type": "text", "text": "x"}],
+        },
+    ]
+    _write(
+        tmp_path / "projects" / "work" / f"{session}.jsonl",
+        _event(session, "user", "2026-07-22T10:00:00Z", "prompt", uuid="prompt"),
+        _assistant(session, "2026-07-22T10:00:01Z", "msg-1", tool_use),
+        _tool_result(session, "2026-07-22T10:00:02Z", "toolu_1"),
+        *({"type": "api-request-blob", "sessionId": session, "hash": "0", "message": m} for m in request_messages),
+        _assistant(session, "2026-07-22T10:00:03Z", "msg-2", {"type": "text", "text": "Done."}),
+    )
+
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+
+    codes = {gap.code for gap in bundle.gaps}
+    assert not codes & {
+        "ambiguous_tool_artifact",
+        "model_response_id_missing",
+        "assistant_item_id_missing",
+        "reasoning_item_id_missing",
+    }
+    [tool] = _records(bundle, ToolCallObservation)
+    assert (tool.tool_call_id, tool.status) == ("toolu_1", "completed")
+    [invocation] = _records(bundle, AgentInvocation)
+    assert [reference.response_id for reference in invocation.model_calls] == ["msg-1", "msg-2"]
+
+
 def _compaction_bundle() -> AgentObservationBundle:
     before = ModelCallRef(model_ref=MODEL_REF, response_id="msg-before")
     after = ModelCallRef(model_ref=MODEL_REF, response_id="msg-after")

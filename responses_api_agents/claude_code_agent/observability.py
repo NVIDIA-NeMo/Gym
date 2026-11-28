@@ -333,9 +333,21 @@ def read_transcripts(config_dir: Path) -> ClaudeCodeTranscripts:
     return transcripts
 
 
+# Claude Code 2.1.312 records a message of a model request that no event of the conversation holds as it was sent,
+# such as tool results joined with Claude Code's own text. The record repeats content of the events without their
+# ids, so it is no event.
+_API_REQUEST_BLOB_TYPE = "api-request-blob"
+
+
 def _read_events(transcripts: ClaudeCodeTranscripts, gaps: list[ObservationGap]) -> list[tuple[int, dict[str, Any]]]:
     gaps.extend(transcripts.gaps)
-    return list(enumerate(record for record in transcripts.records if isinstance(record.get("sessionId"), str)))
+    return list(
+        enumerate(
+            record
+            for record in transcripts.records
+            if isinstance(record.get("sessionId"), str) and record.get("type") != _API_REQUEST_BLOB_TYPE
+        )
+    )
 
 
 def _would_create_parent_cycle(
