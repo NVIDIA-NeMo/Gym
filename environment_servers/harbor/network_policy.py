@@ -20,19 +20,20 @@ _HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _ALLOWED_HOST = re.compile(rf"^(?:\*\.)?{_HOST_LABEL}(?:\.{_HOST_LABEL})*\.?$")
 
 
-def _egress_target(host: str) -> str:
-    """One ``allowed_hosts`` entry as an egress rule target: a host name, a ``*.`` wildcard or an IP literal.
+def _egress_target(host: str, what: str = "allowed_hosts entry") -> str:
+    """One ``allowed_hosts`` entry (or another host, named by ``what`` in errors) as an egress rule target: a host
+    name, a ``*.`` wildcard or an IP literal.
 
     The spellings are Harbor's (``normalize_allowed_hosts``): an IPv6 literal is written bare (no brackets, no zone
     id) and a ``*.`` wildcard covers host names only, so a task Harbor refuses at parse is refused here too.
     """
     target = str(host).strip()
     if not target:
-        raise ValueError("allowed_hosts entries must not be empty")
+        raise ValueError(f"{what} must not be empty")
     if "[" in target or "]" in target:
-        raise ValueError(f"allowed_hosts entry {target!r}: IPv6 literals are written without brackets")
+        raise ValueError(f"{what} {target!r}: IPv6 literals are written without brackets")
     if "%" in target:
-        raise ValueError(f"allowed_hosts entry {target!r}: IPv6 zone ids are not supported")
+        raise ValueError(f"{what} {target!r}: IPv6 zone ids are not supported")
     try:
         return str(ipaddress.ip_address(target))
     except ValueError:
@@ -44,11 +45,9 @@ def _egress_target(host: str) -> str:
             pass
         else:
             # CIDR ranges are not an egress target the sidecar documents (and were not verified live); fail closed.
-            raise ValueError(
-                f"allowed_hosts entry {target!r}: CIDR ranges are not supported by the OpenSandbox egress policy"
-            )
+            raise ValueError(f"{what} {target!r}: CIDR ranges are not supported by the OpenSandbox egress policy")
     if not _ALLOWED_HOST.match(target):
-        raise ValueError(f"allowed_hosts entry {target!r} is not a host name, a *.domain wildcard or an IP address")
+        raise ValueError(f"{what} {target!r} is not a host name, a *.domain wildcard or an IP address")
     normalized = target.rstrip(".").lower()
     if normalized.startswith("*."):
         try:
@@ -56,7 +55,7 @@ def _egress_target(host: str) -> str:
         except ValueError:
             pass
         else:
-            raise ValueError(f"allowed_hosts entry {target!r}: wildcards must target host names, not IP addresses")
+            raise ValueError(f"{what} {target!r}: wildcards must target host names, not IP addresses")
     return normalized
 
 
@@ -85,3 +84,27 @@ def phase_network_policy(
         raise ValueError("allowed_hosts is only valid when network_mode='allowlist'")
     targets = list(dict.fromkeys(_egress_target(host) for host in (allowed_hosts or ())))
     return {"defaultAction": "deny", "egress": [{"action": "allow", "target": target} for target in targets]}
+
+
+def with_harness_hosts(policy: dict[str, object], hosts: Sequence[str]) -> dict[str, object]:
+    """``policy`` (a restricted phase's, from :func:`phase_network_policy`) with an ``allow`` rule for each of
+    ``hosts`` after its own rules: the hosts the agent's sandbox must also reach for the harness to work there (the
+    model endpoint it calls, where its seed downloads its runtime, the tool servers granted to it).
+
+    Each must be a host name or an IP literal the sandbox can reach: a loopback or unspecified address names the
+    sandbox itself, so it is refused rather than opened. Raises ``ValueError``.
+    """
+    targets = [rule["target"] for rule in policy["egress"]]
+    for host in hosts:
+        target = _egress_target(host, "host the harness needs")
+        try:
+            address = ipaddress.ip_address(target)
+        except ValueError:
+            address = None
+        if target == "localhost" or (address is not None and (address.is_loopback or address.is_unspecified)):
+            raise ValueError(
+                f"host the harness needs {target!r} is a loopback or unspecified address, which names the task's "
+                "sandbox itself; advertise a reachable address for the servers the sandbox calls (use_absolute_ip)"
+            )
+        targets.append(target)
+    return {**policy, "egress": [{"action": "allow", "target": target} for target in dict.fromkeys(targets)]}

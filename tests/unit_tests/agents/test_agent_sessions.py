@@ -18,6 +18,7 @@ from nemo_gym.agents.base_responses_api_agent import (
     ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentSandboxEgress,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
@@ -144,6 +145,55 @@ def test_the_capabilities_route_declares_continuation_without_seeding() -> None:
         assert AgentSessionCapabilitiesResponse.model_validate(reply.json()) == expected
         # Asking seeds nothing.
         assert agent._session_records == {}
+
+
+def test_the_capabilities_route_declares_the_hosts_a_borrowed_sandbox_must_reach() -> None:
+    """An environment server that restricts the agent's sandbox opens what the harness declares it reaches there;
+    an adapter that overrides nothing declares nothing (``None``), which such a server refuses rather than guesses."""
+
+    declared = AgentSandboxEgress(
+        model_hosts=["10.1.2.3"], install_hosts=["registry.npmjs.org"], tool_hosts=["tools.example"]
+    )
+
+    class _Declares(_Agent):
+        def sandbox_egress(self) -> AgentSandboxEgress:
+            return declared
+
+    for agent_cls, expected in ((_Agent, None), (_Declares, declared)):
+        agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
+        assert reply.status_code == 200
+        assert AgentSessionCapabilitiesResponse.model_validate(reply.json()).sandbox_egress == expected
+        assert agent._session_records == {}
+
+
+class _CapabilitiesBeforeSandboxEgress(BaseModel):
+    """The capabilities reply as an environment server that predates ``sandbox_egress`` reads it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports_task_tool_context: bool = False
+    continuation: AgentContinuationCapabilities | None = None
+
+
+def test_the_capabilities_reply_sends_sandbox_egress_only_when_declared() -> None:
+    """A harness that declares no sandbox hosts answers as it did before the field existed, so an environment server
+    whose reply model forbids unknown fields still reads it, continuation included."""
+
+    class _Continues(_Agent):
+        def supports_task_tool_context(self) -> bool:
+            return True
+
+        def _agent_continuation_capabilities(self):
+            return AgentContinuationCapabilities(observations=["trajectory", "timing"])
+
+    agent = _Continues.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    wire = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities").json()
+
+    assert set(wire) == {"supports_task_tool_context", "continuation"}
+    earlier = _CapabilitiesBeforeSandboxEgress.model_validate(wire)
+    assert earlier.continuation == AgentContinuationCapabilities(observations=["trajectory", "timing"])
+    assert AgentSessionCapabilitiesResponse.model_validate(wire).sandbox_egress is None
 
 
 class _GrantCheckingAgent(_Agent):

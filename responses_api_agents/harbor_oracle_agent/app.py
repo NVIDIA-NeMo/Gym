@@ -36,6 +36,7 @@ from environment_servers.harbor.session import SOLUTION_DIR
 from environment_servers.harbor.verifier import TIMEOUT_WRAPPER_GUARD
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentSandboxEgress,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -129,6 +130,11 @@ class OracleAgent(SimpleResponsesAPIAgent):
         such tasks instead of refusing them before the solution starts.
         """
         return True
+
+    def sandbox_egress(self) -> AgentSandboxEgress:
+        """The oracle calls no model and installs nothing, so a task that restricts the agent's network runs its
+        ``solve.sh`` under exactly the task's policy."""
+        return AgentSandboxEgress()
 
     # -- sessions --------------------------------------------------------------------------
 

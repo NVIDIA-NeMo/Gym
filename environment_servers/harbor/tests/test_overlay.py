@@ -63,7 +63,7 @@ class TestOverlay:
             "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
         )
 
-        async def create(task, workdir, *, episode_key=None):
+        async def create(task, workdir, *, episode_key=None, network_policy=None):
             # The sandbox starts with the spec's environment, as the provider's container would.
             sandbox.spec = server._sandbox_spec(task, workdir)
             sandbox.spec_env = dict(sandbox.spec.env)

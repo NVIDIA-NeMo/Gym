@@ -241,8 +241,9 @@ Under `continue`, the episode's `responses_create_params` and `response` hold on
 | A missing `steps/<name>/` folder, `instruction.md` or `test.sh` | Load |
 | A separate step with a `steps/<name>/tests/` folder, even one without a Dockerfile, and no `docker_image` in its verifier environment; declare one | Load |
 | `environment_mode = "shared"` with `[steps.verifier.environment]` | Load |
-| A network restriction on `[steps.agent]`, `[steps.verifier]` or its environment | Load |
-| A `[verifier]` network restriction while any step verifies shared | Load |
+| A network restriction on `[steps.verifier]` or its environment | Load |
+| Steps whose agents ask for different networks (`[steps.agent]`, else `[agent]`, else `[environment]`): they share one sandbox | Load |
+| A step that verifies shared under another network than its agent's | Load |
 | `steps/<first step>/trajectory.json`, for every agent but the oracle | Seed |
 | A step user with a group, outside Docker | Seed |
 | `turn_sessions: continue` with a harness that cannot continue, or with steps that switch users | Seed |

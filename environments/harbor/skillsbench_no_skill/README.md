@@ -14,6 +14,8 @@ gym eval run skillsbench_no_skill --agent miniswe_sandboxed_agent --sandbox open
 
 `dataset.toml` declares no source: the tasks come from the pinned upstream checkout, not from a Harbor hub, so the
 prepare script writes them into this folder (the task folders and `manifest.toml` are gitignored beside this
-README), and both commands resolve the entry name to it. Any session harness runs this condition.
+README), and both commands resolve the entry name to it. Any session harness runs this condition, except that
+`bike-rebalance`, which asks for `no-network`, needs OpenSandbox and a harness that declares the hosts it reaches
+from its sandbox (`sandbox_egress`).
 [`benchmarks/skillsbench/README.md`](../../../benchmarks/skillsbench/README.md) covers the conditions, the images,
 the known limits and the OpenHands path.

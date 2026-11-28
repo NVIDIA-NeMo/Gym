@@ -55,7 +55,7 @@ from nemo_gym.data.tasks.harbor.materialize import (
     run_config,
     write_rows,
 )
-from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.data.tasks.harbor.models import HarborTaskConfig, PhaseNetwork
 from nemo_gym.data.tasks.harbor.package_store import PackageStoreError
 from nemo_gym.data.tasks.harbor.prepare import (
     AgentSelection,
@@ -2581,16 +2581,69 @@ def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch,
     assert isinstance(skipped["bad"], HarborTaskError)
 
 
-@pytest.mark.parametrize("section", ["environment", "agent", "verifier", "verifier.environment"])
+SHARED_MISMATCH = "verifies in the agent's sandbox (shared mode)"
+
+
 @pytest.mark.parametrize(
-    "policy", ['network_mode = "no-network"', 'network_mode = "allowlist"', 'allowed_hosts = ["example.org"]']
+    ("section", "policy", "message"),
+    [
+        # The agent's sandbox keeps the agent's policy, where Harbor's shared verifier would run under [environment]'s.
+        ("agent", 'network_mode = "no-network"', SHARED_MISMATCH),
+        ("agent", 'network_mode = "allowlist"', SHARED_MISMATCH),
+        # The verifier asks for a policy the agent's (public) sandbox cannot give it.
+        ("verifier", 'network_mode = "no-network"', SHARED_MISMATCH),
+        ("verifier", 'network_mode = "allowlist"', SHARED_MISMATCH),
+        *[
+            (section, 'allowed_hosts = ["example.org"]', "allowed_hosts is only valid when network_mode='allowlist'")
+            for section in ("environment", "agent", "verifier")
+        ],
+        *[
+            (
+                "verifier.environment",
+                policy,
+                "verifier.environment network restrictions are not supported yet",
+            )
+            for policy in ('network_mode = "no-network"', 'network_mode = "allowlist"', 'allowed_hosts = ["a.org"]')
+        ],
+    ],
 )
-def test_loader_rejects_unenforced_network_policies(tmp_path, section, policy):
-    # A shared-mode task: every phase's restriction is refused, the verifier's for a reason that names the fix.
-    with pytest.raises(HarborTaskError, match="network.*not supported") as excinfo:
+def test_loader_refuses_network_policies_it_cannot_apply_as_harbor_does(tmp_path, section, policy, message):
+    """A shared-mode task verifies in the agent's sandbox, whose egress policy is the agent's from creation on: a
+    verifier that asks for another policy is refused, naming the fix; so are allowed_hosts without an allowlist, and
+    a verifier environment's own restriction, which no sandbox would carry."""
+    with pytest.raises(HarborTaskError, match=re.escape(message)) as excinfo:
         load_task(write_task(tmp_path / "t", toml=f"[{section}]\n{policy}\n"))
-    if section == "verifier":
-        assert "shared verifier mode" in str(excinfo.value) and 'environment_mode = "separate"' in str(excinfo.value)
+    if message == SHARED_MISMATCH:
+        assert 'environment_mode = "separate"' in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("policy", "network"),
+    [
+        ('network_mode = "no-network"', PhaseNetwork("no-network")),
+        ('network_mode = "allowlist"', PhaseNetwork("allowlist")),
+        (
+            'network_mode = "allowlist"\nallowed_hosts = ["pypi.org", "Example.org."]',
+            PhaseNetwork("allowlist", ("example.org", "pypi.org")),
+        ),
+        ("allow_internet = false", PhaseNetwork("no-network")),
+    ],
+)
+def test_an_environment_restriction_is_the_agents_and_the_shared_verifiers_network(tmp_path, policy, network):
+    """``[environment]`` is Harbor's baseline: the agent phase and a shared verifier run under it when they set no
+    policy of their own, so the one sandbox both use can carry it (the legacy ``allow_internet = false`` too)."""
+    task = load_task(
+        write_task(tmp_path / "t", toml=HELLO_TOML.replace("[environment]\n", f"[environment]\n{policy}\n"))
+    )
+    assert task.config.agent_network() == network
+    assert task.config.verifier_network(separate=False) == network
+    assert task.config.agent_network().restricted
+    # An agent policy of its own other than the baseline leaves the shared verifier under the baseline: refused.
+    explicit = HELLO_TOML.replace("[environment]\n", f"[environment]\n{policy}\n").replace(
+        "[agent]\n", '[agent]\nnetwork_mode = "public"\n'
+    )
+    with pytest.raises(HarborTaskError, match=re.escape(SHARED_MISMATCH)):
+        load_task(write_task(tmp_path / "explicit", toml=explicit))
 
 
 SEPARATE_VERIFIER_TOML = HELLO_TOML.replace(
@@ -2616,11 +2669,210 @@ def test_loader_admits_a_verifier_phase_policy_for_separate_verification(tmp_pat
     task = load_task(write_task(tmp_path / "t", toml=toml))
     assert not task.config.is_shared_verifier
     assert (task.config.verifier.network_mode, task.config.verifier.allowed_hosts) == (mode, hosts)
-    # The agent's own sandbox stays public: the other phases are still refused on the same task.
-    for section in ("environment", "agent"):
-        restricted = toml.replace(f"[{section}]\n", f'[{section}]\nnetwork_mode = "no-network"\n')
-        with pytest.raises(HarborTaskError, match=f"{section} network restrictions are not supported yet"):
-            load_task(write_task(tmp_path / section, toml=restricted))
+    assert task.config.verifier_network(separate=True) == PhaseNetwork.of(mode, hosts)
+    # A separate verifier never runs in the agent's sandbox, which keeps the agent's own network.
+    assert task.config.agent_network() == PhaseNetwork("public")
+
+
+def test_an_agent_restriction_loads_with_separate_verification(tmp_path):
+    """The agent's sandbox is created with the agent's policy, so ``[agent]`` loads whenever no verifier shares that
+    sandbox; the separate verifier keeps its own network, which falls back to ``[environment]`` (Harbor's copy of it)
+    unless it declares a ``[verifier.environment]`` or a ``[verifier]`` policy."""
+    toml = SEPARATE_VERIFIER_TOML.replace(
+        "[agent]\n", '[agent]\nnetwork_mode = "allowlist"\nallowed_hosts = ["example.com"]\n'
+    )
+    task = load_task(write_task(tmp_path / "t", toml=toml))
+    assert task.config.agent_network() == PhaseNetwork("allowlist", ("example.com",))
+    assert task.config.verifier_network(separate=True) == PhaseNetwork("public")
+    restricted_environment = toml.replace("[environment]\n", '[environment]\nnetwork_mode = "no-network"\n')
+    inherited = load_task(write_task(tmp_path / "inherited", toml=restricted_environment))
+    # [agent] still wins for the agent; the verifier runs Harbor's copy of [environment], network included.
+    assert inherited.config.agent_network() == PhaseNetwork("allowlist", ("example.com",))
+    assert inherited.config.verifier_network(separate=True) == PhaseNetwork("no-network")
+    own_image = restricted_environment + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+    own = load_task(write_task(tmp_path / "own", toml=own_image))
+    assert own.config.verifier_network(separate=True) == PhaseNetwork("public")
+
+
+def test_a_shared_verifier_loads_when_it_asks_for_the_agents_policy(tmp_path):
+    """A verifier in the agent's sandbox runs under the agent's policy, so naming the same policy (in any spelling)
+    loads; any other is refused with both policies named."""
+    toml = HELLO_TOML.replace(
+        "[agent]\n", '[agent]\nnetwork_mode = "allowlist"\nallowed_hosts = ["example.com", "pypi.org"]\n'
+    )
+    same = toml.replace(
+        "[verifier]\n", '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["PyPI.org.", "example.com"]\n'
+    )
+    task = load_task(write_task(tmp_path / "same", toml=same))
+    assert task.config.is_shared_verifier
+    assert task.config.verifier_network(separate=False) == task.config.agent_network()
+    other = toml.replace("[verifier]\n", '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["example.com"]\n')
+    with pytest.raises(HarborTaskError, match=re.escape(SHARED_MISMATCH)) as excinfo:
+        load_task(write_task(tmp_path / "other", toml=other))
+    assert "agent's (allowlist ['example.com', 'pypi.org'])" in str(excinfo.value)
+    assert "asks for allowlist ['example.com']" in str(excinfo.value)
+
+
+def test_every_steps_agent_must_resolve_to_one_network(tmp_path):
+    """Every step works in the one sandbox, created with one policy: a step's ``[steps.agent]`` policy over the task's
+    ``[agent]`` over ``[environment]``, as Harbor resolves each step, must come out the same for every step."""
+    root = write_multi_step_task(tmp_path / "t")
+    toml = (root / "task.toml").read_text()
+    separate = toml.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
+        "[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n'
+    )
+    # One step names the task's policy itself, the other inherits it: the same network.
+    agreeing = separate.replace("[agent]\n", '[agent]\nnetwork_mode = "no-network"\n').replace(
+        "[steps.agent]\n", '[steps.agent]\nnetwork_mode = "no-network"\n'
+    )
+    (root / "task.toml").write_text(agreeing)
+    task = load_task(root)
+    assert {task.config.agent_network(step) for step in task.config.steps} == {PhaseNetwork("no-network")}
+    (root / "task.toml").write_text(
+        separate.replace("[steps.agent]\n", '[steps.agent]\nnetwork_mode = "no-network"\n')
+    )
+    with pytest.raises(HarborTaskError, match="the steps' agents ask for different networks") as excinfo:
+        load_task(root)
+    assert "01_plan: no-network, 02_implement: public" in str(excinfo.value)
+    (root / "task.toml").write_text(separate.replace("[steps.agent]\n", '[steps.agent]\nallowed_hosts = ["a.org"]\n'))
+    with pytest.raises(HarborTaskError, match=re.escape("[steps.01_plan.agent] allowed_hosts is only valid")):
+        load_task(root)
+
+
+def test_phase_networks_compare_ip_literals_in_their_canonical_spelling(tmp_path):
+    """Two spellings of one IP address are one egress rule (the policy builder writes an IP literal canonically), so
+    the phases that must agree on a network agree on them: a shared verifier and the agent, and every step's agent. A
+    different address still differs."""
+    allowlist = 'network_mode = "allowlist"\nallowed_hosts = [{}]\n'
+    agent = HELLO_TOML.replace("[agent]\n", "[agent]\n" + allowlist.format('"2001:db8:0::1", "2001:DB8::0:1"'))
+    shared = agent.replace("[verifier]\n", "[verifier]\n" + allowlist.format('"2001:db8::1"'))
+    task = load_task(write_task(tmp_path / "shared", toml=shared))
+    assert task.config.is_shared_verifier
+    assert task.config.agent_network() == task.config.verifier_network(separate=False)
+    assert task.config.agent_network().allowed_hosts == ("2001:db8::1",)
+    other = agent.replace("[verifier]\n", "[verifier]\n" + allowlist.format('"2001:db8::2"'))
+    with pytest.raises(HarborTaskError, match=re.escape(SHARED_MISMATCH)):
+        load_task(write_task(tmp_path / "other", toml=other))
+
+    root = write_multi_step_task(tmp_path / "steps")
+    separate = (
+        (root / "task.toml")
+        .read_text()
+        .replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        .replace("[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n')
+        .replace("[agent]\n", "[agent]\n" + allowlist.format('"2001:db8:0::1"'))
+    )
+    # 01_plan's agent names the address its own way; 02_implement's takes the task's [agent] spelling.
+    (root / "task.toml").write_text(
+        separate.replace("[steps.agent]\n", "[steps.agent]\n" + allowlist.format('"2001:db8::1"'))
+    )
+    task = load_task(root)
+    assert {task.config.agent_network(step) for step in task.config.steps} == {
+        PhaseNetwork("allowlist", ("2001:db8::1",))
+    }
+    (root / "task.toml").write_text(
+        separate.replace("[steps.agent]\n", "[steps.agent]\n" + allowlist.format('"2001:db8::2"'))
+    )
+    with pytest.raises(HarborTaskError, match="the steps' agents ask for different networks"):
+        load_task(root)
+
+
+def test_phase_networks_respell_only_hosts_whose_rule_cannot_change():
+    """A host takes its egress rule's spelling only where that cannot change what the policy builder makes of it: an
+    IP literal canonically, an ASCII host name lower-cased and without its one trailing dot. Any other entry is kept as
+    written, so the builder refuses the spelling the task used, never a repaired one, and it is never the valid host it
+    resembles."""
+    malformed = ["example.com..", "2001:db8::1.", "Kexample.com", "example.com\t.", "."]
+    network = PhaseNetwork.of(
+        "allowlist", ["Example.com.", "example.com", "*.Example.com.", "2001:DB8:0::1", *malformed]
+    )
+    assert network.allowed_hosts == ("example.com", "*.example.com", "2001:db8::1", *malformed)
+    for host in malformed:
+        assert PhaseNetwork.of("allowlist", [host]) != PhaseNetwork.of("allowlist", ["example.com"])
+
+
+def test_a_dotted_ipv4_address_is_the_same_network_as_the_address(tmp_path):
+    """The policy builder reads an IPv4 address with one trailing dot as a host name and drops the dot, which makes the
+    address's own rule, so the phases that must agree on a network agree on the two spellings (a shared verifier and
+    the agent in either order, every step's agent). A dotted IPv6 address is not a host name the builder accepts, so it
+    stays as written, for the builder to refuse."""
+    dotted = PhaseNetwork.of("allowlist", ["10.0.0.7."])
+    assert dotted == PhaseNetwork.of("allowlist", ["10.0.0.7"]) and hash(dotted) == hash(
+        PhaseNetwork.of("allowlist", ["10.0.0.7"])
+    )
+    assert dotted.allowed_hosts == ("10.0.0.7",)
+    assert PhaseNetwork.of("allowlist", ["10.0.0.7.", "10.0.0.7"]).allowed_hosts == ("10.0.0.7",)
+    assert PhaseNetwork.of("allowlist", ["10.0.0.7.."]).allowed_hosts == ("10.0.0.7..",)
+    assert PhaseNetwork.of("allowlist", ["2001:db8::1."]) != PhaseNetwork.of("allowlist", ["2001:db8::1"])
+
+    allowlist = 'network_mode = "allowlist"\nallowed_hosts = [{}]\n'
+    for name, agent, verifier in (("a", '"10.0.0.7."', '"10.0.0.7"'), ("b", '"10.0.0.7"', '"10.0.0.7."')):
+        toml = HELLO_TOML.replace("[agent]\n", "[agent]\n" + allowlist.format(agent)).replace(
+            "[verifier]\n", "[verifier]\n" + allowlist.format(verifier)
+        )
+        task = load_task(write_task(tmp_path / name, toml=toml))
+        assert task.config.is_shared_verifier
+        assert task.config.agent_network() == task.config.verifier_network(separate=False)
+        assert task.config.agent_network().allowed_hosts == ("10.0.0.7",)
+
+    root = write_multi_step_task(tmp_path / "steps")
+    separate = (
+        (root / "task.toml")
+        .read_text()
+        .replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        .replace("[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n')
+    )
+    # 01_plan's agent writes the address with its dot; 02_implement's takes the task's [agent] spelling.
+    (root / "task.toml").write_text(
+        separate.replace("[agent]\n", "[agent]\n" + allowlist.format('"10.0.0.7"')).replace(
+            "[steps.agent]\n", "[steps.agent]\n" + allowlist.format('"10.0.0.7."')
+        )
+    )
+    task = load_task(root)
+    assert {task.config.agent_network(step) for step in task.config.steps} == {
+        PhaseNetwork("allowlist", ("10.0.0.7",))
+    }
+
+
+def test_an_empty_allowlist_is_the_same_network_as_no_network(tmp_path):
+    """An allowlist without hosts makes ``no-network``'s deny-all policy, so the phases that must agree on a network
+    agree on the two (a shared verifier and the agent, every step's agent), and each keeps the mode it declares for
+    reporting. Public is not deny-all, an allowlist with hosts (malformed ones too) is neither, and two allowlists
+    still differ by their hosts."""
+    deny_all = PhaseNetwork("no-network")
+    empty = PhaseNetwork.of("allowlist", [])
+    assert empty == deny_all and hash(empty) == hash(deny_all) and empty.mode == "allowlist"
+    assert PhaseNetwork("public") != deny_all and PhaseNetwork("public") != empty
+    assert PhaseNetwork.of("allowlist", ["example.com.."]) != deny_all
+    assert PhaseNetwork.of("allowlist", ["a.org"]) != PhaseNetwork.of("allowlist", ["b.org"])
+
+    no_network = 'network_mode = "no-network"\n'
+    empty_allowlist = 'network_mode = "allowlist"\nallowed_hosts = []\n'
+    for name, environment, verifier in (("a", no_network, empty_allowlist), ("b", empty_allowlist, no_network)):
+        toml = HELLO_TOML.replace("[environment]\n", "[environment]\n" + environment).replace(
+            "[verifier]\n", "[verifier]\n" + verifier
+        )
+        task = load_task(write_task(tmp_path / name, toml=toml))
+        assert task.config.is_shared_verifier
+        assert task.config.agent_network() == task.config.verifier_network(separate=False) == deny_all
+        assert task.config.verifier_network(separate=False).mode == task.config.verifier.network_mode
+
+    root = write_multi_step_task(tmp_path / "steps")
+    separate = (
+        (root / "task.toml")
+        .read_text()
+        .replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        .replace("[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n')
+    )
+    # 01_plan's agent declares no-network; 02_implement's takes the task's empty [agent] allowlist.
+    (root / "task.toml").write_text(
+        separate.replace("[agent]\n", "[agent]\n" + empty_allowlist).replace(
+            "[steps.agent]\n", "[steps.agent]\n" + no_network
+        )
+    )
+    task = load_task(root)
+    assert [task.config.agent_network(step).mode for step in task.config.steps] == ["no-network", "allowlist"]
+    assert {task.config.agent_network(step) for step in task.config.steps} == {deny_all}
 
 
 @pytest.mark.parametrize("policy", ['network_mode = "no-network"', 'network_mode = "public"', ""])
@@ -2709,16 +2961,15 @@ def test_a_task_wide_verifier_restriction_checks_the_steps_resolved_modes(tmp_pa
     assert task.config.is_shared_verifier and task.config.verifier.network_mode == "no-network"
     assert [turn.verifier_mode for turn in task.turns] == ["separate", "separate"]
     mixed = restricted + f'\n[[steps]]\nname = "plan"\n{STEP_GRADER_IMAGE}[[steps]]\nname = "build"\n'
-    with pytest.raises(HarborTaskError, match="not supported in Harbor's shared verifier mode"):
+    with pytest.raises(HarborTaskError, match=re.escape("step 'build' verifies in the agent's sandbox")):
         load_task(_with_steps(write_task(tmp_path / "mixed", toml=mixed), ["plan", "build"]))
-    with pytest.raises(HarborTaskError, match="not supported in Harbor's shared verifier mode"):
+    with pytest.raises(HarborTaskError, match=re.escape("the task verifies in the agent's sandbox")):
         load_task(write_task(tmp_path / "single", toml=restricted))
 
 
 @pytest.mark.parametrize(
     "toml",
     [
-        "[environment]\nallow_internet = false",
         '[environment]\nos = "Windows"',
         '[environment.tpu]\ntype = "v6e"\ntopology = "1x1"',
     ],
@@ -3223,9 +3474,11 @@ class TestDatasetConfig:
         # `memory` replaces memory_mb instead of conflicting with it; `allow_internet` replaces network_mode.
         assert (effective.environment.memory_mb, effective.environment.storage_mb) == (4096, 20480)
         assert effective.environment.network_mode == "no-network"
-        # The loader then reports the unsupported policy as it would for a task.toml that set it.
-        with pytest.raises(HarborTaskError, match="network restrictions"):
-            load_task(folder / "hello")
+        # The loader then applies it as it would a task.toml that set it: the agent's and the shared verifier's network.
+        task = load_task(folder / "hello")
+        assert (
+            task.config.agent_network() == task.config.verifier_network(separate=False) == PhaseNetwork("no-network")
+        )
 
     @pytest.mark.parametrize(
         "text",
