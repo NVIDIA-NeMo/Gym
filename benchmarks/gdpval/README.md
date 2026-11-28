@@ -880,7 +880,7 @@ gym eval run \
     --split benchmark \
     --output results/gdpval_minimax_judge.jsonl \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-    ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+    ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/reference/output
 ```
 
 The overlay repoints the benchmark's existing `gdpval_judge_model` proxy at your
@@ -900,8 +900,9 @@ Notes:
   [Judge input options](#judge-input-options)). Lower the DPI or these caps if
   you hit `finish_reason: length`.
 - **Idle proxies**: the benchmark's three panel proxies still start (no GPU).
-  Drop them with `~gdpval_gpt55_judge_model ~gdpval_gemini31_judge_model
-  ~gdpval_claude48_judge_model` for a fully clean run.
+  For a fully clean run, set them to null with `++gdpval_gpt55_judge_model=null
+  ++gdpval_gemini31_judge_model=null ++gdpval_claude48_judge_model=null`. A `~name`
+  deletion fails here: command-line overrides apply before the `--config` files load.
 - **Video**: MiniMax-M3 reads video natively, so video deliverables are passed as
   native `video_url` media blocks (not filename stubs) via
   `judge_handles_video: true`.
@@ -922,15 +923,29 @@ Kimi-K2.6 vLLM engine with its vision tower as the single judge
 copy of the weights instead of `moonshotai/Kimi-K2.6`.
 
 ```bash
-gym eval run --benchmark gdpval --model-type vllm_model \
+gym eval run --model-type vllm_model \
+    --config benchmarks/gdpval/config.yaml \
     --config resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml \
     --split benchmark --output results/gdpval_kimi_judge.jsonl \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-    ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+    ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/reference/output
 ```
 
+With `KIMI_CHECKPOINT_PATH` set, the model server sends that path as the request's `model`, so add it to the
+engine's served model names as well, or vLLM answers 404 to every judge request:
+
+```bash
+    "++gdpval_judge_model_local.responses_api_models.local_vllm_model.vllm_serve_kwargs.served_model_name=[moonshotai/Kimi-K2.6,$KIMI_CHECKPOINT_PATH]"
+```
+
+Pass the benchmark config with `--config` before the overlay, as above, not with `--benchmark gdpval`. `gym eval run`
+loads `--config` files before `--benchmark` files, so with `--benchmark gdpval` the benchmark's `judge_panel`,
+`judge_model_server` and `judge_pdf_max_pages` replace the overlay's: the frontier panel grades, and the Kimi engine
+starts but is not used. The same holds for the other judge overlays in `resources_servers/gdpval/configs/`.
+
 The same page-cap notes apply as for MiniMax-M3. The benchmark's four OpenAI
-judge proxies start idle; drop them with `~<name>` if you want a clean run.
+judge proxies start idle; for a clean run, set them to null as above, plus
+`++gdpval_judge_model=null`.
 
 ## Aggregate metrics
 

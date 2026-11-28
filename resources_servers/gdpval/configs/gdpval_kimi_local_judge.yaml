@@ -6,11 +6,17 @@
 #
 # Chain this AFTER the benchmark config, e.g.:
 #
-#   gym eval run --benchmark gdpval --model-type vllm_model \
+#   gym eval run --model-type vllm_model \
+#     --config benchmarks/gdpval/config.yaml \
 #     --config resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml \
 #     --split benchmark --output results/gdpval_kimi_judge.jsonl \
 #     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-#     ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+#     ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/reference/output
+#
+# Pass the benchmark config with --config, before this file. `gym eval run` loads
+# --config files before --benchmark files, so `--benchmark gdpval` would put the
+# benchmark's judge_panel, judge_model_server and judge_pdf_max_pages back over
+# this overlay's.
 #
 # What it does:
 #   1. Defines a NEW model server `gdpval_judge_model_local` that gym auto-spawns
@@ -26,9 +32,10 @@
 # The benchmark's OpenAI judge proxies (`gdpval_judge_model` and the three
 # per-member `gdpval_gpt55_judge_model`, `gdpval_gemini31_judge_model` and
 # `gdpval_claude48_judge_model`) stay defined but UNUSED. Each boots a cheap
-# idle FastAPI proxy (no GPU); for a fully clean run drop them with
-# `~gdpval_judge_model ~gdpval_gpt55_judge_model ~gdpval_gemini31_judge_model
-# ~gdpval_claude48_judge_model` on the CLI.
+# idle FastAPI proxy (no GPU); for a fully clean run set them to null on the CLI:
+# `++gdpval_judge_model=null ++gdpval_gpt55_judge_model=null
+# ++gdpval_gemini31_judge_model=null ++gdpval_claude48_judge_model=null`
+# (`~name` fails: CLI overrides apply before the --config files load).
 #
 # Serving shape: TP=8 / DP=1. On 4-GPU nodes the TP group spans two nodes, so
 # VLLM_RAY_DP_PACK_STRATEGY is `span` below. See the standalone
@@ -59,6 +66,8 @@ gdpval_judge_model_local:
         tensor_parallel_size: 8
         pipeline_parallel_size: 1
         gpu_memory_utilization: 0.80
+        # With KIMI_CHECKPOINT_PATH set, add that path here as well (README shows
+        # the ++ flag): this server sends `model` above as the request's model.
         served_model_name: [moonshotai/Kimi-K2.6]
         # `--language-model-only` intentionally OMITTED → vision tower loads.
         enable_expert_parallel: true

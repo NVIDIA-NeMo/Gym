@@ -7,7 +7,8 @@
 #
 # The benchmark's three per-member panel proxies (`gdpval_gpt55_judge_model`,
 # `gdpval_gemini31_judge_model`, `gdpval_claude48_judge_model`) stay defined but
-# unused; drop them with `~<name>` on the CLI for a fully clean run.
+# unused; for a fully clean run set them to null on the CLI (`++<name>=null`;
+# `~<name>` fails: CLI overrides apply before the --config files load).
 
 # --- Repoint the judge proxy at your self-hosted MiniMax-M3 endpoint ---------
 gdpval_judge_model:
