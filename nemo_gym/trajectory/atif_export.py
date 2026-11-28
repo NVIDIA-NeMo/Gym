@@ -61,6 +61,13 @@ from nemo_gym.trajectory.atif_v1_7 import (
     AtifToolCall,
     AtifTrajectoryV1_7,
 )
+from nemo_gym.trajectory.row_media import (
+    NG_ROW_MEDIA_KEY,
+    RowMediaUnavailable,
+    referenced_paths,
+    restore_row_media,
+    row_media_dirs,
+)
 from nemo_gym.trajectory.trajectory_record import ModelCallRef, TrajectoryModelCall, TrajectoryRecord
 
 
@@ -932,6 +939,16 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
     if not isinstance(agent_version, str) or not agent_version.strip():
         raise _path_error("agent_version", "expected a non-empty string")
     _validate_json_value(rollout, path="rollout")
+    try:
+        referenced = referenced_paths(rollout, ("ng_trajectory",))
+    except RowMediaUnavailable as exc:
+        raise _path_error(NG_ROW_MEDIA_KEY, str(exc)) from exc
+    if referenced:
+        raise _path_error(
+            ".".join(str(step) for step in referenced[0]),
+            f"{len(referenced)} image(s) of this row are stored by reference (row_media: reference); restore them "
+            "with nemo_gym.trajectory.restore_row_media before exporting",
+        )
     raw_trajectory = rollout.get("ng_trajectory")
     turns = raw_trajectory.get("turns") if isinstance(raw_trajectory, dict) else None
     for index, turn in enumerate(turns if isinstance(turns, list) else []):
@@ -1045,6 +1062,8 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
 
     keys: set[tuple[int, int]] = set()
     agent_names: set[str] = set()
+    # Rows written with ``row_media: reference`` keep their images in the run's blob directories.
+    media_capture_dirs: list[Path] | None = None
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
     try:
@@ -1061,6 +1080,15 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
                         raise _path_error(f"line {line_no}", "invalid JSON") from exc
                     if not isinstance(row, dict):
                         raise _path_error(f"line {line_no}", "expected a JSON object")
+                    if row.get(NG_ROW_MEDIA_KEY) is not None:
+                        if media_capture_dirs is None:
+                            media_capture_dirs = row_media_dirs(source)[0]
+                        try:
+                            row = restore_row_media(
+                                row, capture_dirs=media_capture_dirs, rollouts_dir=source.parent, in_place=True
+                            )
+                        except RowMediaUnavailable as exc:
+                            raise _path_error(f"line {line_no}.{NG_ROW_MEDIA_KEY}", str(exc)) from exc
                     task_index = _index(row, TASK_INDEX_KEY_NAME, path=f"line {line_no}.{TASK_INDEX_KEY_NAME}")
                     rollout_index = _index(
                         row,

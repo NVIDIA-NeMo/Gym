@@ -1,10 +1,12 @@
 ---
 title: "Linear Model-Call Capture"
-description: "Why model-call capture grew with the square of an agent session, and the opt-in capture format and row payload placement that keep its disk linear and its memory bounded."
+description: "Why model-call capture grew with the square of an agent session, and the opt-in capture format, row payload placement and row media storage that keep its disk linear, its memory bounded and each image stored once."
 ---
 This note explains why [model-call capture](/main/model-server/model-call-capture) grew with the square of a long agent
 session, and the two opt-in settings that keep it linear on disk and bounded in memory:
-`model_call_capture_format: delta` and `model_call_payloads: reference`. Defaults are unchanged.
+`model_call_capture_format: delta` and `model_call_payloads: reference`. A third, `row_media: reference`, stores each
+image of a finished rollout row once (see [Images in finished rows](#images-in-finished-rows)). Defaults are
+unchanged.
 
 ## The problem
 
@@ -105,6 +107,47 @@ overflow. Without a readable capture, that check is unobserved rather than flagg
 
 `delete_model_call_capture` needs `inline`. ATIF export asks for referenced rows to be resolved first, and says how.
 
+## Images in finished rows
+
+With `reference` payloads a row no longer copies requests, but a Codex row still holds every screenshot three times.
+Codex's own session record becomes the agent's observation records (`ng_agent_observations`), the trajectory builds
+its invocation conversation from those records, and it copies each tool output into `tool_calls[].output`. On the
+run above, a row two hours in was 344 MB, of which model calls took 4 MB; rows later reached 1.15 GB.
+
+`row_media: reference` (opt-in; `inline` is the default) stores each image of a finished row once. In the evidence
+keys (`ng_agent_observations`, `ng_trajectory`, `ng_model_call_capture`, `ng_verifier_invocations`), every base64
+`data:` URL of at least 1 KiB is replaced by `null`, and the row lists each replaced place under one key after its
+other keys:
+
+```json
+"ng_row_media": {"version": 1, "root": "model_call_capture_dir", "dir": "blobs/7-0",
+                 "blobs": [[["ng_trajectory", "tool_calls", 12, "output", 0, "image_url"], "9f2c...e1"]]}
+```
+
+The blob is the URL's text in a file named by its SHA-256, the same file the delta capture format writes. With a
+capture directory, a row's images go to `<capture dir>/blobs/<rollout_id>/`, where the delta capture already holds
+every image the model was sent, so the row adds none. Without one, they go to `<rollouts stem>_blobs/<rollout_id>/`
+next to the rollouts file (`root: rollouts_dir`). Blobs are written durably before the row names them; if one cannot
+be written, the row stays inline. The harness output (`response`) and the task input are never changed: verification
+recovery and training read them.
+
+Collection applies it to the record before anything else keeps or writes it, so the row, a result kept in memory, and
+the exporters' spool hold the same references; a recorded `run_examples` shard references its rows, while the result
+returned to the caller keeps its images. A shard staged in a node-local folder (`record_staging_dir`) still writes its
+blobs to their final place as each row is written, so its published rows name blobs that are already there.
+
+`nemo_gym.trajectory.restore_row_media` gives the row back exactly as it was. Readers that need the images restore
+or refuse:
+
+| Reader | With `ng_row_media` |
+|---|---|
+| ATIF export (`gym eval export atif`) | Restores each row from the run's blob directories, found through the saved config next to the rollouts file. `gym_rollout_to_atif` on a referenced row raises and says how to restore it. |
+| Harness conformance bundle check | Restores each row (`--capture-dir`, or the saved config). `inspect_record` on a referenced row raises. |
+| Exporters (W&B, MLflow) | Their projection drops conversations; the listing keeps only the entries the projection still holds. |
+| Rollout health checks | Unaffected: they read tool output text, never image data. On the rows below, every health digest is equal before and after. |
+
+`delete_model_call_capture` needs `inline`, because the capture's blob directory holds the row's images.
+
 ## Compatibility
 
 - The defaults stay `full` and `inline`: lines and rows are written as before.
@@ -116,6 +159,8 @@ overflow. Without a readable capture, that check is unobserved rather than flagg
 - `payload_ref` is a new optional field of `TrajectoryModelCall` and `TrajectoryTurn`, written only in `reference`
   mode. Older readers that forbid unknown fields reject such rows.
 - A `reference` row needs the run's capture directory to restore its requests: keep the directory with the rows.
+- `ng_row_media` is a new top-level row key, written only with `row_media: reference`. A reader that reads images
+  from rows needs `restore_row_media` first; EvalRDL uploads the whole run directory, blobs included.
 
 ## Measurements
 
@@ -150,3 +195,23 @@ full format, and at 0.16 GB in `reference` on the delta format, against 5.5 GB i
 
 In a text-only session, about 90% of the delta bytes are each call's own output. Two thirds of that is the raw
 SSE text kept next to the reassembled response.
+
+### Row media
+
+Finished rows of the same run and of an earlier `inline`-payload run, each converted with
+`scripts/replay_row_media.py` under a 12 GB memory cap, restored, and checked byte for byte against the original line.
+"Held by capture" counts the row's images already in the run's delta capture blobs.
+
+| Row | Original | With `row_media: reference` | Images (unique) | Blob bytes | Held by capture | Reference step | Its peak RSS |
+|---|---|---|---|---|---|---|---|
+| `35-0` (text) | 8.9 MB | 8.9 MB (unchanged) | 0 | 0 | — | 0.01 s | 0.13 GB |
+| `37-0` | 454 MB | 26.9 MB | 171 (39) | 98 MB | 39 of 39 | 0.7 s | 0.56 GB |
+| `12-0` | 863 MB | 96.2 MB | 1,083 (268) | 202 MB | 268 of 268 | 3.4 s | 1.12 GB |
+| `7-0` | 1,146 MB | 122.1 MB | 2,598 (688) | 268 MB | 688 of 688 | 7.7 s | 1.45 GB |
+| `16-0`, inline payloads | 317 MB | 121.0 MB | 611 (10) | 3.3 MB | full-format capture | 0.3 s | 0.55 GB |
+| `66-0`, inline payloads | 4,104 MB | 91.0 MB | 3,244 (30) | 34 MB | full-format capture | 2.4 s | 4.27 GB |
+
+The reference step's peak RSS equals the RSS of the parsed row before it: it adds no memory. Its time is mostly
+writing and fsyncing new blob files; with the capture's blobs already present it writes none. What is left of a
+long Codex row is mostly text, which is still held three times.
+

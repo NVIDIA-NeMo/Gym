@@ -23,6 +23,12 @@ from nemo_gym.trajectory.model_call_record import (
     aggregate_model_call_records,
     build_model_call_record,
 )
+from nemo_gym.trajectory.row_media import (
+    RowMediaStats,
+    capture_media_location,
+    reference_row_media,
+    rollouts_media_location,
+)
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
@@ -210,6 +216,29 @@ def observability_enabled_from_config(global_config_dict: Any) -> bool:
 def model_call_payloads_from_config(global_config_dict: Any) -> ModelCallPayloads:
     """Return where rollout rows keep model-call requests: ``inline``, ``reference`` or ``none``."""
     return ModelCallCaptureConfig.model_validate(global_config_dict).model_call_payloads
+
+
+def reference_record_media(
+    record: dict[str, Any], capture_dirs: Sequence[Path], rollouts_fpath: Optional[Path]
+) -> Optional[RowMediaStats]:
+    """Store the large data URLs of a finished record once and reference them in place (``row_media: reference``).
+
+    The blobs go where the delta capture format keeps this rollout's, ``<capture dir>/blobs/<rollout id>``, so an
+    image the model was sent is not stored again; a run without a capture dir keeps them next to its rollouts file
+    (``<stem>_blobs/<rollout id>``). Returns ``None`` and leaves the record inline when it names no rollout or there
+    is nowhere to put them. See ``nemo_gym/trajectory/row_media.py``.
+    """
+    rollout_id = maybe_rollout_id_from_run_body(record)
+    if rollout_id is None:
+        return None
+    if capture_dirs:
+        store = _store_for_rollout(rollout_id, list(capture_dirs))
+        location = capture_media_location(store.root if store is not None else Path(capture_dirs[0]), rollout_id)
+    elif rollouts_fpath is not None:
+        location = rollouts_media_location(rollouts_fpath, rollout_id)
+    else:
+        return None
+    return reference_row_media(record, location)
 
 
 # How long a reader waits for writes already claimed by the model server to land. A claimed

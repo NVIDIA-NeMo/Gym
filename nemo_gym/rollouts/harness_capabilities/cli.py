@@ -14,6 +14,8 @@ from pathlib import Path
 from string import ascii_letters, digits
 from typing import Iterator
 
+from nemo_gym.trajectory.row_media import restore_row_media, row_media_dirs
+
 from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
 from .contracts import SCHEMA_VERSION
@@ -75,6 +77,7 @@ def inspect_bundle(
             )
         bundle = matches[0]
     sources = [bundle]
+    media_capture_dirs = [capture_dir] if capture_dir is not None else row_media_dirs(bundle)[0]
     if capture_dir is not None:
         if not capture_dir.is_dir():
             raise ValueError("capture directory does not exist")
@@ -98,6 +101,10 @@ def inspect_bundle(
     try:
         with (temporary / "evidence_results.jsonl").open("w") as handle:
             for line, record in json_rows(bundle):
+                # A row written with `row_media: reference` gets its images back from the run's blob directories.
+                record = restore_row_media(
+                    record, capture_dirs=media_capture_dirs, rollouts_dir=bundle.parent, in_place=True
+                )
                 result = inspect_record(record, source=f"{bundle.name}:{line}", scope=scope)
                 count += 1
                 passing_records += result["verdict"] == "fulfilled"

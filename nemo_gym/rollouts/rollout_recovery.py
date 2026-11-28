@@ -668,9 +668,10 @@ _COLLECTION_OPTIONS = frozenset(
         "long_rollout_max_fraction",
         "timing_summary_interval_s",
         "timed_out_max_fraction",
-        # How model calls are stored and placed on rows: evidence layout, not task execution.
+        # How model calls and row media are stored and placed on rows: evidence layout, not task execution.
         "model_call_capture_format",
         "model_call_payloads",
+        "row_media",
     }
 )
 # Server addresses and credentials are resolved anew when a job restarts. Keep model
