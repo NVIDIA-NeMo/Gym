@@ -457,6 +457,39 @@ class TestRunClaudeCode:
         assert model == "claude-sonnet-4-6"
         assert metadata["status"] == "completed"
 
+    @pytest.mark.parametrize("on_stdin", [False, True])
+    def test_host_instruction_uses_the_configured_transport(self, tmp_path: Path, on_stdin: bool) -> None:
+        agent = _make_agent(instruction_on_stdin=on_stdin)
+        captured: dict = {}
+        instruction = "Fix the parser's unicode: \u03bb"
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self, *args):
+                captured["communicate_args"] = args
+                return b'{"type":"result","subtype":"success","is_error":false}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["stdin"] = kwargs.get("stdin")
+            return FakeProc()
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+        ):
+            asyncio.run(agent._run_claude_code(instruction))
+
+        if on_stdin:
+            assert instruction not in captured["cmd"] and "--" not in captured["cmd"]
+            assert captured["stdin"] == asyncio.subprocess.PIPE
+            assert captured["communicate_args"] == (instruction.encode(),)
+        else:
+            assert captured["cmd"][-2:] == ["--", instruction]
+            assert captured["stdin"] is None
+            assert captured["communicate_args"] == ()
+
     def test_skills_staged_and_bare_dropped(self, tmp_path: Path) -> None:
         skills_dir = _write_skill_dir(tmp_path)
         home = tmp_path / "home"
