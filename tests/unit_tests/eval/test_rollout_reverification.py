@@ -2183,6 +2183,35 @@ class TestLoadReverifiedResults:
         assert len(results) == 1
         assert len(rows) == 1
 
+    def test_aggregation_only_keeps_no_generated_content(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.jsonl"
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "a"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "reward": 1.0,
+            "response": {"output": ["long answer"], "usage": {"output_tokens": 7}},
+            "responses_create_params": {"input": ["long prompt"]},
+            "ng_trajectory": {"steps": ["long trajectory"]},
+            "ng_agent_observations": {"items": ["long observation"]},
+            "ng_model_call_capture": {"dir": "x"},
+        }
+        out.write_bytes(orjson.dumps(row) + b"\n")
+
+        results, rows = _load_reverified_results(out, aggregation_only=True)
+
+        assert results == [
+            {
+                AGENT_REF_KEY_NAME: {"name": "a"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "response": {"usage": {"output_tokens": 7}},
+            }
+        ]
+        assert rows == [{AGENT_REF_KEY_NAME: {"name": "a"}}]
+        assert _load_reverified_results(out)[0] == [row]
+
 
 class TestCallAggregateMetrics:
     """Tests for _call_aggregate_metrics.
@@ -3897,6 +3926,30 @@ class TestRunFromConfigJudgeFailedOnly:
         # ...but aggregation covers the full union (seeded success 0 + recovered 1,2)
         agg_results = agg_mock.call_args.args[0]
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in agg_results) == [0, 1, 2]
+
+    async def test_seeded_generated_content_stays_on_disk_not_in_memory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A judge-failed-only output holds every saved rollout of the run; only its aggregation projection is loaded."""
+        success = self._success(0) | {"ng_trajectory": {"steps": ["long"]}, "responses_create_params": {"input": []}}
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(2)],
+            successes=[success],
+            failures=[self._failure(1)],
+        )
+        dispatched: list = []
+        _, agg_mock = self._patch(monkeypatch, dispatched)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._make_config(tmp_path, disable_aggregation=False)
+        )
+
+        on_disk = [orjson.loads(line) for line in (tmp_path / "recovered.jsonl").read_bytes().splitlines()]
+        assert on_disk[0]["ng_trajectory"] == {"steps": ["long"]}
+        for loaded in (agg_mock.call_args.args[0], returned):
+            assert [r[TASK_INDEX_KEY_NAME] for r in loaded] == [0, 1]
+            assert all(key not in r for r in loaded for key in ("ng_trajectory", "responses_create_params"))
 
     async def test_empty_successes_recovers_all_failures(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
