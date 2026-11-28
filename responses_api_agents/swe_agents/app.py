@@ -30,6 +30,7 @@ import time
 import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,6 +181,15 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         description=(
             "Poll interval (seconds) for the container memory watchdog. With no ulimit backstop "
             "this bounds the worst-case RSS overshoot of a fast allocator; a poll costs ~3ms."
+        ),
+    )
+
+    eval_node_cpu_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "CPU count that Node reports inside the eval container, which bounds the worker pools of Jest, Vitest "
+            "and other Node test runners. 0 leaves Node as it is."
         ),
     )
 
@@ -780,6 +790,178 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
         )
 
 
+# Jest and Vitest size their worker pools from the host's CPU count, which a container sees in full. This
+# preload, loaded into every Node process through NODE_OPTIONS, makes Node report at most ``cpu_count`` cores.
+_NODE_CPU_CAP_PATH = "/tmp/node-cpu-cap.cjs"
+_NODE_CPU_CAP_SCRIPT = """\
+const os = require("os");
+const cpus = os.cpus;
+os.cpus = () => cpus().slice(0, {cpu_count});
+if (os.availableParallelism) {{
+  const available = os.availableParallelism;
+  os.availableParallelism = () => Math.min(available(), {cpu_count});
+}}
+"""
+
+
+# Set to the preload option, with a trailing space, only once the preload file has been written.
+_NODE_CPU_CAP_ENV = "NEMO_GYM_NODE_CPU_CAP"
+
+
+def _node_cpu_cap_command(cpu_count: int, path: str = _NODE_CPU_CAP_PATH) -> str:
+    """Shell that writes the preload to ``path`` and adds it to NODE_OPTIONS; a failed write leaves Node as it was."""
+    script_b64 = base64.b64encode(_NODE_CPU_CAP_SCRIPT.format(cpu_count=cpu_count).encode()).decode()
+    return (
+        f"{{ echo {script_b64} | base64 -d > {path} 2>/dev/null "
+        f'&& export {_NODE_CPU_CAP_ENV}="--require={path} " NODE_OPTIONS="--require={path} ${{NODE_OPTIONS:-}}" '
+        f"|| true; }}"
+    )
+
+
+_SHELL_WORD_END = " \t\n;|&()<>`"
+
+
+def _find_or_end(text: str, sub: str, start: int) -> int:
+    position = text.find(sub, start)
+    return len(text) if position == -1 else position
+
+
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "time", "{", "}"})
+
+
+def _shell_commands(script: str) -> Iterator[list[tuple[int, int]]]:
+    """Each simple command of a shell script, as the spans of its words.
+
+    Quoted text stays inside its word; comments, here-doc bodies and case patterns are not commands.
+    """
+    command: list[tuple[int, int]] = []
+    here_docs: list[tuple[str, bool]] = []
+    open_parens = 0
+    case_pattern_next = False
+    i, n = 0, len(script)
+    while i < n:
+        char = script[i]
+        if char in " \t" or script.startswith("\\\n", i):
+            i += 2 if char == "\\" else 1
+        elif char == "#":
+            i = _find_or_end(script, "\n", i)
+        elif script.startswith("((", i):
+            # Arithmetic holds no command, and its "<<" is a shift.
+            i = _find_or_end(script, "))", i) + 2
+        elif char in "\n;|&()`":
+            words, command = command, []
+            if char == "(" and not case_pattern_next:
+                open_parens += 1
+            elif char == ")" and open_parens:
+                open_parens -= 1
+            elif char == ")":
+                words, case_pattern_next = [], False
+            elif script.startswith((";;", ";&"), i):
+                case_pattern_next = True
+            if words:
+                # "case WORD in" is followed by a pattern, and so is every ";;" until "esac".
+                texts = [script[a:b] for a, b in words]
+                case_pattern_next = (texts[0] == "case" and texts[-1] == "in") or (
+                    case_pattern_next and texts != ["esac"]
+                )
+                yield words
+            i += 1
+            if char == "\n":
+                for delimiter, strip_tabs in here_docs:
+                    while i < n:
+                        line_end = _find_or_end(script, "\n", i)
+                        line, i = script[i:line_end], line_end + 1
+                        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                            break
+                here_docs = []
+        elif script.startswith("<<", i) and not script.startswith("<<<", i):
+            strip_tabs = script.startswith("<<-", i)
+            i += 3 if strip_tabs else 2
+            while i < n and script[i] in " \t":
+                i += 1
+            delimiter_start = i
+            while i < n and script[i] not in _SHELL_WORD_END:
+                i += 1
+            here_docs.append((re.sub(r"""['"\\]""", "", script[delimiter_start:i]), strip_tabs))
+        elif char in "<>":
+            i += 1
+            while i < n and script[i] in "<>&|":
+                i += 1
+        else:
+            word_start = i
+            while i < n and script[i] not in _SHELL_WORD_END:
+                if script[i] == "\\":
+                    i += 2
+                elif script[i] == "'":
+                    i = _find_or_end(script, "'", i + 1) + 1
+                elif script[i] == '"':
+                    i += 1
+                    while i < n and script[i] != '"':
+                        i += 2 if script[i] == "\\" else 1
+                    i += 1
+                else:
+                    i += 1
+            command.append((word_start, min(i, n)))
+    if command:
+        yield command
+
+
+def _keep_node_cpu_cap(script: str) -> str:
+    """Put the CPU cap, if it was set up, in front of every NODE_OPTIONS value that ``script`` assigns."""
+    # Only a marker goes in after the "=", so the value and the shell syntax around it stay as the row wrote them.
+    marker = f'"${{{_NODE_CPU_CAP_ENV}:-}}"'
+    starts = [a for command in _shell_commands(script) for a, _ in command if script.startswith("NODE_OPTIONS=", a)]
+    for start in reversed(starts):
+        value_start = start + len("NODE_OPTIONS=")
+        script = script[:value_start] + marker + script[value_start:]
+    return script
+
+
+_SHELL_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_PNPM_OPTIONS_WITH_VALUE = frozenset({"--filter", "-F", "--dir", "-C"})
+
+
+def _jest_word(words: list[str]) -> int | None:
+    """Index of the word ``jest`` in a command that runs Jest: bare, or through npx, yarn, pnpm or cross-env."""
+    i = 0
+    while i < len(words) and (words[i] in _SHELL_KEYWORDS or _SHELL_ASSIGNMENT_RE.match(words[i])):
+        i += 1
+    if i < len(words) and words[i] in ("npx", "yarn", "pnpm"):
+        runner = words[i]
+        i += 1
+        while i < len(words) and words[i].startswith("-"):
+            i += 2 if runner == "pnpm" and words[i] in _PNPM_OPTIONS_WITH_VALUE else 1
+        if i < len(words) and (runner, words[i]) in (("yarn", "run"), ("pnpm", "exec")):
+            i += 1
+    if i < len(words) and words[i] in ("cross-env", "env"):
+        i += 1
+        while i < len(words) and _SHELL_ASSIGNMENT_RE.match(words[i]):
+            i += 1
+    return i if i < len(words) and words[i] == "jest" else None
+
+
+def _serialize_nv_internal_jest(run_script: str) -> str:
+    """Force Jest in-band: large worker pools can wedge rootless Apptainer FUSE mid-eval."""
+    insertions = []
+    for command in _shell_commands(run_script):
+        words = [run_script[a:b] for a, b in command]
+        jest = _jest_word(words)
+        if jest is None:
+            continue
+        # Each Jest command is judged by its own options, wherever its lines break.
+        options = [word.strip("\"'") for word in words[jest + 1 :]]
+        flags = []
+        if not any(o == "-i" or o.startswith(("--runInBand", "--maxWorkers", "-w")) for o in options):
+            flags.append("--runInBand")
+        if not any(o.startswith("--forceExit") for o in options):
+            flags.append("--forceExit")
+        if flags:
+            insertions.append((command[jest][1], " " + " ".join(flags)))
+    for position, text in reversed(insertions):
+        run_script = run_script[:position] + text + run_script[position:]
+    return run_script
+
+
 class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         instance_dict = orjson.loads(self.config.problem_info["instance_dict"])
@@ -822,7 +1004,9 @@ class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
         else:
             test_files = ",".join(test_files_str)
 
-        run_script = instance_dict["run_script.sh"]
+        run_script = _serialize_nv_internal_jest(instance_dict["run_script.sh"])
+        if self.config.eval_node_cpu_count > 0:
+            env_exports, run_script = _keep_node_cpu_cap(env_exports), _keep_node_cpu_cap(run_script)
         parsing_script = instance_dict["parsing_script.py"]
         run_script_path = self.config.persistent_dir / "run_script.sh"
         parsing_script_path = self.config.persistent_dir / "parsing_script.py"
@@ -3503,6 +3687,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         container_commands.append(
             f"echo {chrome_b64} | base64 -d > /tmp/chrome-wrapper.sh && chmod +x /tmp/chrome-wrapper.sh"
         )
+
+        # Cap the CPU count that Node reports while the tests are graded.
+        if command.mode == "eval" and params.eval_node_cpu_count > 0:
+            container_commands.append(_node_cpu_cap_command(params.eval_node_cpu_count))
 
         # Build mount arguments; the empty overmount hides ground-truth eval artifacts in-container.
         mount_args = [
