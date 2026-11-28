@@ -45,10 +45,10 @@ recorded is skipped with the loader's message. The sandbox deployment must be ab
   allocation. Harbor leaves them unlimited on Docker; a sandbox provider applies its own default (1 CPU and 2 GiB on
   OpenSandbox).
 - **Verifier network.** Every package denies its verifier all egress with `[verifier.environment].network_mode =
-  "no-network"`. Gym's loader applies a verifier restriction from `[verifier].network_mode`, as an egress policy on the
-  separate verifier's sandbox, and refuses one on `[verifier.environment]`, so each task's restriction is set on
-  `[verifier]` and its verifier environment is public. The verifier sandbox still has no egress. The policy needs the
-  OpenSandbox provider.
+  "no-network"`. `dataset.toml` sets each task's restriction on `[verifier]` and makes its verifier environment
+  public. The loader now resolves a single-step task's `[verifier.environment]` restriction the same way, as Harbor
+  does, so these overrides are redundant; they stay so that the entry's dataset digest doesn't change. The verifier
+  sandbox has no egress either way. The policy needs the OpenSandbox provider.
 
 ## Known limits
 

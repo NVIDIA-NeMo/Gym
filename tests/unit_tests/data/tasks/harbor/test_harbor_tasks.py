@@ -2581,12 +2581,13 @@ def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch,
     assert isinstance(skipped["bad"], HarborTaskError)
 
 
-@pytest.mark.parametrize("section", ["environment", "agent", "verifier", "verifier.environment"])
+@pytest.mark.parametrize("section", ["environment", "agent", "verifier"])
 @pytest.mark.parametrize(
     "policy", ['network_mode = "no-network"', 'network_mode = "allowlist"', 'allowed_hosts = ["example.org"]']
 )
 def test_loader_rejects_unenforced_network_policies(tmp_path, section, policy):
-    # A shared-mode task: every phase's restriction is refused, the verifier's for a reason that names the fix.
+    # A shared-mode task: every phase's restriction is refused, the verifier's for a reason that names the fix. (A
+    # `[verifier.environment]` makes verification separate; its restriction is covered with the separate verifier.)
     with pytest.raises(HarborTaskError, match="network.*not supported") as excinfo:
         load_task(write_task(tmp_path / "t", toml=f"[{section}]\n{policy}\n"))
     if section == "verifier":
@@ -2630,6 +2631,59 @@ def test_loader_refuses_verifier_allowed_hosts_without_an_allowlist(tmp_path, po
     )
     with pytest.raises(HarborTaskError, match="allowed_hosts is only valid when network_mode='allowlist'"):
         load_task(write_task(tmp_path / "t", toml=toml))
+
+
+VERIFIER_IMAGE_TABLE = '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+
+
+@pytest.mark.parametrize(
+    ("restriction", "network"),
+    [
+        ("allow_internet = false", ("no-network", None)),
+        ('network_mode = "no-network"', ("no-network", None)),
+        ('network_mode = "allowlist"\nallowed_hosts = ["pypi.org"]', ("allowlist", ["pypi.org"])),
+    ],
+)
+def test_a_verifier_environments_restriction_is_the_separate_verifiers_network(tmp_path, restriction, network):
+    """A separate verifier with no `[verifier]` policy runs under its `[verifier.environment]` baseline, as Harbor
+    resolves it, so a restriction there (`allow_internet = false` in upstream tasks) is the verifier's network rather
+    than a refusal: the loader moves it to `[verifier]`, which the server applies to the verifier's sandbox alone, and
+    leaves the environment public. No dataset override is involved, so any task name loads this way."""
+    toml = SEPARATE_VERIFIER_TOML + VERIFIER_IMAGE_TABLE + restriction + "\n"
+    task = load_task(write_task(tmp_path / "any-task", toml=toml))
+    verifier = task.config.verifier
+    assert not task.config.is_shared_verifier
+    assert (verifier.network_mode, verifier.allowed_hosts) == network
+    assert (verifier.environment.network_mode, verifier.environment.allowed_hosts) == ("public", None)
+    assert verifier.environment.docker_image == "org/verifier:1"
+    # The agent's environment is untouched.
+    assert (task.config.environment.network_mode, task.config.environment.allowed_hosts) == ("public", None)
+
+
+@pytest.mark.parametrize(("explicit", "expected"), [("no-network", "no-network"), ("public", "public")])
+def test_an_explicit_verifier_policy_wins_over_its_environments_restriction(tmp_path, explicit, expected):
+    """As in Harbor (`resolve_verifier_phase_policy`), an explicit `[verifier].network_mode` is the verifier's policy
+    whatever `[verifier.environment]` restricts, so a task that declares both loads with the explicit one."""
+    toml = SEPARATE_VERIFIER_TOML.replace(
+        'environment_mode = "separate"', f'environment_mode = "separate"\nnetwork_mode = "{explicit}"'
+    )
+    task = load_task(write_task(tmp_path / "any-task", toml=toml + VERIFIER_IMAGE_TABLE + "allow_internet = false\n"))
+    verifier = task.config.verifier
+    assert (verifier.network_mode, verifier.environment.network_mode) == (expected, "public")
+
+
+def test_a_verifier_environments_restriction_with_steps_or_stray_hosts_is_still_refused(tmp_path):
+    """A multi-step task's steps resolve their own verifier environments, so its task-level `[verifier.environment]`
+    restriction is not moved to `[verifier]` and stays refused, as the steps' own are; so are `allowed_hosts` there
+    without an allowlist."""
+    restricted = SEPARATE_VERIFIER_TOML + VERIFIER_IMAGE_TABLE + "allow_internet = false\n"
+    steps = _with_steps(write_task(tmp_path / "steps", toml=restricted + '\n[[steps]]\nname = "plan"\n'), ["plan"])
+    hosts = write_task(
+        tmp_path / "hosts", toml=SEPARATE_VERIFIER_TOML + VERIFIER_IMAGE_TABLE + 'allowed_hosts = ["example.org"]\n'
+    )
+    for folder in (steps, hosts):
+        with pytest.raises(HarborTaskError, match="verifier.environment network restrictions are not supported yet"):
+            load_task(folder)
 
 
 def test_declared_sidecar_inputs_come_from_dataset_toml_and_are_plain_file_names(tmp_path):
