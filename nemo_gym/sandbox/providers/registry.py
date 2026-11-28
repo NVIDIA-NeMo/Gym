@@ -152,6 +152,12 @@ def _load_opensandbox_provider() -> ProviderClass:
     return OpenSandboxProvider
 
 
+def _load_idegym_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.idegym import IdeGymProvider
+
+    return IdeGymProvider
+
+
 def _load_apptainer_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 
@@ -207,6 +213,7 @@ _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
 _BUILTIN_PROVIDER_LOADERS["e2b"] = _load_e2b_provider
 _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
 _BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
+_BUILTIN_PROVIDER_LOADERS["idegym"] = _load_idegym_provider
 _BUILTIN_PROVIDER_LOADERS["local"] = _load_local_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
 _BUILTIN_PROVIDER_LOADERS["openshell"] = _load_openshell_provider

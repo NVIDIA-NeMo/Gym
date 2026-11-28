@@ -1580,6 +1580,15 @@ wheels = [
 ]
 
 [[package]]
+name = "durationpy"
+version = "0.12"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/c2/f7e7778c832bddb241ca96fccc711dee013ec2e2ac9ef36e98fc117c48e6/durationpy-0.12.tar.gz", hash = "sha256:03e8223034b4a874c1c0022672aead4e6d7ed792bb418be3c5616f6494eb14cc", size = 3666, upload-time = "2026-11-24T14:05:21.6Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0b/ed/5481140d7cdb857b9c87c3792878fb6fe8997aa454724b376f14895ae99e/durationpy-0.12-py3-none-any.whl", hash = "sha256:a102cfd01a9881dc2c9c91c061e9ad22953623ddc95c329d837a44e0c335e796", size = 4360, upload-time = "2026-11-24T14:05:22.434Z" },
+]
+
+[[package]]
 name = "e2b"
 version = "2.50.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2272,6 +2281,19 @@ wheels = [
 ]
 
 [[package]]
+name = "httpx-aiohttp"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/87/3b2df9732a497403e5f4bbf2ec9f25427d53cec797e83070c503649863ef/httpx_aiohttp-0.2.0.tar.gz", hash = "sha256:d4796b981f04734f1d1db9b4d9326ea16bc994f126460b93b69036262cd4a9d8", size = 195714, upload-time = "2026-07-25T07:34:12.17Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/e2/74b6bad3a6d342aee12d8b8d825456c02d21d72319c924326d17444c5ff7/httpx_aiohttp-0.2.0-py3-none-any.whl", hash = "sha256:ccd6eb19ba18805476096e8ef0b369a6beda3955db145a538979eface2fce7ff", size = 9732, upload-time = "2026-07-25T07:34:10.939Z" },
+]
+
+[[package]]
 name = "httpx-sse"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2390,6 +2412,50 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/02/e7/94f8232d4a74cc99514c13a9f995811485a6903d48e5d952771ef6322e30/hyperframe-6.1.0.tar.gz", hash = "sha256:f630908a00854a7adeabd6382b43923a4c4cd4b821fcb527e6ab9e15382a3b08", size = 26566, upload-time = "2025-01-22T21:41:49.302Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/48/30/47d0bf6072f7252e6521f3447ccfa40b421b6824517f82854703d0f5a98b/hyperframe-6.1.0-py3-none-any.whl", hash = "sha256:b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5", size = 13007, upload-time = "2025-01-22T21:41:47.295Z" },
+]
+
+[[package]]
+name = "idegym-api"
+version = "0.13.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "idegym-common-utils" },
+    { name = "kubernetes" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "structlog" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/75/d3/f17ee1cdc4f1815d34e220514ae75ea48e273ecb77b6f46bd8b13e94ca42/idegym_api-0.13.1.tar.gz", hash = "sha256:4c16021a3c6cb5116b0d93eb0709f13b1b7a933efe60325c571ae7b7d91e8428", size = 38447, upload-time = "2026-10-16T17:37:42.243Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/87/60e4dfc73101b6afda1303284b64372925a5310babac875a66279fc0dd4a/idegym_api-0.13.1-py3-none-any.whl", hash = "sha256:a4864bd4747b0056e2c559100f01483fb0940eb58da089d3e51b7878fe89c0de", size = 49747, upload-time = "2026-10-16T17:37:36.206Z" },
+]
+
+[[package]]
+name = "idegym-client"
+version = "0.13.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "idegym-api" },
+    { name = "idegym-common-utils" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/ca/2e7e4d600333b685e444ebed99cfc78a547e0d66d8c7c5f2e3e126989432/idegym_client-0.13.1.tar.gz", hash = "sha256:466325a2431a9f38022cd7ca9da3d9900c50546e6c765fdd4a304889d68ba027", size = 27674, upload-time = "2026-10-16T17:37:43.095Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f0/db/491bd5b627e655c10af3a05ec49febbb5e3f2fe84c592f5f387011987af4/idegym_client-0.13.1-py3-none-any.whl", hash = "sha256:13748c0d4af22b2f8593a697992163a415e86706c2eaab18ce39ea0d6d17277a", size = 34318, upload-time = "2026-10-16T17:37:37.613Z" },
+]
+
+[[package]]
+name = "idegym-common-utils"
+version = "0.13.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "structlog" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/04/c6/5a15dd1317e069ca2d79aa2cb8d0bf84ab70bc2c2a93889082e547806088/idegym_common_utils-0.13.1.tar.gz", hash = "sha256:9c1f1fcc2b66aa99cf9d9355402d6bf595b6b91e51c3744c88a7e5a23e037c55", size = 8592, upload-time = "2026-10-16T17:37:43.758Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/30/a6/e6b00c0bd7272ea61e4cce0e4e5eb72ab95846b91f6a55c09163c6a6efd8/idegym_common_utils-0.13.1-py3-none-any.whl", hash = "sha256:848c7bb56fd6da7ddcb18cf0cde08409135ada016bd2802ec7dd2925ba2f80f9", size = 8906, upload-time = "2026-10-16T17:37:38.597Z" },
 ]
 
 [[package]]
@@ -2763,6 +2829,30 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e3/9a/59a6f6ae6f938c15076be2c21b6cedea973d71bb1349ec84fa485fab82cf/kiwisolver-1.5.1-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:ab620eb663952455271ac37f9aaad86b73c969c02f11f53cea405b38e96a4300", size = 2395634, upload-time = "2026-08-28T10:28:03.977Z" },
     { url = "https://files.pythonhosted.org/packages/e9/2d/8982c1fb7926da5bb7ed60318c3665b5c3f941447271ac982960a11b8637/kiwisolver-1.5.1-cp315-cp315t-win_amd64.whl", hash = "sha256:cb6fae641357ed2f6e533c0d3c6504a4a5703621a50c89459e46051d56b61140", size = 75379, upload-time = "2026-08-28T10:28:06.307Z" },
     { url = "https://files.pythonhosted.org/packages/07/78/ba7b6dfa1708b82b373ac056928a30c545d5c1a627df9839dcec3c6c1881/kiwisolver-1.5.1-cp315-cp315t-win_arm64.whl", hash = "sha256:b390aec180a7c054919c04898835e1c77bced23ea8383eb2c570213bf25d1a86", size = 73011, upload-time = "2026-08-28T10:28:07.578Z" },
+]
+
+[[package]]
+name = "kubernetes"
+version = "37.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "aiohttp-retry" },
+    { name = "certifi" },
+    { name = "durationpy" },
+    { name = "oauthlib" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "requests-oauthlib" },
+    { name = "typing-extensions" },
+    { name = "urllib3" },
+    { name = "websocket-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7b/d2/2f0bd547590150f192a35c2145de97e290b03234c66cd2b55a7a55bf41ba/kubernetes-37.0.3.tar.gz", hash = "sha256:862069ade8490916018a0a4e303050700f96f887edb5ec25db325a5212cb3923", size = 3358005, upload-time = "2026-11-18T16:17:23.942Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/dc/3437018bd8ff7b64cbf17ca58f5fed7c1a5514e53ad728eb3888b34e9938/kubernetes-37.0.3-py2.py3-none-any.whl", hash = "sha256:99a4d2154a884793e308e994a8808a64e548a17f2f525d52919eed1d9c2c58fe", size = 7511682, upload-time = "2026-11-18T16:17:21.76Z" },
 ]
 
 [[package]]
@@ -3736,6 +3826,10 @@ dev = [
     { name = "ruff" },
     { name = "tomlkit" },
 ]
+idegym = [
+    { name = "httpx-aiohttp" },
+    { name = "idegym-client" },
+]
 mlflow = [
     { name = "mlflow" },
     { name = "mlflow-skinny" },
@@ -3795,8 +3889,10 @@ requires-dist = [
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", marker = "extra == 'wandb'", specifier = ">=3.2.1" },
     { name = "httptools" },
+    { name = "httpx-aiohttp", marker = "extra == 'idegym'", specifier = ">=0.2.0" },
     { name = "huggingface-hub", marker = "extra == 'dev'", specifier = "<2" },
     { name = "hydra-core", specifier = ">=1.4.0rc3" },
+    { name = "idegym-client", marker = "extra == 'idegym'", specifier = ">=0.13.1" },
     { name = "itsdangerous" },
     { name = "jinja2", marker = "extra == 'ray'", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.18,<5" },
@@ -3845,7 +3941,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },
 ]
-provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "idegym", "dev"]
 
 [package.metadata.requires-dev]
 codec = [
@@ -4388,6 +4484,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/db/24/528619230976c18364eda2340906ea67b3bf7588b7ce59e054723614abae/nvtx-0.2.15-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:aca61135c76b8107ae3c994325613afa661e1336a991c59cc9c6176829b3b32c", size = 834439, upload-time = "2026-03-18T10:05:01.181Z" },
     { url = "https://files.pythonhosted.org/packages/ef/7b/c1b96f13ef89bdf2a8c2f326a97bed89699271990d7c8624fda3fedc6e61/nvtx-0.2.15-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:58653bf6fd8453947b9e5153da2ad7aeb0ceafa030de7f133efb3eada5da7ca7", size = 790247, upload-time = "2026-03-18T10:11:39.124Z" },
     { url = "https://files.pythonhosted.org/packages/14/5d/e000de781d92b732d52c572517db0e9e3a0085795f8bdc18201713c52d1f/nvtx-0.2.15-cp314-cp314t-win_amd64.whl", hash = "sha256:9d1d10db4fb4a3b0ffd6ed37bf25f0a966a3b4d34b3c9abb1f6572732959a6e5", size = 149109, upload-time = "2026-03-18T10:03:21.615Z" },
+]
+
+[[package]]
+name = "oauthlib"
+version = "4.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/33/17/2bb072de0b990303c985f26869fd47bb179024a051f47e7f9d208eb92f8e/oauthlib-4.0.1.tar.gz", hash = "sha256:3d73febdb6faa00f277c81fb04be7b7586fb96fc3b7f0b9c772dada69a25ede7", size = 191219, upload-time = "2026-10-31T09:52:58.008Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/ef/3b8adde1b32a6f540758bff734d3442c621734c83708e5f02b0ba2f43b84/oauthlib-4.0.1-py3-none-any.whl", hash = "sha256:498a298876e996301950a5b053d12c31628bb7b895db03666430c69ce182eb61", size = 161934, upload-time = "2026-10-31T09:52:56.206Z" },
 ]
 
 [[package]]
@@ -6129,6 +6234,19 @@ wheels = [
 ]
 
 [[package]]
+name = "requests-oauthlib"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "oauthlib" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/f2/05f29bc3913aea15eb670be136045bf5c5bbf4b99ecb839da9b422bb2c85/requests-oauthlib-2.0.0.tar.gz", hash = "sha256:b3dffaebd884d8cd778494369603a9e7b58d29111bf6b41bdc2dcd87203af4e9", size = 55650, upload-time = "2024-03-22T20:32:29.939Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/5d/63d4ae3b9daea098d5d6f5da83984853c1bbacd5dc826764b249fe119d24/requests_oauthlib-2.0.0-py2.py3-none-any.whl", hash = "sha256:7dd8a5c40426b779b0868c404bdef9768deccf22749cde15852df527e6269b36", size = 24179, upload-time = "2024-03-22T20:32:28.055Z" },
+]
+
+[[package]]
 name = "rich"
 version = "15.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -6706,6 +6824,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/48/bb/3d8757f21e9a53d9035c9eb039a777047139a16bfdbedfc7a58241c3d914/starlette-1.10.0.tar.gz", hash = "sha256:b8399098d4c1e3522734f7235dc79b1fc967f96cf139c81e0fa30479e0685f9b", size = 2734356, upload-time = "2026-10-24T15:04:12.342Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/2e/947cfe02def9371c07cd5bf5b6b61c829e9aecb9904db02a66cfafbc1eec/starlette-1.10.0-py3-none-any.whl", hash = "sha256:478c0ab3b4ced6e82719849c118fa406f0278a3499c1a898cd15cd31bdc38ce4", size = 80571, upload-time = "2026-10-24T15:04:10.371Z" },
+]
+
+[[package]]
+name = "structlog"
+version = "26.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5e/89/b4a0bcfdf4f71a3dea31379f095929613d7e4528a0996bca6aa964cd0dca/structlog-26.1.0.tar.gz", hash = "sha256:f63a716cbd1b1291cf7661de7794b455acfa4c43c5bcf1630e6ad5ddc1adb3b7", size = 1459881, upload-time = "2026-06-06T07:33:39.348Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/18/489c97b834dfff9cf2fc2507cede4bcd4b11e67f84bc462acd1992496f86/structlog-26.1.0-py3-none-any.whl", hash = "sha256:e081a26d6c373e6d201eca24eede26d8ffab07f88f477822e679183428d3d91e", size = 73764, upload-time = "2026-06-06T07:33:38.046Z" },
 ]
 
 [[package]]
