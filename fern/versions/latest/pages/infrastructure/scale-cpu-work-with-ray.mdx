@@ -35,6 +35,15 @@ Declare `ray_enabled = True` on the class your entrypoint calls `run_webserver()
 
 Gym launches servers that don't declare `ray_enabled = True` with `RAY_ENABLE_AUTO_CONNECT=0`. If such a server calls Ray anyway, the call fails with "Ray has not been started yet" instead of starting a private Ray cluster in each server process. Declare `ray_enabled = True` to fix it.
 
+### Multi-node clusters with node-local venvs
+
+Servers that use Ray run their Ray tasks with their own venv's interpreter, so on a multi-node cluster that venv must exist on every node. Gym sets it up only on the node where `gym` runs. If venvs are on shared storage (`uv_venv_dir`) or baked into the image, nothing else is needed. If they are on node-local storage, set `++setup_venvs_on_every_ray_node=true`: before starting servers, Gym then sets up the venvs of servers that use Ray on every other Ray node. This requires that:
+
+- The Gym install, the Python interpreter that runs `gym`, and every server directory exist at the same absolute paths on every node.
+- `uv` is on the `PATH` of the Ray processes on every node.
+
+This setup counts against `server_spinup_timeout_seconds`, and covers only the nodes that are alive when `gym` starts.
+
 ### Installing Ray
 Servers that use Ray need Ray installed both where `gym` runs and in their own environment. Install it with the `ray` extra:
 

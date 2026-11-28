@@ -140,6 +140,7 @@ celerybeat.pid
 .env
 .venv
 .venv.setup.lock
+.venv.*.shared-storage-marker
 env/
 venv/
 ENV/
