@@ -733,7 +733,8 @@ async def test_a_task_that_declares_skills_gets_them_in_the_cli_skills_folder_an
     config_dir = f"{state.session.session_dir}/config"
     assert state.task_skills == "/workspace/skills"
     (copy,) = [command for command in commands if " cp -RL -- " in command]
-    assert f"mkdir -p -- {config_dir}/skills && cp -RL -- /workspace/skills/. {config_dir}/skills/" in copy
+    assert f"mkdir -p -- {config_dir}/skills && " in copy
+    assert f"cp -RL -- /workspace/skills/. {config_dir}/skills/;" in copy
     payload = await _first_activation(monkeypatch, state)
     # Claude Code finds skills in CLAUDE_CONFIG_DIR/skills, and --bare would hide them from it.
     assert payload["env"]["CLAUDE_CONFIG_DIR"] == config_dir

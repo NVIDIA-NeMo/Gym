@@ -7,6 +7,7 @@ The helper runs its commands in a real shell on a local sandbox, so the tests ob
 
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -206,6 +207,28 @@ async def test_a_copy_that_fails_after_a_read_only_skill_keeps_its_error_and_its
     # cp carries on past the broken link, so the read-only skill is copied whichever of the two it reaches first.
     assert (destination / "demo" / "SKILL.md").is_file()
     assert _lacking_owner_access(destination) == []
+    assert _modes(read_only_skills) == source_modes
+    await _close_seeded_session(local_sandbox.sandbox, session_dir)
+
+
+async def test_a_retry_copies_over_read_only_skills_an_interrupted_copy_left(local_sandbox, read_only_skills) -> None:
+    """A copy that times out can be stopped after it copied read-only skills and before its chmod, and the seed is
+    retried into the same destination. ``cp`` could not write over those files, and the retry was refused."""
+    source_modes = _modes(read_only_skills)
+    local_sandbox.context.write_text(json.dumps({"skills_dir": str(read_only_skills)}))
+    session_dir = local_sandbox.root / "session"
+    destination = session_dir / "config" / "skills"
+    # What the interrupted copy left: the task's skills with the task's modes.
+    shutil.copytree(read_only_skills, destination)
+    assert _lacking_owner_access(destination)
+
+    await stage_task_skills(local_sandbox.sandbox, str(destination))
+
+    staged = destination / "demo"
+    assert (staged / "SKILL.md").read_text() == (read_only_skills / "demo" / "SKILL.md").read_text()
+    assert _lacking_owner_access(destination) == []
+    assert (staged / "scripts" / "helper.sh").stat().st_mode & stat.S_IXUSR
+    assert not (staged / "SKILL.md").stat().st_mode & 0o111
     assert _modes(read_only_skills) == source_modes
     await _close_seeded_session(local_sandbox.sandbox, session_dir)
 

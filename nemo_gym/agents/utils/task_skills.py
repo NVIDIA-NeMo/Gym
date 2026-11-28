@@ -55,7 +55,8 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | No
     The copy belongs to the session, whose close removes it: after the copy, and after one that failed part way, its
     owner can read and write every entry and enter every folder, whatever the modes in the task's folder (an image
     can ship its skills read-only to a non-root agent user). Executable files stay executable, and the task's folder
-    is left as it was.
+    is left as it was. A copy that an earlier attempt left read-only (a timeout can stop it before its own repair)
+    is made owner-writable before the copy, so a retry copies over it instead of being refused.
     """
     context_path = shlex.quote(TASK_CONTEXT_FILE)
     # A file that exists but cannot be read fails the read instead of passing for an absent one.
@@ -81,12 +82,13 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | No
             f"The task's skills_dir {skills_dir!r} is not an absolute path, so its skills cannot be staged for the CLI"
         )
     source, target = shlex.quote(skills_dir), shlex.quote(destination)
-    # cp gives the copy the task's modes, and a read-only folder in it would keep the close from removing the session.
-    # The chmod runs after a failed copy too; its own errors are dropped, so a refusal reports the copy's.
+    # cp gives the copy the task's modes, and a read-only folder in it would keep the close from removing the session,
+    # or a later copy from writing over it. The first chmod repairs what an interrupted earlier copy left; the second
+    # runs after a failed copy too. Their own errors are dropped, so a refusal reports the copy's.
     copied = await sandbox.exec(
         f"[ -d {source} ] || {{ echo 'not a folder in the sandbox' >&2; exit 2; }}; "
-        f"mkdir -p -- {target} && cp -RL -- {source}/. {target}/; copy_status=$?; "
-        f"chmod -R u+rwX -- {target} 2>/dev/null; exit $copy_status",
+        f"mkdir -p -- {target} && {{ chmod -R u+rwX -- {target} 2>/dev/null; cp -RL -- {source}/. {target}/; }}; "
+        f"copy_status=$?; chmod -R u+rwX -- {target} 2>/dev/null; exit $copy_status",
         cwd="/",
         timeout_s=_COPY_TIMEOUT_S,
     )
