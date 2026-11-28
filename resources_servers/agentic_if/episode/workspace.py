@@ -25,7 +25,8 @@ printf '%s\\n' "$if_base"
 
 # Match the profile plugin's per-tool snapshots: the files against the base tree (`if_base`), untracked files included
 # through a temporary copy of the actor's Git index, which itself stays unchanged. Keep the index timestamp so Git still
-# checks same-size, same-second edits. The positional parameters are the diff's pathspecs.
+# checks same-size, same-second edits. The positional parameters are the diff's pathspecs. An empty `if_base` takes the
+# diff against the index instead, for prefixes recorded that way (`ContinuationSpec.workspace_diff_base`).
 WORKSPACE_DIFF = """
 if_git_dir="$(git rev-parse --absolute-git-dir)" || {
     if_status=$?
@@ -47,17 +48,18 @@ export GIT_INDEX_FILE="$if_index_dir/index"
 # Git also uses 128 for index.lock/disk failures: writes must remain failures,
 # not be mistaken for deliberately broken repository state in the task image.
 git add -N --ignore-removal . || exit "$?"
-git diff --binary --full-index "$if_base" -- "$@"
+git diff --binary --full-index ${if_base:+"$if_base"} -- "$@"
 if_status=$?
 [ "$if_status" -eq 128 ] && exit 78
 exit "$if_status"
 """
 
 
-def workspace_diff_command(base: str, *, exclude: Sequence[str] = ()) -> str:
-    """``WORKSPACE_DIFF`` against the base tree ``base``, leaving out the repository-relative paths in ``exclude``."""
+def workspace_diff_command(base: str | None, *, exclude: Sequence[str] = ()) -> str:
+    """``WORKSPACE_DIFF`` against the base tree ``base`` (the actor's Git index when None), leaving out the
+    repository-relative paths in ``exclude``."""
     pathspecs = (".", *(":(top,literal,exclude)" + path for path in exclude)) if exclude else ()
-    return f"if_base={quote(base)}\nset -- {' '.join(quote(spec) for spec in pathspecs)}\n" + WORKSPACE_DIFF
+    return f"if_base={quote(base or '')}\nset -- {' '.join(quote(spec) for spec in pathspecs)}\n" + WORKSPACE_DIFF
 
 
 _DISCOVER_WORKSPACE = """
@@ -89,7 +91,9 @@ async def workspace_base(sandbox: BoundSandbox) -> str | None:
 
 
 async def snapshot_workspace(sandbox: BoundSandbox, base: str | None) -> str | None:
-    """Observe initial state as the actor, against the episode's base tree; unavailable Git is not a clean tree.
+    """Observe the workspace as the actor, against the episode's base tree; unavailable Git is not a clean tree.
+
+    Seed observes it initially, and again once a continuation's prefix is restored.
 
     A task may deliberately contain broken Git metadata. That state is unknown,
     not clean, and is recorded explicitly for the scorer's argument fallback.
@@ -107,7 +111,7 @@ async def snapshot_workspace(sandbox: BoundSandbox, base: str | None) -> str | N
     if result.return_code in {77, 78} and not result.error_type:
         return None
     if result.return_code or result.error_type:
-        raise RuntimeError("could not snapshot initial workspace")
+        raise RuntimeError("could not snapshot the workspace")
     return result.stdout or ""
 
 

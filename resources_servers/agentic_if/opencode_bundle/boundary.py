@@ -8,7 +8,12 @@ Python resolves everything that depends on the row; the plugin applies it to the
 - ``deny``: the permission denies the plugin's ``config`` hook appends;
 - ``descriptions``: the effective description of each tool (the catalog interface's, overridden by the row's);
 - ``parameter_descriptions``: the row's parameter descriptions as parsed JSON-pointer paths (``describeParameters``);
-- ``historical_rejected_calls``: rejected model calls witnessed in a continuation prefix (``prefix_model_calls``).
+- ``historical_rejected_calls``: rejected model calls witnessed in a continuation prefix (``prefix_model_calls``);
+- ``unreceipted_rejected_calls``, only for a row that lists them: the prefix's rejected calls recorded without a
+  receipt, which keep OpenCode's own form (``ContinuationSpec.unreceipted_rejected_calls``);
+- ``tool_aliases``, only for a row that renames tools: the name the model sees for each renamed built-in tool. The
+  plugin offers the tool under that name, in history and ``tool_choice`` too, and gives OpenCode the built-in tool of
+  a call the model makes under it.
 
 The staged bytes are evidence format (``boundary_sha256`` in the seed record, ``config_sha256`` in the plugin's load
 receipt): keep the keys and their order.
@@ -17,7 +22,7 @@ The row's literal system text is not here: at seed the row has no ``responses_cr
 from the instructions file the OpenCode agent writes (see ``if-boundary.mjs``).
 """
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from copy import deepcopy
 
 from pydantic import JsonValue
@@ -26,6 +31,7 @@ from resources_servers.agentic_if.opencode_bundle.features import check_supporte
 from resources_servers.agentic_if.task_variants.catalog import BUILTIN_TOOLS
 from resources_servers.agentic_if.task_variants.interfaces import installed_interfaces
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
+from resources_servers.agentic_if.task_variants.toolsets import renamed_tools
 
 
 BOUNDARY_VERSION = 1
@@ -64,11 +70,15 @@ def parameter_targets(descriptions: Mapping[str, str]) -> list[dict[str, JsonVal
     return targets
 
 
-def prefix_model_calls(continuation: ContinuationSpec | None) -> dict[str, dict[str, JsonValue]]:
+def prefix_model_calls(
+    continuation: ContinuationSpec | None, *, unreceipted: Collection[str] = ()
+) -> dict[str, dict[str, JsonValue]]:
     """Rejected model calls witnessed in a continuation prefix, by call ID; never inferred.
 
     Each receipt is the ``nemo_gym_model_call`` metadata of the prefix's tool part:
-    ``{"function": {"name", "arguments"}, "available_names": [...]}``.
+    ``{"function": {"name", "arguments"}, "available_names": [...]}``. ``unreceipted`` names the prefix's rejected
+    (``invalid``) calls without a receipt that the row keeps in OpenCode's own form; any other rejected call without
+    one is refused.
     """
     result: dict[str, dict[str, JsonValue]] = {}
     if continuation is None:
@@ -80,6 +90,8 @@ def prefix_model_calls(continuation: ContinuationSpec | None) -> dict[str, dict[
             metadata = part.get("state", {}).get("metadata") or {}
             receipt = metadata.get("nemo_gym_model_call")
             if receipt is None:
+                if part.get("tool") == "invalid" and part.get("callID") in unreceipted:
+                    continue
                 if (
                     part.get("tool") == "invalid"
                     or (metadata.get("nemo_gym_profile") or {}).get("dispatch_rejected") is True
@@ -116,7 +128,8 @@ def compile_boundary(spec: RuntimeSpec) -> dict[str, JsonValue]:
         if "description" in definition:
             descriptions[tool] = definition["description"]
     descriptions.update(tools.tool_descriptions)
-    return {
+    unreceipted = (spec.continuation.unreceipted_rejected_calls or []) if spec.continuation is not None else []
+    boundary: dict[str, JsonValue] = {
         "boundary_version": BOUNDARY_VERSION,
         "provider_id": PROVIDER_ID,
         "tool_names": selected,
@@ -129,5 +142,13 @@ def compile_boundary(spec: RuntimeSpec) -> dict[str, JsonValue]:
             tool: parameter_targets(texts) for tool, texts in tools.tool_parameter_descriptions.items()
         },
         # Only rows that select tools present rejected calls; omitted selection keeps OpenCode's history unchanged.
-        "historical_rejected_calls": {} if selected is None else prefix_model_calls(spec.continuation),
+        "historical_rejected_calls": (
+            {} if selected is None else prefix_model_calls(spec.continuation, unreceipted=unreceipted)
+        ),
     }
+    if selected is not None and unreceipted:
+        boundary["unreceipted_rejected_calls"] = list(unreceipted)
+    aliases = renamed_tools(tools.tool_names)
+    if aliases:
+        boundary["tool_aliases"] = aliases
+    return boundary

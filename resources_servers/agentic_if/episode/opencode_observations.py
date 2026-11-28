@@ -25,7 +25,8 @@ def preserve_rejected_calls(
 
     Stock OpenCode replaces invalid calls with recovery inputs. Keep the exact
     model call and that request's tool inventory, including malformed arguments
-    and child sessions.
+    and child sessions. A prefix's rejected call that the continuation keeps in
+    OpenCode's own form (``unreceipted_rejected_calls``) is left as recorded.
     """
     captured = {}
     for observation in observations:
@@ -37,9 +38,10 @@ def preserve_rejected_calls(
                 raise ValueError("ambiguous model call evidence")
             names = sorted(tool["function"]["name"] for tool in observation["request"].get("tools", []))
             captured[key] = {"function": deepcopy(function), "available_names": names}
-    historical = prefix_model_calls(continuation)
+    unreceipted = (continuation.unreceipted_rejected_calls or []) if continuation is not None else []
+    historical = prefix_model_calls(continuation, unreceipted=unreceipted)
     roots = [key for key, document in exports.items() if document.get("info", {}).get("parentID") is None]
-    if historical and len(roots) != 1:
+    if (historical or unreceipted) and len(roots) != 1:
         raise ValueError("rejected-call evidence requires exactly one root session")
     for session, document in exports.items():
         for message in document.get("messages", []):
@@ -50,6 +52,8 @@ def preserve_rejected_calls(
                     continue
                 receipt = captured.get((session, part.get("callID")))
                 if receipt is None and session in roots:
+                    if part.get("callID") in unreceipted:
+                        continue
                     receipt = historical.get(part.get("callID"))
                 if receipt is None:
                     raise ValueError("unobserved rejected model call in an OpenCode export")

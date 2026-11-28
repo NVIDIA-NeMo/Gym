@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The agentic IF OpenCode plugin bundle: two plugins the Resources Server stages into the task sandbox.
 
-``if-profile.mjs`` applies the row's tool interfaces, read-first guards and planted tool failures inside OpenCode and
+``if-profile.mjs`` applies the row's tool interfaces, read-first guards and planted tool results inside OpenCode and
 records hook receipts. ``if-boundary.mjs`` wraps the policy provider's HTTP call: it presents the row's literal system
 prompt, tool selection and descriptions, restores the model's own tool calls in history, and records every model call.
 The Resources Server stages them at seed (``stage_bundle``) and reads what they recorded at verify

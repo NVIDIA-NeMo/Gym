@@ -3,12 +3,12 @@
 """Restore a continuation's recorded prefix.
 
 The workspace half runs at seed: replay the prefix's shell commands, reset the files to the episode's base tree and
-apply the recorded diff, which is taken against that tree.
+apply the recorded diff, which is taken against that tree (or reset them to the Git index the replayed commands leave,
+for a prefix whose diffs were taken against the index).
 The session half is OpenCode's: the harness imports the staged prefix export and continues it. Verification binds the
 continued root session back to the prefix it restored (``continued_session``).
 """
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from shlex import quote
@@ -19,32 +19,11 @@ from resources_servers.agentic_if.episode import opencode_prefix
 from resources_servers.agentic_if.episode.runtime import BoundSandbox, private_staging, upload_text
 from resources_servers.agentic_if.episode.workspace import workspace_diff_command
 from resources_servers.agentic_if.if_grading.contracts import SessionEvidence
+from resources_servers.agentic_if.if_grading.git_diff import workspace_patches_equal
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
 
 
-def workspace_patches_equal(left: str, right: str) -> bool:
-    """Compare recorded Git patches, allowing only compatible object-ID abbreviations.
-
-    Git's default abbreviation length depends on repository configuration. It is
-    not a file-content difference. Keep every other line (including modes, binary
-    bodies, and no-newline markers) exact; even index IDs must agree by prefix.
-    """
-    first, second = left.splitlines(), right.splitlines()
-    if len(first) != len(second):
-        return False
-    index = re.compile(r"index ([0-9a-f]{4,64})\.\.([0-9a-f]{4,64})( [0-7]{6})?")
-    for a, b in zip(first, second, strict=True):
-        if a == b:
-            continue
-        x, y = index.fullmatch(a), index.fullmatch(b)
-        if x is None or y is None or x[3] != y[3]:
-            return False
-        if any(not (x[k].startswith(y[k]) or y[k].startswith(x[k])) for k in (1, 2)):
-            return False
-    return True
-
-
-async def _workspace_diff(sandbox: BoundSandbox, *, base: str, exclude: tuple[str, ...] = ()) -> str:
+async def _workspace_diff(sandbox: BoundSandbox, *, base: str | None, exclude: tuple[str, ...] = ()) -> str:
     current = await sandbox.exec(command=workspace_diff_command(base, exclude=exclude), timeout_s=600)
     if current.return_code != 0 or current.error_type:
         raise RuntimeError("cannot record replay workspace diff")
@@ -56,12 +35,16 @@ async def restore_workspace(
 ) -> dict[str, JsonValue]:
     """Restore recorded repository state after replaying shell environment effects.
 
-    ``base`` is the episode's base tree, which the recorded diff is taken against. ``staging`` is a directory of the
-    task identity, outside the repository, for the patches.
+    ``base`` is the episode's base tree, which the recorded diff is taken against, unless the continuation's diffs were
+    taken against the Git index (``workspace_diff_base``): the files are then reset to, and compared against, the index
+    the replayed commands leave. ``staging`` is a directory of the task identity, outside the repository, for the
+    patches. A replayed command that times out fails the restore, unless the continuation counts it as a mismatch
+    (``replay_timeouts``).
     """
     source = continuation.prefix_export
     workdir = sandbox.workdir or str(source["info"].get("directory") or ".")
-    mismatches = []
+    against = None if continuation.workspace_diff_base == "index" else base
+    mismatches, timeouts = [], []
     commands = opencode_prefix.recorded_commands(source, default_workdir=workdir)
     remote = None
     touched = set()
@@ -88,17 +71,23 @@ async def restore_workspace(
             cwd=recorded.workdir,
             timeout_s=recorded.timeout_s,
         )
+        if result.error_type == "timeout" and continuation.replay_timeouts == "mismatch":
+            # Typically a command that also timed out when it was recorded: what it did before the deadline stays.
+            timeouts.append(index)
+            mismatches.append(index)
+            continue
         if result.error_type:
             raise RuntimeError("prefix shell replay failed at the sandbox transport")
         observed = ((result.stdout or "") + (result.stderr or "")).strip()
         if result.return_code != 0 or observed != recorded.output.strip():
             mismatches.append(index)
-    # Back to the base tree: undo, as a patch, what the replayed commands left in the files. The index they may have
-    # staged stays as it is; the recorded diff describes the files whatever was staged. This is a fresh,
+    # Back to the recorded diff's base: undo, as a patch, what the replayed commands left in the files. The index they
+    # may have staged stays as it is. Against the base tree, the recorded diff describes the files whatever was staged;
+    # against the index, it describes them relative to what the replayed commands staged again. This is a fresh,
     # resource-owned task sandbox, never the host checkout.
     replayed = quote(f"{staging}/replayed.patch")
     reset = await sandbox.exec(
-        command=f"( {workspace_diff_command(base, exclude=untouched)} ) > {replayed} && "
+        command=f"( {workspace_diff_command(against, exclude=untouched)} ) > {replayed} && "
         f"{{ [ ! -s {replayed} ] || git apply -R --binary --whitespace=nowarn {replayed}; }}",
         timeout_s=600,
     )
@@ -108,13 +97,16 @@ async def restore_workspace(
         applied = await sandbox.exec(command=f"git apply --binary --whitespace=nowarn {quote(remote)}", timeout_s=600)
         if applied.return_code != 0 or applied.error_type:
             raise RuntimeError("recorded prefix workspace diff does not apply")
-    current = await _workspace_diff(sandbox, base=base, exclude=untouched)
-    return {
+    current = await _workspace_diff(sandbox, base=against, exclude=untouched)
+    receipt: dict[str, JsonValue] = {
         "mode": "restore",
         "replayed_commands": len(commands),
         "command_output_mismatch_indices": mismatches,
         "workspace_matches_diff": workspace_patches_equal(current, continuation.workspace_diff),
     }
+    if continuation.replay_timeouts is not None:
+        receipt["command_timeout_indices"] = timeouts
+    return receipt
 
 
 async def restore_prefix_workspace(

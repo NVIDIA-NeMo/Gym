@@ -102,6 +102,7 @@ def build_session_evidence(
         interfaces=installed_interfaces(spec.tools.tool_interfaces),
         artifacts=artifacts,
         controlled_messages=controlled,
+        tool_names=spec.tools.tool_names,
     )
     evidence = bind_observations(
         evidence,
@@ -212,11 +213,13 @@ def save_bundle_files(files: Mapping[str, bytes], directory: Path) -> dict[str, 
 
 
 def with_seed_facts(evidence: SessionEvidence, seed: Mapping[str, JsonValue]) -> SessionEvidence:
-    """Add what seed observed: the working directory, and the initial workspace diff when it was taken."""
+    """Add what seed observed: the working directory, and the workspace diffs it took (initially, and after
+    restoring a continuation's prefix)."""
     if seed.get("workdir") is not None:
         evidence.facts.setdefault("workdir", seed["workdir"])
-    if "workspace_initial_diff" in seed:
-        evidence.facts["workspace_initial_diff"] = seed["workspace_initial_diff"]
+    for name in ("workspace_initial_diff", "workspace_restored_diff"):
+        if name in seed:
+            evidence.facts[name] = seed[name]
     return evidence
 
 

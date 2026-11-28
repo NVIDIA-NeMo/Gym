@@ -70,8 +70,11 @@ def _judge_unit(
     judge: Judge,
     *,
     question: str | None = None,
+    instruction_step: int | None = None,
 ) -> JudgeDecision:
-    shown = render(steps, context, index, judge.config, **render_options(check.parameters))
+    shown = render(
+        steps, context, index, judge.config, instruction_step=instruction_step, **render_options(check.parameters)
+    )
     timing = {"n_steps": len(steps) - index} if context == "after_event" and index is not None else {}
     if check.instruction is not None:
         timing["instruction"] = check.instruction
@@ -113,13 +116,17 @@ def _evaluate(
         for _, index in selected:
             if run_mode:
                 if check.kind == "judge":
-                    # A rule that takes effect mid-run is shown the run from the step it arrived at.
-                    kind = "after_event" if start is not None else context or "run"
-                    units.append(
-                        Unit(
-                            where, None, _judge_unit(check, steps, kind, start if start is not None else index, judge)
-                        )
-                    )
+                    if start is None:
+                        # A rule in effect from the session start is shown its context; `whole_run` is not read.
+                        decision = _judge_unit(check, steps, context or "run", index, judge)
+                    elif parameters.get("whole_run"):
+                        # A rule that takes effect mid-run and asks for the whole run is shown all of it, with a
+                        # line before the step it arrived at.
+                        decision = _judge_unit(check, steps, "run", None, judge, instruction_step=start)
+                    else:
+                        # A rule that takes effect mid-run is shown the run from the step it arrived at.
+                        decision = _judge_unit(check, steps, "after_event", start, judge)
+                    units.append(Unit(where, None, decision))
                     continue
                 if check.kind == "order" and start is not None:
                     preceding = sum(
@@ -173,15 +180,21 @@ def _evaluate(
                 changed = changed_files(steps, index - 1) if context == "message_with_changed_files" else None
                 if context == "message_with_changed_files" and not changed:
                     continue
-                # The marks around a changed file's path are checked by code before the judge sees the message.
+                # The marks a rule sets in `mark_parts`, around a changed file's path or a code reference, are checked
+                # by code before the judge sees the message. Without `mark_parts` the judge alone grades them.
                 marks = parameters.get("mark_parts") or {}
+                bad = []
                 if parameters.get("marks") == "changed_file" and marks:
                     bad = text.changed_file_marks(content, changed or [], marks["path"])
-                    if bad:
-                        units.append(
-                            Unit(where, index, _decision(False, "marks (checked by code): " + "; ".join(bad[:3])))
-                        )
-                        continue
+                elif parameters.get("marks") == "code_reference" and marks:
+                    bad = text.code_reference_marks(
+                        content, name_mark=marks.get("name"), location_mark=marks.get("location")
+                    )
+                if bad:
+                    units.append(
+                        Unit(where, index, _decision(False, "marks (checked by code): " + "; ".join(bad[:3])))
+                    )
+                    continue
                 decision = _judge_unit(check, steps, context or "message", index, judge)
             else:
                 ok, why = TEXT_CHECKERS[check.kind](content, value, parameters, step, facts)

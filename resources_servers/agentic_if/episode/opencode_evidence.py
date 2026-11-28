@@ -43,6 +43,12 @@ def refused(tool: str, status: object, error: object) -> bool:
     return status == "error" and str(error).startswith("The %s tool was called with invalid arguments" % tool)
 
 
+def dispatch_rejected(state: Mapping[str, JsonValue]) -> bool:
+    """The profile plugin refused the call before running it: the model wrote the hidden ID of a tool the row renames
+    (``if-profile.mjs``). The evidence marks such a call `rejected`."""
+    return _object(_object(state.get("metadata")).get("nemo_gym_profile")).get("dispatch_rejected") is True
+
+
 def _object(value: object) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], value) if isinstance(value, dict) else {}
 
@@ -102,10 +108,13 @@ def opencode_evidence(
     interfaces: Mapping[str, Mapping[str, JsonValue]] | None = None,
     artifacts: Mapping[str, str] | None = None,
     controlled_messages: frozenset[tuple[str, str]] = frozenset(),
+    tool_names: Mapping[str, str] | None = None,
 ) -> SessionEvidence:
     """Capture grouped messages, correlated tool results and OpenCode's child sessions.
 
     ``interfaces`` contains trusted, already-selected installed interface definitions.
+    ``tool_names`` is the row's selection: the name the model sees for each built-in tool. A call's ``model_tool`` is
+    that name until the model call that made it is bound (``bind_observations``); a restored prefix's calls keep it.
     ``expected_sessions`` comes from the agent's session inventory so an absent
     delegated export cannot masquerade as an empty child. A cut prefix may be
     complete evidence without being a completed task.
@@ -203,10 +212,12 @@ def opencode_evidence(
                         call_id=call_id,
                         invocation_id=session_id,
                         tool=tool,
-                        model_tool=tool,
+                        model_tool=(tool_names or {}).get(tool, tool),
                         model_args=model_args,
                         args=_arguments(tool, state, model_args, (interfaces or {}).get(tool, {})),
-                        rejected=tool == "invalid" or refused(tool, state.get("status"), state.get("error")),
+                        rejected=tool == "invalid"
+                        or refused(tool, state.get("status"), state.get("error"))
+                        or dispatch_rejected(state),
                     )
                 )
                 if state.get("status") not in {"completed", "error"}:

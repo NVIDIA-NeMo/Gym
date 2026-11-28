@@ -62,8 +62,9 @@ def _spec(value: Parameters) -> dict[str, JsonValue]:
     spec = {"tool": value.get("tool", "any")}
     if value.get("arg"):
         spec["arg"] = value["arg"]
-    if value.get("changes_repo") is not None:  # run.call_matches: whether the call changed the repository
-        spec["changes_repo"] = value["changes_repo"]
+    for key in ("changes_repo", "writes_file"):  # run.call_matches: whether the call changed the repository, any file
+        if value.get(key) is not None:
+            spec[key] = value[key]
     return spec
 
 
@@ -73,10 +74,11 @@ BASH_WRITES_MODES = ("never", "must", "max")  # the modes that count matching ca
 def check_calls(
     steps: list[Step], value: Parameters, check: Parameters, facts: Facts, start: int = 0
 ) -> list[Outcome]:
-    """How the matching calls (value: tool, arg, changes_repo) are made, by `mode`: `must` (one at least), `never`,
-    `only` (no call of another tool), `max` and `per_message_max` (at most `n`, in the run or in one message), or
-    `together` (`n` matching calls in one message). With `bash_writes`, a bash call that visibly writes a file
-    outside what the value's path pattern allows matches too."""
+    """How the matching calls (value: tool, arg, changes_repo, writes_file) are made, by `mode`: `must` (one at least),
+    `never`, `only` (no call of another tool), `max` and `per_message_max` (at most `n`, in the run or in one message),
+    `together` (`n` matching calls in one message) or `alone` (a message that holds a matching call holds no other
+    call). With `bash_writes`, a bash call that visibly writes a file outside what the value's path pattern allows
+    matches too."""
     mode = value["mode"]
     calls = assistant_calls(steps, start)
     spec = _spec(value)
@@ -140,6 +142,18 @@ def check_calls(
                 per_msg[m] = per_msg.get(m, 0) + 1
         best = max(per_msg.values())
         return [(best >= need, "most matching calls in one message: %d (needs %d separate calls)" % (best, need))]
+    if mode == "alone":
+        # with writes_file: every file change goes alone in its message. Not applicable when no call matches.
+        if not hits:
+            return []
+        by_msg = {}
+        for _i, m, c in calls:
+            by_msg.setdefault(m, []).append(c)
+        for m, cs in by_msg.items():
+            hit = next((c for c in cs if call_matches(c, spec, facts)), None)
+            if hit is not None and len(cs) > 1:
+                return [(False, "message %d holds %s beside %d other call(s)" % (m, _show(hit), len(cs) - 1))]
+        return [(True, "every matching call is alone in its message")]
     raise ValueError("calls: unknown mode %r" % (mode,))
 
 
@@ -224,6 +238,32 @@ def shell_write_targets(call: Call, facts: Facts | None = None) -> list[tuple[st
         if (p, kind) not in out:  # one path may come twice: mkdir -p d && cp x d/
             out.append((p, kind))
     return out
+
+
+CONTENT_WRITE_KINDS = ("redirect", "tee", "in_place")  # the shell writes that put content into a file
+WRITE_WAYS = ("shell", "inline")
+
+
+def shell_content_writes(call: Call, facts: Facts | None = None, by: JsonValue = None) -> list[str]:
+    """The files a bash call writes content into, for an arg spec's `writes` (run.call_matches).
+
+    `by: shell`: the targets of redirects, tee and sed -i; `by: inline`: the files its inline scripts write
+    (inline_writes); both without `by`. Copying, moving, creating an empty file or a folder, and deleting write no
+    content. A relative path is read from the call's working folder, else the session's (facts['workdir']); an
+    absolute one without its . and .. parts.
+    """
+    ways = [by] if isinstance(by, str) else by or list(WRITE_WAYS)
+    if not isinstance(ways, list) or any(way not in WRITE_WAYS for way in ways):
+        raise ValueError("an arg spec's `by` is shell or inline, or a list of them, not %r" % (by,))
+    args = call.get("args") or {}
+    cmd = arg_value(args, "command")
+    if not isinstance(cmd, str):
+        return []
+    wd = arg_value(args, "workdir") or (facts or {}).get("workdir")
+    found = [p for p, kind in bash_write_targets(cmd, wd) if kind in CONTENT_WRITE_KINDS] if "shell" in ways else []
+    if "inline" in ways:
+        found += inline_writes(call)
+    return [_norm(p if p.startswith(("/", "~")) or not wd else posixpath.join(wd, p)) for p in found]
 
 
 _ONE_FILE_RE = re.compile(r"\^\(\?!(.+)\$\)$")
@@ -396,13 +436,21 @@ def check_after_event(
 ) -> list[Outcome]:
     """What the assistant does after the planted event (the step `start`; for a whole-run place, the check's `event`)
     until the user speaks again, by `then`: `no_calls_with_text` (it stops calling tools and answers in text),
-    {calls_avoid: spec or specs} (no matching call) or {calls_include: spec or specs} (a matching call that ran)."""
+    `no_calls` (no call at all: the same as {calls_avoid: {tool: any}}), {calls_avoid: spec or specs} (no matching
+    call) or {calls_include: spec or specs} (a matching call that ran). A `then` with both conditions grades each as a
+    unit of its own, so both must hold."""
     ev = event_index(steps, check.get("event")) if start is None else start
     if ev is None:
         return []
     then = value["then"]
-    if isinstance(then, dict) and len(then) != 1:
-        raise ValueError("after_event: `then` takes one condition, not %r" % (sorted(then),))
+    if then == "no_calls":
+        then = {"calls_avoid": {"tool": "any"}}
+    if isinstance(then, dict) and len(then) > 1:
+        return [
+            outcome
+            for key, spec in then.items()
+            for outcome in check_after_event(steps, {"then": {key: spec}}, check, facts, ev)
+        ]
     # the event binds until its session's user speaks again: "OK, go on" after a stop lifts it; a subagent's task
     # prompt, a user message of another session, does not
     session = steps[ev].get("session_id")

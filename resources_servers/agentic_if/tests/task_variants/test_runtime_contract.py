@@ -126,14 +126,29 @@ def test_edited_or_unsealed_inputs_are_rejected(edit):
             {"events": [EVENT | {"match": {"tool": "bash", "arg": {"field": "not_command", "regex": ".*"}}}]},
             "argument",
         ),
-        # A failure is the only planted event; any other action is rejected, never ignored.
-        ({"events": [EVENT | {"action": "replace"}]}, "action"),
-        ({"events": [EVENT | {"action": "append"}]}, "action"),
+        # A planted event fails, replaces or appends to a call's result; any other action is rejected, never ignored.
+        ({"events": [EVENT | {"action": "skip"}]}, "action"),
+        ({"events": [EVENT | {"action": "Replace"}]}, "action"),
     ],
 )
 def test_inconsistent_configuration_is_rejected(changes, match):
     with pytest.raises(ValidationError, match=match):
         spec(**changes)
+
+
+@pytest.mark.parametrize("action", ["replace", "append"])
+def test_a_replaced_or_appended_result_is_sealed_and_matched_like_a_failure(action):
+    event = {
+        "id": "build-down",
+        "match": {"tool": "bash", "arg": {"field": "command", "regex": "^make\\b"}},
+        "nth": 2,
+        "action": action,
+        "text": "Error: the build server is unreachable.",
+    }
+    row = runtime.seal_runtime_row(base_row(), spec(events=[event]))
+    assert row["agentic_if"]["events"] == [event]
+    assert runtime.validate_seed_runtime(row).events[0].action == action
+    assert runtime.validate_runtime(row).events[0].action == action
 
 
 GUARD = {"edit": {"unread": "Read {{path}} first.", "changed": "Read {{path}} again."}}
@@ -166,6 +181,25 @@ def test_a_read_first_guard_keeps_its_literal_placeholder():
     tools = {"tool_names": {"read": "read", "edit": "edit", "write": "write"}, "read_first": GUARD}
     parsed = runtime.validate_runtime(runtime.seal_runtime_row(base_row(), spec(tools=tools)))
     assert parsed.tools.read_first.root == GUARD
+
+
+def test_an_untracked_outcome_is_sealed_and_a_tracked_one_leaves_the_row_as_before():
+    tracked = runtime.seal_runtime_row(base_row(), spec())
+    # The default stays out of the sealed row, so rows sealed before the field existed keep their receipts.
+    assert "outcome_tracked" not in tracked["agentic_if"]
+    assert runtime.seal_runtime_row(base_row(), spec(outcome_tracked=True)) == tracked
+    assert runtime.validate_runtime(tracked).outcome_tracked is True
+    untracked = runtime.seal_runtime_row(base_row(), spec(outcome_tracked=False))
+    assert untracked["agentic_if"]["outcome_tracked"] is False
+    assert runtime.validate_runtime(untracked).outcome_tracked is False
+    # The receipt binds it: flipping it either way breaks the seal.
+    for row, flipped in ((tracked, False), (untracked, True)):
+        edited = deepcopy(row)
+        edited["agentic_if"]["outcome_tracked"] = flipped
+        with pytest.raises(ValueError, match="receipt"):
+            runtime.validate_runtime(edited)
+    with pytest.raises(ValidationError, match="outcome_tracked"):
+        spec(outcome_tracked="false")
 
 
 def test_package_task_references_are_rejected():
@@ -207,6 +241,8 @@ def continuation(**changes):
 
 
 def test_continuation_is_bound_to_task_and_tools_without_duplicating_messages():
+    from resources_servers.agentic_if.task_variants.builder import digest
+
     config = spec(continuation=continuation())
     row = runtime.seal_runtime_row(base_row(), config)
     parsed = runtime.validate_runtime(row)
@@ -216,6 +252,12 @@ def test_continuation_is_bound_to_task_and_tools_without_duplicating_messages():
         runtime.seal_runtime_row(base_row(), spec(continuation=continuation(source_task_sha256="0" * 64)))
     with pytest.raises(ValueError, match="source tools receipt"):
         runtime.seal_runtime_row(base_row(), spec(continuation=continuation(source_tools_sha256="0" * 64)))
+    # The receipt covers the names the model saw: the same prefix under an alias is another row.
+    plain = {"tool_names": {"bash": "bash"}}
+    bound = continuation(source_tools_sha256=digest(spec(tools=plain).tools.model_dump(mode="json")))
+    runtime.seal_runtime_row(base_row(), spec(tools=plain, continuation=bound))
+    with pytest.raises(ValueError, match="source tools receipt"):
+        runtime.seal_runtime_row(base_row(), spec(tools={"tool_names": {"bash": "shell"}}, continuation=bound))
 
 
 @pytest.mark.parametrize(
@@ -265,6 +307,17 @@ def test_an_omitted_system_prompt_is_valid_and_an_empty_one_is_refused():
     row["responses_create_params"]["input"].insert(0, {"role": "system", "content": ""})
     with pytest.raises(ValueError, match="system message needs text"):
         runtime.seal_runtime_row(row, runtime.RuntimeSpec(harness="opencode", task_backend="swe"))
+
+
+def test_a_row_that_renames_tools_needs_a_system_message():
+    # OpenCode's own system prompt, kept without one, names the built-in tools.
+    row = base_row()
+    row["responses_create_params"]["input"].pop(0)
+    renamed = spec(tools={"tool_names": {"bash": "shell", "read": "read"}})
+    with pytest.raises(ValueError, match="renames tools needs a system message"):
+        runtime.seal_runtime_row(row, renamed)
+    runtime.seal_runtime_row(row, spec(tools={"tool_names": {"bash": "bash", "read": "read"}}))
+    runtime.validate_runtime(runtime.seal_runtime_row(base_row(), renamed))
 
 
 def planted_continuation():

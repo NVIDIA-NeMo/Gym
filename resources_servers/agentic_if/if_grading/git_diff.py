@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Repository paths in Git binary/unified diff sections."""
+"""Repository paths in Git binary/unified diff sections, and whether two patches say the same about the files."""
 
 import re
 
@@ -84,3 +84,27 @@ def patch_section_paths(section: str) -> tuple[str | None, str | None]:
     if "deleted file mode" in head:
         return p, None
     return p, p
+
+
+def workspace_patches_equal(left: str, right: str) -> bool:
+    """Compare recorded Git patches, allowing only compatible object-ID abbreviations.
+
+    Git's default abbreviation length depends on repository configuration. It is
+    not a file-content difference. Keep every other line (including modes, binary
+    bodies, and no-newline markers) exact; even index IDs must agree by prefix.
+    """
+    if left == right:
+        return True
+    first, second = left.splitlines(), right.splitlines()
+    if len(first) != len(second):
+        return False
+    index = re.compile(r"index ([0-9a-f]{4,64})\.\.([0-9a-f]{4,64})( [0-7]{6})?")
+    for a, b in zip(first, second, strict=True):
+        if a == b:
+            continue
+        x, y = index.fullmatch(a), index.fullmatch(b)
+        if x is None or y is None or x[3] != y[3]:
+            return False
+        if any(not (x[k].startswith(y[k]) or y[k].startswith(x[k])) for k in (1, 2)):
+            return False
+    return True
