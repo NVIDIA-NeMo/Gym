@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from harbor.llms.base import ContextLengthExceededError
 
 import nemo_gym.client.http_client
 from nemo_gym.agents import (
@@ -1476,6 +1477,44 @@ async def test_nemo_gym_llm_classifies_endpoint_failures(exc, expected):
     else:
         with pytest.raises(type(error)):
             await llm.call("prompt")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body,overflow",
+    [
+        (
+            b'{"error": {"message": "maximum context length", "type": "BadRequestError", "code": "context_length_exceeded"}}',
+            True,
+        ),
+        (b'{"error": {"message": "bad tool schema", "type": "BadRequestError", "code": 400}}', False),
+        (b"not json", False),
+    ],
+)
+async def test_nemo_gym_llm_propagated_context_overflow_is_harbors_context_error(body, overflow):
+    error = _response_error(status=400, message="Bad Request")
+    error.response_content = body
+
+    class Client:
+        async def create_response(self, **kwargs):
+            raise error
+
+    llm = NeMoGymLLM(
+        client=Client(),
+        model_name="policy_model",
+        model_context_limit=1000,
+        model_output_limit=None,
+        llm_request_timeout=1,
+    )
+    if overflow:
+        with pytest.raises(ContextLengthExceededError) as excinfo:
+            await llm.call("prompt")
+        assert excinfo.value.__cause__ is error
+        assert llm._num_compactions == 1
+    else:
+        with pytest.raises(type(error)):
+            await llm.call("prompt")
+        assert llm._num_compactions == 0
 
 
 @pytest.mark.asyncio
