@@ -2091,3 +2091,117 @@ class TestCollateTypedTaskRows:
         other = self.TASK | {"task_id": {"taskset": "other", "task_id": "a:1"}}
         with raises(ValueError, match="differs from the dataset taskset"):
             self._collate(tmp_path, monkeypatch, [other])
+
+
+class TestDatasetInterpolations:
+    """Dataset entries may interpolate top-level keys; the typed server config sees resolved values.
+
+    Data preparation and collation read datasets from the typed server instance config, which was
+    built from an unresolved container, so a `${...}` reached them as a literal string: an
+    interpolated jsonl_fpath failed with FileNotFoundError and an interpolated num_repeats failed
+    the int validation (an almost-server error at parse time).
+    """
+
+    ROWS = [
+        {"responses_create_params": {"input": []}, "question": "q1"},
+        {"responses_create_params": {"input": []}, "question": "q2"},
+    ]
+
+    def _global_config(self, dataset: dict, **top_level) -> DictConfig:
+        # The real parse path that `gym eval run` uses, minus the command line, env.yaml and port probing.
+        parser_config = nemo_gym.config.global_config.GlobalConfigDictParserConfig
+        return GlobalConfigDictParser().parse(
+            parser_config(
+                initial_global_config_dict=DictConfig(
+                    {
+                        **parser_config.NO_MODEL_GLOBAL_CONFIG_DICT,
+                        **top_level,
+                        "my_rs": {
+                            "resources_servers": {
+                                "impl": {"entrypoint": "app.py", "domain": "math", "datasets": [dataset]},
+                            }
+                        },
+                    }
+                ),
+                dotenv_path=None,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def _server_and_datasets(self, tmp_path: Path, global_config_dict: DictConfig):
+        cfg = TrainDataProcessorConfig(output_dirpath=str(tmp_path / "out"), mode="example_validation")
+        (rs,) = TrainDataProcessor().load_and_validate_server_instance_configs(cfg, global_config_dict)
+        return rs, rs.datasets
+
+    def test_interpolated_jsonl_fpath_resolves(self, tmp_path, monkeypatch) -> None:
+        _dataset(tmp_path, "bench_v1", self.ROWS)
+        dataset = {"name": "bench", "type": "example", "jsonl_fpath": "${data_dir}/bench_${version}.jsonl"}
+        global_config_dict = self._global_config(dataset, data_dir=str(tmp_path), version="v1")
+
+        rs, (d,) = self._server_and_datasets(tmp_path, global_config_dict)
+        assert d.jsonl_fpath == str(tmp_path / "bench_v1.jsonl")
+        (typed,) = [
+            instance
+            for instance in GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
+            if instance.name == "my_rs"
+        ]
+        assert typed.datasets[0].jsonl_fpath == d.jsonl_fpath
+        # The file is actually read: collation raised FileNotFoundError on the literal string.
+        monkeypatch.chdir(tmp_path)
+        (path,) = TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=[rs], output_dir=tmp_path / "collated"
+        )
+        assert [json.loads(line)["question"] for line in path.read_text().splitlines()] == ["q1", "q2"]
+
+    def test_interpolated_num_repeats_validates_and_takes_effect(self, tmp_path, monkeypatch) -> None:
+        fpath = _dataset(tmp_path, "bench", self.ROWS)["jsonl_fpath"]
+        dataset = {"name": "bench", "type": "example", "jsonl_fpath": fpath, "num_repeats": "${repeats}"}
+        global_config_dict = self._global_config(dataset, repeats=3)
+
+        rs, (d,) = self._server_and_datasets(tmp_path, global_config_dict)
+        assert d.num_repeats == 3
+        monkeypatch.chdir(tmp_path)
+        (path,) = TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=[rs], output_dir=tmp_path / "collated"
+        )
+        assert [json.loads(line)["question"] for line in path.read_text().splitlines()] == ["q1"] * 3 + ["q2"] * 3
+
+    def test_config_without_interpolations_is_unchanged(self, tmp_path) -> None:
+        from nemo_gym.config.config_types import _container_with_resolved_datasets
+
+        fpath = _dataset(tmp_path, "bench", self.ROWS)["jsonl_fpath"]
+        dataset = {"name": "bench", "type": "example", "jsonl_fpath": fpath, "num_repeats": 2}
+        global_config_dict = self._global_config(dataset)
+        node = global_config_dict["my_rs"]
+        assert _container_with_resolved_datasets(node) == OmegaConf.to_container(node)
+
+        _, (d,) = self._server_and_datasets(tmp_path, global_config_dict)
+        assert d.model_dump() == DatasetConfig.model_validate(dataset).model_dump()
+
+    def test_only_datasets_are_resolved_and_unresolvable_datasets_are_kept(self) -> None:
+        from nemo_gym.config.config_types import _container_with_resolved_datasets
+
+        root = OmegaConf.create(
+            {
+                "suffix": "x",
+                "my_rs": {
+                    "resources_servers": {
+                        "impl": {
+                            "entrypoint": "app.py",
+                            "description": "${suffix}",
+                            "datasets": [{"name": "d", "type": "example", "jsonl_fpath": "${suffix}.jsonl"}],
+                        }
+                    }
+                },
+            }
+        )
+        impl = _container_with_resolved_datasets(root["my_rs"])["resources_servers"]["impl"]
+        assert impl["datasets"][0]["jsonl_fpath"] == "x.jsonl"
+        assert impl["description"] == "${suffix}"
+
+        # A standalone block cannot resolve a top-level key: kept as it was, to fail where it is used.
+        standalone = OmegaConf.create(OmegaConf.to_container(root["my_rs"]))
+        impl = _container_with_resolved_datasets(standalone)["resources_servers"]["impl"]
+        assert impl["datasets"][0]["jsonl_fpath"] == "${suffix}.jsonl"
