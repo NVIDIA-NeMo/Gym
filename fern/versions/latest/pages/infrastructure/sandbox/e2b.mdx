@@ -209,6 +209,18 @@ carry the E2B sandbox ID for reconnection through another configured provider in
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
 
+For `operations.new_sandbox_grace_s` seconds after create, the provider retries calls that a
+sandbox answers as if it were gone. An AgentEnv gateway can briefly answer 404 "sandbox
+assignment not found" for a running sandbox, and a new VM can briefly refuse connections (502)
+during a create wave. File reads, file writes and close retry both errors. Command starts retry
+only the 404, because a 502 can come after the sandbox received the command. Command-start retries
+also stay inside the command's `timeout_s`: a retry gets only the time that is left, and none is
+sent after the deadline. Create also waits inside the grace period until the sandbox answers a
+health check, so the first command does not meet a sandbox that is still starting. This costs
+one extra request for each create, and never fails the create. With `create.reachable_timeout_s`
+set, its no-op command probe runs in place of the health check. During the grace period, `status()` reports a sandbox that
+the control plane does not find as `UNKNOWN`, not `STOPPED`. Set it to `0` to turn this off.
+
 `status()` reads the sandbox record from E2B's control plane (`GET /sandboxes/{id}`): `RUNNING`
 means the service reports the sandbox as running, not that the guest passed a health check.
 An E2B-compatible gateway must serve that endpoint, or status cannot report the real state.
@@ -392,7 +404,7 @@ as `{"files", "processes"}` (read it with `provider_capabilities(provider)`).
 | `snapshots.keep_guest_clock: true` | AgentENV only. A sandbox created from a snapshot keeps the wall clock the snapshot was taken at (`customExtensionParams: {keepGuestClock: true}`, sent with `create.custom_extension_params`), so a harness that continues in it sees no jump in time. The clock then lags real time by the time the snapshot sat unused: after a long gap, TLS checks and requests signed with the time (S3 allows 15 minutes) can fail in the sandbox. Creates from a template never send it. |
 | `create.renew_ttl_s` | The [sandbox lease](/about/concepts/key-terminology), under the key [OpenSandbox](/infrastructure/sandbox/opensandbox) uses: create with this timeout and renew it every third of a lease, so the sandboxes of a process that died end one lease later. Needs `create.timeout_s`. |
 | `create.restore_login_env: true` | Write a login-shell hook into each new sandbox so commands keep the `PATH` their image declares (a Debian image's `/etc/profile` resets it). Off by default, on in `agentenv.yaml`. |
-| `create.reachable_timeout_s` | After a create, run a no-op command until the gateway reaches the new sandbox (it can answer 502 "could not be reached" or 404 at first), for up to this many seconds; a sandbox still unreachable is killed and the create fails. Unset hands the sandbox over at once. |
+| `create.reachable_timeout_s` | After a create, run a no-op command until the gateway reaches the new sandbox (it can answer 502 "could not be reached" or 404 at first), for up to this many seconds; a sandbox still unreachable is killed and the create fails. Unset waits only for a health check inside `operations.new_sandbox_grace_s`, and hands the sandbox over either way. |
 | `create.auto_resume: false` | Kill at timeout. Required on AgentENV, which otherwise keeps timed-out sandboxes paused. |
 
 `nemo_gym/sandbox/providers/e2b/configs/agentenv.yaml` is a ready config for an AgentENV cell. It
