@@ -237,6 +237,23 @@ async def test_a_retry_copies_over_read_only_skills_an_interrupted_copy_left(loc
     await _close_seeded_session(local_sandbox.sandbox, session_dir)
 
 
+async def test_a_session_whose_skills_copy_was_stopped_before_its_repair_still_closes(
+    local_sandbox, read_only_skills
+) -> None:
+    """A seed whose copy timed out closes its session without copying again. The close removes the read-only skills
+    the copy left and releases the environment's sandbox."""
+    source_modes = _modes(read_only_skills)
+    session_dir = local_sandbox.root / "session"
+    destination = session_dir / "config" / "skills"
+    # What the stopped copy left: the task's skills with the task's modes.
+    shutil.copytree(read_only_skills, destination)
+    assert _lacking_owner_access(destination)
+
+    await _close_seeded_session(local_sandbox.sandbox, session_dir)
+
+    assert _modes(read_only_skills) == source_modes
+
+
 async def test_paths_with_spaces_and_shell_characters_are_copied_as_written(local_sandbox) -> None:
     source = _skills_folder(local_sandbox.root, "my skills; $(touch pwned)")
     local_sandbox.context.write_text(json.dumps({"skills_dir": str(source)}))

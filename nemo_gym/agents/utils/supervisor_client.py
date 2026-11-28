@@ -413,11 +413,16 @@ async def remove_session_directory(
     Retire the directory atomically before unlinking its claim. Otherwise a
     delayed launch could win the claim while recursive deletion is in progress.
     A failed removal leaves the retired path available for a close retry.
+
+    A folder in it that its owner cannot write, such as task skills copied
+    read-only by a copy that was stopped before it repaired their modes, is made
+    writable and the removal tried once more.
     """
-    retired = f"{session_dir}.closed"
+    retired = quote(f"{session_dir}.closed")
     result = await sandbox.exec(
         f"if [ -d {quote(session_dir)} ]; then "
-        f"mv {quote(session_dir)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
+        f"mv {quote(session_dir)} {retired} || exit 1; fi; "
+        f"rm -rf -- {retired} 2>/dev/null || {{ chmod -R u+rwX -- {retired} 2>/dev/null; rm -rf -- {retired}; }}",
         cwd=control_cwd(session_dir=session_dir, workdir=workdir),
         timeout_s=timeout,
     )
