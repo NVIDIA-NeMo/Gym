@@ -4360,6 +4360,20 @@ def test_a_completed_tool_call_that_prints_the_marker_is_not_a_tool_failure(tmp_
     assert finding.detail["count"] == 1
 
 
+def test_a_tool_failure_marker_is_not_counted_when_the_tool_ran_in_the_same_rollout(tmp_path: Path) -> None:
+    # OpenCode returns the bare marker when the search path does not exist; other grep or glob calls still complete.
+    missing_path = _tool_call(1, "ripgrep execution failed") | {"tool_name": "glob", "status": "failed"}
+    ran = _tool_call(2, "No files found") | {"tool_name": "grep", "status": "completed"}
+    other_tool_ran = _tool_call(3, "ok") | {"tool_name": "bash", "status": "completed"}
+
+    _, findings = _tool_call_failed_findings(tmp_path, [missing_path, ran])
+    assert findings == []
+
+    _, findings = _tool_call_failed_findings(tmp_path, [missing_path, other_tool_ran])
+    [finding] = findings
+    assert finding.detail["count"] == 1
+
+
 def test_a_trajectory_without_failed_tool_outputs_has_no_tool_call_failed_finding(tmp_path: Path) -> None:
     _, findings = _tool_call_failed_findings(tmp_path, [_tool_call(1, "3 matches"), _tool_call(2, "")])
     assert findings == []
