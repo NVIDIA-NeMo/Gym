@@ -331,6 +331,10 @@ through the same command builder used locally. This fallback is sandbox-only:
 local `/run` uses only its explicit `skills_ref`, and unseeded `/v1/responses` does
 not pick up configured skills. The collector's
 run-level skills option remains unsupported for materialized task rows.
+`SandboxAccess.env` is forwarded to Claude Code, except `ANTHROPIC_*`,
+`CLAUDE_CODE_*` and `NEMO_GYM_*` variables, the variables that the agent sets
+itself, and `PWD`, which stays the task workdir. A forwarded entry replaces a
+variable of the same name of the sandbox. Client settings belong in `extra_env`.
 
 Sandbox requests accept one user text prompt (a string or a single user message),
 optionally preceded by one system message. Assistant/developer messages, multiple

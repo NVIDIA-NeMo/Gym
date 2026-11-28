@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -22,23 +23,26 @@ from responses_api_agents.claude_code_agent.tests.test_sandbox import seed
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
 
 
-def runner_command(tmp_path: Path, code: str) -> list[str]:
-    """Stage a stub CLI through stage_activation into a local session directory."""
+def stage(tmp_path: Path, command: list[str], *, access_env: dict[str, str] | None = None) -> list[str]:
+    """Stage ``command`` through stage_activation into a local session directory, and return the runner's argv.
+
+    ``access_env`` is what the owner of the borrowed sandbox states for the harness in ``SandboxAccess.env``.
+    """
 
     async def upload(source, target):
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
 
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, tmp_path / HARNESS_RUNNER_FILE)
-    child = tmp_path / "child.py"
-    child.write_text(code)
+    request = seed()
+    request.sandbox_access.env = access_env or {}
     state = adapter.ClaudeCodeSandboxSession(
-        request=seed(),
+        request=request,
         runtime="/runtime",
         session=SimpleNamespace(session_dir=str(tmp_path), sandbox=SimpleNamespace(upload=upload)),
     )
     payload = {
-        "command": [sys.executable, str(child)],
+        "command": command,
         "cwd": str(tmp_path),
         "env": {"GYM_VALUE": "it's set"},
         "settings": {},
@@ -46,6 +50,13 @@ def runner_command(tmp_path: Path, code: str) -> list[str]:
         "skills_path": None,
     }
     return asyncio.run(state.stage_activation(payload)).argv
+
+
+def runner_command(tmp_path: Path, code: str) -> list[str]:
+    """Stage a stub CLI through stage_activation into a local session directory."""
+    child = tmp_path / "child.py"
+    child.write_text(code)
+    return stage(tmp_path, [sys.executable, str(child)])
 
 
 def test_large_json_stdout_cannot_be_corrupted_by_interleaved_stderr(tmp_path):
@@ -98,3 +109,66 @@ time.sleep(60)
         if process.poll() is None:
             process.kill()
             process.communicate(timeout=5)
+
+
+def test_sandbox_access_env_reaches_claude_except_reserved_prefixes(tmp_path):
+    access_env = {
+        "TASK_API_TOKEN": "task value",
+        "LANG": "C",
+        "PATH": f"/task-bin:{os.environ['PATH']}",
+        "CLAUDE_PROJECT_DIR": "/task-project",
+        "GYM_VALUE": "must-not-apply",
+        "ANTHROPIC_BASE_URL": "http://must-not-apply",
+        "CLAUDE_CODE_USE_BEDROCK": "must-not-apply",
+        "NEMO_GYM_SUPERVISOR": "must-not-apply",
+    }
+    report = "".join(f'printf "%s|" "${{{name}-unset}}"; ' for name in access_env)
+    command = stage(tmp_path, ["bash", "-c", report], access_env=access_env)
+    # The sandbox's own environment; the process supervisor sets the marker for the harness.
+    env = {key: value for key, value in os.environ.items() if key not in access_env}
+    env |= {"LANG": "C.UTF-8", "PATH": os.environ["PATH"], "NEMO_GYM_SUPERVISOR": "marker"}
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    # An entry replaces the sandbox's value of the same name, and the adapter's own variable keeps its value.
+    path = f"/task-bin:{os.environ['PATH']}"
+    assert (tmp_path / "events.jsonl").read_text() == f"task value|C|{path}|/task-project|it's set|unset|unset|marker|"
+
+
+@pytest.mark.parametrize("name", ["command", "cwd", "env", "stdout"])
+def test_sandbox_access_env_entry_cannot_replace_a_runner_parameter(tmp_path, name):
+    value = str(tmp_path / "elsewhere")
+    report = f'printf "%s|" "$PWD" "$GYM_VALUE" "${name}"'
+    command = stage(tmp_path, ["bash", "-c", report], access_env={name: value})
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    # The runner started the staged command in its working directory, with the adapter's variable and the staged
+    # output file.
+    assert (tmp_path / "events.jsonl").read_text() == f"{tmp_path}|it's set|{value}|"
+
+
+def test_sandbox_access_env_pwd_entry_leaves_pwd_at_the_workdir(tmp_path):
+    # printenv shows the variable as Claude Code receives it; a shell would set PWD again when it starts.
+    command = stage(tmp_path, ["printenv", "PWD"], access_env={"PWD": "/nowhere"})
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "events.jsonl").read_text() == f"{tmp_path}\n"
+
+
+def test_sandbox_access_env_path_entry_does_not_hide_the_staged_command(tmp_path):
+    # The CLI is staged by its absolute path, so a PATH entry that holds only a task directory still starts it.
+    printenv = shutil.which("printenv")
+    command = stage(tmp_path, [printenv, "PATH"], access_env={"PATH": "/task-bin"})
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "events.jsonl").read_text() == "/task-bin\n"
+
+
+def test_sandbox_access_env_entry_with_an_invalid_name_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="Invalid environment variable names"):
+        stage(tmp_path, ["true"], access_env={"-i": "value"})
+
+
+@pytest.mark.parametrize("access_env", [None, {"ANTHROPIC_BASE_URL": "http://must-not-apply"}])
+def test_seed_without_forwarded_env_stages_the_command_unchanged(tmp_path, access_env):
+    stage(tmp_path, ["claude", "-p"], access_env=access_env)
+    assert "command=(claude -p)\n" in (tmp_path / "params.sh").read_text()
