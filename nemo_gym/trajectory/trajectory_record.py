@@ -110,6 +110,20 @@ class TrajectoryResponseMetadata(ObservationModel):
     output_budget_refit: Optional[OutputBudgetRefit] = None
 
 
+class ModelCallPayloadRef(ObservationModel):
+    """The model-call capture line that holds a request a rollout row does not copy.
+
+    Rows collected with ``model_call_payloads: reference`` carry this in place of ``TrajectoryModelCall.request``
+    and ``TrajectoryTurn.question``. ``capture_file`` is relative to the run's ``model_call_capture_dir`` and
+    ``call_index`` is the line's position in it. ``nemo_gym.rollouts.model_calls.resolve_model_call_payloads``
+    restores the omitted fields.
+    """
+
+    capture_file: str = Field(min_length=1)
+    call_index: int = Field(ge=0)
+    model_call_id: Optional[str] = None
+
+
 class TrajectoryModelCall(ObservationModel):
     model_call_id: Optional[str] = None
     agent_instance: Optional[str] = Field(default=None, min_length=1)
@@ -124,6 +138,17 @@ class TrajectoryModelCall(ObservationModel):
     response: Optional[Any] = None
     response_metadata: TrajectoryResponseMetadata = Field(default_factory=TrajectoryResponseMetadata)
     token_stats: TrajectoryTokenStats = Field(default_factory=TrajectoryTokenStats)
+    payload_ref: Optional[ModelCallPayloadRef] = Field(
+        default=None, description="Set when the row omits the request: the capture line that holds it."
+    )
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_reference(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.payload_ref is None:
+            result.pop("payload_ref", None)
+        return result
 
 
 class TrajectoryTurn(ObservationModel):
@@ -150,6 +175,9 @@ class TrajectoryTurn(ObservationModel):
     resolved: Optional[bool] = None
     step_count: int = Field(ge=0, description="Producer-reported cumulative step count within this invocation.")
     model_calls: list[ModelCallRef] = Field(default_factory=list)
+    payload_ref: Optional[ModelCallPayloadRef] = Field(
+        default=None, description="Set when the turn omits its question: the capture line whose request holds it."
+    )
 
     # Keep the model schema; a serializer return annotation would replace it.
     @model_serializer(mode="wrap")
@@ -157,6 +185,8 @@ class TrajectoryTurn(ObservationModel):
         result = handler(self)
         if self.activation_id is None:
             result.pop("activation_id", None)
+        if self.payload_ref is None:
+            result.pop("payload_ref", None)
         return result
 
 

@@ -1,10 +1,10 @@
 ---
 title: "Linear Model-Call Capture"
-description: "Why model-call capture grew with the square of an agent session, and the opt-in capture format that keeps its disk linear."
+description: "Why model-call capture grew with the square of an agent session, and the opt-in capture format and row payload placement that keep its disk linear and its memory bounded."
 ---
 This note explains why [model-call capture](/main/model-server/model-call-capture) grew with the square of a long agent
-session, and the opt-in setting that keeps it linear on disk: `model_call_capture_format: delta`. The default is
-unchanged.
+session, and the two opt-in settings that keep it linear on disk and bounded in memory:
+`model_call_capture_format: delta` and `model_call_payloads: reference`. Defaults are unchanged.
 
 ## The problem
 
@@ -15,6 +15,11 @@ capture file is about `0.7 × calls × last request size`. Codex also re-sends e
 A Terminal-Bench Science run (DeepSeek V4.1 Flash with Codex, 70 sessions of 8 hours) wrote 60 GB of captures in its
 first hour. One file reached 25.9 GB, with single requests of 90 MB. A text-only session grows by about 80 MB per hour;
 a session with screenshots by up to 26 GB per hour.
+
+When a rollout finished, the merge parsed its whole capture into memory, payloads included, even when the row kept
+none. The trajectory then copied each call's full input twice, into `ng_trajectory.model_calls[].request` and
+`turns[].question`. Rows reached 27 GB, and the Gym head swung between 59 and 112 GB of RSS assembling them until the
+host killed it.
 
 ## Delta capture format
 
@@ -72,14 +77,45 @@ are compared with the call it continues and replaced by the earlier objects when
 A line whose base or blob cannot be read is reported unreadable, like a damaged line. It is never rebuilt
 wrongly, and `capture_index` is still the line's position.
 
+## The finished-rollout merge
+
+The merge streams the capture. Unless the row keeps request payloads, it reads the metadata view, keeping only each
+call's response for the tool and turn joins. Its memory no longer grows with the conversation. A v2 trajectory
+(`trajectory_schema_version: "2.0"`) links each tool call to the response that requested it, so it reads responses
+even for a row that keeps no payloads; it no longer reads their requests to do so.
+
+## Where rows keep payloads
+
+`model_call_payloads` chooses what each rollout row copies, for `gym eval run` and `run_examples`:
+
+| Value | `model_calls[].request`, `turns[].question` | `model_calls[].response`, turn answers |
+|---|---|---|
+| `inline` (default) | Copied, as today | Copied |
+| `reference` | Omitted; `payload_ref` names the capture line | Copied |
+| `none` | Omitted | Omitted (as `include_model_call_payloads=False`) |
+
+`payload_ref` is `{capture_file, call_index, model_call_id}`, relative to the run's `model_call_capture_dir`.
+`nemo_gym.rollouts.resolve_model_call_payloads(trajectory, capture_dirs)` restores both omitted fields.
+Responses stay inline: each holds only its own call's output, so they grow linearly, and the health checks and the
+tool-request evidence read them.
+
+The one health check input that is a request, the opening of a conversation (to tell an overflow after an answer in
+the same conversation from one in another), is read from the capture. It is read only for chains that end on an
+overflow. Without a readable capture, that check is unobserved rather than flagged.
+
+`delete_model_call_capture` needs `inline`. ATIF export asks for referenced rows to be resolved first, and says how.
+
 ## Compatibility
 
-- The default stays `full`: lines are written as before.
+- The defaults stay `full` and `inline`: lines and rows are written as before.
 - Every reader in Gym accepts both formats. `CaptureStore.copy_full()` writes a self-contained full-format copy;
   the SWE-Together judge evidence uses it.
 - External readers of `*.capture.jsonl` lines need to handle `capture_format` lines, through `CaptureStore` or
   `scripts/replay_capture_delta.py`, before a run turns `delta` on.
 - Deleting a rollout's capture, including the collector's cleanup before a retry, also deletes its blob directory.
+- `payload_ref` is a new optional field of `TrajectoryModelCall` and `TrajectoryTurn`, written only in `reference`
+  mode. Older readers that forbid unknown fields reject such rows.
+- A `reference` row needs the run's capture directory to restore its requests: keep the directory with the rows.
 
 ## Measurements
 
@@ -92,6 +128,25 @@ These are real captures from the run above. Each was converted with `scripts/rep
 | `9-0` (screenshots) | 93 | 5.2 GB | 101 MB (42 blobs) | 51× | 35 s | 0.8 GB |
 | `4-0` (screenshots) | 286 | 13.3 GB | 151 MB (166 blobs) | 88× | 88 s | 0.6 GB |
 | `61-0` (screenshots) | 211 | 25.9 GB | 385 MB (128 blobs) | 67× | 173 s | 2.1 GB |
+
+The finished-rollout enrichment (merge, trajectory and `ng_perf`, then serializing the row) was also measured,
+with each measurement in its own process under the same 16 GB cap:
+
+| Capture | Code and payloads | Peak RSS | Time | Row |
+|---|---|---|---|---|
+| `9-0`, full format | before, inline | 10.5 GB | 15 s | 5.2 GB |
+| `9-0`, full format | before, none | 5.6 GB | 14 s | 0.5 MB |
+| `9-0`, full format | after, reference | 0.6 GB | 11 s | 4.4 MB |
+| `61-0`, full format | before, none | killed at 16 GB | — | — |
+| `61-0`, full format | after, reference | 1.7 GB | 58 s | 9.3 MB |
+| `61-0`, delta format | after, reference | 0.3 GB | 0.3 s | 9.3 MB |
+| `61-0`, either format | after, inline | killed at 16 GB | — | (26 GB of requests) |
+
+An `inline` row holds every call's full request by definition, so for long sessions only `reference` or `none`
+can keep rows bounded.
+
+The merge alone (`scripts/replay_capture_delta.py merge`) on `9-0` peaks at 0.5 GB in `reference` or `none` on the
+full format, and at 0.16 GB in `reference` on the delta format, against 5.5 GB in `inline` on either format.
 
 In a text-only session, about 90% of the delta bytes are each call's own output. Two thirds of that is the raw
 SSE text kept next to the reassembled response.

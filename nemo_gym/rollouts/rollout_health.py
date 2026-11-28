@@ -38,8 +38,11 @@ from nemo_gym.rollouts.health.checks import (
     _ROLLOUT_SPECS,
     _TASK_SPECS,
     CHECK_REGISTRY,
+    REFERENCED_CONVERSATION_HEADS,
+    PayloadUnavailable,
     _bind_policy_call_views,
     _canonical_trajectory,
+    _conversation_head,
     _ended_on_failed_call,
     _is_failed,
     _is_failed_attempt,
@@ -144,7 +147,36 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
 
 def _worker(payload: _WorkerInput) -> RolloutDigest:
     record, parse_error = _read_record(payload.line)
-    return evaluate_record(record, payload.ignored_checks, line=payload.line, parse_error=parse_error)
+    return evaluate_record(
+        record, payload.ignored_checks, line=payload.line, parse_error=parse_error, capture_dirs=payload.capture_dirs
+    )
+
+
+def _referenced_conversation_heads(capture_dirs: Sequence[Path]) -> Any:
+    """Read the openings (`_conversation_head`) of the requests ``payload_ref`` entries name.
+
+    Each capture file is read once, on the first reference into it, and only each call's opening is kept.
+    """
+    heads: dict[str, dict[int, tuple[str | None, Any]]] = {}
+
+    def read(ref: dict[str, Any]) -> Any:
+        capture_file, call_index = ref.get("capture_file"), ref.get("call_index")
+        if not isinstance(capture_file, str) or type(call_index) is not int:
+            raise PayloadUnavailable("malformed payload_ref")
+        if capture_file not in heads:
+            # Lazy: the capture store pulls in the model-server stack, which health workers do not need otherwise.
+            from nemo_gym.rollouts.model_calls import iter_capture_requests
+
+            heads[capture_file] = {
+                index: (model_call_id, _conversation_head({"request": request}))
+                for index, model_call_id, request in iter_capture_requests(capture_dirs, capture_file)
+            }
+        found = heads[capture_file].get(call_index)
+        if found is None or ref.get("model_call_id") not in (None, found[0]):
+            raise PayloadUnavailable(f"capture line {capture_file}:{call_index} is not readable")
+        return found[1]
+
+    return read
 
 
 def evaluate_record(
@@ -153,12 +185,29 @@ def evaluate_record(
     *,
     line: _LineSlice | None = None,
     parse_error: str | None = None,
+    capture_dirs: Sequence[Path] = (),
 ) -> RolloutDigest:
     """Evaluate every rollout-level check on one rollout record.
 
     The one code path behind both the post-run report (which reads ``record`` from a JSONL ``line``)
-    and live emission (which passes the in-memory result, so ``line`` is ``None``).
+    and live emission (which passes the in-memory result, so ``line`` is ``None``). ``capture_dirs`` lets the
+    checks read requests a row only references (``model_call_payloads: reference``); without them, a check that
+    needs such a request is unobserved.
     """
+    token = REFERENCED_CONVERSATION_HEADS.set(_referenced_conversation_heads(capture_dirs) if capture_dirs else None)
+    try:
+        return _evaluate_record(record, ignored_checks, line=line, parse_error=parse_error)
+    finally:
+        REFERENCED_CONVERSATION_HEADS.reset(token)
+
+
+def _evaluate_record(
+    record: dict[str, Any],
+    ignored_checks: frozenset[str],
+    *,
+    line: _LineSlice | None,
+    parse_error: str | None,
+) -> RolloutDigest:
     unreadable_identity = (
         f"__unreadable_record__:input-{line.source_index}:line-{line.line_number}" if line is not None else None
     )
@@ -258,6 +307,9 @@ def evaluate_record(
             unobserved.append(spec.id)
         try:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
+        except PayloadUnavailable:
+            # The check needs a request the row only references and no capture provides: not observed.
+            unobserved.append(spec.id)
         except Exception as exc:
             unobserved.append(spec.id)
             if "check_execution_error" not in ignored_checks:
@@ -281,6 +333,11 @@ def evaluate_record(
     identities = [identity for call in calls if (identity := _replay_identity(call)) is not None]
     duplicated = sum(count - 1 for count in Counter(identities).values() if count > 1)
     transcript_prompt, transcript_completion, _ = _transcript_tokens(record)
+    try:
+        ended_on_error = model_calls_observed and _ended_on_failed_call(calls)
+    except PayloadUnavailable:
+        # An overflow whose conversation cannot be compared counts as it would without request payloads.
+        ended_on_error = True
 
     return RolloutDigest(
         task_index=task_index,
@@ -309,7 +366,7 @@ def evaluate_record(
             for call in failed
         ),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
+        ended_on_error=ended_on_error,
         context_window_exceeded=_context_window_exceeded(record),
         verification_skipped=(
             record.get("verification_skipped") if isinstance(record.get("verification_skipped"), bool) else None
@@ -1005,7 +1062,7 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
                     if rollout_id in pending or store.incomplete_path_for(rollout_id).name in names:
                         break
                     if store.path_for(rollout_id).name in names:
-                        records, unreadable = read_available_model_call_records(store, rollout_id)
+                        records, unreadable = read_available_model_call_records(store, rollout_id, payloads=False)
                         if not unreadable:
                             calls = [
                                 record.model_dump(exclude={"request", "response", "request_raw", "response_raw"})
@@ -1081,6 +1138,7 @@ def run_health_checks(
         _WorkerInput(
             line=line,
             ignored_checks=ignored,
+            capture_dirs=tuple(model_call_capture_dirs),
         )
         for line in lines
     ]

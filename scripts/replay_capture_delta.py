@@ -19,10 +19,15 @@
 and checks that every rebuilt exchange equals its original line, byte for byte once serialized. The source is
 only read. It prints one JSON report: sizes, line counts, timings and the process's peak RSS after each phase.
 
-Run it on a large capture under a memory cap, in its own process, for example::
+``merge`` times the finished-rollout merge (``merge_model_call_capture_into_record``) on one capture, in one
+``model_call_payloads`` mode, and prints its time, the merged record's size and peak RSS.
+
+Run each measurement on a large capture under a memory cap, in its own process, for example::
 
     systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 --unit=capture-replay \\
         python scripts/replay_capture_delta.py convert /runs/x/model-calls/9-0.capture.jsonl --out-dir /tmp/delta
+    systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 --unit=capture-merge \\
+        python scripts/replay_capture_delta.py merge /tmp/delta 9-0 --payloads reference
 """
 
 import argparse
@@ -36,6 +41,7 @@ from typing import Any
 import orjson
 
 from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import merge_model_call_capture_into_record
 
 
 _CAPTURE_SUFFIX = ".capture.jsonl"
@@ -137,16 +143,43 @@ def _parses_to_dict(line: bytes) -> bool:
         return False
 
 
+def merge(capture_dir: Path, rollout_id: str, payloads: str) -> dict[str, Any]:
+    """Time the finished-rollout merge of one capture; return the report."""
+    record = {"_ng_rollout_id": rollout_id, "_ng_task_index": 0, "_ng_rollout_index": 0}
+    started = time.monotonic()
+    merge_model_call_capture_into_record(record, [capture_dir], payloads=payloads)
+    elapsed = time.monotonic() - started
+    capture = record.get("ng_model_call_capture") or {}
+    return {
+        "rollout_id": rollout_id,
+        "payloads": payloads,
+        "calls": len(capture.get("calls") or []),
+        "gaps": capture.get("gaps") or [],
+        "record_bytes": len(orjson.dumps(record, default=str)),
+        "merge_seconds": round(elapsed, 1),
+        "peak_rss_bytes": _peak_rss_bytes(),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     convert_parser = commands.add_parser("convert", help="Write a full-format capture as delta and verify it.")
     convert_parser.add_argument("source", type=Path, help="A <rollout_id>.capture.jsonl file in the full format.")
     convert_parser.add_argument("--out-dir", type=Path, required=True, help="Where to write the delta capture.")
+    merge_parser = commands.add_parser("merge", help="Time the finished-rollout merge of one capture.")
+    merge_parser.add_argument("capture_dir", type=Path, help="The capture directory, in either format.")
+    merge_parser.add_argument("rollout_id")
+    merge_parser.add_argument("--payloads", choices=("inline", "reference", "none"), default="inline")
     args = parser.parse_args(argv)
-    report = convert(args.source, args.out_dir)
+    if args.command == "convert":
+        report = convert(args.source, args.out_dir)
+        ok = report["mismatch_count"] == 0
+    else:
+        report = merge(args.capture_dir, args.rollout_id, args.payloads)
+        ok = True
     print(json.dumps(report, indent=2))
-    return 0 if report["mismatch_count"] == 0 else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

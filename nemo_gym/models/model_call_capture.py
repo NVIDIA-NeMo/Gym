@@ -31,7 +31,7 @@ import re
 import shutil
 import time
 from collections.abc import Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
@@ -123,6 +123,9 @@ def note_finish_reason(request: Request, finish_reason: str | None) -> None:
     execution["finish_reason"] = finish_reason
 
 
+ModelCallPayloads = Literal["inline", "reference", "none"]
+
+
 class ModelCallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
@@ -132,6 +135,9 @@ class ModelCallCaptureConfig(BaseModel):
     # How a capture file stores each call: ``full`` lines (the default), or ``delta`` lines that store only what
     # earlier calls of the rollout did not already hold. See ``nemo_gym/models/capture_format.py``.
     model_call_capture_format: CaptureFormat = "full"
+    # Where rollout rows keep each call's request: ``inline`` copies it (the default), ``reference`` names its
+    # capture line instead, ``none`` keeps call metadata only.
+    model_call_payloads: ModelCallPayloads = "inline"
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -276,7 +282,9 @@ class CaptureStore:
             try:
                 yield from handle
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                # A reader abandoned mid-file is finalized late, maybe after its file; closing it unlocks too.
+                if not handle.closed:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _lines(self, rollout_id: str) -> Iterator[bytes]:
         """The non-empty lines of a rollout's capture, stripped."""
@@ -297,20 +305,23 @@ class CaptureStore:
         exchanges as read-only: later calls of the same rollout can share their objects.
         """
         reader = CaptureReader(self.blob_dir_for(rollout_id), payloads=payloads)
-        for capture_index, line in enumerate(self._lines(rollout_id)):
-            try:
-                parsed = orjson.loads(line)
-            except orjson.JSONDecodeError:
-                yield capture_index, None
-                continue
-            if not isinstance(parsed, dict):
-                yield capture_index, None
-                continue
-            try:
-                yield capture_index, reader.decode(parsed)
-            except CaptureDecodeError:
-                logger.debug("Model-call capture line %d of rollout %s cannot be rebuilt.", capture_index, rollout_id)
-                yield capture_index, None
+        # Closed here, not by the garbage collector, when the caller stops early, so the lock is released at once.
+        with closing(self._lines(rollout_id)) as lines:
+            for capture_index, line in enumerate(lines):
+                try:
+                    parsed = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    yield capture_index, None
+                    continue
+                if not isinstance(parsed, dict):
+                    yield capture_index, None
+                    continue
+                try:
+                    exchange = reader.decode(parsed)
+                except CaptureDecodeError:
+                    logger.debug("Capture line %d of rollout %s cannot be rebuilt.", capture_index, rollout_id)
+                    exchange = None
+                yield capture_index, exchange
 
     def read(self, rollout_id: str) -> list[dict[str, Any]]:
         """Every exchange of a rollout; raises on a line that cannot be read."""

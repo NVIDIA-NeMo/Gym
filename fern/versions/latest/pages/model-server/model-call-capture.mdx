@@ -269,7 +269,9 @@ to the cache); both are part of `tokens_in`. Gym reads cache writes from OpenAI'
 (Chat Completions), and from Anthropic's `cache_creation_input_tokens`.
 
 After successful [`ng_trajectory`](/main/observability/rollout-evidence#which-artifact-to-read) projection, attached calls
-omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
+omit request and response payloads; those remain in `CaptureStore`. With `model_call_payloads: reference`, the
+trajectory's calls and turns name each request's capture line in `payload_ref` instead of copying it (see
+[Store long sessions](#store-long-sessions)). If projection fails, payloads
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
 `multimodal_history_redacted` gap omit payload copies from `ng_trajectory`.
 
@@ -359,6 +361,7 @@ The CLI workflow above sets these top-level fields in Gym's [global config](/mai
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
 | `model_call_capture_format` | `str` | `full` | `full` stores each exchange whole. `delta` stores each request's history as the items earlier calls of the rollout did not hold, and large `data:` URLs once per rollout under `blobs/`. See [Store long sessions](#store-long-sessions). |
+| `model_call_payloads` | `str` | `inline` | What rollout rows copy from the capture. `inline` copies requests and responses, `reference` copies responses and names each request's capture line in `payload_ref`, `none` keeps call metadata only. |
 
 You can put the same settings in a YAML config instead:
 
@@ -399,13 +402,14 @@ separate capture directory for concurrent collection jobs whose indices can over
 ### Store long sessions
 
 An agent re-sends its whole conversation on every call, so a capture in the `full` format grows with the square of
-the session. A Codex session that re-sends its screenshots can write tens of gigabytes per hour. For long agentic
-runs, set the delta format:
+the session. A Codex session that re-sends its screenshots can write tens of gigabytes per hour, and rows that copy
+every request grow the same way. For long agentic runs, set both opt-in fields:
 
 ```yaml
 observability_enabled: true
 model_call_capture_dir: /absolute/path/to/model-calls
 model_call_capture_format: delta
+model_call_payloads: reference
 ```
 
 With `delta`, each line keeps a `capture_format` key that names an earlier line of the same file
@@ -414,8 +418,13 @@ that line's are listed in `inherited_keys`; large `data:` URLs live in `blobs/<r
 lists their JSON paths. Every Gym reader, including `CaptureStore.read()`, rebuilds full exchanges from both
 formats. A tool that reads `*.capture.jsonl` lines directly must handle `capture_format` lines, or read through
 `CaptureStore`; `CaptureStore.copy_full()` writes a self-contained `full` copy. Check the format on your own
-captures with `scripts/replay_capture_delta.py convert`. The design and measurements are in
-[Linear Model-Call Capture](/main/infrastructure/engineering-notes/linear-model-call-capture).
+captures with `scripts/replay_capture_delta.py convert`.
+
+With `reference`, `ng_trajectory.model_calls[].request` and `turns[].question` are replaced by `payload_ref`
+(capture file, call index and model call id). Restore them with
+`nemo_gym.rollouts.resolve_model_call_payloads(trajectory, [capture_dir])`. Keep the capture directory with the
+rows. `delete_model_call_capture` needs `inline`, and ATIF export needs the rows resolved first. The design and
+measurements are in [Linear Model-Call Capture](/main/infrastructure/engineering-notes/linear-model-call-capture).
 
 ## If you build a custom agent
 

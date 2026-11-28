@@ -185,6 +185,8 @@ def _turns_from_model_calls(
         if invocation_id is None or id(call) in compaction_calls:
             continue
         question, answer, reasoning, tool_calls = _turn_content(call.request, call.response)
+        # A row that references its requests leaves the question in the capture line the call names.
+        payload_ref = call.payload_ref if call.request is None else None
         turn_counts[invocation_id] += 1
         turns.append(
             TrajectoryTurn(
@@ -204,6 +206,7 @@ def _turns_from_model_calls(
                         response_id=metadata.response_id,
                     )
                 ],
+                payload_ref=payload_ref,
             )
         )
         tool_counts[invocation_id] += tool_calls
@@ -421,6 +424,7 @@ def _build_trajectory_record(
             if raw_call.get("response") is not None
             else raw_call.get("response_raw"),
             response_metadata=metadata,
+            payload_ref=raw_call.get("payload_ref"),
             token_stats=TrajectoryTokenStats(
                 prompt_tokens=_nonnegative_int(raw_call.get("tokens_in")),
                 completion_tokens=_nonnegative_int(raw_call.get("tokens_out")),

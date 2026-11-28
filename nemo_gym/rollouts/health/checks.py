@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from typing import Any
 
 from nemo_gym.rollouts.health.types import (
@@ -287,6 +288,17 @@ def _agent_steps(trajectory: dict[str, Any]) -> list[_AgentStep]:
     return steps
 
 
+class PayloadUnavailable(Exception):
+    """A check needs a request that the row only references (``payload_ref``), and no capture provides it."""
+
+
+# For the record being evaluated: the opening (`_conversation_head`) of the request a ``payload_ref`` names, read
+# from the run's captures. It raises ``PayloadUnavailable`` when the line cannot be read; ``None`` without captures.
+REFERENCED_CONVERSATION_HEADS: ContextVar[Callable[[dict[str, Any]], Any] | None] = ContextVar(
+    "REFERENCED_CONVERSATION_HEADS", default=None
+)
+
+
 def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
     # The session each invocation belongs to: activations of one harness session share it.
     sessions = {
@@ -320,6 +332,7 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "tokens_out": tokens.get("completion_tokens"),
                 "request": raw.get("request"),
                 "response": raw.get("response"),
+                "payload_ref": raw.get("payload_ref"),
                 "session": sessions.get(raw.get("client_session_id"), raw.get("client_session_id")),
             }
         )
@@ -784,9 +797,15 @@ def _conversation_head(call: dict[str, Any]) -> Any:
     """How the conversation a call continues opens: its instructions, system prompt, or first message.
 
     Calls of one conversation share it; another conversation on the same model server, such as a user simulator's,
-    opens differently. A call whose request was not captured has none.
+    opens differently. A call whose request was not captured has none. A request the row only references is read
+    from its capture; when that is not possible, ``PayloadUnavailable`` leaves the asking check unobserved.
     """
     request = call.get("request")
+    if request is None and call.get("payload_ref") is not None:
+        read_head = REFERENCED_CONVERSATION_HEADS.get()
+        if read_head is None:
+            raise PayloadUnavailable(f"request of model call {call.get('model_call_id')} is only referenced")
+        return read_head(call["payload_ref"])
     if not isinstance(request, dict):
         return None
     for key in ("instructions", "system"):
@@ -834,8 +853,12 @@ def _chain_ended_on_failure(chain: Sequence[dict[str, Any]]) -> bool:
         return False
     if all(call.get("started_at") is not None for call in chain):
         last = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))[-1]
-        answered = any(_is_successful(call) and _same_conversation(call, last) for call in chain)
-        return _is_failed(last) and not (answered and _is_context_overflow_rejection(last))
+        if not _is_failed(last):
+            return False
+        if not _is_context_overflow_rejection(last):
+            return True
+        # Only an overflow needs the conversations compared, so referenced requests are read only then.
+        return not any(_is_successful(call) and _same_conversation(call, last) for call in chain)
     return len(failed) == len(chain)
 
 

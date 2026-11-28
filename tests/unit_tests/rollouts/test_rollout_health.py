@@ -2214,6 +2214,86 @@ def test_an_overflow_after_an_answer_in_the_same_conversation_is_not_flagged(tmp
     assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
 
 
+def _referenced_overflow_fixture(tmp_path: Path, answered_opening: str, *, capture_format: str) -> Path:
+    """A rollout written with ``model_call_payloads: reference``: an answer, then a context overflow.
+
+    Its requests are only in the capture; the row names each one's capture line.
+    """
+    from nemo_gym.models.model_call_capture import CaptureStore
+
+    answered = _call(
+        model_call_id="first",
+        started_at=1.0,
+        model_ref=_POLICY_REF,
+        request=_conversation("responses", answered_opening, "task"),
+    )
+    overflow = _call(
+        model_call_id="last",
+        call_index=1,
+        started_at=2.0,
+        tokens_in=None,
+        tokens_out=0,
+        model_ref=_POLICY_REF,
+        request=_conversation("responses", "You are an agent.", "task", "next step"),
+        **CONTEXT_OVERFLOWS["propagated"],
+    )
+    store = CaptureStore(tmp_path / "model-calls", capture_format=capture_format)
+    for call in (answered, overflow):
+        store.record("0-0", {"model_call_id": call["model_call_id"], "request": call["request"]})
+    stored = deepcopy(_owned_attempts(answered, overflow))
+    stored["ng_trajectory"]["model_calls"] = [
+        {
+            **_trajectory_call(call),
+            "request": None,
+            "payload_ref": {
+                "capture_file": "0-0.capture.jsonl",
+                "call_index": index,
+                "model_call_id": call["model_call_id"],
+            },
+        }
+        for index, call in enumerate((answered, overflow))
+    ]
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(stored, option=orjson.OPT_APPEND_NEWLINE))
+    return rollout_path
+
+
+@pytest.mark.parametrize("capture_format", ["full", "delta"])
+def test_a_referenced_request_is_read_from_the_capture(tmp_path: Path, capture_format: str) -> None:
+    """With ``model_call_payloads: reference`` the checks compare conversations through the capture."""
+    rollout_path = _referenced_overflow_fixture(tmp_path, "You are an agent.", capture_format=capture_format)
+
+    result = run_health_checks(rollout_path, workers=1, model_call_capture_dirs=[tmp_path / "model-calls"])
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
+    assert "rollout_ended_on_failed_model_call" not in digest.unobserved
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 0
+
+
+def test_a_referenced_request_of_another_conversation_still_flags_the_overflow(tmp_path: Path) -> None:
+    rollout_path = _referenced_overflow_fixture(tmp_path, "You play the customer.", capture_format="delta")
+
+    [digest] = run_health_checks(rollout_path, workers=1, model_call_capture_dirs=[tmp_path / "model-calls"]).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
+@pytest.mark.parametrize("captures", ["not given", "deleted"])
+def test_an_unreadable_referenced_request_leaves_its_check_unobserved(tmp_path: Path, captures: str) -> None:
+    """Without the capture the conversations cannot be compared: the check says nothing rather than guess."""
+    rollout_path = _referenced_overflow_fixture(tmp_path, "You are an agent.", capture_format="delta")
+    capture_dirs = [] if captures == "not given" else [tmp_path / "model-calls"]
+    if captures == "deleted":
+        (tmp_path / "model-calls" / "0-0.capture.jsonl").unlink()
+
+    [digest] = run_health_checks(rollout_path, workers=1, model_call_capture_dirs=capture_dirs).rollouts
+
+    assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
+    assert "rollout_ended_on_failed_model_call" in digest.unobserved
+    assert "check_execution_error" not in {finding.check for finding in digest.findings}
+
+
 @pytest.mark.parametrize("dialect", ["chat", "responses"])
 @pytest.mark.parametrize("opening", ["You play the customer.", None], ids=["another_conversation", "no_request"])
 def test_an_answer_outside_the_overflowing_conversation_does_not_excuse_it(tmp_path, dialect, opening):

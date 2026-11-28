@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         observability_enabled_from_config,
         read_available_model_call_records,
         read_model_call_records,
+        resolve_model_call_payloads,
     )
     from nemo_gym.rollouts.rollout_collection import (
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -95,6 +96,7 @@ _PUBLIC_API = {
     "read_model_call_records": "model_calls",
     "read_rollout_timing": "health.timeouts",
     "record_resubmit_offset": "rollout_recovery",
+    "resolve_model_call_payloads": "model_calls",
     "run_health_checks": "rollout_health",
     "summarize_timeouts": "health.timeouts",
 }

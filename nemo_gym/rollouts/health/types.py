@@ -212,6 +212,8 @@ class _LineSlice:
 class _WorkerInput:
     line: _LineSlice
     ignored_checks: frozenset[str]
+    # The run's capture dirs, to read requests that rows only reference.
+    capture_dirs: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -886,7 +886,7 @@ def _stub_health_digest(monkeypatch, verdict, checks):
     import nemo_gym.rollouts.rollout_health as rollout_health
 
     digest = SimpleNamespace(verdict=verdict, findings=[SimpleNamespace(check=check) for check in checks])
-    monkeypatch.setattr(rollout_health, "evaluate_record", lambda result, ignored: digest)
+    monkeypatch.setattr(rollout_health, "evaluate_record", lambda result, ignored, *, capture_dirs=(): digest)
 
 
 def test_health_span_carries_the_verdict_and_the_distinct_flagged_checks(recorded_spans, monkeypatch):

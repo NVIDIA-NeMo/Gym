@@ -933,6 +933,14 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
         raise _path_error("agent_version", "expected a non-empty string")
     _validate_json_value(rollout, path="rollout")
     raw_trajectory = rollout.get("ng_trajectory")
+    turns = raw_trajectory.get("turns") if isinstance(raw_trajectory, dict) else None
+    for index, turn in enumerate(turns if isinstance(turns, list) else []):
+        if isinstance(turn, dict) and turn.get("payload_ref") is not None and turn.get("question") is None:
+            raise _path_error(
+                f"ng_trajectory.turns[{index}].question",
+                "only referenced (model_call_payloads: reference); restore it with "
+                "nemo_gym.rollouts.resolve_model_call_payloads before exporting",
+            )
     _preflight_raw_trajectory(raw_trajectory)
     try:
         trajectory = TrajectoryRecord.model_validate(raw_trajectory, strict=True)
