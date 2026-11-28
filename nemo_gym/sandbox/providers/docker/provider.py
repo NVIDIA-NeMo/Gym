@@ -28,9 +28,9 @@ import shutil
 import signal
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, ClassVar
+from typing import Any
 
 from nemo_gym.sandbox.providers.base import (
     NetworkRule,
@@ -411,6 +411,15 @@ def _user_flag(user: str | int) -> str:
     return "0" if user == "root" or user == 0 else str(user)
 
 
+def _cancelled_create_hold_s(create: DockerCreateConfig, exec_config: DockerExecConfig) -> float | None:
+    """How long a cancelled create may keep running: the ``docker run`` it already started, which it lets answer so
+    the container it made is not left behind (``create.start_timeout_s``), then the inspect and the forced removal
+    of that container (``exec.default_timeout_s`` each). ``None`` when either timeout is unset."""
+    if create.start_timeout_s is None or exec_config.default_timeout_s is None:
+        return None
+    return create.start_timeout_s + 2 * exec_config.default_timeout_s
+
+
 def _picks_network(args: Sequence[str]) -> bool:
     """Whether ``docker run`` arguments put the container on a network themselves."""
     return any(arg in ("--network", "--net") or arg.startswith(("--network=", "--net=")) for arg in args)
@@ -419,9 +428,20 @@ def _picks_network(args: Sequence[str]) -> bool:
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
-    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(
-        network_rules=frozenset({"inherit", "no_network"}), reconnect="same_host"
+    capabilities: SandboxCapabilities = SandboxCapabilities(
+        network_rules=frozenset({"inherit", "no_network"}),
+        reconnect="same_host",
+        cancelled_create_hold_s=_cancelled_create_hold_s(DockerCreateConfig(), DockerExecConfig()),
     )
+
+    @classmethod
+    def capabilities_for_config(cls, config: Mapping[str, Any]) -> SandboxCapabilities:
+        """The capabilities with the cancelled-create hold of this deployment's ``create`` and ``exec`` timeouts."""
+        hold = _cancelled_create_hold_s(
+            _coerce_config(config.get("create"), DockerCreateConfig),
+            _coerce_config(config.get("exec"), DockerExecConfig),
+        )
+        return replace(cls.capabilities, cancelled_create_hold_s=hold)
 
     name = "docker"
 
@@ -475,6 +495,11 @@ class DockerProvider:
         self._exec_config = _coerce_config(exec, DockerExecConfig)
         self._create_config = _coerce_config(create, DockerCreateConfig)
         self._probe = _coerce_config(probe, DockerProbeConfig)
+        # This instance's hold follows its own create and exec timeouts, as capabilities_for_config does for the class.
+        self.capabilities = replace(
+            type(self).capabilities,
+            cancelled_create_hold_s=_cancelled_create_hold_s(self._create_config, self._exec_config),
+        )
         self._binary = _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
         # Live PTY sessions by container name; closed with their container and at provider shutdown.

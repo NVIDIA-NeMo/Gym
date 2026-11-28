@@ -4720,6 +4720,82 @@ class TestSeedGuards:
         assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
         assert stopped == ["hanging"] and not server._sandboxes
 
+    async def test_separate_verifier_retry_reserves_the_providers_cancelled_create_hold(self, tmp_path, monkeypatch):
+        """A retried create that its ready deadline cancels may keep running for its provider's hold (Docker lets
+        the `docker run` it sent answer, so its container is not left behind), and then ends masked without
+        test.sh. The retry starts only when the task deadline holds the longer of that hold and test.sh after the
+        ready deadline, and never on a provider that gives the hold no bound, so it cannot run into the task
+        deadline instead of masking the row."""
+        from environment_servers.harbor.sandboxes import HELD_CREATE_MARGIN_S
+
+        server, task, _, _ = self.separate_with_verifier_starts(tmp_path, monkeypatch)
+        settings = task.config.verifier
+        ready = server.config.sandbox_ready_timeout_s  # SEED_CREATE_GRACE_S is 0 here
+        test_sh = settings.timeout_sec + server.config.verifier_grace_s
+        loop = asyncio.get_running_loop()
+
+        def left(seconds):
+            return SimpleNamespace(deadline=loop.time() + seconds)
+
+        docker = {"create": {"start_timeout_s": 900.0}, "exec": {"default_timeout_s": 50.0}}
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"docker": docker}}
+        )
+        # Docker may hold a cancelled create for 900 s plus an inspect and a removal of 50 s each.
+        held = 1000 + HELD_CREATE_MARGIN_S
+        assert held > test_sh
+        assert not server._verifier_retry_fits(left(ready + held - 5), task, settings)
+        assert server._verifier_retry_fits(left(ready + held + 1), task, settings)
+        # A hold shorter than test.sh adds nothing: a create either is held or runs test.sh, never both.
+        docker["create"]["start_timeout_s"] = 1.0
+        docker["exec"]["default_timeout_s"] = 1.0
+        assert server._verifier_retry_fits(left(ready + max(test_sh, 3 + HELD_CREATE_MARGIN_S) + 1), task, settings)
+        docker["create"]["start_timeout_s"] = None
+        assert not server._verifier_retry_fits(left(ready + 100_000), task, settings)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert server._verifier_retry_fits(left(ready + max(test_sh, HELD_CREATE_MARGIN_S) + 1), task, settings)
+
+    async def test_a_separate_verifiers_budget_reserves_the_providers_cancelled_create_hold(
+        self, tmp_path, monkeypatch
+    ):
+        """The task budget's separate verifier start covers its provider's hold after the ready timeout, so a
+        first verifier create that Docker holds ends masked before the task deadline rather than at it."""
+        server, task, _, _ = self.separate_with_verifier_starts(tmp_path, monkeypatch)
+        base = server._post_seed_budget_s(task)
+        docker = {"create": {"start_timeout_s": 600.0}, "exec": {"default_timeout_s": 180.0}}
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"docker": docker}}
+        )
+        assert server._post_seed_budget_s(task) == base + 960.0
+        # Without enforced task timeouts there is no task deadline to protect, and the budget only meets
+        # default_episode_timeout_seconds: nothing is reserved, so a task that fits it is not refused.
+        server.config.enforce_task_timeouts = False
+        assert server._post_seed_budget_s(task) == base
+        server.config.enforce_task_timeouts = True
+        docker["create"]["start_timeout_s"] = None
+        assert server._post_seed_budget_s(task) == base
+
+    async def test_separate_verifier_is_not_retried_when_the_deadline_cannot_hold_dockers_cancelled_create(
+        self, tmp_path, monkeypatch
+    ):
+        """On Docker, a deadline that holds a create and test.sh but not the time a cancelled create may keep its
+        `docker run` going gets no retry: the row is masked after one attempt, as #6467 promises, rather than a
+        retried create ending the episode at the task deadline."""
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch, None, None)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {"sandbox": {"docker": {"create": {"start_timeout_s": 600.0}}}},
+        )
+        settings = task.config.verifier
+        need = 0.05 + settings.timeout_sec + server.config.verifier_grace_s
+        monkeypatch.setattr(server, "_post_seed_budget_s", lambda task: need + 30.0)
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
+        assert stopped == ["hanging"] and not server._sandboxes
+
     async def test_retried_verifier_start_is_capped_in_time_for_test_sh(self, tmp_path, monkeypatch):
         """Everything a retried verifier does before test.sh ends in time for test.sh and its grace, whatever its
         image starts: a setup step that hangs masks the row instead of running into the task deadline."""
@@ -4749,7 +4825,7 @@ class TestSeedGuards:
         assert "in the time left for test.sh" in result.failure_reason
         assert not any("bash /tests/test.sh" in call["command"] for call in verifier.execs)
         assert stopped == ["hanging"] and verifier.stopped and not server._sandboxes
-        assert server._verifier_retry_fits(SimpleNamespace(deadline=None), settings)
+        assert server._verifier_retry_fits(SimpleNamespace(deadline=None), task, settings)
 
     async def test_separate_verifier_create_failure_other_than_the_ready_timeout_is_not_retried(
         self, tmp_path, monkeypatch

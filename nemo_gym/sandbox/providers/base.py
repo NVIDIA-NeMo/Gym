@@ -411,11 +411,19 @@ class SandboxCapabilities:
         reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
             ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
             ``never``.
+        cancelled_create_hold_s: How long a create may keep running after its caller cancels it, finishing a
+            request it already sent and removing what that made rather than leaving a sandbox nobody holds, as the
+            provider class and its deployment config set it; ``None`` when nothing bounds it. A caller that cancels
+            a create on its own deadline and still needs time afterwards reserves this too. ``0`` means the provider
+            declares no hold (OpenSandbox does not yet declare the up to ``ORPHAN_REAP_TIMEOUT_S`` it spends reaping
+            an orphaned create). The value does not count a wait for a command slot that other work on the same
+            provider instance holds.
     """
 
     snapshot_keeps: frozenset[SnapshotContent] = frozenset()
     network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
     reconnect: Reconnect = "always"
+    cancelled_create_hold_s: float | None = 0.0
 
 
 def provider_capabilities(provider: object, *, config: Mapping[str, Any] | None = None) -> SandboxCapabilities:

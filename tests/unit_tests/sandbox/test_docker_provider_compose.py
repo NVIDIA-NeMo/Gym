@@ -213,6 +213,29 @@ def test_networking_works_on_the_bridge_and_named_networks(network):
     docker_provider.DockerProvider(create={"network": network}).validate_networking()
 
 
+def test_a_cancelled_create_reports_how_long_it_may_keep_running():
+    """The capability a caller reserves after cancelling a create: the `docker run` already sent
+    (create.start_timeout_s), then an inspect and a forced removal (exec.default_timeout_s each); no bound when a
+    timeout is unset. The other capabilities are the class's."""
+    from nemo_gym.sandbox.providers.base import SandboxCapabilities, provider_capabilities
+
+    cls = docker_provider.DockerProvider
+    assert cls.capabilities.cancelled_create_hold_s == 600 + 2 * 180
+    configured = provider_capabilities(
+        cls, config={"create": {"start_timeout_s": 30}, "exec": {"default_timeout_s": 5}}
+    )
+    assert configured.cancelled_create_hold_s == 40
+    assert configured.network_rules == cls.capabilities.network_rules and configured.reconnect == "same_host"
+    assert provider_capabilities(cls, config={"create": {"start_timeout_s": None}}).cancelled_create_hold_s is None
+    assert provider_capabilities(cls, config={"exec": {"default_timeout_s": None}}).cancelled_create_hold_s is None
+    # An instance reports its own configuration's hold.
+    instance = cls(create={"start_timeout_s": 30}, exec={"default_timeout_s": 5})
+    assert provider_capabilities(instance).cancelled_create_hold_s == 40
+    assert cls.capabilities.cancelled_create_hold_s == 960
+    # A provider that declares nothing returns a cancelled create at once.
+    assert SandboxCapabilities().cancelled_create_hold_s == 0
+
+
 @pytest.mark.parametrize("args", [["--network", "host"], ["--net=none"], ["--network=gym-net"]])
 def test_networking_is_refused_when_extra_run_args_pick_the_network(args):
     """create.extra_run_args can put every container on a network that validate_networking never sees (main's

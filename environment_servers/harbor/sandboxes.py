@@ -73,7 +73,9 @@ from nemo_gym.sandbox import (
     cpu_cap_env,
     deployment_platform,
     document_volume_sources,
+    get_provider_class,
     opensandbox_shm_labels,
+    provider_capabilities,
     resolve_compose,
     resolve_provider_config,
     resolve_provider_metadata,
@@ -92,6 +94,9 @@ LOGGER = logging.getLogger(__name__)
 # found, before this server gives up on it. A provider attempt budget configured above the ready timeout
 # (`create.timeout_s`) is not covered: the deadline here is this server's promise.
 SEED_CREATE_GRACE_S = ORPHAN_REAP_TIMEOUT_S + 15.0
+# Slack after a create its provider held past the ready deadline returns: the unwinding of the cancelled create
+# and of the timeout around it, before the row is masked.
+HELD_CREATE_MARGIN_S = 15.0
 
 
 class HarborSeedTimeoutError(RuntimeError):
@@ -900,7 +905,7 @@ class HarborSandboxMixin:
         try:
             return await self._create_verifier_sandbox(task, episode_key=session.session_id), False
         except HarborSeedTimeoutError as exc:
-            if not self._verifier_retry_fits(session, settings):
+            if not self._verifier_retry_fits(session, task, settings):
                 raise
             LOGGER.warning(f"{task.task_id}: retrying the verifier sandbox once: {exc}")
             try:
@@ -911,18 +916,41 @@ class HarborSandboxMixin:
                 exc.__suppress_context__ = True
                 raise exc
             # The release has no bound of its own and may have used the time the retry needs.
-            if not self._verifier_retry_fits(session, settings):
+            if not self._verifier_retry_fits(session, task, settings):
                 raise
         return await self._create_verifier_sandbox(task, episode_key=session.session_id), True
 
-    def _verifier_retry_fits(self, session: HarborSession, settings: Any) -> bool:
-        """Whether the task deadline still holds a whole verifier create and ``test.sh`` with its grace, the least a
-        retry needs to be worth starting. Always true when the deadline is not enforced."""
+    def _verifier_retry_fits(self, session: HarborSession, task: HarborTask, settings: Any) -> bool:
+        """Whether the task deadline still holds what a retried verifier create can take, the least a retry needs to
+        be worth starting: its ready deadline with the create grace, then either ``test.sh`` with its grace (the
+        create succeeded) or the time the provider may keep the create running after that deadline cancelled it
+        (``cancelled_create_hold_s``: Docker lets a ``docker run`` it already sent answer, so as not to leave its
+        container behind), which ends masked and never reaches ``test.sh``. A provider that gives the hold no bound
+        gets no retry, since a retry it holds past the task deadline would end the episode there instead of masking
+        the row. Always true when the deadline is not enforced."""
         if session.deadline is None:
             return True
-        need = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
-        need += settings.timeout_sec + self.config.verifier_grace_s
+        hold = self._cancelled_create_hold_s(task)
+        if hold is None:
+            return False
+        after_ready = max(hold + HELD_CREATE_MARGIN_S, settings.timeout_sec + self.config.verifier_grace_s)
+        need = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S + after_ready
         return session.deadline - asyncio.get_running_loop().time() >= need
+
+    def _cancelled_create_hold_s(self, task: HarborTask) -> float | None:
+        """How long the provider of ``task``'s sandboxes may keep a cancelled create running, from its deployment
+        config (``SandboxCapabilities.cancelled_create_hold_s``)."""
+        # A provider block that does not resolve to one provider the registry knows declares nothing here: starting a
+        # sandbox on it is what reports the configuration error.
+        try:
+            config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
+            if len(config) != 1:
+                return 0.0
+            ((name, options),) = config.items()
+            provider = get_provider_class(name)
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+        return provider_capabilities(provider, config=options or {}).cancelled_create_hold_s
 
     async def _start_with_pull_retries(
         self,
