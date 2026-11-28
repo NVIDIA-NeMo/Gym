@@ -4,10 +4,8 @@
 #
 # Evaluate ONE policy model on BIRD dev (or, with --split train, BIRD train) via the standard, existing birdbench pipeline
 # (`gym eval prepare`/`gym eval run --benchmark birdbench`, as documented in this directory's own
-# README) -- no custom collection code. Verification
-# runs through resources_servers/bird_sql/eval_utils.py exactly as it always has, so this
-# benefits from the GIL-contention-safe concurrency and `conn.close()` fixes made there
-# automatically, with zero changes needed here.
+# README) -- no custom collection code. Verification runs through resources_servers/bird_sql/eval_utils.py, in a
+# verifier sandbox per grade for the SQLite dialect (see --sandbox-config).
 #
 # `gym eval prepare` only needs to run once (the prepared jsonl doesn't depend on which model
 # you're evaluating) -- skipped automatically on subsequent calls if it already exists.
@@ -41,6 +39,9 @@
 #                                            ReViSQL-verified "uberset" of BIRD train (~9 GB download on first use; see
 #                                            README.md, "Dialects and splits") and is meant for generating training
 #                                            data. Not gym's own `--split` (that one is fixed to `benchmark`).
+#   --sandbox-config PATH                  Default: nemo_gym/sandbox/providers/docker/configs/docker.yaml. The provider
+#                                            config whose `sandbox` block the server starts its verifier sandboxes from
+#                                            (SQLite dialect), e.g. nemo_gym/sandbox/providers/enroot/configs/enroot.yaml.
 #   --concurrency N                        Default: 8. Caps concurrent in-flight requests
 #                                            (nemo_gym's own retry on 429/502/503/504/520 has no
 #                                            upper bound and no backoff growth -- see
@@ -99,6 +100,7 @@ MODEL_TYPE="vllm_model"
 CONCURRENCY="8"
 DIALECT="sqlite"
 SPLIT="dev"
+SANDBOX_CONFIG="nemo_gym/sandbox/providers/docker/configs/docker.yaml"
 # (Empty arrays are expanded as ${ARR[@]+"${ARR[@]}"} below: plain "${ARR[@]}" errors under `set -u` on bash < 4.4,
 # e.g. macOS's stock bash 3.2, when the array is empty.)
 EXTRA_ARGS=()
@@ -116,6 +118,7 @@ while [[ $# -gt 0 ]]; do
         --concurrency) CONCURRENCY="$2"; shift 2 ;;
         --dialect) DIALECT="$2"; shift 2 ;;
         --split) SPLIT="$2"; shift 2 ;;
+        --sandbox-config) SANDBOX_CONFIG="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -183,6 +186,13 @@ if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
         DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.spark_warehouse_dir=resources_servers/bird_sql/.bird_sql/spark_warehouse_${SPLIT}")
     fi
 fi
+SANDBOX_ARGS=(--config "${SANDBOX_CONFIG}")
+case "${SANDBOX_CONFIG}" in
+    *nemo_gym/sandbox/providers/docker/configs/docker.yaml)
+        # Grading needs no network, and Docker ignores bird_sql's network_policy: cut it in the provider block.
+        SANDBOX_ARGS+=("++sandbox.docker.create.network=none")
+        ;;
+esac
 mkdir -p "${OUTPUT_DIR}"
 
 # Reuses ${PREPARED_JSONL} when it exists and prepare.py's is_prepared_data_current() accepts it (a Spark file
@@ -212,6 +222,7 @@ gym eval run \
     --max-output-tokens "${MAX_OUTPUT_TOKENS}" \
     --num-repeats "${NUM_REPEATS}" \
     --concurrency "${CONCURRENCY}" \
+    "${SANDBOX_ARGS[@]}" \
     "${MODEL_ARGS[@]}" \
     ${DIALECT_ARGS[@]+"${DIALECT_ARGS[@]}"} \
     ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || EVAL_STATUS=$?
@@ -231,7 +242,7 @@ try:
 except (OSError, ValueError) as e:
     sys.exit(f"[summary] no aggregate metrics to summarize: {e}")
 names = ["no_sql", "sql-timeout", "gold-sql-timeout", "pred-sql-timeout",
-         "sql_errors", "gold-sql-error", "pred-sql-error", "unclean"]
+         "sql_errors", "gold-sql-error", "pred-sql-error", "sandbox_error", "unclean"]
 for entry in entries:
     am = entry.get("agent_metrics", {})
     total = am.get("rollouts_count")

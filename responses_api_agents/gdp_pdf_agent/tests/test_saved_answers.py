@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Real adapter routes and durable collection with a scripted model; no inference or sandbox provider."""
+"""Real adapter routes and durable collection with a scripted model; no inference, and no sandbox provider but the
+local one that grades the BIRD rows on this host (tests only)."""
 
 import asyncio
 import hashlib
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -193,7 +195,19 @@ async def test_adapter_failure_keeps_saved_answer_and_resume_never_regenerates(t
                 monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _: tmp_path)
                 resource = BirdSqlResourcesServer(
                     config=BirdSqlResourcesServerConfig(
-                        host="127.0.0.1", port=0, entrypoint="", name="resources", bird_sql_dir=str(tmp_path)
+                        host="127.0.0.1",
+                        port=0,
+                        entrypoint="",
+                        name="resources",
+                        bird_sql_dir=str(tmp_path),
+                        # The verifier sandbox, on the local provider with this interpreter.
+                        sandbox_provider={"local": {"workspace_root": str(tmp_path / "sandboxes")}},
+                        sandbox_config={
+                            "python": sys.executable,
+                            "work_dir": str(tmp_path / "verify"),
+                            "memory_limit_mib": None,
+                            "provider_options": {},
+                        },
                     ),
                     server_client=client(),
                 )

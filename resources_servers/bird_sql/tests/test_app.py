@@ -7,15 +7,18 @@ import importlib.util
 import io
 import sqlite3
 import subprocess
+import sys
 import time
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
+    PROVIDER_UNAVAILABLE,
     VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -23,8 +26,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     RequestFailureLog,
 )
-from nemo_gym.server_runtime import verifier_observability
+from nemo_gym.server_runtime import SimpleResourcesServer, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.bird_sql.app import (
     BirdSqlResourcesServer,
     BirdSqlResourcesServerConfig,
@@ -44,6 +48,7 @@ from resources_servers.bird_sql.eval_utils import (
     result_sets_match,
 )
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
+from resources_servers.bird_sql.verifier_sandbox import SqliteGrade
 
 
 # ---------------------------------------------------------------------------
@@ -106,13 +111,37 @@ def tiny_db(tmp_path) -> Path:
     return db
 
 
+def server_client() -> MagicMock:
+    """A server client whose merged config defines no sandbox block, so an inline ``sandbox_provider`` is needed."""
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    return client
+
+
+def local_sandbox_settings(tmp_path: Path) -> dict:
+    """Grade on the local provider with this interpreter: the runner and eval_utils run for real, on this host.
+
+    Only tests use it; the local provider has no isolation.
+    """
+    return {
+        "sandbox_provider": {"local": {"workspace_root": str(tmp_path / "sandboxes")}},
+        "sandbox_config": {
+            "python": sys.executable,
+            "work_dir": str(tmp_path / "verify"),
+            # RLIMIT_AS is a Linux sandbox setting; macOS rejects it.
+            "memory_limit_mib": None,
+            "provider_options": {},
+        },
+    }
+
+
 @pytest.fixture
 def server_with_mocked_dbs(tmp_path, monkeypatch):
     """Build a BirdSqlResourcesServer whose DB root points at tmp_path (no download).
 
     ``verify`` refuses to run a query without the database file, so the default ``TestDB`` gets an
-    empty placeholder file; tests that mock ``execute_and_compare`` never open it, and ``tiny_db``
-    turns it into a real database.
+    empty placeholder file; tests that mock the verifier sandbox never open it, and ``tiny_db``
+    turns it into a real database, graded by the real runner on the local provider.
     """
     (tmp_path / "TestDB").mkdir(exist_ok=True)
     (tmp_path / "TestDB" / "TestDB.sqlite").touch()
@@ -127,9 +156,9 @@ def server_with_mocked_dbs(tmp_path, monkeypatch):
         bird_sql_dir=str(tmp_path),
         max_concurrency=4,
         sql_execution_timeout_s=10.0,
+        **local_sandbox_settings(tmp_path),
     )
-    server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-    return server
+    return BirdSqlResourcesServer(config=config, server_client=server_client())
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +320,7 @@ def _mock_execute_sqlite(monkeypatch, gold_result, pred_result):
     """Patch eval_utils.execute_sqlite to return canned results based on SQL string."""
     calls = []
 
-    def fake_execute(db_path, sql, timeout_s=None):
+    def fake_execute(db_path, sql, timeout_s=None, *, read_only=False):
         calls.append(sql)
         return gold_result if "GOLD_SQL" in sql else pred_result
 
@@ -311,7 +340,7 @@ async def test_execute_sqlite_async_success(monkeypatch):
 async def test_execute_sqlite_async_timeout_backstop(monkeypatch):
     """execute_sqlite is mocked, so the in-SQLite timeout is bypassed and the outer wait_for backstop trips."""
 
-    def slow_execute(db_path, sql, timeout_s=None):
+    def slow_execute(db_path, sql, timeout_s=None, *, read_only=False):
         time.sleep(10)
         return [(1,)]
 
@@ -378,7 +407,7 @@ async def test_execute_and_compare_gold_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_and_compare_pred_timeout(monkeypatch):
-    def slow_execute(db_path, sql, timeout_s=None):
+    def slow_execute(db_path, sql, timeout_s=None, *, read_only=False):
         if "SLOW" in sql:
             time.sleep(10)
         return [(1,)]
@@ -394,7 +423,7 @@ async def test_execute_and_compare_pred_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_and_compare_gold_timeout(monkeypatch):
-    def slow_execute(db_path, sql, timeout_s=None):
+    def slow_execute(db_path, sql, timeout_s=None, *, read_only=False):
         if "SLOW" in sql:
             time.sleep(10)
         return [(1,)]
@@ -409,16 +438,16 @@ async def test_execute_and_compare_gold_timeout(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# BirdSqlResourcesServer.verify end-to-end (mock execute_and_compare)
+# BirdSqlResourcesServer.verify end-to-end (mock the verifier sandbox)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_verify_gold_failure_logged_with_running_totals(server_with_mocked_dbs, monkeypatch, caplog):
     async def fake(**_kw):
-        return False, None, None, "gold_sql_timeout"
+        return SqliteGrade(False, "gold_sql_timeout")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     for _ in range(2):
         await server_with_mocked_dbs.verify(_make_verify_request("```sql\nSELECT 1\n```"))
@@ -432,9 +461,9 @@ async def test_verify_no_codeblock_skips_execution(server_with_mocked_dbs, monke
     """No ```sql``` block -> hard 0, no execution attempted (no query to run)."""
 
     async def fail_if_called(**_kw):
-        raise AssertionError("execute_and_compare should not be called when no SQL was extracted")
+        raise AssertionError("the verifier sandbox should not be called when no SQL was extracted")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fail_if_called)
 
     body = _make_verify_request("the model produced only prose, no SQL fence")
     resp = await server_with_mocked_dbs.verify(body)
@@ -448,9 +477,9 @@ async def test_verify_no_codeblock_skips_execution(server_with_mocked_dbs, monke
 @pytest.mark.asyncio
 async def test_verify_empty_response_skips_execution(server_with_mocked_dbs, monkeypatch):
     async def fail_if_called(**_kw):
-        raise AssertionError("execute_and_compare should not be called when no SQL was extracted")
+        raise AssertionError("the verifier sandbox should not be called when no SQL was extracted")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fail_if_called)
 
     body = _make_verify_request("")
     resp = await server_with_mocked_dbs.verify(body)
@@ -463,9 +492,9 @@ async def test_verify_empty_response_skips_execution(server_with_mocked_dbs, mon
 @pytest.mark.asyncio
 async def test_verify_match(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
-        return True, [(1,)], [(1,)], None
+        return SqliteGrade(True, None)
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     body = _make_verify_request("```sql\nSELECT x FROM t\n```", gt_sql="SELECT x FROM t")
     resp = await server_with_mocked_dbs.verify(body)
@@ -488,6 +517,8 @@ def _assert_verifier_failure(resp, failure_reason: FailureCode, extracted_sql: s
     """The verifier could not measure the answer: masked, typed, and the answer is kept on the row."""
     assert resp.reward == 0.0
     assert resp.mask_sample is True
+    # Never graded, so recovery may grade the kept answer again.
+    assert resp.evaluation_completed is False
     assert resp.failure_kind == VERIFIER_ERROR
     assert resp.failure_reason == failure_reason
     assert resp.execution_match is False
@@ -506,9 +537,9 @@ def _observed_verifier_failures(log: RequestFailureLog) -> list:
 @pytest.mark.asyncio
 async def test_verify_mismatch_with_codeblock(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
-        return False, [(1,)], [(2,)], None
+        return SqliteGrade(False, None)
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     body = _make_verify_request("```sql\nSELECT 2\n```")
     resp = await server_with_mocked_dbs.verify(body)
@@ -522,9 +553,9 @@ async def test_verify_pred_sql_error_with_codeblock(server_with_mocked_dbs, monk
     """The model's own query failing is a wrong answer (the official BIRD rule), so it stays a scored 0."""
 
     async def fake(**_kw):
-        return False, [(1,)], None, "pred_sql_error"
+        return SqliteGrade(False, "pred_sql_error")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     body = _make_verify_request("```sql\nBROKEN SQL\n```")
     resp = await server_with_mocked_dbs.verify(body)
@@ -534,9 +565,9 @@ async def test_verify_pred_sql_error_with_codeblock(server_with_mocked_dbs, monk
 @pytest.mark.asyncio
 async def test_verify_pred_sql_timeout_with_codeblock(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
-        return False, [(1,)], None, "pred_sql_timeout"
+        return SqliteGrade(False, "pred_sql_timeout")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     body = _make_verify_request("```sql\nSLOW SQL\n```")
     resp = await server_with_mocked_dbs.verify(body)
@@ -548,9 +579,9 @@ async def test_verify_gold_sql_error_is_a_typed_verifier_failure(server_with_moc
     """A gold query that cannot run was never the model's doing: masked and typed, never a scored 0."""
 
     async def fake(**_kw):
-        return False, None, None, "gold_sql_error"
+        return SqliteGrade(False, "gold_sql_error")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     body = _make_verify_request("```sql\nSELECT 1\n```")
     with RequestFailureLog.capture() as log:
@@ -562,9 +593,9 @@ async def test_verify_gold_sql_error_is_a_typed_verifier_failure(server_with_moc
 @pytest.mark.asyncio
 async def test_verify_gold_sql_timeout_is_a_typed_verifier_failure(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
-        return False, None, None, "gold_sql_timeout"
+        return SqliteGrade(False, "gold_sql_timeout")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     body = _make_verify_request("```sql\nSELECT 1\n```")
     with RequestFailureLog.capture() as log:
@@ -575,12 +606,12 @@ async def test_verify_gold_sql_timeout_is_a_typed_verifier_failure(server_with_m
 
 @pytest.mark.asyncio
 async def test_verify_crash_is_a_typed_verifier_failure(server_with_mocked_dbs, monkeypatch):
-    """A crash inside the executor is reported with its cause, not scored as a wrong answer."""
+    """A crash inside the grader is reported with its cause, not scored as a wrong answer."""
 
     async def fake(**_kw):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fake)
 
     body = _make_verify_request("```sql\nSELECT 1\n```")
     with RequestFailureLog.capture() as log:
@@ -598,9 +629,9 @@ async def test_verify_missing_database_is_a_typed_verifier_failure(server_with_m
     """No database for the db_id: nothing is executed, nothing is created, and the row is masked and typed."""
 
     async def fail_if_called(**_kw):
-        raise AssertionError("execute_and_compare should not run without a database")
+        raise AssertionError("the verifier sandbox should not run without a database")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fail_if_called)
 
     body = _make_verify_request("```sql\nSELECT x FROM t\n```", db_id="NoSuchDB")
     with RequestFailureLog.capture() as log:
@@ -674,6 +705,154 @@ async def test_verify_records_a_programmatic_grading_observation(server_with_moc
     assert failed.grading_operations is None
 
 
+def _refuse_host_execution(monkeypatch) -> None:
+    """Fail the test if any query runs on this host's SQLite instead of in the verifier sandbox."""
+
+    def host_execute(*_args, **_kwargs):
+        raise AssertionError("SQL ran on the Resources Server host")
+
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", host_execute)
+
+
+@pytest.mark.asyncio
+async def test_verify_sandbox_that_never_grades_is_retried_then_masked_as_incomplete(
+    server_with_mocked_dbs, monkeypatch
+):
+    """No host fallback: every attempt gets a fresh sandbox, and when none grades the row is masked, not scored 0."""
+    attempts = []
+
+    async def down(**kwargs):
+        attempts.append(kwargs)
+        raise SandboxVerificationError(PROVIDER_UNAVAILABLE, "provider refused the sandbox")
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", down)
+    _refuse_host_execution(monkeypatch)
+
+    with RequestFailureLog.capture() as log:
+        resp = await server_with_mocked_dbs.verify(_make_verify_request("```sql\nSELECT 1\n```"))
+
+    assert len(attempts) == server_with_mocked_dbs.config.inconclusive_verification_retries + 1 == 3
+    assert resp.reward == 0.0
+    assert resp.mask_sample is True
+    assert resp.evaluation_completed is False
+    assert resp.failure_kind == PROVIDER_UNAVAILABLE
+    assert resp.failure_reason == FailureCode.SANDBOX_ERROR
+    assert resp.extracted_sql == "SELECT 1"
+    assert _observed_verifier_failures(log) == [
+        ("resources_server", PROVIDER_UNAVAILABLE, "verify", "verification", "SandboxVerificationError")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_verify_scores_the_grade_of_a_retry_after_a_failed_sandbox(server_with_mocked_dbs, monkeypatch):
+    outcomes = [SandboxVerificationError(VERIFIER_ERROR, "runner was killed"), SqliteGrade(True, None)]
+
+    async def flaky(**_kwargs):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", flaky)
+
+    resp = await server_with_mocked_dbs.verify(_make_verify_request("```sql\nSELECT 1\n```"))
+
+    _assert_scored(resp, 1.0, FailureCode.NONE)
+    assert resp.evaluation_completed is True
+    assert outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_verify_sends_the_row_database_and_both_queries_to_the_sandbox(
+    server_with_mocked_dbs, tiny_db, monkeypatch
+):
+    seen = {}
+
+    async def grade(**kwargs):
+        seen.update(kwargs)
+        return SqliteGrade(False, "pred_sql_error")
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", grade)
+
+    resp = await server_with_mocked_dbs.verify(
+        _make_verify_request("```sql\nSELECT nope FROM t\n```", gt_sql="SELECT x FROM t")
+    )
+
+    _assert_scored(resp, 0.0, FailureCode.EXECUTION_ERROR)
+    assert (seen["database"], seen["db_id"], seen["gold_sql"], seen["pred_sql"]) == (
+        tiny_db,
+        "TestDB",
+        "SELECT x FROM t",
+        "SELECT nope FROM t",
+    )
+    assert seen["sql_execution_timeout_s"] == 10.0
+    assert seen["metadata"] == {"benchmark": "bird_sql", "db_id": "TestDB"}
+
+
+@pytest.mark.asyncio
+async def test_startup_probe_grades_on_the_smallest_database_and_reports_its_sqlite(
+    server_with_mocked_dbs, tmp_path, caplog
+):
+    """The probe grades a known answer through the real runner (local provider here) on the smallest database."""
+    big = tmp_path / "BigDB" / "BigDB.sqlite"
+    big.parent.mkdir()
+    big.write_bytes(b"x" * 4096)  # not a database: probing it would fail
+    await server_with_mocked_dbs._probe_sandbox()
+    [message] = [r.getMessage() for r in caplog.records if "verifier sandbox ready" in r.getMessage()]
+    assert f"grades with SQLite {sqlite3.sqlite_version}" in message
+
+
+@pytest.mark.asyncio
+async def test_server_startup_runs_the_probe_and_a_failed_probe_aborts_it(server_with_mocked_dbs, monkeypatch):
+    monkeypatch.setattr(SimpleResourcesServer, "setup_webserver", lambda self: FastAPI())
+    probes = []
+
+    async def probe(self):
+        probes.append(self)
+        raise RuntimeError("cannot grade")
+
+    monkeypatch.setattr(BirdSqlResourcesServer, "_probe_sandbox", probe)
+    app = server_with_mocked_dbs.setup_webserver()
+
+    with pytest.raises(RuntimeError, match="cannot grade"):
+        async with app.router.lifespan_context(app):
+            pass
+    assert probes == [server_with_mocked_dbs]
+
+
+def test_other_dialects_start_without_a_sandbox_probe(tmp_path, monkeypatch):
+    monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
+    monkeypatch.setattr("resources_servers.bird_sql.setup_bird_spark.ensure_bird_spark", lambda *_a: {})
+    base = FastAPI()
+    parent_lifespan = base.router.lifespan_context
+    monkeypatch.setattr(SimpleResourcesServer, "setup_webserver", lambda self: base)
+    config = BirdSqlResourcesServerConfig(
+        host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="spark"
+    )
+    server = BirdSqlResourcesServer(config=config, server_client=server_client())
+
+    assert server.setup_webserver().router.lifespan_context is parent_lifespan
+
+
+@pytest.mark.asyncio
+async def test_startup_fails_when_the_verifier_sandbox_cannot_grade(server_with_mocked_dbs, monkeypatch):
+    async def down(**_kwargs):
+        raise SandboxVerificationError(PROVIDER_UNAVAILABLE, "cannot reach the Docker daemon")
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.probe_sandbox", down)
+    with pytest.raises(RuntimeError, match="cannot grade: cannot reach the Docker daemon"):
+        await server_with_mocked_dbs._probe_sandbox()
+
+
+def test_server_refuses_to_start_without_its_sandbox_block(tmp_path, monkeypatch):
+    """A missing provider config fails startup instead of masking every row."""
+    monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
+    config = BirdSqlResourcesServerConfig(host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path))
+
+    with pytest.raises(ValueError, match="'sandbox' is not defined"):
+        BirdSqlResourcesServer(config=config, server_client=server_client())
+
+
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
@@ -730,11 +909,12 @@ class TestComputeMetrics:
                 r(0.0, extracted=None, failure_reason="no_sql_extracted"),
                 r(0.0, extracted=None, failure_reason="no_sql_extracted"),
             ],
+            [r(0.0, failure_reason="sandbox_error"), r(0.0)],  # a masked sandbox failure, a wrong result
         ]
         metrics = server_with_mocked_dbs.compute_metrics(tasks)
 
         expected_counts = {
-            "rollouts": 8,
+            "rollouts": 10,
             "no_sql": 2,
             "gold-sql-timeout": 1,
             "pred-sql-timeout": 1,
@@ -742,13 +922,15 @@ class TestComputeMetrics:
             "gold-sql-error": 1,
             "pred-sql-error": 1,
             "sql_errors": 2,
-            "unclean": 6,  # everything except the correct and the wrong-result rollout
+            "sandbox_error": 1,
+            "unclean": 7,  # everything except the correct and the two wrong-result rollouts
         }
         assert {k: metrics[f"{k}_count"] for k in expected_counts} == expected_counts
-        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(100 * 1 / 8)
-        assert metrics["pass@1[avg-of-2]/no_sql"] == pytest.approx(100 * 2 / 8)
-        assert metrics["pass@1[avg-of-2]/unclean"] == pytest.approx(100 * 6 / 8)
-        assert metrics["pass@1[avg-of-2]/sql-timeout"] == pytest.approx(100 * 2 / 8)
+        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(100 * 1 / 10)
+        assert metrics["pass@1[avg-of-2]/no_sql"] == pytest.approx(100 * 2 / 10)
+        assert metrics["pass@1[avg-of-2]/unclean"] == pytest.approx(100 * 7 / 10)
+        assert metrics["pass@1[avg-of-2]/sql-timeout"] == pytest.approx(100 * 2 / 10)
+        assert metrics["pass@1[avg-of-2]/sandbox_error"] == pytest.approx(100 * 1 / 10)
 
     def test_unknown_error_is_unclean_but_not_a_named_failure(self, server_with_mocked_dbs):
         scores = server_with_mocked_dbs._score_fn(self._task_result(0.0, failure_reason="unknown_error"))
@@ -973,7 +1155,7 @@ class TestExecuteSparkAsyncTimeout:
             return [(1,)]
 
         monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_spark", fake_execute_spark)
-        monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", lambda *_a: [(1,)])
+        monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", lambda *_a, **_k: [(1,)])
         match, gold, pred, err = await execute_and_compare_spark(
             Path("/x.sqlite"), MagicMock(), "SELECT 1", "SELECT SLOW", asyncio.Semaphore(2), timeout_s=0.05
         )
@@ -995,7 +1177,7 @@ async def test_verify_spark_dialect_routes_to_spark(tmp_path, monkeypatch, tiny_
         raise AssertionError("sqlite path must not run for dialect=spark")
 
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare_spark", fake_spark)
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_sqlite)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fail_sqlite)
     config = BirdSqlResourcesServerConfig(
         host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="spark"
     )
@@ -1200,9 +1382,14 @@ def test_split_train_verifies_against_train_databases_dir(tmp_path, monkeypatch)
     )
     monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_train", lambda _path: train_dir)
     config = BirdSqlResourcesServerConfig(
-        host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), split="train"
+        host="127.0.0.1",
+        port=20099,
+        entrypoint="",
+        bird_sql_dir=str(tmp_path),
+        split="train",
+        **local_sandbox_settings(tmp_path),
     )
-    server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    server = BirdSqlResourcesServer(config=config, server_client=server_client())
     assert server._db_path("db1") == train_dir / "train_databases" / "db1" / "db1.sqlite"
 
 
