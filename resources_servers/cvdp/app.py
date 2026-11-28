@@ -183,6 +183,26 @@ def _parse_model_response(res: str, target_files: List[str]) -> Optional[Dict[st
 
 
 # ----------------------------
+# Metrics
+# ----------------------------
+
+
+def _category_reward_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+    """Mean reward of each CVDP category, as ``mean/<category>/reward`` (for example ``mean/cid003/reward``).
+
+    The categories are the ones the rollouts carry, so each dataset reports its own. Every rollout of a task counts
+    toward the task's category, which is read from the first rollout that has it: a rollout scored zero before it
+    reached ``verify`` may lack the field.
+    """
+    rewards: dict[str, list[float]] = {}
+    for task_rollouts in tasks:
+        category = next((rollout["category"] for rollout in task_rollouts if rollout.get("category")), None)
+        if category:
+            rewards.setdefault(category, []).extend(float(rollout.get("reward", 0.0)) for rollout in task_rollouts)
+    return {f"mean/{category}/reward": sum(values) / len(values) for category, values in sorted(rewards.items())}
+
+
+# ----------------------------
 # Server
 # ----------------------------
 
@@ -223,6 +243,12 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 "is referenced in harness files.",
                 VERIF_EDA_CATEGORIES,
             )
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return _category_reward_metrics(tasks)
+
+    def compute_repeat_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return _category_reward_metrics(tasks)
 
     async def verify(self, body: CVDPVerifyRequest) -> CVDPVerifyResponse:
         meta = CVDPVerifierMetadata.model_validate(body.verifier_metadata)
