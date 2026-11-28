@@ -132,6 +132,7 @@ class FakeSession:
         self.sandbox = SimpleNamespace(sandbox_id="sandbox-1")
         self.closing = False
         self.expired = False
+        self.expire_completed = False
         self.artifacts = None
         self.cleanup = None
         self._result = (artifacts, cleanup, raises)

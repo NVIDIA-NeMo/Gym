@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi import Body
+from pydantic import BaseModel
 
-from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRecord,
     CheckpointRequest,
@@ -22,6 +28,11 @@ from nemo_gym.server_runtime._checkpoint.errors import (
     ControlError,
     ExportFailedError,
     StaleAttemptError,
+)
+from nemo_gym.server_runtime.base_environment_server import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
 )
 
 
@@ -714,3 +725,87 @@ def test_a_record_with_nothing_spent_is_written_without_the_field_so_an_earlier_
     assert RecordBeforeTheField.model_validate(unspent).episode_id == episode_id
     assert EpisodeRecord.model_validate(unspent).elapsed_s == 0.0
     assert spent["elapsed_s"] == 1.5 and EpisodeRecord.model_validate(spent).elapsed_s == 1.5
+
+
+class _TaskInput(BaseModel):
+    value: str
+
+
+class _EpisodeRequest(BaseEpisodeRequest[_TaskInput]):
+    pass
+
+
+class _EpisodeResponse(BaseEpisodeResponse[str]):
+    pass
+
+
+class _ConfiguredRestarts(BaseEnvironmentServer[_EpisodeRequest, _EpisodeResponse]):
+    """A protocol that records boundaries, declared ``exported``, whose instance, as configured, records none between
+    some of its steps (as single_agent_turn's step loop), so its episodes take part as restarts."""
+
+    request_model = _EpisodeRequest
+    response_model = _EpisodeResponse
+    checkpoint_mode = "exported"
+
+    def checkpoint_mode_in_effect(self) -> Any:
+        return "restart_only"
+
+    async def run(self, request: _EpisodeRequest, cleanup: CleanupContext) -> _EpisodeResponse:
+        return _EpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result="done")
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        return AggregateMetrics()
+
+
+def _configured(server_type: type[_ConfiguredRestarts]) -> _ConfiguredRestarts:
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
+    config = BaseEnvironmentServerConfig(
+        name="environment", host="127.0.0.1", port=1234, entrypoint="app.py", cleanup_timeout_seconds=1
+    )
+    return server_type(config=config, server_client=client)
+
+
+def test_an_environment_whose_instance_restarts_installs_a_restart_only_participant() -> None:
+    server = _configured(_ConfiguredRestarts)
+
+    server.setup_webserver()
+
+    assert isinstance(server._checkpoint, EnvironmentParticipant)
+    assert server._checkpoint.mode == "restart_only"
+
+
+async def test_the_episodes_of_an_environment_whose_instance_restarts_begin_as_restarts() -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class _Blocking(_ConfiguredRestarts):
+        async def run(self, request: _EpisodeRequest, cleanup: CleanupContext) -> _EpisodeResponse:
+            started.set()
+            await release.wait()
+            return await super().run(request, cleanup)
+
+    server = _configured(_Blocking)
+    server.setup_webserver()
+    request = _EpisodeRequest(
+        episode_id=EpisodeId(rollout_id="rollout", attempt=1),
+        task=MaterializedTask(task_id=TaskId(taskset="test:default", task_id="t"), task_input=_TaskInput(value="v")),
+    )
+
+    running = asyncio.create_task(server.run_request(request))
+    await started.wait()
+    report = server._checkpoint.readiness()
+    release.set()
+    response = await running
+
+    # The class declares exported, but the instance's episodes never hold up a checkpoint.
+    assert (report.restarts, report.blocker_count) == (["rollout-a1"], 0)
+    assert response.result == "done"
+
+
+def test_an_unknown_mode_in_effect_stops_the_server_at_setup() -> None:
+    class _UnknownMode(_ConfiguredRestarts):
+        def checkpoint_mode_in_effect(self) -> Any:
+            return "stateless"
+
+    with pytest.raises(ValueError, match=re.escape("checkpoint_mode_in_effect() returned 'stateless'")):
+        _configured(_UnknownMode).setup_webserver()

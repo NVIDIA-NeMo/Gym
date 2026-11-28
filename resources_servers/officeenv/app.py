@@ -10,7 +10,7 @@ and adds only Gym's own response fields.
 A row (one JSONL line, written by ``officeenv emit`` or ``officeenv.emit.gym_row``):
 
     {"responses_create_params": {"input": [...], "tools": [...]},
-     "officeenv": {<TaskSpec>}, "officeenv_version": "1.10.0", "task_id": "..."}
+     "officeenv": {<TaskSpec>}, "officeenv_version": "1.14.0", "task_id": "..."}
 
 An Agent's ``/run`` (the simple agent) POSTs the row to ``/seed_session``, each function call to
 ``POST /<tool_name>`` with the call's arguments as the body, and the row plus the model's response
@@ -18,6 +18,10 @@ to ``/verify``. An Environment Server seeds with a ``ResourcesSeedSessionRequest
 ``task_data`` holds the row's other fields, so the session cookie names its
 ``resources_session_id``; its agent reaches the same tool routes (or the MCP endpoint below) with
 that cookie, ``/verify`` grades the episode as for an Agent, and ``/close_session`` ends it.
+``GET /task_state`` (Gym's ``ResourcesTaskState``) says whether the episode's task has ended
+(``complete_task`` succeeded), so an environment server can end the episode there: ``single_agent_turn``
+drives the agent one step at a time and reads it between steps (``end_on_task_state``). With
+``close_tools_on_task_end``, a tool call after the call that ended the task is refused.
 
 With ``expose_tools_over_mcp: true``, Gym's MCP endpoint serves every tool of OfficeEnv's
 ``tools`` exposure under its tool name, and each episode's token admits only that episode's tools.
@@ -36,19 +40,23 @@ penalty from the reward and reports the two terms as ``reward_components``, so a
 schedule the penalty on its own (NeMo RL ``grpo.phasic_reward_components``).
 """
 
+import asyncio
 import contextvars
 import importlib.util
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
+    RESOURCES_TASK_STATE_PATH,
+    RESOURCES_TASK_STATE_RELEASE_PATH,
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -62,12 +70,18 @@ from nemo_gym.server_runtime import (
     ResourcesSessionConflictError,
     ResourcesSessionFences,
     ResourcesSessionLostError,
+    ResourcesTaskState,
+    ResourcesTaskStateRelease,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
+
+LOGGER = logging.getLogger(__name__)
+# The longest a watching read of the task state (GET /task_state's wait_s) waits for the task to end.
+MAX_TASK_STATE_WAIT_SECONDS = 60.0
 
 # OfficeEnv installs apart from this server's locked dependencies until it is published (README.md, "The OfficeEnv
 # version"): without it the server stops here, naming the step that installs it.
@@ -77,10 +91,21 @@ if importlib.util.find_spec("officeenv") is None:
         "server's locked dependencies: see 'The OfficeEnv version' in resources_servers/officeenv/README.md "
         "(OFFICEENV_GIT_URL)."
     )
+# The tool catalog this server serves over MCP (EpisodeService.catalog_tools) is OfficeEnv 1.13.0's, as are workspace
+# mode and the file call (officeenv.files) that a subclass lending sandboxes runs: an older release stops the server
+# here too, naming both versions.
+OFFICEENV_NEEDED = "1.13.0"
+if importlib.util.find_spec("officeenv.files") is None:
+    from officeenv import __version__ as installed_officeenv
 
-from officeenv.apps import available, get_app_class
+    raise ImportError(
+        f"This server needs OfficeEnv {OFFICEENV_NEEDED} or later (officeenv.files), and its venv has OfficeEnv "
+        f"{installed_officeenv}: install the release 'The OfficeEnv version' in resources_servers/officeenv/README.md "
+        "names (OFFICEENV_GIT_URL)."
+    )
+
 from officeenv.artifacts import ArtifactStore
-from officeenv.exposure import Catalog, ToolsExposure
+from officeenv.files import Workspace
 from officeenv.service import EpisodeService, Reply
 
 
@@ -116,6 +141,24 @@ class OfficeEnvResourcesServerConfig(BaseResourcesServerConfig):
             "Stores of the artifacts a row's TaskSpec names by SHA-256 instead of carrying them "
             "(officeenv.artifacts), searched in order: absolute paths, such as a corpus's artifacts/ folder "
             "beside its rows file. A row that names artifacts no store holds is refused (400)."
+        ),
+    )
+    close_tools_on_task_end: bool = Field(
+        default=False,
+        description=(
+            "Refuse a tool call (409) once a call has returned with the episode's task ended (GET /task_state), so "
+            "the calls a turn makes after the one that ended it change nothing; the environment server that ends "
+            "episodes there sets it"
+        ),
+    )
+    task_end_hold_seconds: float = Field(
+        default=180.0,
+        ge=0,
+        description=(
+            "For a session an environment server watches (GET /task_state?watch=true: it stops the session's run once "
+            "the task ends), the longest the call that ends the task waits for that server to release it (POST "
+            "/task_state/release) before it is answered anyway. The harness reads the answer only after its run has "
+            "stopped, so no model call follows the call that ended the task"
         ),
     )
 
@@ -156,6 +199,10 @@ class OfficeEnvVerifyRequest(BaseVerifyRequest):
 
 class OfficeEnvVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+class OfficeEnvTaskState(ResourcesTaskState):
+    """``GET /task_state``: whether the episode's task has ended (``complete_task`` succeeded, either status)."""
 
 
 class OfficeEnvLengthPenaltyVerifyResponse(BaseMultiRewardVerifyResponse):
@@ -205,11 +252,11 @@ def length_penalty_fields(reward: float, response: NeMoGymResponse, config: Leng
 
 
 @cache
-def tools_exposure_catalog() -> dict[str, dict[str, Any]]:
-    """Every tool of OfficeEnv's ``tools`` exposure with all of its apps connected, by name: the
-    tool definitions the MCP endpoint serves."""
-    apps = {name: get_app_class(name)() for name in available()}
-    return {tool["name"]: tool for tool in ToolsExposure(Catalog(apps), {}).tools()}
+def tools_exposure_catalog(workspace: Workspace | None = None) -> dict[str, dict[str, Any]]:
+    """Every tool of OfficeEnv's ``tools`` exposure with all of its apps connected, by name, as workspace mode
+    describes them when ``workspace`` is given (``EpisodeService.catalog_tools``): the tool definitions the MCP
+    endpoint serves, which an episode's own are checked against at its seed."""
+    return {tool["name"]: tool for tool in EpisodeService.catalog_tools(workspace=workspace)}
 
 
 # The tools of the session the current /seed_session request seeded. Gym mints the episode's MCP
@@ -221,20 +268,30 @@ _SEEDED_TOOLS: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar
 
 @dataclass
 class _Episode:
-    """An episode session, kept by its ``resources_session_id`` until it is closed."""
+    """An episode session, kept by its ``resources_session_id`` until it is closed, with the tools its MCP token
+    admits."""
 
     episode_id: EpisodeId
     task_id: TaskId
-    tools: list[str]
+    grant: list[str] = field(default_factory=list)
 
 
 class OfficeEnvResourcesServer(SimpleResourcesServer):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     config: OfficeEnvResourcesServerConfig
-    # Episodes by Gym's session ID, which an Environment Server's seed sets to its resources_session_id.
+    # Episodes by Gym's session ID, which an environment server's seed sets to its resources_session_id.
     service: EpisodeService = Field(default_factory=EpisodeService)
     _episodes: dict[str, _Episode] = PrivateAttr(default_factory=dict)
+    # Whether each session's task had ended when its last tool call returned (GET /task_state,
+    # close_tools_on_task_end). Published once a whole call is over, so no read sees a state the same call reverses.
+    _task_ends: dict[str, bool] = PrivateAttr(default_factory=dict)
+    # The sessions an environment server watches (GET /task_state?watch=true), and for each session the event a
+    # waiting read waits on (set once its task ends or its world goes) and the one the call that ended its task waits
+    # on (set by POST /task_state/release, or when its world goes).
+    _watched: set[str] = PrivateAttr(default_factory=set)
+    _task_end_signals: dict[str, asyncio.Event] = PrivateAttr(default_factory=dict)
+    _task_end_releases: dict[str, asyncio.Event] = PrivateAttr(default_factory=dict)
     _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
@@ -246,6 +303,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.get("/officeenv/apps")(self.list_apps)
+        app.get(RESOURCES_TASK_STATE_PATH)(self.task_state)
+        app.post(RESOURCES_TASK_STATE_RELEASE_PATH)(self.release_task_end)
         app.post("/{tool_name}")(self.tool_call)  # registered last: fixed routes win
         return app
 
@@ -270,40 +329,63 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionConflictError(f"Resources session {session_id} is already closed")
         episode = self._episodes.get(session_id)
         if episode is None:
-            reply = self._seed(session_id, body.task_data)
-            episode = self._episodes[session_id] = _Episode(body.episode_id, body.task_id, reply.body["tools"])
+            episode = self._episodes[session_id] = self._new_episode(session_id, body)
         elif (episode.episode_id, episode.task_id) != (body.episode_id, body.task_id):
             raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         # Gym's session routing names the cookie session after the ID too; this keeps the two the same without it.
         request.session[SESSION_ID_KEY] = session_id
-        _SEEDED_TOOLS.set(episode.tools)
+        _SEEDED_TOOLS.set(episode.grant)
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    def _new_episode(self, session_id: str, body: ResourcesSeedSessionRequest) -> _Episode:
+        """A new episode: its world, built from its row (``_seed``), and the tools its MCP token admits. The row
+        keeps the task's ``responses_create_params``, as a seed of the whole row does, so ``tool_drift`` compares
+        its tools with the ones the server serves."""
+        params = body.responses_create_params
+        reply = self._seed(session_id, body.task_data | ({"responses_create_params": params} if params else {}))
+        return _Episode(body.episode_id, body.task_id, grant=list(reply.body["tools"]))
 
     def _seed(self, session_id: str, row: dict[str, Any]) -> Reply:
         """Build the session ``row`` describes. A malformed task, an unknown app or a row from
-        another OfficeEnv major version fails the seed with OfficeEnv's status and error code;
-        nothing is stored, so the seed can be retried."""
+        another OfficeEnv major version fails the seed with OfficeEnv's status and error code, and so
+        does a row whose tools the MCP endpoint does not serve (``_unreachable``); nothing is stored,
+        so the seed can be retried."""
         reply = self.service.seed(session_id, row)
         if reply.status != 200:
             raise HTTPException(status_code=reply.status, detail=reply.body)
-        if self.config.expose_tools_over_mcp:
-            catalog = tools_exposure_catalog()
-            tools = self.service.store.get(session_id).tools()
-            unserved = sorted(tool["name"] for tool in tools if catalog.get(tool["name"]) != tool)
-            if unserved:
-                self._discard(session_id)
-                message = (
-                    f"The MCP endpoint serves the tools exposure's tools, not {unserved[:5]}: "
-                    "emit the row with exposure mode 'tools' and the default separator"
-                )
-                raise HTTPException(
-                    status_code=400, detail={"error": {"code": "unsupported_exposure", "message": message}}
-                )
+        self._refuse_unreachable(session_id, self._unreachable(session_id))
         return reply
+
+    def _unreachable(self, session_id: str, workspace: Workspace | None = None) -> str | None:
+        """Why the MCP endpoint cannot serve a seeded session's tools, if it cannot: it serves the ``tools``
+        exposure's tools under their own names, as workspace mode describes them for a session that runs in it
+        (``workspace``)."""
+        if not self.config.expose_tools_over_mcp:
+            return None
+        catalog = tools_exposure_catalog(workspace)
+        tools = self.service.store.get(session_id).tools()
+        unserved = sorted(tool["name"] for tool in tools if catalog.get(tool["name"]) != tool)
+        if not unserved:
+            return None
+        return (
+            f"The MCP endpoint serves the tools exposure's tools, not {unserved[:5]}: "
+            "emit the row with exposure mode 'tools' and the default separator"
+        )
+
+    def _refuse_unreachable(self, session_id: str, message: str | None) -> None:
+        """Fail a seed whose session's apps cannot be reached (``message`` says why), freeing its world."""
+        if message is not None:
+            self._discard(session_id)
+            raise HTTPException(
+                status_code=400, detail={"error": {"code": "unsupported_exposure", "message": message}}
+            )
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Release the episode's world unless verification already has; a retried close, or the
         close of a session that was never seeded, succeeds."""
+        return self._close(body)
+
+    def _close(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
         # Nothing below awaits, so no other request runs between the checks and the updates.
         fenced_episode = self._fences.get(session_id)
@@ -319,12 +401,16 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def retire_session_state(self, session_id: str) -> None:
+        # A retired attempt is never closed, and its replacement may seed the same session ID with its own episode.
+        self._episodes.pop(session_id, None)
         self._discard(session_id)
 
     def _discard(self, session_id: str) -> None:
         """Free a session's world without grading it."""
         self.service.store.sessions.pop(session_id, None)
         self.service.notes.pop(session_id, None)
+        self._task_ends.pop(session_id, None)
+        self._forget_watch(session_id)
 
     async def tool_call(self, request: Request, tool_name: str) -> Response:
         # app-level errors are tool outputs the model sees (200); only a body that is no JSON
@@ -332,13 +418,129 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         if self.service.store.get(session_id) is None:
             raise ResourcesSessionLostError("This session has ended.")
-        reply = self.service.call(session_id, tool_name, await request.body())
+        body = await request.body()
+        reply = await self._episode_call(session_id, self._episodes.get(session_id), tool_name, body)
         return Response(content=reply.text(), media_type="application/json", status_code=reply.status)
+
+    async def task_state(
+        self,
+        request: Request,
+        watch: bool = False,
+        wait_s: Annotated[float, Query(ge=0, le=MAX_TASK_STATE_WAIT_SECONDS)] = 0.0,
+    ) -> OfficeEnvTaskState:
+        """Whether the session's task has ended, for an environment server that ends its episode there. With ``watch``
+        the caller stops the session's run once the task ends, so the call that ends it is answered only after the
+        caller releases it (``release_task_end``, at most ``task_end_hold_seconds`` later); with ``wait_s`` the read
+        waits up to that long for the task to end."""
+        session_id = request.session.get(SESSION_ID_KEY)
+        if session_id is None or self.service.store.get(session_id) is None:
+            raise ResourcesSessionLostError("This session has ended.")
+        if watch:
+            self._watched.add(session_id)
+        if wait_s and not self._task_ends.get(session_id, False):
+            signal = self._task_end_signals.setdefault(session_id, asyncio.Event())
+            try:
+                async with asyncio.timeout(wait_s):
+                    await signal.wait()
+            except TimeoutError:
+                pass
+            if self.service.store.get(session_id) is None:
+                raise ResourcesSessionLostError("This session has ended.")
+        return OfficeEnvTaskState(task_ended=self._task_ends.get(session_id, False))
+
+    async def release_task_end(self, request: Request) -> ResourcesTaskStateRelease:
+        """The watching environment server has stopped the session's run, or stops watching it: answer the call that
+        ended its task, if one waits, and hold none of its calls again."""
+        session_id = request.session.get(SESSION_ID_KEY)
+        released = self._task_end_releases.pop(session_id, None) if session_id is not None else None
+        if session_id is not None:
+            self._watched.discard(session_id)
+        if released is None:
+            return ResourcesTaskStateRelease(released=False)
+        released.set()
+        return ResourcesTaskStateRelease(released=True)
+
+    async def _hold_task_end(self, session_id: str) -> None:
+        """Wait, before the call that ended a watched session's task is answered, until the watching environment
+        server has stopped the session's run and released the call (``release_task_end``), at most
+        ``task_end_hold_seconds``: the harness then reads the answer only once its run is over."""
+        released = self._task_end_releases.get(session_id)
+        if released is None:
+            return
+        try:
+            async with asyncio.timeout(self.config.task_end_hold_seconds):
+                await released.wait()
+        except TimeoutError:
+            LOGGER.warning(
+                "No environment server released the task end of OfficeEnv session %s within %g s; the call that "
+                "ended it is answered anyway",
+                session_id,
+                self.config.task_end_hold_seconds,
+            )
+        finally:
+            if self._task_end_releases.get(session_id) is released:
+                del self._task_end_releases[session_id]
+
+    def _forget_watch(self, session_id: str) -> None:
+        """The session's world is gone: wake a read that waits for its task's end, and answer a held call."""
+        self._watched.discard(session_id)
+        for events in (self._task_end_signals, self._task_end_releases):
+            event = events.pop(session_id, None)
+            if event is not None:
+                event.set()
+
+    def _task_ended(self, session_id: str) -> bool:
+        """Whether the episode's task has ended: the user app's task row left ``pending`` (``complete_task``
+        succeeded, either status). The row is read rather than the tool name, because every exposure reaches the op
+        its own way (``user_complete_task``, ``api_call``, ``run_command``, ``call_tool``)."""
+        session = self.service.store.get(session_id)
+        if session is None or "user" not in session.apps:
+            return False
+        rows = session.world.collection("user", "tasks").rows.values()
+        return any(row.get("status", "pending") != "pending" for row in rows)
+
+    async def _episode_call(
+        self, session_id: str, episode: _Episode | None, tool_name: str, body: bytes | str
+    ) -> Reply:
+        """Call ``tool_name`` with ``body``. The task state the call leaves is published once the whole call is over
+        (``_task_ends``), and with ``close_tools_on_task_end`` a call after a published end is refused. The call that
+        ends a watched session's task is answered once the watching environment server releases it
+        (``_hold_task_end``)."""
+        try:
+            self._refuse_after_task_end(session_id)
+            return self.service.call(session_id, tool_name, body)
+        finally:
+            if self._publish_task_state(session_id):
+                await self._hold_task_end(session_id)
+
+    def _refuse_after_task_end(self, session_id: str) -> None:
+        """With ``close_tools_on_task_end``, refuse a call once one has returned with the episode's task ended."""
+        if self.config.close_tools_on_task_end and self._task_ends.get(session_id, False):
+            raise ResourcesSessionConflictError("The task has ended: its tools are closed")
+
+    def _publish_task_state(self, session_id: str) -> bool:
+        """Publish the task state a whole call left (``GET /task_state``), while the session holds its world: whether
+        the call ended the task. Then a read waiting for the end answers, and for a watched session the call is held
+        until the watching environment server releases it (``_hold_task_end``)."""
+        if self.service.store.get(session_id) is None:
+            return False
+        ended, before = self._task_ended(session_id), self._task_ends.get(session_id, False)
+        self._task_ends[session_id] = ended
+        if ended == before:
+            return False
+        if not ended:
+            # The task is open again (a later call reopened it): a read waits for its next end.
+            self._task_end_signals.pop(session_id, None)
+            return False
+        if session_id in self._watched:
+            self._task_end_releases[session_id] = asyncio.Event()
+        self._task_end_signals.setdefault(session_id, asyncio.Event()).set()
+        return True
 
     async def verify(
         self, request: Request, body: OfficeEnvVerifyRequest
     ) -> OfficeEnvVerifyResponse | OfficeEnvLengthPenaltyVerifyResponse:
-        result = self.service.verify(request.session[SESSION_ID_KEY])
+        result = await self._verification(request.session[SESSION_ID_KEY])
         if result.get("officeenv_failure") == "no_session":
             # Never seeded, verified already, closed, or gone with a restart: the world went with
             # it, so the reward would measure the environment, not the policy.
@@ -347,6 +549,13 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             return OfficeEnvVerifyResponse(**{**body.model_dump(), **result})
         penalty = length_penalty_fields(result["reward"], body.response, self.config.length_penalty)
         return OfficeEnvLengthPenaltyVerifyResponse(**{**body.model_dump(), **result, **penalty})
+
+    async def _verification(self, session_id: str) -> dict[str, Any]:
+        """OfficeEnv's verification of the session, which grades its world and releases it."""
+        result = self.service.verify(session_id)
+        self._task_ends.pop(session_id, None)  # verification releases the world, and its tools are closed
+        self._forget_watch(session_id)
+        return result
 
     def mcp_tools(self, harvested: list["MCPTool"], catchall: Any | None) -> list["MCPTool"] | None:
         """Every tool of the ``tools`` exposure, dispatched through the tool route; no other route is a tool."""

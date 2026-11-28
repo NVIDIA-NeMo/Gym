@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -49,9 +50,14 @@ class RunRecorder:
         self._responder = responder
 
     async def __call__(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[int, str, str]:
-        self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin})
+        self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin, "semaphore": semaphore})
         return self._responder(list(argv))
 
 
@@ -833,6 +839,64 @@ async def test_upload_builds_mkdir_and_cp(fake_binary: str, monkeypatch: pytest.
     assert exec_calls and "mkdir -p /etc" in exec_calls[0]["argv"][-1]
     assert _contains_seq(exec_calls[0]["argv"], ["--user", "0"])  # mkdir runs as root
     assert cp_calls[0]["argv"] == [FAKE_BINARY, "cp", str(src), "nemo-gym-x:/etc/app.conf"]
+
+
+async def test_uploads_take_their_own_bound_not_the_exec_bound(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A running harness holds an exec slot for as long as it runs, so an upload (a rollout stop's marker) must not
+    wait for one: both of its commands take the upload bound."""
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+
+    await provider.upload_file(_make_handle(), src, "/session/expire.request")
+
+    assert provider.uploads_independent_of_execs() is True
+    assert [call["semaphore"] for call in rec.calls] == [provider._upload_semaphore] * 2
+    assert provider._upload_semaphore is not provider._semaphore
+
+
+async def test_an_upload_runs_while_a_command_holds_every_exec_slot(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh", "concurrency": 1})
+    started: list[list[str]] = []
+
+    class _Process:
+        returncode = 0
+        pid = 1
+
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def fake_exec(*argv: str, **_kwargs: Any) -> _Process:
+        started.append(list(argv))
+        return _Process()
+
+    monkeypatch.setattr(docker_provider.asyncio, "create_subprocess_exec", fake_exec)
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"payload")
+
+    async with provider._semaphore:  # a harness's command holds the only exec slot
+        await asyncio.wait_for(provider.upload_file(_make_handle(), src, "/session/expire.request"), timeout=5)
+
+    assert [argv[1] for argv in started] == ["exec", "cp"]
+
+
+async def test_upload_mkdir_timeout_raises_the_upload_error(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            raise TimeoutError("docker command timed out")
+        return 0, "", ""
+
+    provider, _rec = _make_provider(monkeypatch, responder)
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="mkdir parent.*timed out"):
+        await provider.upload_file(_make_handle(), src, "/etc/app.conf")
 
 
 async def test_upload_no_parent_skips_mkdir(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

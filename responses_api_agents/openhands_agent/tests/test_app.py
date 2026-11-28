@@ -324,6 +324,7 @@ def session_state(**session):
         "cleanup": {"timed_out": False, "return_code": 0, "cleanup_confirmed": True, "error": None},
         "artifacts": None,
         "expired": False,
+        "expire_completed": False,
         "sandbox": SimpleNamespace(sandbox_id="nemo-gym-task"),
     }
     return adapter.OpenHandsSandboxSession(

@@ -14,12 +14,12 @@ says which release it runs and how that installs.
 
 ## The OfficeEnv version
 
-The server runs OfficeEnv 1.10.0. OfficeEnv is not published yet, so the server's `pyproject.toml`
+The server runs OfficeEnv 1.14.0. OfficeEnv is not published yet, so the server's `pyproject.toml`
 and `uv.lock` list only its public dependencies, and OfficeEnv installs apart, from NVIDIA's
 internal GitLab, into the venv Gym builds from them:
 
 ```bash
-uv pip install --python resources_servers/officeenv/.venv/bin/python "officeenv @ git+${OFFICEENV_GIT_URL}@v1.10.0"
+uv pip install --python resources_servers/officeenv/.venv/bin/python "officeenv @ git+${OFFICEENV_GIT_URL}@v1.14.0"
 ```
 
 `OFFICEENV_GIT_URL` is that repository's git URL: `ssh://...` with an SSH key, or `https://...`
@@ -27,9 +27,10 @@ where a git credential helper or `~/.netrc` holds a token (ask the point of cont
 Molinari <dmolinari@nvidia.com>). Gym builds the venv the first time it starts or tests the
 server (`gym env test +entrypoint=resources_servers/officeenv`), and later builds only add to it,
 so OfficeEnv stays installed. Without OfficeEnv the server stops at start with an error that names
-this step, and its tests are skipped. On a cluster, build the venv and install OfficeEnv on a
-login node, then reuse it (`skip_venv_if_present=true`). Once OfficeEnv is published, it moves into
-`pyproject.toml` and the lock like any other dependency.
+this step, and its tests are skipped; with a release older than 1.13.0, which has no workspace mode
+(`officeenv.files`), it stops naming the release it needs and the one it found. On a cluster, build
+the venv and install OfficeEnv on a login node, then reuse it (`skip_venv_if_present=true`). Once
+OfficeEnv is published, it moves into `pyproject.toml` and the lock like any other dependency.
 
 Release numbers follow OfficeEnv's `docs/RELEASING.md`: a patch release changes no verdict for an
 existing row, a minor one may add features or move verdicts (each listed in OfficeEnv's
@@ -52,7 +53,7 @@ every server, so that tree shadows the installed release, and `/verify` reports 
 ```json
 {"responses_create_params": {"input": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}], "tools": [...]},
  "officeenv": {"task_id": "...", "seed": 1, "actor": {...}, "apps": {...}, "exposure": {"mode": "api_search"}, "checks": [...]},
- "officeenv_version": "1.10.0",
+ "officeenv_version": "1.14.0",
  "task_id": "..."}
 ```
 
@@ -74,14 +75,15 @@ officeenv emit $E/renewal_escalation.json $E/schedule_kickoff.json $E/vendor_ter
   $E/ticket_triage.json $E/sprint_handover.json -o data/example.jsonl
 ```
 
-The example rows are emitted by OfficeEnv 1.10.0; against 1.9.0's, only their version stamp and
-`schedule_kickoff`'s Google Calendar tools changed (`send_updates`, described as it now behaves,
-and taken by `delete_event` and `update_event` too). The example rollouts were collected on
-2026-10-28 with `azure/openai/gpt-5.5` against OfficeEnv 1.9.0, through this server and the simple
-agent (concurrency two). All five score 1.0. Every error the metrics count is an authored fault (a
-transient error, rate limits) or a tool mistake the model recovered from. They are integration
-smokes, not a benchmark: `schedule_kickoff` scores 0.75 whenever the model books its slot over a
-meeting injected during the episode (`gcalendar.no_conflicts`), as it did on earlier runs.
+The example rows are emitted by OfficeEnv 1.14.0; against 1.13.0's, `sprint_handover` also lists
+`jira_list_priorities` (Jira's priority scheme, new in 1.14.0), and the rest changed only in their
+version stamp. The example rollouts were collected on 2026-11-13 with `azure/openai/gpt-5.5` against
+OfficeEnv 1.14.0, through `single_agent_turn`'s step loop and the simple agent (two at a time). All
+five score 1.0: `sprint_handover`, whose task ends with `complete_task`, ended at the step that
+called it, and the other four when the model answered. Every error the metrics count is an
+authored fault (a transient error, rate limits) or a tool mistake the model recovered from. They are integration smokes, not a benchmark: `schedule_kickoff`
+scores 0.75 whenever the model books its slot over a meeting injected during the episode
+(`gcalendar.no_conflicts`), as it did on earlier runs.
 
 Training and validation sets are not committed.
 
@@ -119,28 +121,58 @@ gym env start --resources-server officeenv --model-type openai_model \
 
 ## Run
 
+The example rows route by taskset (`officeenv:example`), so collate them first, then collect against running servers:
+
 ```bash
+gym dataset collate --resources-server officeenv --mode example_validation --output-dir results/officeenv_example_data
 gym env start --resources-server officeenv --model-type openai_model
-gym eval run --no-serve --agent officeenv_simple_agent \
-  --input resources_servers/officeenv/data/example.jsonl \
-  --output results/officeenv_rollouts.jsonl
+# In a second shell, once the servers are ready:
+gym eval run --no-serve --resources-server officeenv --model-type openai_model \
+  --input results/officeenv_example_data/example.jsonl --output results/officeenv_rollouts.jsonl
 ```
 
-The simple agent stops after `max_steps` (50) turns, or once the model answers without calling a
-tool. Tasks explored through `api_search` spend a search and a fetch on every endpoint before
-calling it, so long ones need more:
-`+officeenv_simple_agent.responses_api_agents.simple_agent.max_steps=150`.
+The rows run on Gym's `single_agent_turn_legacy` (this config's `officeenv_environment_server`), which takes the
+taskset's episodes and flat rows alike, such as a training corpus's rows routed by their agent. It drives the simple
+agent one step at a time: each activation names the episode's step limit, and the agent then takes one step (one model
+call and the tool calls it makes), whatever its own `max_steps`. Between steps it reads `GET /task_state`
+(`end_on_task_state`). An episode ends before the next model call once its task has ended (`complete_task`
+succeeded), when the model answers without calling a tool, or after `max_episode_steps` (50) steps, which the reply's
+metadata then names (`ng_termination_reason: max_episode_steps`). A session lost during the episode (`GET /task_state`
+answers 404 with `failure_kind: session_lost`) ends it too, and `/verify` masks its reward. With
+`close_tools_on_task_end` (on in this config) the server refuses a tool call once the task has ended, so the calls a
+step makes after the one that ended its task change nothing. Tasks explored through `api_search` spend a search and a
+fetch on every endpoint before calling it, so long ones need more steps:
+`++officeenv_environment_server.environment_servers.single_agent_turn_legacy.max_episode_steps=150`.
+
+`--agent-type` adds the named agent's config to the run. A template that leaves its resources server unset is
+composed in place of `officeenv_simple_agent`, and `allowed_agents` refuses any other such template before anything
+starts. The simple agent stays on the step loop. The compaction agent (`simple_agent_with_compaction`) keeps no agent
+session, so composition relays it through a `legacy_agent` server to its own `/run`, which runs its own loop and takes
+flat rows, not the taskset's episodes. A session harness such as `hermes_agent` resolves as its own environment
+server, and these rows still run on `officeenv_simple_agent`. The step loop checks its agent at startup, so an
+`agent_server` set directly to an agent that cannot take one step per activation stops the server.
+
+Episodes the step loop drives take part in checkpoints as restarts. NeMo RL's turn and prefix recovery accept no
+environment server but `legacy_agent` in a run's config for now, so a training run with OfficeEnv sets
+`rollout_recovery.target_level: sibling`. The setting applies to the whole training run: NeMo RL checks every
+environment server in the run's config, so a setting for OfficeEnv's taskset alone would not help. It stays until
+NeMo RL follows.
 
 ## Episode sessions and MCP
 
-An Environment Server (for example `single_agent_turn`) seeds with a `ResourcesSeedSessionRequest`
+An environment server (for example `single_agent_turn_legacy`) seeds with a `ResourcesSeedSessionRequest`
 whose `task_data` holds the row's fields other than `responses_create_params`. The OfficeEnv
 session takes the request's `resources_session_id`, which the seed's session cookie also names;
 the agent calls the same `POST /<tool_name>` routes with that cookie, and `/verify` grades the
-episode as for an Agent. Seeding the same ID again for the same episode returns the same session,
+episode as for an agent. `GET /task_state` (Gym's `ResourcesTaskState`, `{"task_ended": ...}`) says whether the
+session's task has ended: the user app's task row left `pending`. An environment server that stops an agent's own
+loop once the task ends (`end_on_task_state` without `max_episode_steps`) reads it with `watch=true`: the call that
+ends that session's task is then answered only after the environment server releases it (`POST /task_state/release`),
+at most `task_end_hold_seconds` (180) later, so no model call follows it; `wait_s` makes a read wait for the end.
+Seeding the same ID again for the same episode returns the same session,
 and `/close_session` releases a world that verification has not. After a close, a seed of the same
-ID is refused for `session_close_retry_window_seconds`. These seeds carry no tool list, so they
-report no `tool_drift`.
+ID is refused for `session_close_retry_window_seconds`. These seeds carry the task's
+`responses_create_params`, so they report `tool_drift` as a seed of the whole row does.
 
 With `expose_tools_over_mcp: true`, Gym's MCP endpoint serves every tool of OfficeEnv's `tools`
 exposure under its tool name, and each episode's MCP token (in the seed response) admits only
@@ -163,7 +195,9 @@ guarded weighted mean by default), it returns:
 - `officeenv_server_version`: the OfficeEnv version that graded the rollout.
 
 Checks on the policy's replies read every message it sent, including any it sent after completing
-the task. A rollout without a session to grade (never seeded, verified already, closed, or lost
+the task, unless `close_tools_on_task_end` refused the call. This configuration turns that setting
+on, so a call after the one that completed the task gets 409 and changes nothing. A rollout without
+a session to grade (never seeded, verified already, closed, or lost
 to a server restart) gets reward 0 with `mask_sample: true` and `failure_kind: session_lost`, and
 a tool call without a session answers 404 with the same `failure_kind`.
 

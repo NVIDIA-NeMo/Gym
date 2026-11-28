@@ -24,6 +24,7 @@ from nemo_gym.agents import (
     SandboxSession,
     check_agent_seed_rejected,
 )
+from nemo_gym.agents.base_responses_api_agent import report_completed_rollout_stop
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
@@ -316,7 +317,13 @@ def session(tmp_path: Path, mode: str) -> tuple[GooseSession, LocalSandbox]:
 
 
 async def activate(
-    tmp_path: Path, mode: str, *, timeout: float = 20, delegate: bool = False, stop_before_launch: bool = False
+    tmp_path: Path,
+    mode: str,
+    *,
+    timeout: float = 20,
+    delegate: bool = False,
+    stop_before_launch: bool = False,
+    stop_completed: bool = False,
 ):
     server = agent(timeout=timeout, delegate=delegate, context_limit=262144)
     state, sandbox = session(tmp_path, mode)
@@ -331,7 +338,7 @@ async def activate(
     request = body(temperature=0.6)
     state.activation_request = request
     if stop_before_launch:
-        assert await state.session.expire(timeout=10, reason="budget")
+        assert await state.session.expire(timeout=10, reason="budget", completed=stop_completed)
     endpoint = SimpleNamespace(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
     with patch.object(GooseAgent, "model_endpoint", return_value=endpoint):
         try:
@@ -513,6 +520,21 @@ async def test_rollout_stop_before_launch_is_an_empty_incomplete_run(tmp_path):
     assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
     assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
     assert close.cleanup_confirmed
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_a_stop_for_an_ended_task_says_completed_in_the_response_and_the_invocation(tmp_path):
+    """A run stopped because its task had ended answers as completed, and the close the agent server returns for it
+    (report_completed_rollout_stop) says so of its invocation too; the sandbox keeps the supervisor's timeout."""
+    response, close, _, _, _ = await activate(tmp_path, "normal", stop_before_launch=True, stop_completed=True)
+    assert response.status == "completed"
+    invocation, sandbox = close.agent_observations.records
+    assert (invocation.status, sandbox.outcome) == ("incomplete", "timeout")
+
+    invocation, sandbox = report_completed_rollout_stop(close).agent_observations.records
+
+    assert (invocation.status, invocation.error_type, sandbox.outcome) == ("completed", None, "timeout")
 
 
 @pytest.mark.asyncio
