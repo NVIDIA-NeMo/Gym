@@ -3,6 +3,14 @@
 Practical considerations for RL on this environment, and what to monitor during training. The numbers in Gym configs
 are defaults, not tuned values. For the scoring rules, see the [README](../README.md#scoring).
 
+The environment's config (`configs/agentic_turn_simulation.yaml`) runs each row as an episode of the
+[`agent_arena`](../../../environment_servers/agent_arena/README.md) Environment Server, which serves the simulated
+tools and scores the turn with this resources server's settings; `configs/agentic_turn_simulation_legacy_agent.yaml`
+keeps the deprecated `legacy_agent` relay. The advice below holds for both unless it names one. Only the agent's
+model calls are trained: they carry the token-capture and sampling segments, while the simulator's and the judges'
+calls send `null` sampling and carry no token ids (with observability on, they still appear in the rollout's
+model-call capture).
+
 ## Data selection
 
 Profile the starting policy and keep rows with mixed outcomes that fit the training context, holding out whole
@@ -20,8 +28,8 @@ that:
   its tool definitions, the conversation), and a turn makes several simulator calls. Policy servers sit idle waiting
   on them, so adding policy capacity buys nothing. Give the simulator and judge dedicated replicas sized to the number
   of in-flight rollouts, and raise `tool_simulator_max_concurrency` and `judge_max_concurrency` to match.
-- **Route by prompt prefix.** Consecutive calls of a rollout share almost all of their prompt, but the resources
-  server's calls carry no session, so a list of replicas in `judge_base_url` spreads them per call (unless rollout
+- **Route by prompt prefix.** Consecutive calls of a rollout share almost all of their prompt, but the simulator's
+  and judges' calls carry no session, so a list of replicas in `judge_base_url` spreads them per call (unless rollout
   observability or checkpointing is on, which pins each rollout's calls to one replica) and every call recomputes the
   shared prefix. Put a prefix-aware router in front of the replicas and pass its single URL; it
   restores prefix-cache hits and per-request decode speed. Make its key long enough that a system prompt shared by
@@ -32,10 +40,11 @@ that:
 - **Never change the judge mid-run.** The judge model, its prompts, its effort, `show_agent_system_prompt` and the note
   file together define the reward. A change is a new reward version: start a new run, re-profile, and re-judge old
   rollouts with `gym eval reverify` ([command](../README.md#reporting-an-eval)) to compare.
-- **Expire abandoned sessions.** A rollout that fails before `/verify` leaves its session (the whole history) in the
-  resources server's memory until `session_ttl_seconds`. For long runs, set it well above the turn time cap, for
-  example twice the cap: a turn can overrun the cap by a model step and its tool calls, and a session dropped
-  meanwhile masks the rollout.
+- **Expire abandoned sessions (relay only).** On the `legacy_agent` relay, a rollout that fails before `/verify`
+  leaves its session (the whole history) in the resources server's memory until `session_ttl_seconds`. For long runs,
+  set it well above the turn time cap, for example twice the cap: a turn can overrun the cap by a model step and its
+  tool calls, and a session dropped meanwhile masks the rollout. With `agent_arena`, the turn's state ends with its
+  episode and the setting does not apply.
 
 By default the simulator and the judge share one model server. To serve them from separate models, define a second
 model server in a config file that also points `tool_simulator_model_server` (or the `judges` list) at it:
@@ -97,7 +106,8 @@ gym env start \
 - **Keep caps comparable.** Use the same caps for reward profiling and training where possible, and compare runs at
   the same training stage: masking and reward both drift as the policy changes.
 - **Filtering by reason.** Trainers that filter masked rollouts by reason can match `failure_kind` values that start
-  with `agentic_turn_simulation:` plus `judge_failed`; `mask_sample` alone covers all of them.
+  with `agentic_turn_simulation:` plus `judge_failed` (a judge that gives no verdict masks the turn on both paths);
+  `mask_sample` alone covers all of them.
 - **Masking or rescoring caps in the trainer.** To keep scored cap hits out of the gradient, or to give them a
   different reward, match their `stop_reason` in the trainer. To mask them in the environment for every consumer, list
   them in `masked_stop_reasons`.

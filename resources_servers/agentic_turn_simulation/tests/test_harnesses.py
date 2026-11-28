@@ -509,8 +509,11 @@ class TestSystemPromptOverride:
         )
         assert state.simulator_preamble.endswith("</agent_system_prompt>\n\n")  # and no tool definitions
         note = load_prompt("tool-simulator-system-prompt-note.md")
-        assert server._simulator_prompts["sandbox"] == load_prompt("tool-simulator-sandbox.md") + "\n\n" + note + "\n"
-        assert server._simulator_prompts["claude_code"] == load_prompt("tool-simulator-claude-code.md")
+        assert (
+            server._turns._simulator_prompts["sandbox"]
+            == load_prompt("tool-simulator-sandbox.md") + "\n\n" + note + "\n"
+        )
+        assert server._turns._simulator_prompts["claude_code"] == load_prompt("tool-simulator-claude-code.md")
 
         sent = script(server, [chat(json.dumps(VERDICT))])
         await _verify(server, CLAUDE_CODE_ROW, tools, [_final("Done.")], metadata=SANDBOX_METADATA)
@@ -551,8 +554,8 @@ class TestSystemPromptOverride:
 
     def test_unset_leaves_every_profile_its_default(self) -> None:
         server = make_server()
-        assert server._simulator_prompts["sandbox"] == load_prompt("tool-simulator-sandbox.md")
-        assert all(server._shows_system_prompt(p) is p.show_system_prompt for p in HARNESSES.values())
+        assert server._turns._simulator_prompts["sandbox"] == load_prompt("tool-simulator-sandbox.md")
+        assert all(server._turns.shows_system_prompt(p) is p.show_system_prompt for p in HARNESSES.values())
 
 
 class TestGenericVerify:

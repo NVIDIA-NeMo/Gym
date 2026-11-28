@@ -17,8 +17,11 @@
 
 Per row, the steps the env runs before the first policy call: the agent_ref name (unless --agent ''), the run-request
 model, the harness the row selects (a row that names a harness must not fall back to generic), the harness's
-conversion of the history into tool items, its tool list, and the replay of recorded file edits into the session
-workspace. Then a dry draw of which rows obstacle injection would arm at --obstacle-row-rate (counts only; the draw
+conversion of the history into tool items, its tool list, the replay of recorded file edits into the session
+workspace, and what the agent_arena Environment Server checks when it sets the episode up: each tool a call may name as
+a ``ToolSpec`` (a name a tool grant can carry, object parameters), no tool named like one of the server's routes
+(``SERVER_ROUTE_NAMES``, and ``mcp`` with --mcp, for a
+server whose ``tool_transports`` include ``mcp``), and the harness the seed carries within the ``agent_context`` size limit. Then a dry draw of which rows obstacle injection would arm at --obstacle-row-rate (counts only; the draw
 hashes row content, so a content change moves it). The first failing row stops the run with
 its line number. Prints, and with --report writes, counts per file: rows, harness, rows whose tools have obstacle
 texts, obstacle draw (keys are "sandbox:<kind>" for sandbox rows, "other:<kind>" otherwise).
@@ -34,16 +37,27 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationRunRequest, _input_items, _row_tools
+from pydantic import ValidationError
+
+from nemo_gym.server_runtime import AgentContext
 from resources_servers.agentic_turn_simulation.harnesses import select_harness
 from resources_servers.agentic_turn_simulation.obstacles import ObstacleInjectionConfig, arm
+from resources_servers.agentic_turn_simulation.schemas import AgenticTurnSimulationRunRequest
+from resources_servers.agentic_turn_simulation.turns import _input_items, _row_tools, harness_context, tool_specs
 
 
 AGENT = "agentic_turn_simulation_agent"
+# The first path segment of each route of the agent_arena Environment Server: a tool cannot take one of these names.
+# The server mounts MCP_ROUTE_NAME too only when its tool_transports include mcp. environment_servers/agent_arena/tests
+# pins both to the server's routes.
+SERVER_ROUTE_NAMES = frozenset({"aggregate_metrics", "docs", "openapi.json", "redoc", "run"})
+MCP_ROUTE_NAME = "mcp"
 
 
-def validate_file(path: Path, *, agent: str = AGENT, row_rate: float = 0.3) -> dict[str, object]:
-    """Counts for one file; raises SystemExit naming the first row that does not load."""
+def validate_file(path: Path, *, agent: str = AGENT, row_rate: float = 0.3, mcp: bool = False) -> dict[str, object]:
+    """Counts for one file; raises SystemExit naming the first row that does not load. ``mcp``: the server serves
+    tools over MCP too, so ``mcp`` is a route name."""
+    route_names = SERVER_ROUTE_NAMES | {MCP_ROUTE_NAME} if mcp else SERVER_ROUTE_NAMES
     config = ObstacleInjectionConfig(enabled=True, row_rate=row_rate)
     harnesses, armed, obstacle_tools, rows = Counter(), Counter(), Counter(), 0
     with open(path, "rb", buffering=1 << 22) as f:
@@ -58,10 +72,18 @@ def validate_file(path: Path, *, agent: str = AGENT, row_rate: float = 0.3) -> d
                 raise SystemExit(f"{path}:{n}: row names harness {metadata['harness']!r} but selects generic")
             items = _input_items(body)
             prefix = harness.to_tool_items(items)
-            tool_names = harness.tool_names(_row_tools(body))
+            tools = _row_tools(body)
+            tool_names = harness.tool_names(tools)
             workspace = harness.new_workspace(body.verifier_metadata or {})
             if workspace is not None:
                 workspace.replay(prefix)
+            try:
+                specs = tool_specs(harness, tools, prefix, tool_names)
+                AgentContext(values=harness_context(harness, tool_names).model_dump(mode="json"))
+            except ValidationError as error:
+                raise SystemExit(f"{path}:{n}: the episode cannot be set up: {error}") from None
+            if taken := sorted({spec.name for spec in specs} & route_names):
+                raise SystemExit(f"{path}:{n}: tools named like the agent_arena server's routes: {taken}")
             if any(name in tool_names for name in harness.obstacle_texts):
                 obstacle_tools[harness.name] += 1
             obstacle = arm(
@@ -90,11 +112,14 @@ def main() -> None:
         "--agent", default=AGENT, help=f"expected agent_ref name (default {AGENT}; '' skips the check)"
     )
     parser.add_argument("--obstacle-row-rate", type=float, default=0.3)
+    parser.add_argument(
+        "--mcp", action="store_true", help="the server's tool_transports include mcp (a tool cannot be named mcp)"
+    )
     parser.add_argument("--report", type=Path, help="write the counts as JSON")
     args = parser.parse_args()
     report = {}
     for path in args.files:
-        report[path.name] = validate_file(path, agent=args.agent, row_rate=args.obstacle_row_rate)
+        report[path.name] = validate_file(path, agent=args.agent, row_rate=args.obstacle_row_rate, mcp=args.mcp)
         print(path.name, json.dumps(report[path.name]))
     if args.report:
         with os.fdopen(os.open(args.report, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:

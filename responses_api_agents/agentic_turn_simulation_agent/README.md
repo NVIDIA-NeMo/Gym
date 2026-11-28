@@ -1,23 +1,46 @@
 # Agentic Turn Simulation Agent
 
-A `simple_agent` that plays one whole agent turn for the
-[`agentic_turn_simulation`](../../resources_servers/agentic_turn_simulation/README.md) resources server, which answers
-the tool calls and scores the turn. It inherits `simple_agent`'s `/run` and `/v1/responses` and replaces only the
-episode loop.
+A `simple_agent` that plays one whole agent turn of the
+[`agentic_turn_simulation`](../../resources_servers/agentic_turn_simulation/README.md) environment, whose server
+answers the tool calls and scores the turn. It inherits `simple_agent`'s `/run`, `/v1/responses` and agent sessions,
+and replaces only the episode loop.
+
+That server is the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server in an agent
+session: it serves the row's tools behind the session's direct HTTP grant, and sends the row's harness with the seed, in
+its `agent_context`. A session seeded without such a grant or harness, or with `execute_tools: false` (the agent plays
+the whole turn, so it has no unresolved calls to hand back), is refused (422). So is a lent sandbox, before anything
+else in the seed is checked: no operation of a turn runs in one. On the deprecated `/run` relay it is the configured
+`resources_server`, with the cookies its `/seed_session` set, through its `/harness` and `/simulate_tool_call`. A turn
+on the relay logs a deprecation warning once per process; see
+[Migrating from the legacy_agent relay](../../environment_servers/agent_arena/README.md#migrating-from-the-legacy_agent-relay).
 
 ## What the episode does differently
 
-- **The row's harness.** At the start of the turn the agent asks the resources server's `/harness`, with the session
-  the row was seeded with, for the row's stop tools and tool protocol (native function calls, or Cline's XML). A bare
-  `/v1/responses` call without a seeded session uses the config's `stop_tools` and native calls. A 404 for a seeded
-  session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted) fails
-  the rollout instead of running a Cline row as native; so does any other `/harness` error or an unknown protocol.
-- **Every tool call goes to `/simulate_tool_call`**, with its `call_id`, `name`, raw `arguments` (parseable or not)
-  and the turn so far without reasoning: the simulator needs that context. A successful reply's output is the tool's
-  result, including an error the simulated tool reports (a missing file, a failed command), which is judged as usual.
-  An error reply from the resources server (not 2xx or 3xx) is retried, `simulate_max_attempts` times in all, after
-  1, 2, ... seconds. If every attempt fails, the tool result is the resources server's simulator-failure output, so
-  `/verify` masks the turn as `simulator_failed` instead of judging a turn that got an error page as a tool result.
+- **The row's harness**: its stop tools and tool protocol (native function calls, or Cline's XML).
+  - In an agent session, the seed's `agent_context` values name it (`TurnHarnessContext`: `stop_tools`, `protocol`, and
+    `tool_names`, the tools the server answers). A seed without them, or with a malformed one, is refused (422) instead
+    of running a Cline row as native. The request to the model is the row's, as it is.
+  - On the relay, the agent asks the resources server's `/harness`, with the session the row was seeded with. A bare
+    `/v1/responses` call without a seeded session uses the config's `stop_tools` and native calls. A 404 for a seeded
+    session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted) fails
+    the rollout; so does any other `/harness` error, or an unknown protocol.
+- **Every tool call is simulated.** A successful reply's output is the tool's result, including an error the simulated
+  tool reports (a missing file, a failed command), which is judged as usual. An error reply (not 2xx or 3xx) is
+  retried, `simulate_max_attempts` times in all, after 1, 2, ... seconds. If every attempt fails, the tool result is
+  the resources server's simulator-failure output, so scoring masks the turn as `simulator_failed` instead of judging a
+  turn that got an error page as a tool result.
+  - In an agent session, a call goes to `POST /<tool name>` through the grant: the arguments object is the body, the
+    call id is in `X-NeMo-Gym-Tool-Call-Id`, with the grant's headers and the session's cookies. The server rebuilds
+    the simulator's view of the turn from the episode's earlier calls. A call no tool of the row can take is answered
+    by the agent without a request: arguments that are not a JSON object, or a name outside `tool_names` (a name such
+    as `run` would otherwise reach one of the server's own routes). Scoring gives such a turn 0
+    (`malformed_arguments`, `nonexistent_tool`) whatever the call returned; the trajectory records such a call as
+    failed with that name as its `error_type`, since no request was made. A reply that refuses a call the agent sent
+    (401, 403, 404, 410, 422) means the grant does not serve the row's tools: the turn ends unretried, as a failed
+    response classified `environment_protocol_violation` (`AgentOutcome`), which the environment server fails
+    terminally.
+  - On the relay, a call goes to `/simulate_tool_call` with its `call_id`, `name`, raw `arguments` (parseable or not)
+    and the turn so far without reasoning.
 - **What ends the turn** (`response.metadata.stop_reason`, with `steps`, `elapsed_seconds` and the per-call
   [token usage](#token-usage) `model_calls`):
 
@@ -31,6 +54,7 @@ episode loop.
   | `time_cap` | The wall-clock cap, checked before each model call | masked |
   | `context_overflow` | The history no longer fits the policy's context | masked at `steps` 0 (the row does not fit), else 0 |
   | `max_output_tokens` | A cut-off reply with a tool call or nothing visible, once the budget cannot grow | 0 (`unfinished_turn`) |
+  | `grant_refused` | In an agent session: the grant refused a call the agent sent | not scored: the response is failed (`environment_protocol_violation`) |
 
 - **Output budget.** A reply cut off by its output budget (the request's `max_output_tokens`) is discarded and retried
   with double the budget, up to `max_output_tokens_cap`: its arguments may be cut, and running them would score the
@@ -42,7 +66,11 @@ episode loop.
   visible, ends the turn as `max_output_tokens`, its calls unrun. When the prompt fits but prompt plus budget does
   not, the budget shrinks to what fits (and never grows again). Retries are not steps. Shrinking needs the overflow
   error from the model server (`propagate_context_overflow_errors: true` on a `vllm_model` policy; with Gym's default,
-  false, an overflow comes back as an empty cut-off reply). Any other model-server error fails the rollout.
+  false, an overflow comes back as an empty cut-off reply). Any other model-server error fails the rollout: the agent
+  raises, its reply is an HTTP 500, and the episode is retried as a dependency failure.
+- **Trajectory.** An agent session's close returns the turn's trajectory as the agent recorded it, as `/run` returns
+  it, with each tool call's output. Gym would otherwise take a call's output from the conversation's
+  `function_call_output` items, which a Cline turn does not have (its results are in a user message).
 
 ## Token usage
 
@@ -68,16 +96,16 @@ A model-server error returns no reply and is not listed (a context overflow that
 ## Cline's XML protocol
 
 For `protocol: cline_xml` rows the model writes tool calls as XML in its reply text
-(`<read_file><path>src/app.ts</path></read_file>`), parsed with the resources server's `cline_xml` rules. Each call goes
-to `/simulate_tool_call` in order as `xml_<step>_<k>`, and the results return together as the next user message, as
-Cline sends them. A reply without a tool call gets Cline's own "no tools used" message and the latest
+(`<read_file><path>src/app.ts</path></read_file>`), parsed with the resources server's `cline_xml` rules. Each call is simulated in order
+as `xml_<step>_<k>`, and the results return together as the next user message, as Cline sends them: only the last
+result keeps the `<environment_details>` that close the message. A reply without a tool call gets Cline's own "no tools used" message and the latest
 `<environment_details>`, and the model tries again.
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---|---|
-| `resources_server` | required | The `agentic_turn_simulation` resources server. |
+| `resources_server` | required | The `agentic_turn_simulation` resources server (the relay's tools). |
 | `model_server` | required | The policy model server. |
 | `max_steps` | `50` | Model steps per turn. `0` disables. |
 | `max_time_seconds` | `7200` | Wall-clock cap per turn. `null` or `0` disables. Lower it for training. |
@@ -86,13 +114,15 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 | `min_output_tokens` | `2048` | Smallest shrunk budget worth retrying with. |
 | `context_margin_tokens` | `256` | Tokens kept free when shrinking the budget to fit the context. |
 | `cline_max_consecutive_mistakes` | `3` | Cline rows: replies in a row without a tool call before the turn ends. |
-| `simulate_max_attempts` | `3` | `/simulate_tool_call` attempts per tool call before its result becomes a simulator failure (masked). |
+| `simulate_max_attempts` | `3` | Attempts per tool call before its result becomes a simulator failure (masked). |
 
-Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
+Inherited: `token_id_capture` (set `true` for training), and `skip_verification` and `skip_verification_reward`. The
+relay's `/run` honors the last two itself; in an agent session the `agent_arena` Environment Server reads them from
+this agent's config (unless it sets its own) and returns the fixed reward without scoring.
 
 Run it through this environment's config (`gym env start --resources-server agentic_turn_simulation`), not alone:
-every episode needs the session `/seed_session` opens on the resources server. Gym agent sessions are not supported:
-the agent is not in `AGENT_SESSION_AGENT_TYPES`, so Gym relays it through `/run`.
+every episode needs a turn session, which the `agent_arena` Environment Server sets up for each row (or, on the relay,
+`/seed_session` on the resources server).
 
 ## Tests
 

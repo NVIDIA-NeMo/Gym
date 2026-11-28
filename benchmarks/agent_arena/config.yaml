@@ -4,6 +4,8 @@
 # AgentArena as a benchmark: the agentic_turn_simulation environment over the Arena validation
 # split, 4 repeats. The simulator and judge are the environment's judge model server: pass
 # ++judge_base_url (one URL or a list of replicas), ++judge_api_key and ++judge_model_name.
+# Each row is an episode of the agent_arena Environment Server, which serves the turn's simulated tools to the agent's
+# session and scores the turn. config_legacy_agent.yaml keeps the deprecated legacy_agent relay.
 config_paths:
   - resources_servers/agentic_turn_simulation/configs/agentic_turn_simulation.yaml
 
@@ -24,6 +26,6 @@ agent_arena_benchmark_agent:
 agent_arena_benchmark_environment_server:
   _inherit_from: agentic_turn_simulation_environment_server
   environment_servers:
-    legacy_agent:
+    agent_arena:
       agent_server:
         name: agent_arena_benchmark_agent

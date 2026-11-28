@@ -12,7 +12,13 @@ over partial work as complete) show up at the end of a turn, not in its first st
 [docs/data.md](docs/data.md) shows how to build rows from your own traces.
 
 The environment pairs with the agent
-[`agentic_turn_simulation_agent`](../../responses_api_agents/agentic_turn_simulation_agent/README.md).
+[`agentic_turn_simulation_agent`](../../responses_api_agents/agentic_turn_simulation_agent/README.md). Each row runs
+as one episode of the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server, which sets
+the turn up, serves its simulated tools to the agent's session and scores it, with this resources server's settings.
+This resources server serves the deprecated `legacy_agent` relay (`configs/agentic_turn_simulation_legacy_agent.yaml`)
+and re-scores saved rows (`gym eval reverify`); both servers run the turn through the same code (`turns.py`). To move a
+relay config to the Environment Server, see
+[Migrating from the legacy_agent relay](../../environment_servers/agent_arena/README.md#migrating-from-the-legacy_agent-relay).
 
 - [docs/design.md](docs/design.md): why whole-turn simulation, and how the simulator, the judge and masking work.
 - [docs/harnesses.md](docs/harnesses.md): each harness's formats, Cline's XML protocol, adding a harness.
@@ -24,14 +30,18 @@ The environment pairs with the agent
 ```
 row: history up to a user message + the harness's system prompt and tools
   |
-/seed_session ....... store the history, pick the row's harness, replay recorded results into a model of its files
+setup ............... store the history, pick the row's harness, replay recorded results into a model of its files
   |
 agent loop .......... policy step -> tool calls -> /simulate_tool_call -> answered in code if exact, else by the LLM
   |                   ends on: a final message (or an empty reply), a stop tool, the step (model call) or time cap,
   |                   a context overflow, a cut-off reply with a call or nothing visible (Cline: the mistake limit)
   |
-/verify ............. masked? -> code gate -> LLM judge -> reward 1.0 if the turn is correct, else 0.0
+score ............... masked? -> code gate -> LLM judge -> reward 1.0 if the turn is correct, else 0.0
 ```
+
+The `agent_arena` Environment Server sets the turn up when its episode starts, serves the row's tools as
+`POST /<tool name>` (each answered as `/simulate_tool_call` answers it) and scores the turn in process. On the relay,
+setup is this resources server's `/seed_session` and scoring its `/verify`.
 
 - A **stop tool** is the harness's "ask the user" or "finish" tool. A call to one never runs: the reply's other calls
   run (on Cline rows, only those before it), then the turn ends; the user's next message is never simulated.
@@ -85,8 +95,9 @@ gym eval run --no-serve \
   `failure_kind`), the metrics in `..._aggregate_metrics.json` (see [Scoring](#scoring)), and
   `..._materialized_inputs.jsonl`, which `gym eval reverify` and `gym eval profile` read. A rollout whose `/run`
   fails ends the run; add `++route_failures_to_sidecar=true` to record it in `..._failures.jsonl` and keep going.
-- Run one resources-server worker (`num_workers` unset or 1, the default): sessions live in its memory, and a call
-  that reaches another worker finds no session.
+- On the relay, run one worker of the resources server (`num_workers` unset or 1, the default): a turn's session lives
+  in the memory of the worker that set it up, and a call that reaches another worker finds no session. The
+  `agent_arena` Environment Server may run several: it routes each tool call to the worker that runs its episode.
 - The simulator and judge set throughput. For more than a few hundred rollouts, or to serve them from separate models,
   see [docs/training.md](docs/training.md#serving-the-simulator-and-the-judge).
 
@@ -280,7 +291,7 @@ a short description of the agent to a shared judge frame; the rubrics are the sa
 | `foreign_script_gate_min_letters` | `null` | Score 0 as `foreign_script`, without a judge, a policy turn whose `foreign_script_letters` reaches this many (`null`: off; the count is reported either way). |
 | `session_ttl_seconds` | `21600` | Sessions that never reach `/verify` are dropped after this long. |
 | `show_agent_system_prompt` | `null` | Show the judge and simulator the row's system prompt. `null`: every harness but `sandbox`. |
-| `obstacle_injection` | `{enabled: false, row_rate: 0.3, kinds: {transient: 0.25, blocked_route: 0.5, empty_search: 0.25}, call_kinds: [fetch, search], harnesses: null, max_call_index: 2, seed: 0}` | Recoverable failures injected into the policy's web calls ([design](docs/design.md#recoverable-obstacles)). When enabled, a hash of `seed` and the row's input arms `row_rate` of the rows (`verifier_metadata.obstacle` overrides it), each with one kind drawn by `kinds`; the failure hits the first fitting web call of an allowed `call_kinds` among the turn's web calls 0..`max_call_index` that its kind can fail (fetches for `blocked_route`, searches for `empty_search`), never first in a reply that calls a stop tool. `harnesses: null` is every harness with recorded texts (`sandbox`, `claude_code`, `openclaw`, `opencode`); a row without `harness` runs as `generic` and is never armed. |
+| `obstacle_injection` | `{enabled: false, row_rate: 0.3, kinds: {transient: 0.25, blocked_route: 0.5, empty_search: 0.25}, call_kinds: [fetch, search], harnesses: null, max_call_index: 2, seed: 0}` | Recoverable failures injected into the policy's web calls ([design](docs/design.md#recoverable-obstacles)). When enabled, a hash of `seed` and the row's input arms `row_rate` of the rows (`verifier_metadata.obstacle` overrides it), each with one kind drawn by `kinds`; the failure hits the first fitting web call of an allowed `call_kinds` among the turn's web calls 0..`max_call_index` that its kind can fail (fetches for `blocked_route`, searches for `empty_search`), never first in a reply that calls a stop tool. `harnesses: null` is every harness with recorded texts (`sandbox`, `claude_code`, `openclaw`, `opencode`); a row without `harness` runs as `generic` and is never armed. Relay configs only: the `agent_arena` Environment Server refuses it at startup. |
 | `metric_breakdown_keys` | `[harness, record_kind]` | `verifier_metadata` keys that `turn_score` is broken down by (dotted for a nested key, such as `difficulty.level`, which becomes `turn_score_by_difficulty_level`). |
 | `judge_system_prompt_note_file` | `judge-system-prompt-note.md` | How the judge should read that prompt: facts in it are grounded and its instructions are ones the agent had to follow. |
 
