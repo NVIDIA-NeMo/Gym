@@ -410,6 +410,8 @@ def _separate_mode(task: HarborTask, separate: bool | None) -> bool:
 
 
 # The agent transcript in ATIF v1.7, written under AGENT_LOGS_DIR before every verify; Harbor verifiers may read it.
+# The oracle's runs get it too, unlike under Harbor, whose oracle writes none: a task verifier that reads it keeps
+# working when ``harbor_oracle_agent`` validates the task.
 TRAJECTORY_FILE_NAME = "trajectory.json"
 
 # Top-level names in a verification's host logs folder that this server writes itself, beside what it downloads from

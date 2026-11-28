@@ -19,7 +19,10 @@ In the default shared mode, the server does this in the agent's sandbox:
    image's `/tests`.
 3. Uploads `tests/` to `/tests` and makes `test.sh` executable.
 4. Writes the agent's transcript to `/logs/agent/trajectory.json` in
-   [ATIF v1.7](/main/reference/atif-export), the format Harbor's verifiers read.
+   [ATIF v1.7](/main/reference/atif-export), the format Harbor's verifiers read. The oracle gets one too, though
+   Harbor's oracle writes none, so a verifier that reads it works when the oracle validates the task. Beside it,
+   the oracle leaves `oracle.txt`, the output of `solve.sh`, and, when `solve.sh` exits non-zero, `exit-code.txt`
+   with the exit code.
 5. Runs `bash /tests/test.sh` from the working directory under `timeout`, with its output in
    `/logs/verifier/test-stdout.txt`.
 
