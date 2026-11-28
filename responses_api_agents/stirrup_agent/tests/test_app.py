@@ -197,6 +197,18 @@ class TestApp:
         assert payload["code_exec"] is (code_exec is not False)
 
     @pytest.mark.asyncio
+    async def test_code_exec_limits_reach_the_runner_and_default_to_none(self) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy")
+
+        default = await _runner_payload(_make_config(), body)
+        limited = await _runner_payload(
+            _make_config(code_exec_max_memory_mib=8192, code_exec_max_file_size_mib=1024), body
+        )
+
+        assert (default["code_exec_max_memory_mib"], default["code_exec_max_file_size_mib"]) == (None, None)
+        assert (limited["code_exec_max_memory_mib"], limited["code_exec_max_file_size_mib"]) == (8192, 1024)
+
+    @pytest.mark.asyncio
     async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
         config = _make_config(
             context_window_tokens=131072,

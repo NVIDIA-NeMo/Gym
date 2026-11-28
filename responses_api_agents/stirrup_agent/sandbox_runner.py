@@ -59,10 +59,24 @@ _REJECTION_STATUSES = frozenset({400, 413, 422})
 class LocalShell(CodeExecToolProvider):
     """Mimic original ``code_exec`` behavior from the Apptainer backend."""
 
-    def __init__(self, workdir: str, scratch: Path) -> None:
+    def __init__(
+        self,
+        workdir: str,
+        scratch: Path,
+        *,
+        max_memory_mib: int | None = None,
+        max_file_size_mib: int | None = None,
+    ) -> None:
         super().__init__()
         self._workdir = workdir
         self._scratch = scratch
+        # Soft and hard limits both: a command cannot raise them again.
+        limits = []
+        if max_memory_mib is not None:
+            limits.append(f"ulimit -d {max_memory_mib * 1024}")
+        if max_file_size_mib is not None:
+            limits.append(f"ulimit -f {max_file_size_mib * 1024}")
+        self._limits = "".join(f"{limit} && " for limit in limits)
         # How the last command ended, for its tool-call observation.
         self.last_exit_code: int | None = None
         self.last_timed_out = False
@@ -75,7 +89,9 @@ class LocalShell(CodeExecToolProvider):
 
     async def run_command(self, cmd: str, *, timeout: int | None = None) -> CommandResult:
         timeout = timeout or self._shell_timeout
-        script = f"cd {shlex.quote(self._workdir)} && ( timeout -k 10 {timeout} bash -c {shlex.quote(cmd)} )"
+        script = (
+            f"cd {shlex.quote(self._workdir)} && ( {self._limits}timeout -k 10 {timeout} bash -c {shlex.quote(cmd)} )"
+        )
         # Files, not pipes: a background process keeps a pipe open after the command returns.
         with tempfile.TemporaryFile(dir=self._scratch) as out, tempfile.TemporaryFile(dir=self._scratch) as err:
             process = await asyncio.create_subprocess_exec(
@@ -399,7 +415,12 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         finish_names = payload["finish_tool_names"]
         task_tools = [remote_tool(spec, http) for spec in payload["tools"]]
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
-        shell = LocalShell(payload["workdir"], scratch)
+        shell = LocalShell(
+            payload["workdir"],
+            scratch,
+            max_memory_mib=payload["code_exec_max_memory_mib"],
+            max_file_size_mib=payload["code_exec_max_file_size_mib"],
+        )
         observer.watch_model_calls(client)
         observer.watch_tool_calls(NeMoAgent)
         observer.shell = shell

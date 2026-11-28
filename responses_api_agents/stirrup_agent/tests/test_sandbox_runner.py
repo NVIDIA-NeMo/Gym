@@ -6,6 +6,7 @@ import ast
 import asyncio
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -55,6 +56,8 @@ def _payload(model_url: str, resources_url: str, workdir: Path) -> dict:
         "workdir": str(workdir),
         "max_turns": 10,
         "min_compaction_summary_words": 1,
+        "code_exec_max_memory_mib": None,
+        "code_exec_max_file_size_mib": None,
         "client": {"model": "policy", "base_url": model_url, "max_tokens": 32768, "temperature": 0.0},
     }
 
@@ -403,8 +406,8 @@ def test_a_model_server_error_that_is_not_a_rejected_request_still_fails_the_run
 def test_a_timed_out_command_is_a_timeout_observation_and_the_model_sees_the_failure(tmp_path, resources, monkeypatch):
     init = LocalShell.__init__
 
-    def short_timeout(self, *args):
-        init(self, *args)
+    def short_timeout(self, *args, **kwargs):
+        init(self, *args, **kwargs)
         self._shell_timeout = 1
 
     monkeypatch.setattr(sandbox_runner.LocalShell, "__init__", short_timeout)
@@ -576,6 +579,26 @@ class TestLocalShell:
 
         assert result.stdout == "started\n"
         assert time.monotonic() - started < 10
+
+    def test_a_memory_limit_fails_an_oversized_allocation(self, tmp_path):
+        (tmp_path / "root").mkdir()
+        shell = LocalShell(str(tmp_path / "root"), tmp_path, max_memory_mib=512)
+        python = shlex.quote(sys.executable)
+
+        small = self._run(shell, f"{python} -c 'x = bytearray(64 << 20)' && echo fits")
+        large = self._run(shell, f"{python} -c 'x = bytearray(1 << 30)'")
+
+        assert small.stdout == "fits\n"
+        assert large.exit_code == 1 and "MemoryError" in large.stderr
+
+    def test_a_file_size_limit_stops_a_command_at_the_limit(self, tmp_path):
+        (tmp_path / "root").mkdir()
+        shell = LocalShell(str(tmp_path / "root"), tmp_path, max_file_size_mib=1)
+
+        result = self._run(shell, "head -c 4194304 /dev/zero > big; ulimit -f 4096")
+
+        assert result.exit_code != 0
+        assert (tmp_path / "root" / "big").stat().st_size == 1 << 20
 
 
 def test_the_staged_files_have_no_broken_imports():

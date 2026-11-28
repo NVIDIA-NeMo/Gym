@@ -295,6 +295,18 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: Dict[str, Any] = Field(
         default_factory=dict, description="SandboxSpec fields for a sandbox started from sandbox_provider."
     )
+    code_exec_max_memory_mib: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Data segment limit (ulimit -d) of each code_exec process. Unset preserves the sandbox limit. A provider "
+        "without cgroup limits (Apptainer without systemd) otherwise lets one command take the host's memory.",
+    )
+    code_exec_max_file_size_mib: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Size limit (ulimit -f) of each file a code_exec process writes, its output included. Unset "
+        "preserves the sandbox limit. Files in a tmpfs-backed sandbox /tmp are host memory.",
+    )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=12600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
@@ -423,6 +435,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "stop_request_path": state.session.stop_request_path,
             "max_turns": self.config.agent_max_turns,
             "min_compaction_summary_words": self.config.min_compaction_summary_words,
+            "code_exec_max_memory_mib": self.config.code_exec_max_memory_mib,
+            "code_exec_max_file_size_mib": self.config.code_exec_max_file_size_mib,
             "client": {
                 "model": model_name,
                 # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
