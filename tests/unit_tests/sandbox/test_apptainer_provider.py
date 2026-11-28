@@ -163,10 +163,15 @@ def test_require_apptainer_uses_configured_binpath(monkeypatch: pytest.MonkeyPat
 
 def test_apptainer_subprocess_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("KEPT", "1")
+    # Apptainer passes this environment into the container, so a server's run session secret stays out of it.
+    monkeypatch.setenv("NEMO_GYM_RUN_SESSION_SECRET_0123456789ABCDEF", "secret")
 
-    assert apptainer_provider._apptainer_subprocess_env("/workspace/apptainer/bin")["PATH"] == (
-        "/workspace/apptainer/bin:/usr/bin"
-    )
+    env = apptainer_provider._apptainer_subprocess_env("/workspace/apptainer/bin")
+
+    assert env["PATH"] == "/workspace/apptainer/bin:/usr/bin"
+    assert env["KEPT"] == "1"
+    assert "NEMO_GYM_RUN_SESSION_SECRET_0123456789ABCDEF" not in env
 
 
 def test_coerce_config() -> None:

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import hashlib
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -16,6 +18,7 @@ from pydantic import JsonValue
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.run_session_secrets import RUN_SESSION_SECRET_ENV_PREFIX
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
@@ -106,11 +109,15 @@ class RestartOnlyServer(CounterServer):
 
 
 def make_server(
-    server_type: type[CounterServer] = CounterServer, *, routed: bool = False, socket_dir: str | None = None
+    server_type: type[CounterServer] = CounterServer,
+    *,
+    routed: bool = False,
+    socket_dir: str | None = None,
+    **config_fields: Any,
 ) -> tuple[CounterServer, httpx.AsyncClient]:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
-    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="counter")
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="counter", **config_fields)
     server = server_type(config=config, server_client=server_client, counters={})
     app = server.setup_webserver()
     if socket_dir is not None:
@@ -1315,6 +1322,44 @@ def test_mcp_session_tokens_are_read_with_the_servers_own_secret() -> None:
     assert claims("a secret, not the server's name") == MCPTokenClaims("s", EpisodeId(rollout_id="r", attempt=1))
     # The server's public name, which the secret replaces as the key, signs no token this server accepts.
     assert claims(server.get_session_middleware_key()) is None
+
+
+class RunSecretServer(CounterServer):
+    signs_sessions_with_run_secret: ClassVar[bool] = True
+
+
+class RunSecretStatelessServer(StatelessServer):
+    signs_sessions_with_run_secret: ClassVar[bool] = True
+
+
+@pytest.mark.parametrize(
+    "server_type, config_fields",
+    [
+        (RunSecretServer, {}),
+        (RunSecretStatelessServer, {}),
+        (CounterServer, {"expose_tools_over_mcp": True, "mcp_bearer_token": True}),
+    ],
+)
+async def test_a_server_that_signs_with_the_run_secret_takes_part_as_restart_only(
+    server_type: type[CounterServer],
+    config_fields: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A restart replaces the run's secret, so the cookies and MCP tokens a restored session arrives with would not
+    decode: the server reports restart_only whatever it declares, and its episodes start over after a crash."""
+    # The server's secret starts unset, and monkeypatch removes the one the server makes.
+    monkeypatch.setenv(RUN_SESSION_SECRET_ENV_PREFIX + hashlib.sha256(b"counter").hexdigest()[:16].upper(), "")
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.base_resources_server"):
+        server, client = make_server(server_type, **config_fields)
+    async with client:
+        seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
+        status = (await client.get("/ng-control/v1/checkpoint/status", headers=AUTH)).json()
+
+    assert seed.status_code == 200
+    assert status["mode"] == "restart_only"
+    assert server.session_secret != server.get_session_middleware_key()
+    assert f"takes part in checkpoints as restart_only, not {server_type.checkpoint_mode}" in caplog.text
 
 
 def test_an_exported_server_without_its_hooks_fails_at_startup() -> None:

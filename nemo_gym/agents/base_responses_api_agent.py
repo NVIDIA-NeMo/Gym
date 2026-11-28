@@ -112,7 +112,12 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.base_server import (
+    BaseRunServerInstanceConfig,
+    BaseServer,
+    SimpleServer,
+    uses_run_session_secret,
+)
 from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import ToolAccess
@@ -770,7 +775,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
 
         Status, discovery and seed replies report it. An agent whose capture depends on its configuration,
-        such as on a sandbox provider that can snapshot, overrides it.
+        such as on a sandbox provider that can snapshot, overrides it. An agent that signs its sessions with the run's
+        secret takes part as ``restart_only`` whatever this returns (``setup_agent_checkpoint``).
         """
         return self.checkpoint_mode
 
@@ -800,6 +806,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         mode = self.checkpoint_mode_in_effect()
         if mode not in _AGENT_CHECKPOINT_MODES:
             raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode != "restart_only" and uses_run_session_secret(self):
+            # A restart replaces the run's secret, so the cookie a restored session arrives with would not decode.
+            LOG.warning(
+                "%s signs its sessions with the run's secret, which a restart replaces, so it takes part in "
+                "checkpoints as restart_only, not %s",
+                self.config.name,
+                mode,
+            )
+            mode = "restart_only"
         if mode == "restart_only":
             # Fail closed: in-flight work is reported as restarts,
             # which never hold up a checkpoint and start over after a crash.

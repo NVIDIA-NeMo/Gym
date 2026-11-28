@@ -195,13 +195,15 @@ def _rpc(client: TestClient, method: str, params: dict | None = None, token: str
     return client.post("/mcp", headers=headers, json=body).json()
 
 
-def _handshake(client: TestClient) -> None:
-    _rpc(
+def _handshake(client: TestClient) -> dict:
+    """Initialize the MCP session, and return the initialize reply."""
+    initialized = _rpc(
         client,
         "initialize",
         {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
     )
     client.post("/mcp", headers=RPC_HEADERS, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return initialized
 
 
 def _list(client: TestClient, token: str | None = None) -> list[dict]:
@@ -594,8 +596,9 @@ def _company_server(cls=SessionScoped, mcp_server_name: str = "company") -> Simp
 
 
 def test_bearer_token_and_advertised_name_present_an_ordinary_endpoint():
-    """The seed hands out a bearer token under the advertised name; tools/list needs it and shows only the
-    session's grant; a tool outside the grant is answered as an unknown one; the errors name no framework."""
+    """The seed hands out a bearer token under the advertised name, and initialize introduces the endpoint under
+    it; tools/list needs the token and shows only the session's grant; a tool outside the grant is answered as an
+    unknown one; the errors name no framework."""
     server = _company_server()
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
@@ -604,7 +607,8 @@ def test_bearer_token_and_advertised_name_present_an_ordinary_endpoint():
         assert mcp["server_name"] == "company" and list(mcp["headers"]) == ["Authorization"]
         scheme, _, token = mcp["headers"]["Authorization"].partition(" ")
         assert scheme == "Bearer"
-        _handshake(client)
+        # Not the server's own name (store), which would name an internal service to code in the sandbox.
+        assert _handshake(client)["result"]["serverInfo"]["name"] == "company"
         bearer = {**RPC_HEADERS, "Authorization": f"Bearer {token}"}
 
         def rpc(method: str, params: dict, headers: dict) -> dict:

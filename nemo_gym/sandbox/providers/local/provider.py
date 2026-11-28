@@ -26,6 +26,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
 
+from nemo_gym.core.run_session_secrets import without_run_session_secrets
 from nemo_gym.sandbox.providers.base import (
     SandboxCapabilities,
     SandboxExecResult,
@@ -128,7 +129,8 @@ class LocalProvider:
                 process = await asyncio.create_subprocess_exec(
                     *process_argv,
                     cwd=str(exec_cwd),
-                    env={**os.environ, **inst["env"], **(env or {})},
+                    # The command may run code a model wrote: the secrets a server signs sessions with stay out.
+                    env={**without_run_session_secrets(os.environ), **inst["env"], **(env or {})},
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=True,
