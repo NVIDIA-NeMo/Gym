@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from environments.ether0.prepare import format_row
+from resources_servers.ether0.scripts.prepare_ether0 import format_row
 
 
 OUTPUT_FPATH = Path(__file__).resolve().parent / "data" / "test.jsonl"
@@ -20,7 +20,7 @@ def prepare() -> Path:
     from datasets import load_dataset
 
     source = load_dataset("futurehouse/ether0-benchmark", split="test", revision=DATA_REVISION)
-    # format_row is the environment's own formatter: it holds the system prompt and the
+    # format_row is the resources server's own formatter: it holds the system prompt and the
     # verifier_metadata fields the resources server reads back.
     rows = [format_row(row) for row in source]
     identities = {row["verifier_metadata"]["id"] for row in rows}

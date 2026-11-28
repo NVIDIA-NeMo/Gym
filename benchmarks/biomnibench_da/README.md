@@ -44,6 +44,13 @@ gym eval run --resume --concurrency 8 \
   ++prepare_script_args.output_dir="${PWD}/benchmarks/biomnibench_da/data"
 ```
 
+## Terminus 2 preset
+
+[`terminus_2/`](terminus_2/README.md) runs the same upstream dataset with Terminus 2 through the
+`harbor_agent` bridge and Gym's model server, with Docker and Singularity profiles and its own
+materializer and seeded train/test partition. It is a run preset of this benchmark and has no
+manifest of its own.
+
 ## Configuration
 
 | Variable | Type | Description |

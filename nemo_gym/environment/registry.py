@@ -98,6 +98,19 @@ def _path_identity(tree_dir: Path, manifest_path: Path) -> str:
     return relative.as_posix()
 
 
+def folder_in_other_catalog_tree(tree_dir: Path, name: str) -> Path | None:
+    """The folder in the other catalog tree of ``tree_dir``'s search root that has the top-level name of ``name``.
+
+    ``tree_dir`` is a search root's ``benchmarks/`` or ``environments/`` folder, and ``name`` a catalog name in it, which
+    is its folder path there. A catalog name identifies one entry whatever its kind, so a top-level folder name is used
+    in only one of the two trees. `gym env init` and `gym env validate` refuse a name this returns a folder for.
+    Discovery does not, so search roots whose trees already share a name keep listing both entries.
+    """
+    other_subdir = {ENVIRONMENTS_SUBDIR: BENCHMARKS_SUBDIR, BENCHMARKS_SUBDIR: ENVIRONMENTS_SUBDIR}[tree_dir.name]
+    folder = tree_dir.parent / other_subdir / name.split("/", 1)[0]
+    return folder if folder.is_dir() else None
+
+
 def _manifest_entry(
     tree_dir: Path,
     manifest_path: Path,

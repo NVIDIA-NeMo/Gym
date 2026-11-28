@@ -6,7 +6,7 @@ Source: [futurehouse/ether0-benchmark](https://huggingface.co/datasets/futurehou
 
 Prepared task count: **325**, about 25 per task type across 14 types. Every answer is a molecule, a reaction or a reaction name. Data license: CC-BY-4.0. Integration code is Apache-2.0.
 
-Preparation uses the environment's own formatter (`environments/ether0/prepare.py`), so prompts and `verifier_metadata` are the ones the [ether0 resources server](../../resources_servers/ether0/README.md) grades. The standard `simple_agent` is used with no tools.
+Preparation uses the resources server's own formatter ([`scripts/prepare_ether0.py`](../../resources_servers/ether0/scripts/prepare_ether0.py)), so prompts and `verifier_metadata` are the ones the [ether0 resources server](../../resources_servers/ether0/README.md) grades. The standard `simple_agent` is used with no tools.
 
 Mean binary reward in [0, 1], higher is better. No LLM judge.
 

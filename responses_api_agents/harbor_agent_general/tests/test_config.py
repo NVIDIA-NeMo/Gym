@@ -191,8 +191,8 @@ def test_reject_mixed_native_and_legacy_settings(tmp_path: Path) -> None:
         ),
         ("benchmarks/biomnibench_da/config.yaml", "biomnibench_da", "singularity"),
         ("benchmarks/genebench_pro/config.yaml", "genebench_pro", "singularity"),
-        ("environments/labbench2_pdf/config.yaml", "harbor_agent_general", "docker"),
-        ("environments/labbench2_pdf/config_singularity.yaml", "harbor_agent_general", "singularity"),
+        ("benchmarks/labbench2_pdf/harbor_docker.yaml", "harbor_agent_general", "docker"),
+        ("benchmarks/labbench2_pdf/harbor_singularity.yaml", "harbor_agent_general", "singularity"),
     ],
 )
 def test_shipped_configs_resolve_native_job(
@@ -216,11 +216,11 @@ def test_shipped_configs_resolve_native_job(
     assert job.datasets[0].task_names == ["selected-task"]
     assert job.environment.type == environment_type
     assert "job" in settings
-    if filename.startswith("environments/labbench2_pdf/"):
+    if filename.startswith("benchmarks/labbench2_pdf/"):
         assert job.agents[0].model_name == "openai/test-model"
         assert job.jobs_dir == repo / "results/labbench2_pdf/harbor_jobs"
         dataset_name = "tasks_docker" if environment_type == "docker" else "tasks_singularity"
-        assert job.datasets[0].path == repo / "environments/labbench2_pdf/data" / dataset_name
+        assert job.datasets[0].path == repo / "benchmarks/labbench2_pdf/data" / dataset_name
         assert job.job_name.startswith("t0-r0-")
         assert job.agents[0].override_setup_timeout_sec == 900
         assert job.agents[0].env["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config_paths:
-  - environments/labbench2_pdf/config.yaml
+  - benchmarks/labbench2_pdf/harbor_docker.yaml
 
 labbench2_pdf_benchmark_harbor_agent:
   _inherit_from: harbor_agent_general

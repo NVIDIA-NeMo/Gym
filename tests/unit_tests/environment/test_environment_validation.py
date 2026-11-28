@@ -1086,6 +1086,30 @@ def test_manifest_identity_matches_its_catalog_path(changes: dict, message: str,
         validate_environment(manifest_path)
 
 
+@pytest.mark.parametrize(("kind", "other_tree"), [("environment", "benchmarks"), ("benchmark", "environments")])
+def test_a_name_the_other_catalog_tree_has_is_refused(kind: str, other_tree: str, tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind=kind)
+    validate_environment(manifest_path)
+    # A folder without a manifest takes the name too: its config is listed under its folder path.
+    (tmp_path / other_tree / "demo").mkdir(parents=True)
+    (tmp_path / other_tree / "demo" / "config.yaml").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match=f"also used by .*{other_tree}/demo\\. A top-level folder"):
+        validate_environment(manifest_path)
+
+
+def test_a_nested_name_whose_top_level_folder_the_other_tree_has_is_refused(tmp_path: Path) -> None:
+    config_manifest_path = _asset(tmp_path)
+    nested_manifest_path = tmp_path / "environments/acme/demo/manifest.yaml"
+    nested_manifest_path.parent.mkdir(parents=True)
+    manifest = load_manifest(config_manifest_path).model_copy(update={"name": "acme/demo"})
+    nested_manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+    (tmp_path / "benchmarks/acme/other").mkdir(parents=True)
+
+    with pytest.raises(EnvironmentValidationError, match="Name 'acme/demo' is also used by .*benchmarks/acme\\."):
+        validate_environment(nested_manifest_path, config_manifest_path.with_name("config.yaml"))
+
+
 def test_slash_qualified_name_matches_nested_catalog_path(tmp_path: Path) -> None:
     config_manifest_path = _asset(tmp_path)
     nested_manifest_path = tmp_path / "environments/acme/demo/manifest.yaml"

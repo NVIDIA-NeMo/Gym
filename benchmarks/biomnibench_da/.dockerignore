@@ -1,0 +1,3 @@
+# The Terminus 2 preset builds its own runtime image (terminus_2/docker/) and keeps its downloads under
+# terminus_2/data/; neither belongs in this Dockerfile's build context.
+terminus_2/
