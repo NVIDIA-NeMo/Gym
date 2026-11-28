@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   validate-codeowners-membership:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml@f47f58bcf571d7dee8678e0fc5f6eec7800dadd4
     with:
       membership_app_id: ${{ vars.GYM_PR_APP_ID }}
     secrets:

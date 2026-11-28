@@ -22,4 +22,4 @@ permissions:
 
 jobs:
   copyright-check:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_copyright_check.yml@7c09a9e67a5cd4f2e73803114195d6705738d6c1
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_copyright_check.yml@f47f58bcf571d7dee8678e0fc5f6eec7800dadd4
