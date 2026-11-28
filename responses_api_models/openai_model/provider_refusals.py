@@ -48,17 +48,22 @@ def provider_refusal(status: int, body: object, allowed_codes: frozenset[str]) -
     return None
 
 
-def refusal_response(model: str, refusal: dict, raw_body: bytes | str | dict | None, *, request: dict) -> dict:
-    """Build a refusal envelope preserving request tools, error evidence and unknown usage."""
+def _refusal_evidence(refusal: dict, raw_body: bytes | str | dict | None) -> dict[str, object]:
+    """The provider's refusal as it arrived: status, code, message and the raw error body."""
     if isinstance(raw_body, bytes):
         raw_body = raw_body.decode(errors="replace")
     raw = raw_body if isinstance(raw_body, str) else json.dumps(raw_body, sort_keys=True)
-    evidence = {
+    return {
         "http_status": 400,
         "error_code": refusal["code"],
         "message": refusal["message"],
         "raw_error_body": raw,
     }
+
+
+def refusal_response(model: str, refusal: dict, raw_body: bytes | str | dict | None, *, request: dict) -> dict:
+    """Build a refusal envelope preserving request tools, error evidence and unknown usage."""
+    evidence = _refusal_evidence(refusal, raw_body)
     return {
         "id": "resp_provider_refusal_" + uuid4().hex,
         "created_at": time.time(),
@@ -80,4 +85,25 @@ def refusal_response(model: str, refusal: dict, raw_body: bytes | str | dict | N
         # The provider did not report usage; do not invent zero billable tokens.
         "usage": None,
         "metrics": {"provider_http_refusal": evidence},
+    }
+
+
+def refusal_chat_completion(model: str, refusal: dict, raw_body: bytes | str | dict | None) -> dict:
+    """Build a chat completion for a refusal: the refusal message, finish reason ``content_filter``, error evidence
+    and unknown usage."""
+    return {
+        "id": "chatcmpl_provider_refusal_" + uuid4().hex,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "content_filter",
+                "message": {"role": "assistant", "content": None, "refusal": refusal["message"]},
+            }
+        ],
+        # The provider did not report usage; do not invent zero billable tokens.
+        "usage": None,
+        "metrics": {"provider_http_refusal": _refusal_evidence(refusal, raw_body)},
     }
