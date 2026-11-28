@@ -1,0 +1,23 @@
+{
+  "defaults": {
+    "request": "greedy",
+    "skills": {
+      "EVAL_ARGS": "++eval_type=nemo_skills.dataset.voicearena-monsoon.scorer::MonsoonASREvaluator ++eval_config.cleanup_generation_loops=true",
+      "METRICS_TYPE": "nemo_skills.dataset.voicearena-monsoon.scorer::MonsoonASRMetrics"
+    }
+  },
+  "profiles": {
+    "voicearena-monsoon.en-in.public": {
+      "prompt_override": {
+        "system_prompt": "",
+        "user_prompt": "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only. Use Latin script only."
+      }
+    },
+    "voicearena-monsoon.hi-in.public": {
+      "prompt_override": {
+        "system_prompt": "",
+        "user_prompt": "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only. Use Devanagari for Hindi words, never romanized Hindi. Keep English words in their original spelling."
+      }
+    }
+  }
+}
