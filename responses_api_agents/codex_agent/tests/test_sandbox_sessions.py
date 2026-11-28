@@ -44,6 +44,7 @@ from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxStatus, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.codex_agent.app import (
     _SANDBOX_SESSION_KEY,
+    SANDBOX_PROVIDER_KEY_ENV,
     CodexAgent,
     CodexAgentConfig,
     _model_endpoint_error,
@@ -1892,7 +1893,7 @@ def test_instructions_and_text_parts_reach_codex_without_other_provider_credenti
         config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
         assert config["developer_instructions"] == "config instruction\n\nrequest instruction\n\ninput instruction"
         assert payload["prompt"] == "task"
-        assert payload["env"]["OPENAI_API_KEY"] == "gym"
+        assert payload["env"][SANDBOX_PROVIDER_KEY_ENV] == "gym"
         assert "must-not-copy" not in json.dumps(sandbox.files)
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         conversation = closed.json()["agent_observations"]["records"][0]["conversation"]
@@ -3558,13 +3559,19 @@ def test_sandbox_environment_inheritance_is_opt_in(setup, inherit) -> None:
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
         assert result.status_code == 200, result.text
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
     assert payload["inherit_env"] is inherit
-    # HOME and the XDG directories come from the sandbox either way; only CODEX_HOME is private.
+    # HOME and the XDG directories come from the sandbox either way; only CODEX_HOME and the provider key are
+    # private. No OPENAI_* variable is set, so a task's own OPENAI_API_KEY reaches Codex's shell commands.
     assert payload["env"] == {
         "CODEX_HOME": f"{sandbox.directory}/home/.codex",
-        "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+        SANDBOX_PROVIDER_KEY_ENV: "gym",  # pragma: allowlist secret
     }
+    # The Gym provider reads its key from that variable and keeps the Gym model server's address.
+    assert config["model_provider"] == "gym"
+    assert config["model_providers"]["gym"]["env_key"] == SANDBOX_PROVIDER_KEY_ENV
+    assert config["model_providers"]["gym"]["base_url"].startswith("http://model.example:9000/")
 
 
 def test_sandbox_access_env_reaches_codex(setup) -> None:
@@ -3582,7 +3589,7 @@ def test_sandbox_access_env_reaches_codex(setup) -> None:
     assert payload["env"] == {
         **env,
         "CODEX_HOME": f"{sandbox.directory}/home/.codex",
-        "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+        SANDBOX_PROVIDER_KEY_ENV: "gym",  # pragma: allowlist secret
     }
 
 
