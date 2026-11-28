@@ -37,37 +37,56 @@ not a decrement schedule or a token-budget estimate. A terminal (unrecoverable) 
 failure is scored as a zero attempt, matching AA's treatment of failed submissions -- it does not
 raise, so the row still gets verified (and scores 0, since an empty answer earns no rubric credit)
 rather than being dropped from the run entirely.
+
+An agent session gets the manifest from its ``agent_context`` (``artifacts.document_manifest``, the ``agent`` role's
+context in the task row) and runs the same delivery and backoff in the episode of its one activation; the agent loop
+stays Simple Agent's. The delivery record goes into the response's ``document_delivery`` metadata, and the Environment
+Server verifies the answer.
 """
 
 import base64
+import errno
 import io
 import json
 import math
 import re
+from dataclasses import dataclass, fields
+from http import HTTPStatus
 from pathlib import Path
 from time import time
-from typing import Any, Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 from aiohttp import ClientResponseError
 from fastapi import Request
 from PIL import Image, ImageDraw
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    resolve_agent_context_artifact,
+)
 from nemo_gym.agents.agent_outcome import policy_timeout_failure
 from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     failure_kinds,
 )
+from nemo_gym.server_runtime import AgentContextArtifact
+from nemo_gym.trajectory import ObservationGap, TrajectoryRecord
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
+    SimpleAgentSessionState,
     SimpleAgentVerifyResponse,
 )
 
@@ -80,7 +99,9 @@ _MAX_PAGES_PER_IMAGE = 4
 
 class GdpPdfAgentConfig(SimpleAgentConfig):
     documents_base_dir: str = Field(
-        description="Base directory for resolving verifier_metadata.document_manifest, relative to the Gym root.",
+        description="Base directory for resolving the document manifest (verifier_metadata.document_manifest on "
+        "/run, the agent_context artifact in a session), relative to the Gym root. A session refuses a manifest "
+        "that resolves outside it through a symlink, so name the real directory.",
     )
     dpi: int = Field(
         default=BASE_DPI,
@@ -220,8 +241,42 @@ def _input_limit(error: ClientResponseError) -> tuple[Optional[str], Optional[in
     text = getattr(error, "response_content", b"")
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="replace")
-    text = str(text).lower()
-    if error.status in (401, 403, 429) or any(
+    return _classify_input_limit(error.status, str(text))
+
+
+def _session_model_error(response: NeMoGymResponse) -> Optional[tuple[int, str]]:
+    """The status and upstream body of a model error that a session activation returned as a failed response.
+
+    In a session, Simple Agent does not raise a model HTTP error: it returns a failed response classified as
+    ``model_request_error`` with the status, and the upstream body in ``error.message``.
+    """
+    if response.status != "failed" or response.error is None:
+        return None
+    try:
+        outcome = AgentOutcome.model_validate_json((response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY, ""))
+    except ValidationError:
+        return None
+    if outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code is None:
+        return None
+    text = re.sub(r"^Model HTTP \d+: ", "", response.error.message)
+    try:
+        # Without a body, the message falls back to the reason phrase; that is the empty body _input_limit sees.
+        if text.strip().lower() == HTTPStatus(outcome.status_code).phrase.lower():
+            text = ""
+    except ValueError:
+        pass
+    return outcome.status_code, text
+
+
+def _is_empty_server_error(status: int, text: str) -> bool:
+    """A server error without a body: taken for a payload limit, though no provider said so."""
+    return status >= 500 and not text.strip()
+
+
+def _classify_input_limit(status: int, text: str) -> tuple[Optional[str], Optional[int]]:
+    """The input limit a model error's status and body report, and the image cap it names, if any."""
+    text = text.lower()
+    if status in (401, 403, 429) or any(
         marker in text for marker in ("ratelimiterror", "rate_limit_exceeded", "authenticationerror")
     ):
         return None, None
@@ -234,7 +289,7 @@ def _input_limit(error: ClientResponseError) -> tuple[Optional[str], Optional[in
             return "image_count", int(match[1])
     if "too many images" in text:
         return "image_count", None
-    if error.status == 413 or any(
+    if status == 413 or any(
         marker in text
         for marker in (
             "request entity too large",
@@ -259,7 +314,7 @@ def _input_limit(error: ClientResponseError) -> tuple[Optional[str], Optional[in
         )
     ):
         return "context", None
-    if error.status >= 500 and not text.strip():
+    if _is_empty_server_error(status, text):
         # An empty body on a server error is exactly what an oversized-request crash on the
         # inference server looks like when nothing survives to describe why (seen in practice:
         # vLLM returning a 500 with response_content=b'' under an oversized multi-image prompt).
@@ -324,10 +379,44 @@ def _compose_pages(
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
-    """Load a prepare-time document manifest, sorting pages by page number."""
+    """Load a prepare-time document manifest, sorting pages by page number.
+
+    Raises ValueError for a manifest that is not a JSON object, or that names a page image outside its own
+    directory: page images go to the model, so a manifest cannot point at other files on the host.
+    """
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError(f"{manifest_path} is not a JSON object")
     manifest["pages"] = sorted(manifest.get("pages") or [], key=lambda page: page["page_number"])
+    manifest_dir = manifest_path.parent.resolve()
+    for page in manifest["pages"]:
+        if "image" in page and not (manifest_dir / page["image"]).resolve().is_relative_to(manifest_dir):
+            raise ValueError(f"{manifest_path} names page image {page['image']!r}, which is outside {manifest_dir}")
     return manifest
+
+
+# Errors the manifest path itself causes, which a retry meets again (the set resolve_agent_context_artifact refuses).
+_MANIFEST_PATH_ERRNOS = frozenset(
+    {errno.EACCES, errno.EPERM, errno.ENAMETOOLONG, errno.ELOOP, errno.ENOTDIR, errno.ENOENT, errno.EISDIR}
+)
+
+
+def _unusable_page(
+    manifest: dict[str, Any],
+    manifest_dir: Path,
+    *,
+    include_text: bool,
+    include_images: bool,
+    max_pages: Optional[int],
+) -> Optional[str]:
+    """Why a loaded manifest cannot be delivered, or None: a page whose text or page image the delivery would read
+    is missing, so every attempt would fail the same way."""
+    for page in manifest["pages"][:max_pages]:
+        if include_text and not isinstance(page.get("text"), str):
+            return f"page {page['page_number']} has no extracted text"
+        if include_images and not (isinstance(page.get("image"), str) and (manifest_dir / page["image"]).is_file()):
+            return f"page {page['page_number']} names no page image file under {manifest_dir}"
+    return None
 
 
 def _manifest_text_blocks(manifest: dict[str, Any], *, max_pages: Optional[int]) -> tuple[list[dict[str, Any]], int]:
@@ -460,13 +549,8 @@ def _build_task_text_block(
     return {"type": "input_text", "text": "\n\n".join(parts)}
 
 
-def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
-    """Remove input_image blocks from the serialized rollout result.
-
-    Operates on a dict dump to avoid Pydantic model mutation/serialization issues,
-    then re-validates into the response model.
-    """
-
+def _scrub_image_blocks(value: Any) -> tuple[Any, bool]:
+    """``value`` without its input_image blocks, and whether it had any."""
     removed_image = False
 
     def scrub(value: Any) -> Any:
@@ -483,7 +567,16 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
             return {key: scrub(item) for key, item in value.items()}
         return value
 
-    data = scrub(result.model_dump(mode="json"))
+    return scrub(value), removed_image
+
+
+def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
+    """Remove input_image blocks from the serialized rollout result.
+
+    Operates on a dict dump to avoid Pydantic model mutation/serialization issues,
+    then re-validates into the response model.
+    """
+    data, removed_image = _scrub_image_blocks(result.model_dump(mode="json"))
     if removed_image:
         for key in ("ng_trajectory", "ng_agent_observations"):
             observations = data.get(key)
@@ -492,8 +585,189 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
     return SimpleAgentVerifyResponse.model_validate(data)
 
 
+def _strip_trajectory_images(trajectory: TrajectoryRecord) -> TrajectoryRecord:
+    """The trajectory without the base64 page images its conversations carry, with a gap that says so."""
+    data, removed_image = _scrub_image_blocks(trajectory.model_dump(mode="json"))
+    stripped = TrajectoryRecord.model_validate(data)
+    if removed_image:
+        stripped.gaps.append(ObservationGap(code="multimodal_history_redacted"))
+    return stripped
+
+
+# The response metadata key a session's delivery record goes in, the one a /run result carries as a field.
+DOCUMENT_DELIVERY_METADATA_KEY = "document_delivery"
+
+
+class GdpPdfAgentContext(BaseModel):
+    """The ``agent_context`` a GDP.pdf task carries: its document manifest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    document_manifest: AgentContextArtifact
+
+
+@dataclass
+class GdpPdfSessionState(SimpleAgentSessionState):
+    # The task's document manifest, resolved under documents_base_dir when the session is seeded.
+    manifest_path: Optional[Path] = None
+
+
 class GdpPdfAgent(SimpleAgent):
     config: GdpPdfAgentConfig
+    agent_context_model = GdpPdfAgentContext
+
+    def _documents_base_dir(self) -> Path:
+        base = Path(self.config.documents_base_dir)
+        return base if base.is_absolute() else PARENT_DIR / base
+
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> GdpPdfSessionState:
+        # A restore rebuilds sessions through here too, so a restored session keeps its document.
+        state = super()._new_session_state(body)
+        context = self.parse_agent_context(body)
+        manifest_path = resolve_agent_context_artifact(
+            context.document_manifest, self._documents_base_dir(), kind="file"
+        )
+        try:
+            manifest = _load_manifest(manifest_path)
+            source_dpi = int(manifest.get("source_dpi", self.config.dpi))
+            problem = _unusable_page(
+                manifest,
+                manifest_path.parent,
+                include_text=self.config.include_text,
+                include_images=self.config.include_images,
+                max_pages=self.config.max_pages,
+            )
+        except OSError as error:
+            # A storage error (EIO, ESTALE) may pass, so it fails the seed as a transient error; only an error the
+            # path itself causes refuses it, as resolve_agent_context_artifact does.
+            if error.errno not in _MANIFEST_PATH_ERRNOS:
+                raise
+            raise AgentSeedRejectedError(f"document manifest {manifest_path} cannot be read: {error}") from None
+        except (ValueError, KeyError, TypeError) as error:
+            # Every retry would parse the same file, so a malformed manifest refuses the seed.
+            raise AgentSeedRejectedError(
+                f"document manifest {manifest_path} cannot be read: {type(error).__name__}: {error}"
+            ) from None
+        if problem is not None:
+            # Every activation would fail on the same page, so refuse the seed instead of answering without it.
+            raise AgentSeedRejectedError(f"document manifest {manifest_path}: {problem}")
+        if source_dpi != self.config.dpi:
+            raise AgentSeedRejectedError(
+                f"{manifest_path} was rendered at {source_dpi} DPI, but this agent's starting dpi is "
+                f"{self.config.dpi}: re-render the document at the configured DPI, or match dpi to it"
+            )
+        return GdpPdfSessionState(
+            **{field.name: getattr(state, field.name) for field in fields(state)}, manifest_path=manifest_path
+        )
+
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        create_episode = super()._create_session_episode
+        manifest_path = state.manifest_path if isinstance(state, GdpPdfSessionState) else None
+        if manifest_path is None or not (self.config.include_text or self.config.include_images):
+            return await create_episode(state, body, **kwargs)
+        return await self._answer_with_document(
+            body, manifest_path, lambda params: create_episode(state, params, **kwargs)
+        )
+
+    def _document_request(
+        self,
+        params: NeMoGymResponseCreateParamsNonStreaming,
+        manifest: dict[str, Any],
+        manifest_dir: Path,
+        delivery: DocumentDelivery,
+        prompt_blocks: list[dict[str, Any]],
+        text_blocks: list[dict[str, Any]],
+    ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, int]:
+        """The request for one delivery attempt, and the pages its images leave out (max_pages)."""
+        image_blocks: list[dict[str, Any]] = []
+        image_pages_truncated = 0
+        # Text-only fallback (delivery.text_only_fallback=True) suppresses image render
+        # after the DPI floor was hit and pages still didn't fit -- see adapt().
+        if self.config.include_images and not delivery.text_only_fallback:
+            image_blocks, image_pages_truncated = _render_manifest_images(
+                manifest,
+                manifest_dir,
+                delivery=delivery,
+                max_pages=self.config.max_pages,
+                source_dpi=int(manifest.get("source_dpi", self.config.dpi)),
+                image_format=self.config.image_format,
+                jpeg_quality=self.config.jpeg_quality,
+            )
+        delivery_notice_blocks = _delivery_notice_blocks(delivery)
+        # Reference request shape: images FIRST, then a single unified text block that
+        # contains the preamble + user prompt + extracted PDF text with ## Page N markers.
+        task_text_block = _build_task_text_block(prompt_blocks, delivery_notice_blocks, text_blocks)
+        params_dict = params.model_dump(exclude_unset=True)
+        params_dict["input"] = [{"role": "user", "content": [*image_blocks, task_text_block]}]
+        return NeMoGymResponseCreateParamsNonStreaming.model_validate(params_dict), image_pages_truncated
+
+    async def _answer_with_document(
+        self,
+        params: NeMoGymResponseCreateParamsNonStreaming,
+        manifest_path: Path,
+        create_episode: Callable[[NeMoGymResponseCreateParamsNonStreaming], Awaitable[tuple]],
+    ) -> tuple:
+        """Run a session activation's episode with the document, backing off as run() does.
+
+        An input-limit rejection that no smaller delivery fixes returns an empty failed response, which the
+        Environment Server verifies as a zero attempt, as run() scores it. Any other model error stays the
+        classified failure Simple Agent returns, for the Environment Server's outcome policy; so does an empty-body
+        server error on the last, text-only attempt, since it may be an outage rather than a limit.
+
+        Every attempt passes the same checkpoint activation to ``create_episode``. That is safe because this agent
+        runs no tools and so never commits a boundary past step 0: a restore restarts the backoff at full DPI.
+        """
+        manifest = _load_manifest(manifest_path)
+        prompt_blocks = _prompt_blocks({"responses_create_params": params.model_dump(exclude_unset=True)})
+        text_blocks: list[dict[str, Any]] = []
+        pages_truncated = 0
+        if self.config.include_text:
+            text_blocks, pages_truncated = _manifest_text_blocks(manifest, max_pages=self.config.max_pages)
+        delivery = DocumentDelivery(self.config.dpi, self.config.max_images)
+        terminal_limit: Optional[str] = None
+        while True:
+            request, image_pages_truncated = self._document_request(
+                params, manifest, manifest_path.parent, delivery, prompt_blocks, text_blocks
+            )
+            pages_truncated = max(pages_truncated, image_pages_truncated)
+            model_response, trajectory, model_cookies, resources_cookies = await create_episode(request)
+            model_error = _session_model_error(model_response)
+            limit, image_cap = _classify_input_limit(*model_error) if model_error is not None else (None, None)
+            if limit is not None:
+                if delivery.adapt(limit, image_cap, min_dpi=self.config.min_dpi):
+                    continue
+                if not _is_empty_server_error(*model_error):
+                    terminal_limit = limit
+                    model_response = _terminal_failure_response(self.config.model_server.name)
+                # Otherwise the last rejection was only an empty server error, which an outage looks like too:
+                # the classified model_request_error stays the result, for the outcome policy to judge.
+            elif (
+                model_response.status == "incomplete"
+                and self.config.regenerate_on_incomplete_output
+                and self.config.include_images
+                and delivery.adapt("output_truncated", None, min_dpi=self.config.min_dpi)
+            ):
+                continue
+            break
+        record = (
+            delivery.record(terminal_limit)
+            | {"rejected_attempts": delivery.attempts, "pages_truncated": pages_truncated}
+            | delivery.adaptation_counts()
+        )
+        if terminal_limit and self.config.mask_failed_attempts:
+            # The Environment Server returns a session's row, so gdp_pdf's verify() applies this mark as run() would:
+            # mask_sample and failure_kind for an attempt whose input never fit.
+            record |= {"mask_failed_attempt": True, "failure_kind": _failure_kind(terminal_limit)}
+        model_response = model_response.model_copy(
+            update={
+                "metadata": {**(model_response.metadata or {}), DOCUMENT_DELIVERY_METADATA_KEY: json.dumps(record)}
+            }
+        )
+        if trajectory is not None and self.config.strip_images_from_output:
+            trajectory = _strip_trajectory_images(trajectory)
+        return model_response, trajectory, model_cookies, resources_cookies
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         resolved_base = Path(self.config.documents_base_dir)
@@ -548,28 +822,10 @@ class GdpPdfAgent(SimpleAgent):
                 text_blocks, pages_truncated = _manifest_text_blocks(manifest, max_pages=self.config.max_pages)
 
             while True:
-                image_blocks: list[dict[str, Any]] = []
-                # Text-only fallback (delivery.text_only_fallback=True) suppresses image render
-                # after the DPI floor was hit and pages still didn't fit -- see adapt() below.
-                if self.config.include_images and not delivery.text_only_fallback:
-                    image_blocks, image_pages_truncated = _render_manifest_images(
-                        manifest,
-                        manifest_dir,
-                        delivery=delivery,
-                        max_pages=self.config.max_pages,
-                        source_dpi=manifest_source_dpi,
-                        image_format=self.config.image_format,
-                        jpeg_quality=self.config.jpeg_quality,
-                    )
-                    pages_truncated = max(pages_truncated, image_pages_truncated)
-                delivery_notice_blocks = _delivery_notice_blocks(delivery)
-                # Reference request shape: images FIRST, then a single unified text block that
-                # contains the preamble + user prompt + extracted PDF text with ## Page N markers.
-                task_text_block = _build_task_text_block(prompt_blocks, delivery_notice_blocks, text_blocks)
-                content = [*image_blocks, task_text_block]
-                params_dict = body.responses_create_params.model_dump(exclude_unset=True)
-                params_dict["input"] = [{"role": "user", "content": content}]
-                params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_dict)
+                params, image_pages_truncated = self._document_request(
+                    body.responses_create_params, manifest, manifest_dir, delivery, prompt_blocks, text_blocks
+                )
+                pages_truncated = max(pages_truncated, image_pages_truncated)
                 try:
                     model_response, trajectory, _, cookies = await self._create_episode(
                         params,
