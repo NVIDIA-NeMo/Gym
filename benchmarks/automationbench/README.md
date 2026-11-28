@@ -63,7 +63,11 @@ directly comparable to the AA leaderboard column.
 
 - Toolset: `api`, matching the AA harness
 - `api_fetch` uses JSON objects instead of JSON strings for `body` and
-  `params`, with `{}` for empty values.
+  `params`, with `{}` for empty values. Strict function calling cannot
+  describe objects with arbitrary keys, so rows send `api_fetch` with
+  `strict: false`; the other tools stay strict. Rows prepared before this
+  change send it strict, which endpoints that enforce strict schemas reject;
+  re-run `gym eval prepare --benchmark automationbench`.
 - Scoring code: `automationbench_env/` (imports upstream
   `automationbench`; vendors nothing)
 
