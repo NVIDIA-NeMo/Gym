@@ -343,7 +343,9 @@ Sandbox requests may set `metadata.agent_timeout_sec` to a positive number of
 seconds, encoded as a string. This bounds the activation's model and tool work,
 capped by the configured `timeout`; missing or invalid values use that ceiling.
 Other metadata keys are rejected with HTTP 422. Setup and cleanup keep their
-separate limits.
+separate limits. The response states the limit that the activation ran under as
+`metadata.agent_timeout_sec`, beside `harness_execution`, `claude_code_version` and,
+when the runner reported them, `harness_hostname` and `harness_pid`.
 
 The shared `SandboxSession` supervisor stops the harness before reading its
 dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,
@@ -354,6 +356,15 @@ harness execution; setup and close use the limits above. The close response's
 `cleanup_confirmed` reports whether harness termination was witnessed or an owned
 sandbox was stopped. A false value can accompany successful borrowed-connection
 release; the owner must destroy that sandbox and leave the activation ungraded.
+
+A sandbox activation that Claude Code ends because a model request failed is returned `failed` with the cause in
+`metadata.ng_agent_outcome`. The Environment Server's `agent_outcome_policy` acts on that cause. The cause is
+`model_request_error` with the HTTP status that the `result` event of Claude Code states in `api_error_status`. A
+turn that ended for an API error without a status got no HTTP response, and its cause is `model_transport_error`.
+Claude Code 2.1.312 ends the turn at once for the status 400, 413 or 422. It repeats a request up to ten times
+after the status 401, 429, 500 or 503 and after a refused connection, which takes about three minutes, and then
+ends the turn. An activation that failed for another reason states no cause, and the Environment Server verifies
+it.
 
 `configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
 such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own

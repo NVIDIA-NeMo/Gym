@@ -38,6 +38,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
@@ -55,6 +56,8 @@ from nemo_gym.agents import (
 from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -236,6 +239,19 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
 
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read the failed model request that ended the turn from Claude Code 2.1.312's ``result`` event.
+
+        ``api_error_status`` is the HTTP status of that request. A turn that ended for an API error without a
+        status got no HTTP response. Any other ending stays unknown.
+        """
+        status = native_result.get("api_error_status")
+        if type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("terminal_reason") == "api_error":
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return AgentOutcome(failure_kind="unknown")
+
     config: ClaudeCodeAgentConfig
     # Sandbox sessions run the CLI inside the sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
@@ -639,6 +655,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         run_metadata: dict[str, Any],
         *,
         status: str | None = None,
+        error: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> NeMoGymResponse:
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -669,6 +687,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         )
         return NeMoGymResponse(
             **({"status": status} if status is not None else {}),
+            error=error,
+            metadata=metadata,
             id=response_id,
             created_at=int(time()),
             model=model_name,
@@ -899,6 +919,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
         env.update(self._client_env())
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         artifacts = None
         failure = None
         try:
@@ -921,7 +942,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "skills_path": skills_path,
                         **({"prompt": prompt} if stdin else {}),
                     },
-                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                    timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as error:
@@ -960,7 +981,31 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
-        response = self._response_from_output(body, items, model, run_metadata, status=status)
+        outcome = self.classify_outcome(run_metadata)
+        model_request_failed = status == "failed" and outcome.failure_kind != "unknown"
+        runtime = state.runtime_info
+        response = self._response_from_output(
+            body,
+            items,
+            model,
+            run_metadata,
+            status=status,
+            error={
+                "code": "rate_limit_exceeded" if outcome.status_code == 429 else "server_error",
+                "message": run_metadata.get("error_message", ""),
+            }
+            if model_request_failed
+            else None,
+            metadata={
+                "harness_execution": "sandbox",
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
+                **({"claude_code_version": version} if (version := self.config.claude_code_version) else {}),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+            },
+        )
+        if model_request_failed:
+            # A turn that failed otherwise stays unclassified, which the Environment Server verifies.
+            response = self.report_outcome(response, run_metadata)
         state.observations = await self._reconcile_captured_calls(
             state.observations, rollout_id=state.request.episode_id.capture_key, response=response
         )

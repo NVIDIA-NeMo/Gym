@@ -15,7 +15,13 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    OutcomeAction,
+    agent_outcome_policy,
+)
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter
@@ -26,7 +32,7 @@ from responses_api_agents.claude_code_agent.tests.test_sandbox import agent, res
 RESULT = json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": {"input_tokens": 1}})
 
 
-async def launch(monkeypatch, instance, prompt="Fix the code"):
+async def launch(monkeypatch, instance, prompt="Fix the code", result=RESULT, metadata=None, runtime_info=None):
     """Run one sandbox activation with a stubbed execution; return the runner input and response."""
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
@@ -37,10 +43,11 @@ async def launch(monkeypatch, instance, prompt="Fix the code"):
             cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
             artifacts=None,
         ),
+        runtime_info=runtime_info,
     )
-    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(RESULT))
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(result))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
-    body = NeMoGymResponseCreateParamsNonStreaming(input=prompt)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=prompt, metadata=metadata)
     response = await instance._sandbox_response(state, body, prompt=prompt, system=None)
     return execute.await_args.args[0], response
 
@@ -61,6 +68,108 @@ async def test_instruction_reaches_the_cli_on_stdin_when_configured(monkeypatch,
     else:
         assert command[-2:] == ["--", "Fix the 'parser'"]
         assert "prompt" not in payload
+
+
+def failed_result(**fields):
+    """The result event of a turn that Claude Code ended with an error."""
+    return json.dumps({"type": "result", "subtype": "success", "is_error": True, "result": "API Error", **fields})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fields", "outcome", "code", "action"),
+    [
+        (
+            {"terminal_reason": "api_error", "api_error_status": 400},
+            {"failure_kind": "model_request_error", "status_code": 400},
+            "server_error",
+            OutcomeAction.VERIFY,
+        ),
+        (
+            {"terminal_reason": "image_error", "api_error_status": 413},
+            {"failure_kind": "model_request_error", "status_code": 413},
+            "server_error",
+            OutcomeAction.VERIFY,
+        ),
+        (
+            {"terminal_reason": "api_error", "api_error_status": 401},
+            {"failure_kind": "model_request_error", "status_code": 401},
+            "server_error",
+            OutcomeAction.FAIL,
+        ),
+        (
+            {"terminal_reason": "api_error", "api_error_status": 429},
+            {"failure_kind": "model_request_error", "status_code": 429},
+            "rate_limit_exceeded",
+            OutcomeAction.RETRY,
+        ),
+        (
+            {"terminal_reason": "api_error", "api_error_status": 503},
+            {"failure_kind": "model_request_error", "status_code": 503},
+            "server_error",
+            OutcomeAction.RETRY,
+        ),
+        (
+            {"terminal_reason": "api_error", "api_error_status": None},
+            {"failure_kind": "model_transport_error"},
+            "server_error",
+            OutcomeAction.RETRY,
+        ),
+    ],
+    ids=["400", "413", "401", "429", "503", "no response"],
+)
+async def test_failed_model_request_is_reported_with_its_cause(monkeypatch, fields, outcome, code, action):
+    instance = agent(anthropic_base_url="https://model.example")
+    _, response = await launch(monkeypatch, instance, result=failed_result(**fields))
+    assert response.status == "failed"
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
+    assert (response.error.code, response.error.message) == (code, "API Error")
+    assert agent_outcome_policy(response) == action
+
+
+@pytest.mark.asyncio
+async def test_turn_that_did_not_fail_states_no_error_of_a_model_request(monkeypatch):
+    """A result that ends a turn at the limit on turns can still state the status of a failed model request."""
+    result = failed_result(subtype="error_max_turns", terminal_reason="max_turns", api_error_status=503)
+    instance = agent(anthropic_base_url="https://model.example")
+    _, response = await launch(monkeypatch, instance, result=result)
+    assert response.status == "incomplete"
+    assert response.error is None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        failed_result(terminal_reason="completed"),
+        json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True}),
+    ],
+    ids=["an error result", "an error during execution"],
+)
+async def test_turn_that_failed_otherwise_states_no_cause(monkeypatch, result):
+    instance = agent(anthropic_base_url="https://model.example")
+    _, response = await launch(monkeypatch, instance, result=result)
+    assert response.status == "failed"
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata and response.error is None
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("requested", "enforced"), [(None, "7200.0"), ("90", "90.0"), ("86400", "7200.0")])
+async def test_response_states_the_enforced_timeout_the_version_and_the_runner(monkeypatch, requested, enforced):
+    instance = agent(anthropic_base_url="https://model.example", timeout=7200)
+    metadata = {"agent_timeout_sec": requested} if requested else None
+    runner = adapter.HarnessProcessInfo(hostname="worker", pid=7)
+
+    _, response = await launch(monkeypatch, instance, metadata=metadata, runtime_info=runner)
+
+    assert response.metadata == {
+        "harness_execution": "sandbox",
+        "harness_hostname": "worker",
+        "harness_pid": "7",
+        "claude_code_version": instance.config.claude_code_version,
+        "agent_timeout_sec": enforced,
+    }
 
 
 def run_runner(tmp_path, prompt=None):

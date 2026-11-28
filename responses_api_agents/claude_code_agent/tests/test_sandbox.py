@@ -347,7 +347,12 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     assert response.output[0].content[0].text == "partial"
     assert response.status == status
     assert response.usage.total_tokens == 12
-    assert response.metadata is None  # no adapter-specific runtime policy fields
+    # The fields that the other harness adapters state; the stubbed execution reports no runner.
+    assert response.metadata == {
+        "harness_execution": "sandbox",
+        "claude_code_version": "2.1.108",
+        "agent_timeout_sec": str(float(instance.config.timeout)),
+    }
     assert "model_call_ownership_unavailable" in [gap.code for gap in state.observations.gaps]
 
     assert next(r for r in state.observations.records if r.kind == "sandbox").sandbox_id == "sandbox-actual"
