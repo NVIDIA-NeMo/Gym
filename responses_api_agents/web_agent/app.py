@@ -26,6 +26,8 @@ from nemo_gym.client.openai_client import _error_body_is_permanent_quota
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     SESSION_LOST,
+    SESSION_RELEASE_FAILED,
+    TRANSPORT_TIMEOUT,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -33,7 +35,6 @@ from nemo_gym.core import (
     is_namespaced,
     is_registered,
 )
-from nemo_gym.core.failure_kinds import SESSION_RELEASE_FAILED, TRANSPORT_TIMEOUT
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.web import (
