@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# NL2RepoBench x OpenCode on agent sessions. single_agent_turn_legacy seeds the resources server, which starts the agent
+# sandbox and lends it (sandbox_access); opencode_agent runs OpenCode inside it. After the agent session closes, /verify
+# collects /workspace and grades it in a fresh sandbox from the task's pinned image.
+#
+# Differences from opencode_sandboxed_agent.yaml, the legacy_agent preset the published runs used:
+# - One activation. opencode_agent has no idle nudge or stuck detector yet, so a reply without a tool call ends the run;
+#   the relay preset continues it until TASK_COMPLETE (up to 100 nudges). Compare the two only after an A/B on the same
+#   tasks.
+# - opencode_agent installs its pinned OpenCode release at seed, which the default official mode's open egress allows.
+
+config_paths:
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - resources_servers/nl2repobench/configs/nl2repobench.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+nl2repobench_opencode_resources_server:
+  _inherit_from: nl2repobench_resources_server
+  resources_servers:
+    nl2repobench:
+      # official mode: the generic agent image needs open egress to install a task's dependencies, as upstream's agent
+      # has, so treat its score as an upper bound (README "Network modes"). The verifier is unaffected.
+      enforce_agent_no_network: false
+      # Grade like NL2RepoBench itself (see _UPSTREAM_PACKAGE_FILES in app.py).
+      grading_protocol: upstream
+
+nl2repobench_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
+      # NL2RepoBench's agent budget: 6 hours.
+      timeout: 21600
+      # An admitted episode already holds its sandbox, so the agent server does not queue it again.
+      concurrency: 1024
+      context_window: 524288
+      # OpenHands' default max_iterations (500), which NL2RepoBench runs with. No compaction: an overflow ends the run
+      # with a context error instead of a summary.
+      opencode_config:
+        agent:
+          build:
+            steps: 500
+        compaction:
+          auto: false
+      # The generic agent image has no ripgrep; with open egress OpenCode fetches one when it first needs it.
+      sandbox_ripgrep_download: true
+      # A run that fails or reaches its time limit still leaves a workspace to grade, as the relay preset grades it.
+      verify_after_agent_error: true
+      datasets:
+        - name: nl2repobench_v1
+          type: benchmark
+          jsonl_fpath: benchmarks/nl2repobench/data/nl2repobench_benchmark.jsonl
+          prepare_script: benchmarks/nl2repobench/prepare.py
+          num_repeats: 1
+
+nl2repobench_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: nl2repobench_opencode_agent
+      # The agent's 21600 s plus collection and grading, within the agent sandbox's 25200 s ttl_s.
+      default_episode_timeout_seconds: 25200
