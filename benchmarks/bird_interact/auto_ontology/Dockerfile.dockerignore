@@ -1,0 +1,7 @@
+# The build context is the repository root: send only this directory, and the two files of each release database that
+# the catalog build reads: its schema (for the sample rows) and its column meanings. The knowledge base, part of which
+# each task hides, and the ground truth, in data/*.jsonl, stay out.
+*
+!benchmarks/bird_interact/auto_ontology/
+!benchmarks/bird_interact/data/*/databases/*/*_schema.txt
+!benchmarks/bird_interact/data/*/databases/*/*_column_meaning_base.json
