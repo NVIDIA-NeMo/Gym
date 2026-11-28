@@ -1,0 +1,29 @@
+name: voice_code_bench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: asr
+description: Transcription of code-like spoken entities (URLs, paths, commands, identifiers) over the 300 VoiceCodeBench recordings, scored by format-invariant WER and an LLM entity verifier.
+modality: audio
+licensing: MIT AND LicenseRef-VoiceCodeBench-Audio
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 0.0
+  higher_is_better: true
+determinism: unknown
+resources_server: audio_eval
+agent_server: simple_agent
+datasets:
+- name: voice_code_bench
+  type: benchmark
+  jsonl_fpath: benchmarks/voice_code_bench/data/voice_code_bench.jsonl
+  prepare_script: benchmarks/voice_code_bench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active

@@ -1,0 +1,15 @@
+{
+  "profiles": {
+    "voice-code-bench": {
+      "prompt_override": {
+        "system_prompt": "",
+        "user_prompt": "Transcribe the audio as a clean written transcript. Context terms to bias toward: phone number, email address, URL, file path, command, CLI flag, environment variable, software version, date, time, postal address, reference ID, account ID, record ID, product code, spelled sequence. Use conventional written forms and preserve punctuation/separators inside code-like entities."
+      },
+      "request": "greedy",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=voice_code_bench ++eval_config.verifier_id=openai_gpt_5_5_v1 ++eval_config.cleanup_generation_loops=true",
+        "METRICS_TYPE": "voice_code_bench"
+      }
+    }
+  }
+}
