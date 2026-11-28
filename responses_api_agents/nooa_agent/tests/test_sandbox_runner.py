@@ -197,7 +197,7 @@ async def test_limit_result_survives_worker_boundary_and_cleanup(reason: NOOATer
     [
         cleanup_receipt(return_code=7),
         cleanup_receipt(return_code=None),
-        cleanup_receipt(timed_out=True),
+        cleanup_receipt(timed_out=True, error="supervisor failed"),
         cleanup_receipt(error="supervisor failed"),
     ],
 )
@@ -864,20 +864,75 @@ async def test_retry_cannot_exceed_artifact_capture_budget() -> None:
     s.disconnect.assert_awaited_once()
 
 
+def stopped_artifact() -> SandboxResult:
+    """What the worker publishes when the supervisor's SIGTERM stops it: its work, marked cancelled."""
+    from nemo_gym.trajectory import ObservationGap
+    from responses_api_agents.nooa_agent.result import set_response_lifecycle
+
+    work = artifact()
+    return work.model_copy(
+        update={
+            "response": set_response_lifecycle(work.response, NOOATerminationReason.CANCELLED, None),
+            "observations": work.observations.model_copy(
+                update={"gaps": [*work.observations.gaps, ObservationGap(code="cancelled", detail="CancelledError: ")]}
+            ),
+            "termination_reason": NOOATerminationReason.CANCELLED,
+            "termination_error": "CancelledError: ",
+            "error": RunnerError(kind="cancelled", message="CancelledError: "),
+        }
+    )
+
+
 @pytest.mark.asyncio
-async def test_worker_deadline_preserves_checkpoint_without_retryable_dependency_error() -> None:
+@pytest.mark.parametrize("saved", ["checkpoint", "result", "stopped-result"])
+async def test_worker_deadline_returns_saved_work_as_a_gradable_time_limit(saved: str) -> None:
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    if saved == "checkpoint":
+        s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    elif saved == "stopped-result":
+        # The usual case: the supervisor's SIGTERM at the deadline makes the worker publish a cancelled result.
+        s.files[r.directory + "/result.json"] = stopped_artifact().model_dump_json()
+    else:
+        s.files[r.directory + "/result.json"] = artifact().model_dump_json()
+    request = payload().request
+    result = await r.run(request)
+    assert result.termination_reason is NOOATerminationReason.TIMEOUT_EXCEEDED
+    assert "execution deadline" in result.termination_error
+    # `incomplete` is the status the environment verifies; `failed` would skip grading.
+    assert result.episode.response.status == "incomplete"
+    assert result.episode.response.output == artifact().response.output
+    assert request.model_cookies == {"model": "new"}
+    assert request.resource_cookies == {"resource": "new"}
+    response, observations = finalize_run_result(result)
+    assert response.status == "incomplete"
+    gaps = {gap.code: gap.detail for gap in observations.gaps}
+    assert NOOATerminationReason.TIMEOUT_EXCEEDED in gaps
+    assert NOOATerminationReason.CANCELLED not in gaps
+    assert not any("not gradable" in detail or "not a terminal" in detail for detail in gaps.values())
+    if saved == "checkpoint":
+        assert "last saved checkpoint" in gaps["partial_checkpoint"]
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", [None, "errored-result"])
+async def test_worker_deadline_without_a_saved_response_stays_a_non_retryable_failure(saved: str | None) -> None:
     from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
 
     r, s = runner()
     s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
-    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline") as caught:
+    if saved is not None:
+        errored = artifact(RunnerError(kind="fatal", message="adapter defect"))
+        s.files[r.directory + "/result.json"] = errored.model_dump_json()
+    with pytest.raises(RuntimeError, match="worker exceeded its execution deadline") as caught:
         await r.run(payload().request)
     assert not is_transient_infrastructure_error(caught.value)
-    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
-    assert caught.value.result.episode.response.status == "failed"
-    assert caught.value.result.episode.response.output == checkpoint_artifact().response.output
-    assert "partial_checkpoint" in {gap.code for gap in r.observations.gaps}
+    if saved is not None:
+        assert isinstance(caught.value, NOOARunFailure)
+        assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+        assert caught.value.result.episode.response.status == "failed"
     await r.close()
 
 

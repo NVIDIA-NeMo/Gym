@@ -95,7 +95,9 @@ class SandboxNOOARunner:
         )
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
-        """Execute once, preserving evidence without allowing it to override failure."""
+        """Execute once, preserving evidence without allowing it to override failure.
+
+        The one outcome graded on saved evidence is a worker the supervisor stopped at its deadline."""
         try:
             capture_failure: Exception | None = None
             try:
@@ -127,7 +129,15 @@ class SandboxNOOARunner:
             ):
                 await self._collect_diagnostics()
             if cleanup["timed_out"]:
-                # Exhausting the worker budget is not a retryable dependency outage.
+                evidence = self.artifact or self.checkpoint
+                # A worker stopped by the supervisor's SIGTERM publishes its work as a cancelled result. A fatal
+                # or transient error in that result is the run's own failure and is not graded.
+                stopped = evidence is not None and (evidence.error is None or evidence.error.kind == "cancelled")
+                if cleanup["error"] is None and capture_failure is None and stopped and evidence.response is not None:
+                    # The supervisor stopped the worker at its deadline: a time limit, not a retryable
+                    # dependency outage. The work it saved is graded as it stands.
+                    return self._deadline_result(request, evidence)
+                # Nothing saved, or evidence that could not be read in full, cannot be graded.
                 raise RuntimeError("NOOA sandbox worker exceeded its execution deadline")
             if cleanup["error"]:
                 raise RuntimeError(f"NOOA sandbox supervisor failed: {cleanup['error']}")
@@ -171,6 +181,37 @@ class SandboxNOOARunner:
                     else:
                         raise NOOARunFailure(error, result) from error
             raise
+
+    def _deadline_result(self, request: NOOARunRequest, evidence: SandboxResult) -> NOOARunResult:
+        """Return the work a worker saved before its deadline as a gradable time-limit result."""
+        detail = "NOOA sandbox worker reached its execution deadline; its saved work is graded as it stands."
+        request.model_cookies.update(evidence.model_cookies)
+        request.resource_cookies.update(evidence.resource_cookies)
+        result = evidence.run_result()
+        observations = (self.observations or result.episode.observations).model_copy(deep=True)
+        # The worker recorded its stop as a cancellation; the deadline is the reason reported instead.
+        observations.gaps = [gap for gap in observations.gaps if gap.code != NOOATerminationReason.CANCELLED]
+        if isinstance(evidence, SandboxCheckpoint):
+            # A checkpoint recovered after an unexplained exit is marked not gradable. At the deadline it is the
+            # worker's result, so say what it is instead.
+            note = ObservationGap(
+                code="partial_checkpoint",
+                detail="NOOA worker stopped at its deadline; this is its last saved checkpoint.",
+            )
+            observations.gaps = [*(gap for gap in observations.gaps if gap.code != note.code), note]
+            if result.trajectory is not None:
+                result.trajectory = result.trajectory.model_copy(
+                    update={"gaps": [*(gap for gap in result.trajectory.gaps if gap.code != note.code), note]}
+                )
+        result.termination_reason = NOOATerminationReason.TIMEOUT_EXCEEDED
+        result.termination_error = detail
+        result.episode = replace(
+            result.episode,
+            response=set_response_lifecycle(result.episode.response, NOOATerminationReason.TIMEOUT_EXCEEDED, detail),
+            observations=observations,
+        )
+        self.observations = observations
+        return result
 
     async def _collect_diagnostics(self) -> None:
         """Retain a bounded log tail only after the important evidence is captured."""

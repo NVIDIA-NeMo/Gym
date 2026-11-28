@@ -329,10 +329,9 @@ async def test_failed_connect_closes_provider_without_retaining_seeded_state(set
     sandbox.disconnect.assert_not_awaited()
 
 
-async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_outage(setup) -> None:
+async def test_worker_stopped_at_its_budget_returns_saved_work_for_grading(setup) -> None:
     import json
 
-    from responses_api_agents.nooa_agent.runner import NOOARunFailure
     from responses_api_agents.nooa_agent.tests.test_sandbox_runner import checkpoint_artifact, cleanup_receipt
 
     instance, sandbox, _, _ = setup
@@ -340,10 +339,31 @@ async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_out
     runner = instance._require_agent_session("session").runner
     sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
     sandbox.files[runner.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline"):
-        await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    response = await instance.responses(
+        request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task")
+    )
+    # The environment verifies an `incomplete` response and skips a `failed` one.
+    assert response.status == "incomplete"
+    assert response.output == checkpoint_artifact().response.output
     receipt = await close(instance)
-    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+    codes = {gap.code for gap in receipt.agent_observations.gaps}
+    assert NOOATerminationReason.TIMEOUT_EXCEEDED in codes
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR not in codes
+
+
+async def test_worker_budget_failure_without_saved_work_is_not_a_retryable_dependency_outage(setup) -> None:
+    import json
+
+    from responses_api_agents.nooa_agent.tests.test_sandbox_runner import cleanup_receipt
+
+    instance, sandbox, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    runner = instance._require_agent_session("session").runner
+    sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    # Not an HTTPException(503): the environment must not retry an exhausted budget as an outage.
+    with pytest.raises(RuntimeError, match="worker exceeded its execution deadline"):
+        await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    await close(instance)
 
 
 async def test_cancelled_request_stays_cancelled_even_when_session_is_closing(setup) -> None:
