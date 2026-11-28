@@ -388,6 +388,7 @@ A rollout counts as timed out on one of two kinds of evidence:
    | `agent_timed_out` | the Codex agent |
    | `agent_timeout_error` | the Harbor agent |
    | `eval_timed_out` | SWE-bench Pro's verification |
+   | `verifier_timeout_s` | DeepSWE's verification, when the tests hit the task's limit |
    | `timed_out` | BrowseComp's per-rollout limit (`rollout_timeout_s`) |
    | `termination.reason=timeout` | Terminal-Bench's agent termination record |
 
