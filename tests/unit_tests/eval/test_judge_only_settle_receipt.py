@@ -310,7 +310,10 @@ def test_an_incomplete_strict_pass_rewrites_the_quality_summary_from_the_rows_it
     monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda path: False)  # the strict run stays incomplete
 
     eval_cli._rejudge_saved_judge_failures(
-        run_config, output, SimpleNamespace(disable_aggregation=False), complete_only=True
+        run_config,
+        output,
+        SimpleNamespace(disable_aggregation=False, allow_incomplete_aggregate=False),
+        complete_only=True,
     )
 
     coverage = RolloutStore.read(output, import_legacy=False).coverage()

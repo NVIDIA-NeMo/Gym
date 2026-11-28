@@ -224,6 +224,7 @@ def test_resume_allows_new_server_addresses_and_operational_options(saved_manife
         "num_samples_in_parallel": 10,
         "count_missing_rollouts_as_zero": True,
         "dispatch_reservation_interval_s": 0.0,
+        "allow_incomplete_aggregate": True,
     }
     servers["policy"]["responses_api_models"]["vllm_model"].update(host="host-B", port=200, api_key="new")
     current = RunManifest.create(source, rows, config, servers)
@@ -2488,11 +2489,15 @@ async def test_a_grading_provider_stop_ends_the_run_without_a_retry(
     ],
 )
 async def test_a_credentials_or_quota_stop_writes_no_aggregate(runner_config, monkeypatch, failure_class, kind):
-    """The stop is a rejection like an incomplete run: one rollout scored, yet no score is computed or left behind."""
+    """The stop is a rejection like an incomplete run: one rollout scored, yet no score is computed or left behind.
+
+    Allowing an incomplete aggregate does not change that: a provider stop is not unrecoverable rollouts.
+    """
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
     from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
     runner_config.require_complete = True
+    runner_config.allow_incomplete_aggregate = True
     runner_config.disable_aggregation = False
     aggregate = aggregate_metrics_path_for(Path(runner_config.output_jsonl_fpath))
     aggregate.write_text("[]")  # an earlier segment's aggregate describes other rows

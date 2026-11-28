@@ -131,7 +131,7 @@ from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
 from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
-from nemo_gym.utils.path_utils import materialized_path_for
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_path_for
 
 
 if TYPE_CHECKING:
@@ -930,7 +930,7 @@ def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
 def _saved_run_complete(output: Path) -> bool:
     """Whether the saved Store selection now meets ``check_completion``: unreadable evidence is not complete."""
     from nemo_gym.rollouts import RolloutStore
-    from nemo_gym.rollouts.rollout_recovery import has_only_intentional_gaps
+    from nemo_gym.rollouts.rollout_store import coverage_complete
 
     try:
         store = RolloutStore.read(output, import_legacy=False)
@@ -939,10 +939,7 @@ def _saved_run_complete(output: Path) -> bool:
         coverage = store.coverage()
     except Exception:  # the original rejection stands
         return False
-    completed = coverage["settled"]
-    return completed == coverage["expected"] or has_only_intentional_gaps(
-        expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
-    )
+    return coverage_complete(coverage)
 
 
 def _rejudge_saved_judge_failures(
@@ -959,13 +956,19 @@ def _rejudge_saved_judge_failures(
     start of a resumed run, with ``aggregate`` off since its collection aggregates afterwards. The saved results to
     grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
-    ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
-    incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
+    ``complete_only`` recomputes metrics when the settled run completes, or when the run opts into an incomplete
+    aggregate and nothing remains retryable. Only a complete run exports its score. Completeness is returned
     (always False without ``complete_only``). Recomputed metrics also refresh the per-agent completion files written
     during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
-    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_collection import (
+        RolloutAggregationConfig,
+        RolloutAggregationHelper,
+        _credentials_rejected_stop,
+        _quota_exhausted_stop,
+    )
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
     if isinstance(global_config_dict, DictConfig):
@@ -993,13 +996,27 @@ def _rejudge_saved_judge_failures(
     if collection_config.disable_aggregation or not aggregate:
         return complete
     if complete_only and not complete:
-        # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
-        # pass settled: the aggregation that rewrites it is skipped with the metrics. No completion file can follow
-        # it either, so they are removed.
-        if scored or raised or changed:
-            _remove_completion_files(output)
+        # Rejudging may produce the first scored row. Decide from the opt-in and settled state, not whether
+        # collection had enough scored rows to write an aggregate. Completion files still require a complete run.
+        _remove_completion_files(output)
+        allow_incomplete = False
+        if collection_config.allow_incomplete_aggregate:
+            try:
+                store = RolloutStore.read(output, import_legacy=False)
+                allow_incomplete = (
+                    store is not None
+                    and store.coverage()["retryable"] == 0
+                    and not _credentials_rejected_stop(store.failures())
+                    and not _quota_exhausted_stop(store.failures())
+                )
+            except Exception:  # unreadable evidence cannot authorize a partial score
+                logger.warning(
+                    "Could not check the saved run's eligibility for an incomplete aggregate.", exc_info=True
+                )
+        if not allow_incomplete:
+            aggregate_metrics_path_for(output).unlink(missing_ok=True)
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
-        return complete
+            return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
             run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
@@ -1012,8 +1029,11 @@ def _rejudge_saved_judge_failures(
             flush=True,
         )
         _remove_completion_files(output)
+        if complete_only and not complete:  # an incomplete run's aggregate from before the new grades is stale
+            aggregate_metrics_path_for(output).unlink(missing_ok=True)
         return complete
-    _refresh_completion_files(output, run_config)
+    if complete or not complete_only:
+        _refresh_completion_files(output, run_config)
     return complete
 
 
@@ -1335,9 +1355,13 @@ def export_run() -> None:  # pragma: no cover
     from nemo_gym.rollouts.rollout_recovery import run_lock
 
     artifacts = RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath)
-    from nemo_gym.artifacts.exporters.base import BaseExporter
+    from nemo_gym.artifacts.exporters.base import BaseExporter, ExportResult
+    from nemo_gym.rollouts.rollout_store import incomplete_run_export_error
 
-    if isinstance(exporter, BaseExporter) and artifacts.export_done_fpath(name).exists():
+    incomplete = incomplete_run_export_error(artifacts.rollouts_jsonl_fpath) if exporter.publishes_aggregate else None
+    if incomplete is not None:
+        result = ExportResult.failed(incomplete)
+    elif isinstance(exporter, BaseExporter) and artifacts.export_done_fpath(name).exists():
         # An exported run's repeat only verifies its receipt and writes nothing: it must not take the run lock, whose
         # holder record it would overwrite.
         result = exporter.export(artifacts)

@@ -77,6 +77,8 @@ class Exporter(ABC):
     # Identifier used on the command line and in logs, e.g. "atif".
     name: ClassVar[str]
     config_model: ClassVar[type[RunExportConfig]]
+    # Whether the export carries the run's aggregate metrics, which an incomplete strict run must not publish.
+    publishes_aggregate: ClassVar[bool] = True
 
     def __init__(self, config: RunExportConfig) -> None:
         self.config = config

@@ -131,10 +131,23 @@ def test_the_e2e_entry_point_uses_the_same_ordering_and_the_custom_driver_branch
     assert "_collect_and_rejudge(rch, config, " in inspect.getsource(eval_cli.collect_rollouts)
 
 
-def test_a_rejected_run_that_the_pass_completes_ends_with_its_aggregate_and_a_settled_batch_status(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "outcome, with_manifest",
+    [
+        ("complete", True),
+        ("complete", False),
+        ("first-score", False),
+        ("first-score", True),
+        ("partial", False),
+        ("partial", True),
+        ("retryable", True),
+        ("provider-stop", True),
+    ],
+)
+def test_a_rejected_run_recomputes_its_aggregate_and_keeps_its_batch_status_in_line_with_completion(
+    tmp_path, monkeypatch, with_manifest, outcome
 ) -> None:
-    """The real collector rejects a strict run and removes its aggregate; the pass completes it and the aggregate returns."""
+    """A saved answer's new grade reaches the aggregate, while an unfinished run's status stays pending."""
     import orjson
 
     import nemo_gym.rollouts.rollout_collection as collection
@@ -161,7 +174,7 @@ def test_a_rejected_run_that_the_pass_completes_ends_with_its_aggregate_and_a_se
                 }
             ).decode()
             + "\n"
-            for i in range(2)
+            for i in range(3 if outcome == "partial" else 2)
         )
     )
     output = tmp_path / "rollouts.jsonl"
@@ -173,7 +186,10 @@ def test_a_rejected_run_that_the_pass_completes_ends_with_its_aggregate_and_a_se
         "route_failures_to_sidecar": True,
         "disable_health_check": True,
         "require_complete": True,
+        "allow_incomplete_aggregate": outcome != "complete",
     }
+    if not with_manifest:
+        run_config.pop("batch_manifest_fpath")
     config = RolloutCollectionConfig(**run_config)
     rows = collection.RolloutCollectionHelper._preprocess_rows_from_config(None, config)
     [(agent, observed)] = observe_materialized_rows(rows).items()
@@ -207,27 +223,59 @@ def test_a_rejected_run_that_the_pass_completes_ends_with_its_aggregate_and_a_se
 
     async def post(server_name, url_path, json, **kwargs):
         if url_path == "/run":
-            return FakeResponse(200, judge_down if json["x"] == 0 else {"reward": 1.0, "response": {}})
+            if json["x"] == 0:
+                return FakeResponse(200, judge_down)
+            if outcome != "complete" and json["x"] == (2 if outcome == "partial" else 1):
+                return FakeResponse(
+                    200,
+                    {
+                        "failure_kind": "provider_credentials_rejected"
+                        if outcome == "provider-stop"
+                        else "agent_run_error",
+                        "_ng_failure_class": "agent_run_error",
+                        "_ng_failure_terminal": outcome != "retryable",
+                    },
+                )
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
         return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    exported = []
+    monkeypatch.setattr(collection, "export_metrics", lambda *args, **kwargs: exported.append(args))
+    # The export guard reads the strict run's saved configuration.
+    (tmp_path / "rollouts_resolved_config.yaml").write_text("require_complete: true\n")
     aggregate = aggregate_metrics_path_for(output)
     aggregate.write_text("[]")  # an earlier segment's aggregate, which the rejected run removes
 
     async def judge_answers(self, config):
         failure = RolloutStore.read(output, import_legacy=False).failures()[0]
-        _settle(output, failure, 1.0)
+        _settle(output, failure, 1.0 if outcome == "complete" else 0.0)
         # The pass starts from the rejected run: no score published, aggregation still pending.
-        assert not aggregate.exists()
-        pending = orjson.loads((tmp_path / "batch_status.json").read_bytes())
+        if outcome == "first-score":
+            assert not aggregate.exists()
+        pending = orjson.loads(status_path.read_bytes())
         assert pending["members"][agent]["aggregation_status"] == "pending"
 
     monkeypatch.setattr(rollout_reverification.RolloutReverificationHelper, "run_from_config", judge_answers)
 
-    eval_cli._collect_and_rejudge(collection.RolloutCollectionHelper(), config, run_config, output)
+    status_path = tmp_path / ("batch_status.json" if with_manifest else "rollouts_batch_status.json")
+    if outcome == "complete":
+        eval_cli._collect_and_rejudge(collection.RolloutCollectionHelper(), config, run_config, output)
+    else:
+        with pytest.raises(IncompleteEvaluationError):
+            eval_cli._collect_and_rejudge(collection.RolloutCollectionHelper(), config, run_config, output)
+
+    if outcome in {"retryable", "provider-stop"}:
+        assert not aggregate.exists()
+        assert not exported
+        return
 
     metrics = orjson.loads(aggregate.read_bytes())
-    assert metrics[0]["key_metrics"]["mean/reward"] == 1.0
-    status = orjson.loads((tmp_path / "batch_status.json").read_bytes())
-    assert status["members"][agent]["aggregation_status"] == "complete"
-    assert status["members"][agent]["completed_rollout_count"] == 2
+    assert metrics[0]["key_metrics"]["mean/reward"] == {"complete": 1.0, "first-score": 0.0, "partial": 0.5}[outcome]
+    status = orjson.loads(status_path.read_bytes())
+    assert status["members"][agent]["aggregation_status"] == ("complete" if outcome == "complete" else "pending")
+    assert status["members"][agent]["completed_rollout_count"] == (1 if outcome == "first-score" else 2)
+    coverage = RolloutStore.read(output, import_legacy=False).coverage()
+    assert coverage["retryable"] == 0
+    assert (coverage["settled"] == coverage["expected"]) is (outcome == "complete")
+    assert bool(exported) is (outcome == "complete")
