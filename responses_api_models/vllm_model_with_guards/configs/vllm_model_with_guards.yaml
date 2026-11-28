@@ -1,0 +1,14 @@
+policy_model:
+  responses_api_models:
+    vllm_model_with_guards:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      # Guards are off until set. See README.md.
+      guard_text_only_after_assistant_turns: null
+      guard_max_assistant_turns: null
+      guard_identical_tool_calls: null
