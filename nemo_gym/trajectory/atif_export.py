@@ -41,6 +41,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymMessage,
+    NeMoGymResponseCustomToolCall,
+    NeMoGymResponseCustomToolCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputItem,
     NeMoGymResponseOutputMessage,
@@ -1210,8 +1212,10 @@ def transcript_to_atif(
     when it ran out of tokens, several reasoning segments, empty or encrypted reasoning, arguments that are
     not a JSON object) export with the departure named under ``extra.nemo_gym.conversion`` (``status:
     partial``, ``reasons``); raises :class:`AtifExportError` only for what the mapping cannot represent at
-    all (a copied assistant turn, a later system turn, a result for no call or a second
-    ``function_call_output`` for the same ``call_id``, item types ATIF has no place for).
+    all (an assistant turn copied into request input, a later system turn, a result for no
+    matching call or a second result for the same ``call_id``, item types ATIF has no place for).
+    Assistant messages in ``output_items`` may use the statusless request-input shape: their
+    source in the generated output, rather than an invented completion status, identifies them.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise _path_error("session_id", "expected a non-empty string")
@@ -1219,11 +1223,13 @@ def transcript_to_atif(
         raise _path_error("agent_name", "expected a non-empty string")
     if not isinstance(agent_version, str) or not agent_version.strip():
         raise _path_error("agent_version", "expected a non-empty string")
-    conversation = _transcript_items(input_items, path="input") + _transcript_items(output_items, path="output")
+    inputs = _transcript_items(input_items, path="input")
+    conversation = inputs + _transcript_items(output_items, path="output")
 
     steps: list[AtifStep] = []
     agent_steps: list[AtifStep] = []
-    open_calls: dict[str, AtifStep] = {}
+    open_calls: dict[str, tuple[AtifStep, str]] = {}
+    seen_call_ids: set[str] = set()
     pending_reasoning: list[NeMoGymResponseReasoningItem] = []
     reasons: set[str] = set()
     seen_agent_output = False
@@ -1254,9 +1260,12 @@ def transcript_to_atif(
     while index < len(conversation):
         item = conversation[index]
         path = f"transcript[{index}]"
-        if isinstance(item, (NeMoGymEasyInputMessage, NeMoGymMessage)):
-            if item.role == "assistant":
-                raise _path_error(f"{path}.role", "copied assistant context is not supported")
+        assistant_message = isinstance(item, (NeMoGymEasyInputMessage, NeMoGymResponseOutputMessage)) and (
+            item.role == "assistant"
+        )
+        if assistant_message and index < len(inputs):
+            raise _path_error(f"{path}.role", "copied assistant context is not supported")
+        if isinstance(item, (NeMoGymEasyInputMessage, NeMoGymMessage)) and not assistant_message:
             if seen_agent_output:
                 if item.role != "user":
                     raise _path_error(path, "later system or developer turns are not supported")
@@ -1279,19 +1288,32 @@ def transcript_to_atif(
             pending_reasoning.append(item)
             index += 1
             continue
-        if isinstance(item, NeMoGymResponseFunctionToolCall):
-            calls: list[NeMoGymResponseFunctionToolCall] = []
-            while index < len(conversation) and isinstance(conversation[index], NeMoGymResponseFunctionToolCall):
+        if isinstance(item, (NeMoGymResponseFunctionToolCall, NeMoGymResponseCustomToolCall)):
+            calls: list[NeMoGymResponseFunctionToolCall | NeMoGymResponseCustomToolCall] = []
+            while index < len(conversation) and isinstance(
+                conversation[index], (NeMoGymResponseFunctionToolCall, NeMoGymResponseCustomToolCall)
+            ):
                 calls.append(conversation[index])
                 index += 1
             atif_calls: list[AtifToolCall] = []
             for offset, call in enumerate(calls):
                 call_path = f"transcript[{index - len(calls) + offset}]"
                 if not call.call_id.strip() or not call.name.strip():
-                    raise _path_error(call_path, "function calls need a call_id and a name")
-                if call.call_id in open_calls or any(call.call_id == c.tool_call_id for c in atif_calls):
-                    raise _path_error(call_path, f"duplicate function call ID {call.call_id!r}")
-                arguments, argument_extra = _live_arguments(call, reasons=reasons)
+                    raise _path_error(call_path, "tool calls need a call_id and a name")
+                if call.call_id in seen_call_ids:
+                    raise _path_error(call_path, f"duplicate tool call ID {call.call_id!r}")
+                seen_call_ids.add(call.call_id)
+                if isinstance(call, NeMoGymResponseCustomToolCall):
+                    # A custom tool consumes a string, even when it looks like JSON.
+                    # ATIF requires object arguments; keep the source type and payload explicit.
+                    arguments = {"input": call.input}
+                    argument_extra = {"source_item_type": call.type, "raw_input": call.input}
+                    for key in ("namespace", "status"):
+                        value = getattr(call, key, None)
+                        if value is not None:
+                            argument_extra["source_" + key] = value
+                else:
+                    arguments, argument_extra = _live_arguments(call, reasons=reasons)
                 extra = ({"source_item_id": call.id} if call.id is not None else {}) | (argument_extra or {})
                 atif_calls.append(
                     AtifToolCall(
@@ -1308,33 +1330,49 @@ def transcript_to_atif(
                 reasoning_content=_live_reasoning_text(pending_reasoning, path=f"{path}.reasoning", reasons=reasons),
                 tool_calls=atif_calls,
             )
-            for call in atif_calls:
-                open_calls[call.tool_call_id] = step
+            for call, atif_call in zip(calls, atif_calls, strict=True):
+                open_calls[atif_call.tool_call_id] = (step, call.type)
             pending_reasoning = []
             steps.append(step)
             agent_steps.append(step)
             continue
-        if isinstance(item, NeMoGymFunctionCallOutput):
+        if isinstance(item, (NeMoGymFunctionCallOutput, NeMoGymResponseCustomToolCallOutput)):
             flush_reasoning(path)
-            step = open_calls.pop(item.call_id, None)
-            if step is None:
-                raise _path_error(path, f"function result {item.call_id!r} matches no pending call")
+            pending = open_calls.get(item.call_id)
+            if pending is None:
+                raise _path_error(path, f"tool result {item.call_id!r} matches no pending call")
+            step, call_type = pending
+            if item.type != call_type + "_output":
+                raise _path_error(f"{path}.type", "tool result type does not match its pending call")
+            del open_calls[item.call_id]
+            item_id = getattr(item, "id", None)
+            result_extra = {"source_item_id": item_id} if item_id is not None else {}
+            if isinstance(item, NeMoGymResponseCustomToolCallOutput):
+                result_extra.update(source_item_type=item.type, raw_output=_json_value(item.output))
+                for key in ("name", "status"):
+                    value = getattr(item, key, None)
+                    if value is not None:
+                        result_extra["source_" + key] = value
             results = list(step.observation.results) if step.observation is not None else []
             results.append(
                 AtifObservationResult(
                     source_call_id=item.call_id,
                     content=_transcript_text(item.output, path=f"{path}.output"),
-                    extra={"nemo_gym": {"source_item_id": item.id}} if item.id is not None else None,
+                    extra={"nemo_gym": result_extra} if result_extra else None,
                 )
             )
             step.observation = AtifObservation(results=results)
             index += 1
             continue
-        if isinstance(item, NeMoGymResponseOutputMessage):
+        if assistant_message:
             message_reasons: set[str] = set()
             message = _transcript_text(item.content, path=f"{path}.content", reasons=message_reasons)
             reasons |= message_reasons
-            step_extra = {"source_item_id": item.id} if item.id else {}
+            step_extra = {"source_item_id": item.id} if item.id is not None else {}
+            if item.phase is not None:
+                step_extra["source_phase"] = item.phase
+            if isinstance(item, NeMoGymEasyInputMessage):
+                step_extra["source_status_absent"] = True
             if "refusal" in message_reasons:
                 # The step's text is a refusal, not an answer; the marker says so next to the partial reason.
                 step_extra["refusal"] = True
