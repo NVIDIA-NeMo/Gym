@@ -20,6 +20,12 @@ EXTERNAL_CREDENTIALS = {
         "NVIDIA_MANAGEMENT_ORG_PAT",
         "NVIDIA_MANAGEMENT_ORG_PAT",
     ),
+    ".github/workflows/community-bot.yml": (
+        "community-bot",
+        "NVIDIA-NeMo/FW-CI-templates/.github/workflows/_community_label.yml",
+        "NVIDIA_MANAGEMENT_ORG_PAT",
+        "NVIDIA_MANAGEMENT_ORG_PAT",
+    ),
     ".github/workflows/validate-codeowners-membership.yml": (
         "validate-codeowners-membership",
         "NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_membership.yml",
@@ -72,7 +78,7 @@ def _credential_violations(node: dict | list | str, matrix: dict | str = "") -> 
                         if (
                             "PAT" in name.split("_")
                             or "PERSONAL_ACCESS_TOKEN" in name
-                            or name == "NVSKILLS_CI_DISPATCH_TOKEN"
+                            or name in {"BOT_KEY", "NVSKILLS_CI_DISPATCH_TOKEN"}
                         ):
                             yield name
 
@@ -121,6 +127,7 @@ def test_guardwords_receives_only_its_catalog_deploy_key() -> None:
         ("toJSON(secrets)", ["toJSON(secrets)"]),
         ("secrets[matrix.name]", ["dynamic secret reference"]),
         ("secrets['GITHUB_PAT']", ["GITHUB_PAT"]),
+        ("secrets.BOT_KEY", ["BOT_KEY"]),
         ("secrets.NVSKILLS_CI_DISPATCH_TOKEN", ["NVSKILLS_CI_DISPATCH_TOKEN"]),
         ("secrets.DOCS_FERN_TOKEN || secrets['PROVIDER_PATH']", []),
     ],
