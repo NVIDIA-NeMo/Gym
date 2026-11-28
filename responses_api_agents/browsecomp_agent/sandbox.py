@@ -24,6 +24,7 @@ from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRunt
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import DirectHTTPToolAccess
+from responses_api_agents.browsecomp_agent.tool_sidecar import BrowsecompToolSidecar
 
 
 LOG = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class BrowsecompSandboxSession(AgentSessionState):
     resources_cookies: dict[str, str]
     started_at: float | None = None
     _stop_logged: bool = False
+    tools: BrowsecompToolSidecar | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
@@ -191,6 +193,8 @@ class BrowsecompSandboxSession(AgentSessionState):
                     lifetime,
                 )
                 self._stop_logged = status == "ok"
+            if self.tools is not None:
+                await self.tools.close()
         if self.task is not None and not self.task.done():
             self.task.cancel()
         if self.task is not None:

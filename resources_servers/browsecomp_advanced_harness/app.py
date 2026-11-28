@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from aiohttp import ClientTimeout
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from httpx import AsyncClient
 from pocketshell import run as pocketshell_run
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr, ValidationError, model_validator
@@ -119,6 +120,7 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
     exclude_domains_file_path: str
+    use_tool_sidecar_metrics: bool = False
     # Bounds on one search/browse provider call (both providers). Rate limits (429, 502, 503, 504, 520) are waited
     # out without spending the retry attempts, but only for this long per call; past it they count as attempts and the
     # call fails after the last one. 0 spends attempts from the first rate limit.
@@ -197,6 +199,8 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
+        if self.use_tool_sidecar_metrics and self.workspace != "none":
+            raise ValueError("With tool-sidecar metrics, the outside Resources Server must use workspace: none")
         if self.search_provider == "tavily" and not self.tavily_api_key:
             raise ValueError("tavily_api_key is required when search_provider='tavily'")
         if self.search_provider == "exa" and not self.exa_api_key:
@@ -345,6 +349,11 @@ class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
 
 class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
+
+
+def exclude_domains_digest(domains: List[str]) -> str:
+    """Digest of an exclusion list that ignores order and duplicates, so two copies of one list compare equal."""
+    return hashlib.sha256("\n".join(sorted(set(domains))).encode()).hexdigest()
 
 
 class TavilySearchVerifyResponse(TavilySearchVerifyRequest, BaseVerifyResponse, JudgeEvaluation):
@@ -1139,6 +1148,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
         self._exclude_domains = self._parse_exclude_domains()
+        self._exclude_domains_sha256 = exclude_domains_digest(self._exclude_domains)
 
         # Shared flat-file provider cache (replaces the never-used in-memory
         # _page_cache). Only raw provider responses are stored — never
@@ -2097,6 +2107,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 timed_out=int(timed_out),
             )
 
+        # Checked before the judge: a rollout without valid sidecar metrics must not pay for a judge call.
+        sidecar_metrics = self._tool_sidecar_metrics(body.response) if self.config.use_tool_sidecar_metrics else None
+
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
@@ -2115,7 +2128,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
 
-        session_metrics = self._session_id_to_metrics[sid]
+        if sidecar_metrics is not None:
+            session_metrics = sidecar_metrics
+        else:
+            session_metrics = self._session_id_to_metrics[sid]
         num_provider_429s, num_provider_other_retries = _sum_provider_retry_counts(session_metrics)
         verify_response = TavilySearchVerifyResponse(
             **body.model_dump(),
@@ -2179,6 +2195,31 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         formatted_results = "\n".join(blocks)
         return formatted_results
+
+    def _tool_sidecar_metrics(self, response: object) -> TavilySearchMetrics:
+        """Read the records the agent pulled from its tool sidecar before pod teardown, or refuse the rollout.
+
+        Missing, malformed, or collected under a different exclusion list is a configuration error that every retry
+        repeats, so it answers 422 instead of a score.
+        """
+        raw = getattr(response, "browsecomp_tool_metrics", None)
+        if not isinstance(raw, dict) or "async_tavily_calls" not in raw:
+            raise HTTPException(
+                status_code=422,
+                detail="use_tool_sidecar_metrics needs browsecomp_tool_metrics on the response; "
+                "pair this server with a browsecomp_agent that sets tool_sidecar",
+            )
+        try:
+            metrics = TavilySearchMetrics.model_validate(raw)
+        except ValidationError as error:
+            raise HTTPException(status_code=422, detail=f"Malformed browsecomp_tool_metrics: {error}") from error
+        if raw.get("exclude_domains_sha256") != self._exclude_domains_sha256:
+            raise HTTPException(
+                status_code=422,
+                detail="The tool sidecar searched with a different exclusion list than exclude_domains_file_path; "
+                "rebuild the tools image with this file",
+            )
+        return metrics
 
     def _parse_exclude_domains(self) -> list[str]:
         with open(self.config.exclude_domains_file_path, "r") as f:
