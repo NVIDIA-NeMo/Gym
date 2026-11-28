@@ -60,6 +60,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         await_model_call_capture_quiescence,
         merge_model_call_capture_into_record,
         model_call_capture_dirs_from_config,
+        report_run_accepted,
     )
     from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
     from nemo_gym.utils import materialized_path_for
@@ -390,6 +391,9 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             # Reject any saved task before dispatching new work or replacing published artifacts.
             for row in rows:
                 validated_results[row["task_id"]] = await collect(row, validate_only=True)
+        # Under the lock, with the saved run's inventory matched and every saved task validated: what sits under the
+        # output names is this command's.
+        report_run_accepted(output)
         with tempfile.TemporaryDirectory(dir=output.parent, prefix=f".{output.stem}-") as pending:
             staged_output = Path(pending) / output.name
             stream = os.fdopen(os.open(staged_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")

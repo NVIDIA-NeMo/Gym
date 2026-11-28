@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         SharedRolloutCollectionConfig,
         enrich_run_result,
         get_max_rollout_attempts,
+        report_run_accepted,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
@@ -95,6 +96,7 @@ _PUBLIC_API = {
     "read_model_call_records": "model_calls",
     "read_rollout_timing": "health.timeouts",
     "record_resubmit_offset": "rollout_recovery",
+    "report_run_accepted": "rollout_collection",
     "run_health_checks": "rollout_health",
     "summarize_timeouts": "health.timeouts",
 }

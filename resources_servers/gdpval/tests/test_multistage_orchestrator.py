@@ -4336,6 +4336,17 @@ class TestCachedDeliverableReuse:
         persisted = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
         return dispatched, verified, persisted
 
+    async def test_the_driver_reports_that_the_run_under_its_output_names_is_now_its_own(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The multi-stage driver collects without ``run_from_config``, so it tells the command that dispatched it
+        itself, once it has decided to resume or replace the saved run, and names the rollouts file it decided for;
+        the command writes its resolved config then."""
+        reported = []
+        monkeypatch.setattr(multistage_module, "report_run_accepted", reported.append)
+        await self._run_two_stages(tmp_path, monkeypatch, cached=True)
+        assert reported == [tmp_path / "rollouts.jsonl"]
+
     async def test_a_later_stage_judges_the_cached_deliverable_through_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

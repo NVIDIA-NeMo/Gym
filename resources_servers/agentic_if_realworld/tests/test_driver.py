@@ -232,6 +232,8 @@ def test_adaptive_capture_selected_parameters_and_resume(
     monkeypatch.setattr(http_client, "raise_for_status", status)
     monkeypatch.setattr(http_client, "get_response_json", response_json)
     monkeypatch.setattr(http_client, "request", judge_request)
+    taken_over = []
+    monkeypatch.setattr(rollout_collection, "report_run_accepted", taken_over.append)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     config = SimpleNamespace(
         num_repeats=1,
@@ -417,11 +419,16 @@ def test_adaptive_capture_selected_parameters_and_resume(
         saved = core.read(tmp_path / "out.jsonl")["response"]
         config.resume_from_cache = True
         config.limit = 1
+        assert taken_over == [tmp_path / "out.jsonl"]
         with pytest.raises(ValueError, match="inventory"):
             asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        # The driver refused the saved run, so it did not report that it took the run over.
+        assert taken_over == [tmp_path / "out.jsonl"]
         config.limit = 2
         with pytest.raises(ValueError, match="Ambiguous"):
             asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        # Nor here: validating the saved tasks refused the run before the driver took it over.
+        assert taken_over == [tmp_path / "out.jsonl"]
         assert all(path.read_bytes() == saved for path, saved in artifacts.items())
         assert inventory_path.read_bytes() == inventory_bytes
         assert len(calls) == 2 and len(judge_calls) == 1
@@ -470,7 +477,10 @@ def test_adaptive_capture_selected_parameters_and_resume(
         assert not [finding for finding in findings if finding["assertion"].startswith(("steps.", "ownership."))]
     before = {path: core.digest(path) for path in [*store.root.glob("*"), *verifier.receipt_dir.rglob("*.json")]}
     config.resume_from_cache = True
+    reports = len(taken_over)
     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    # A resume whose saved tasks validate reports that it took the run over.
+    assert taken_over[reports:] == [tmp_path / "out.jsonl"]
     assert inventory_path.read_bytes() == inventory_bytes
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
     assert len(verification) == 2 * int(complete_stage is not None)
@@ -498,6 +508,8 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert all(path.read_bytes() == saved for path, saved in artifacts.items())
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
     assert all(core.digest(path) == digest for path, digest in before.items())
+    # A resume with another runtime or policy model setting is refused before the driver takes the run over.
+    assert len(taken_over) == reports + 1
     model_settings["reasoning_effort"] = reasoning_effort
     preserved_inventory = inventory_path.with_suffix(".saved")
     inventory_path.rename(preserved_inventory)

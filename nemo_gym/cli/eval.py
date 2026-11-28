@@ -26,7 +26,8 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -34,7 +35,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import yaml
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, TypeAdapter, ValidationError, field_validator
 from rich.table import Table
 
 from nemo_gym._moved_paths import moved_names_getattr
@@ -361,6 +362,71 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
     )
 
 
+# Set when a resume leaves the saved run as it was: it stopped before its servers started (data preparation or a
+# configuration check stopped it), or the collector did not accept it (``_resume_of_saved_run``). The saved rollouts
+# are then still the earlier run's. Read by the commands that dispatch a collection in this process and write a run
+# summary after it (``_dispatch_collection``).
+_saved_run_untouched = False
+
+
+def _resumes_saved_run(global_config_dict: DictConfig | Mapping[str, Any], output: Path) -> bool:
+    """Whether the collector will check the run against one saved under ``output``'s names before it collects."""
+    from nemo_gym.rollouts.rollout_records import resolve_rollout_path
+    from nemo_gym.rollouts.rollout_store import saved_run_files
+
+    try:
+        # As the collection config reads them, so a quoted "false" is not a resume here either.
+        resume = any(
+            TypeAdapter(bool).validate_python(global_config_dict.get(key) or False)
+            for key in ("resume_from_cache", "resubmit")
+        )
+    except ValidationError:
+        return False  # The collection config refuses the value with its own message.
+    if not resume:
+        return False
+    return any(path.exists() for path in saved_run_files(resolve_rollout_path(output)))
+
+
+@contextmanager
+def _resume_of_saved_run(global_config_dict: DictConfig | Mapping[str, Any], output: Path) -> Iterator[None]:
+    """Run a collection that resumes the rollouts saved under ``output``'s names, built-in or a custom driver's.
+
+    Until the collector or the driver takes the saved run over, the saved rollouts are the earlier run's, and so is
+    the resolved config beside them. Whichever collects reports it (``report_run_accepted``), the built-in collector
+    under the run lock: the resolved config is written then. A collection that fails before that leaves the file as
+    it was. One that ends normally without any report, as a custom driver written before the report existed does,
+    has its resolved config written when it ends. One that reports only other rollouts files, such as the parts of
+    the run it collected, did not take this run over, and leaves the file as it was.
+
+    A ``ConfigError`` before the report (the collector refused the resume, a file of the saved run is missing,
+    another collector owns the run) sets ``_saved_run_untouched``.
+    """
+    from nemo_gym.artifacts.resolved_config import write_resolved_config
+    from nemo_gym.rollouts.rollout_collection import _ON_RUN_ACCEPTED
+
+    global _saved_run_untouched
+    accepted = reported = False
+
+    def on_run_accepted(accepted_output: Path) -> None:
+        nonlocal accepted, reported
+        reported = True
+        if accepted_output.resolve() != output.resolve():
+            return  # Another rollouts file, such as a part of the run a driver collects under its own names.
+        accepted = True
+        write_resolved_config(global_config_dict, output)
+
+    token = _ON_RUN_ACCEPTED.set(on_run_accepted)
+    try:
+        yield
+    except ConfigError:
+        _saved_run_untouched = not accepted
+        raise
+    finally:
+        _ON_RUN_ACCEPTED.reset(token)
+    if not reported:
+        write_resolved_config(global_config_dict, output)
+
+
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
@@ -371,7 +437,16 @@ def e2e_rollout_collection():  # pragma: no cover
         RolloutCollectionHelper,
     )
 
+    global _saved_run_untouched
     global_config_dict = get_global_config_dict()
+
+    # Until the servers start, a resume has not touched the saved run: whatever stops it before that, the collection
+    # config's own checks included, leaves the run as it was.
+    output_jsonl_fpath = global_config_dict.get("output_jsonl_fpath")
+    resumes_saved_run = bool(output_jsonl_fpath) and _resumes_saved_run(
+        global_config_dict, Path(str(output_jsonl_fpath))
+    )
+    _saved_run_untouched = resumes_saved_run
 
     # Ensure we have the right config first thing
     e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)
@@ -418,8 +493,12 @@ def e2e_rollout_collection():  # pragma: no cover
         OmegaConf.to_container(rollout_collection_config_dict)
     )
 
-    write_resolved_config(global_config_dict, output_fpath)
+    if not resumes_saved_run:
+        # Before the servers start, so a run that fails early still records what it asked for. A resume of saved
+        # rollouts writes it once the collector has accepted the resume (_resume_of_saved_run).
+        write_resolved_config(global_config_dict, output_fpath)
 
+    _saved_run_untouched = False
     supervisor = ServerSupervisor()
     supervisor.start(None)
 
@@ -452,15 +531,18 @@ def e2e_rollout_collection():  # pragma: no cover
     collection_completed = False
     interrupted = False
     try:
-        if driver_path:
-            module_name, _, fn_name = driver_path.partition(":")
-            if not module_name or not fn_name:
-                raise ConfigError(f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r}).")
-            driver_fn = getattr(importlib.import_module(module_name), fn_name)
-            resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
-            asyncio.run(driver_fn(rollout_collection_config, resolved_config))
-        else:
-            _collect_and_rejudge(rch, rollout_collection_config, global_config_dict, output_fpath)
+        with _resume_of_saved_run(global_config_dict, output_fpath) if resumes_saved_run else nullcontext():
+            if driver_path:
+                module_name, _, fn_name = driver_path.partition(":")
+                if not module_name or not fn_name:
+                    raise ConfigError(
+                        f"rollout_collection_driver must be 'module.path:function' (got {driver_path!r})."
+                    )
+                driver_fn = getattr(importlib.import_module(module_name), fn_name)
+                resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
+                asyncio.run(driver_fn(rollout_collection_config, resolved_config))
+            else:
+                _collect_and_rejudge(rch, rollout_collection_config, global_config_dict, output_fpath)
         collection_completed = True
     except KeyboardInterrupt:
         interrupted = True
@@ -1240,7 +1322,11 @@ def collect_rollouts():  # pragma: no cover
 
     global_config_dict = get_global_config_dict()
     config = RolloutCollectionConfig.model_validate(global_config_dict)
-    write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
+    output = Path(config.output_jsonl_fpath)
+    resumes_saved_run = _resumes_saved_run(global_config_dict, output)
+    if not resumes_saved_run:
+        # See e2e_rollout_collection: a resume of saved rollouts writes it once the collector has accepted it.
+        write_resolved_config(global_config_dict, output)
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
 
@@ -1249,10 +1335,9 @@ def collect_rollouts():  # pragma: no cover
     init_telemetry(server_name="driver", server_type="driver")
     _interrupt_on_sigterm()
     try:
-        _collect_and_rejudge(rch, config, global_config_dict, Path(config.output_jsonl_fpath))
-        _check_collection_completion(
-            Path(config.output_jsonl_fpath), require_complete=config.require_complete, completed=True
-        )
+        with _resume_of_saved_run(global_config_dict, output) if resumes_saved_run else nullcontext():
+            _collect_and_rejudge(rch, config, global_config_dict, output)
+        _check_collection_completion(output, require_complete=config.require_complete, completed=True)
     except KeyboardInterrupt:
         mark_run_failed()
         if not _terminated:
@@ -1665,7 +1750,7 @@ def _patterns(args: argparse.Namespace, name: str) -> list[str]:
 def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: HarborBenchmark | None = None) -> None:
     """Entry point for ``gym eval run <target> ...``, and for ``gym eval run --benchmark`` when the benchmark's
     config names a Harbor target (``benchmark``, :func:`harbor_benchmark_from_args`)."""
-    from nemo_gym.cli.main import _merge_config_paths, dispatch
+    from nemo_gym.cli.main import _merge_config_paths
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     if getattr(args, "no_serve", False):
@@ -1727,20 +1812,33 @@ def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: Har
         _clear_collector_metrics(Path(collection.output_jsonl_fpath), split=_collector_split())
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
     try:
-        dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+        _dispatch_collection(tokens)
     finally:
-        _write_summary(
-            Path(collection.output_jsonl_fpath),
-            command="gym eval run",
-            target=args.target,
-            prepared=prepared,
-            agent=agent,
-            run_config=config_path,
-            # A fresh run reads its selected rows only for the summary, after the collector has had them.
-            expected=expected if expected is not None else lambda: helper._preprocess_rows_from_config(collection),
-            split=_collector_split(),
-            before_dispatch=before_dispatch,
-        )
+        if not _saved_run_untouched:
+            _write_summary(
+                Path(collection.output_jsonl_fpath),
+                command="gym eval run",
+                target=args.target,
+                prepared=prepared,
+                agent=agent,
+                run_config=config_path,
+                # A fresh run reads its selected rows only for the summary, after the collector has had them.
+                expected=expected if expected is not None else lambda: helper._preprocess_rows_from_config(collection),
+                split=_collector_split(),
+                before_dispatch=before_dispatch,
+            )
+
+
+def _dispatch_collection(tokens: list[str]) -> None:
+    """Run ``e2e_rollout_collection`` in this process. Afterwards ``_saved_run_untouched`` says whether it was a
+    resume that stopped before its servers started or that the collector did not accept. The saved run's summary
+    then stays: the saved rollouts are still the earlier run's, and this command's agent and run config would
+    replace the ones that produced them."""
+    from nemo_gym.cli.main import dispatch
+
+    global _saved_run_untouched
+    _saved_run_untouched = False
+    dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
 
 
 def _collector_split() -> str | None:
@@ -2072,7 +2170,7 @@ def validate_target(
     results never share a folder with a model's; a Harbor-backed benchmark's ``--agent-type harbor_oracle_agent``
     also passes the ``preparation_overrides`` that load its settings (see ``_benchmark_agent``).
     """
-    from nemo_gym.cli.main import _merge_config_paths, dispatch
+    from nemo_gym.cli.main import _merge_config_paths
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     # Evaluation and reference validation must never share inputs, configs, or cached results.
@@ -2178,20 +2276,21 @@ def validate_target(
             _clear_collector_metrics(rollouts, split=_collector_split())
         print(f"Run config written to {config_path}; validating {len(expected)} oracle rollout(s)")
         try:
-            dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+            _dispatch_collection(tokens)
         finally:
-            _write_summary(
-                rollouts,
-                command="gym dataset validate",
-                target=args.target,
-                prepared=prepared,
-                agent=agent,
-                run_config=config_path,
-                expected=expected,
-                split=_collector_split(),
-                before_dispatch=before_dispatch,
-                unvalidated=left_out,
-            )
+            if not _saved_run_untouched:
+                _write_summary(
+                    rollouts,
+                    command="gym dataset validate",
+                    target=args.target,
+                    prepared=prepared,
+                    agent=agent,
+                    run_config=config_path,
+                    expected=expected,
+                    split=_collector_split(),
+                    before_dispatch=before_dispatch,
+                    unvalidated=left_out,
+                )
     else:
         # Nothing to dispatch (no selected task has a solution/): the summary still says what was selected,
         # beside the rollouts file the command line asked for (there is no run config to resolve it from).

@@ -1825,7 +1825,9 @@ class SharedRolloutCollectionConfig(
             "multi-pass run) while still producing the standard rollout + aggregate-metrics "
             "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
             "When unset, the standard single-pass collection runs. A driver must honour "
-            "``resume_from_cache`` itself; one that ignores it restarts from zero on an auto-resumed job."
+            "``resume_from_cache`` itself; one that ignores it restarts from zero on an auto-resumed job. "
+            "A driver that collects without the built-in helper calls ``report_run_accepted`` once it has "
+            "taken a saved run over: a resume writes its resolved config then."
         ),
     )
     environment_routing_mode: Literal["agent", "legacy", "taskset"] = Field(
@@ -2673,6 +2675,30 @@ _RUN_FAILURE_ERRORS = (ClientError, orjson.JSONDecodeError, TimeoutError)
 # Statuses something in front of the environment server answers with; it returns 500 itself.
 _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
+
+
+# What ``report_run_accepted`` calls, with the rollouts file of the run that was taken over. A context variable, so
+# the collector a custom ``rollout_collection_driver`` runs reaches the command that dispatched the driver.
+_ON_RUN_ACCEPTED: ContextVar[Callable[[Path], None] | None] = ContextVar("_ON_RUN_ACCEPTED", default=None)
+
+
+def report_run_accepted(output_jsonl_fpath: Path) -> None:
+    """Tell the command that dispatched this collection that the run saved under ``output_jsonl_fpath``'s names is
+    now this command's.
+
+    The built-in collector calls this under the run lock, once its store has started the run or accepted its resume.
+    A custom ``rollout_collection_driver`` that collects without ``run_from_config`` calls it once it has decided to
+    resume or replace the saved run, after every check of its own that can refuse the run and before it writes to
+    it. On a resume of saved rollouts the command writes its resolved config only then, so a resume that stops
+    earlier keeps the saved run's.
+
+    Pass the rollouts file the decision was made for. The command acts only on its own output, so a driver that
+    collects a part of its run under other names reports nothing for the whole run by doing so, and one that reports
+    only such parts leaves the saved run's resolved config as it was.
+    """
+    on_run_accepted = _ON_RUN_ACCEPTED.get()
+    if on_run_accepted is not None:
+        on_run_accepted(Path(output_jsonl_fpath))
 
 
 #: ``SpanContext`` of the ``gym.job`` span the driver opened as a standalone trace root, for the
@@ -4571,6 +4597,7 @@ executions → not run again (left to recovery)
             return input_rows, manifest
 
         store = _start_or_resume_store(output_fpath, config, prepare_inputs)
+        report_run_accepted(output_fpath)
         if store.started_fresh and agent_complete_dir_for(output_fpath).exists():
             # A fresh run must not inherit completion files from an older run that used the same output path.
             shutil.rmtree(agent_complete_dir_for(output_fpath))
