@@ -112,6 +112,7 @@ Other features use some of these words in their own senses and keep them:
 | **Rollout driver** | Coordinates an episode and records its trajectory. |
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
+| **Turn priority** | The vLLM request `priority` a vLLM model server with `priority_by_turn` sends: minus the number of assistant messages in the call's prompt, so 0 for a rollout's first model call and -1 for its second. It counts model calls (the multi-step sense), not dialogue turns. With vLLM's `priority` scheduling policy, the later model calls of rollouts in flight run before the first model calls of new ones. See [vLLM](/model-server/vllm). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
 
 ### Evaluation

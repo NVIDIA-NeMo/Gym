@@ -130,6 +130,22 @@ When `return_token_id_information: true`, generation token IDs are read from
 the native `logprobs.tokens` (`"token_id:<int>"`) entries and prompt token IDs
 from `prompt_logprobs` — no separate `/tokenize` round-trip is needed.
 
+## Turn priority
+
+With `priority_by_turn: true`, every engine call carries vLLM's request `priority`, set to minus the number of assistant messages in the call's history: 0 for the first model call of a rollout, -1 for the second, and so on. Serve the engine with `--scheduling-policy priority` (vLLM runs a smaller priority first and preempts it last), and the later model calls of rollouts already in flight are scheduled before the first model calls of new ones, so started rollouts finish sooner when the engine is saturated. Without that policy the value does not change scheduling.
+
+```yaml
+priority_by_turn: true
+```
+
+| Route | Priority sent |
+|-------|---------------|
+| `/v1/chat/completions` | counted from `messages` |
+| `/v1/responses` (converted to chat) | counted from the converted `messages` |
+| `use_completions_api: true` | counted from `messages` before they are rendered to `prompt` |
+
+A `priority` set in `extra_body` or a request's `metadata.extra_body` is sent unchanged. With `dynamo_frontend: true`, whose frontend refuses an unknown top-level field, the priority rides in the request's `nemo_rl:gym:` annotation. The flag is rejected with `is_responses_native: true`.
+
 ## Example run config
 
 VLLMModel connects NeMo Gym to a vLLM server that you start and manage yourself. Spin up a vLLM server in a separate terminal (see the [vLLM docs](https://docs.vllm.ai/)), then point NeMo Gym at it.

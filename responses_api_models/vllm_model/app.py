@@ -288,6 +288,15 @@ _OUTPUT_BUDGET_KEYS = (*_CHAT_BUDGET_KEYS, "max_output_tokens")
 _OUTPUT_BUDGET_KEY_BY_API = {"completions": "max_tokens", "responses": "max_output_tokens"}
 
 
+def turn_priority(messages: list[dict[str, Any]]) -> int:
+    """vLLM's request ``priority`` for a model call: minus the assistant messages in its history.
+
+    The first model call of a rollout gets 0 and each later one 1 less. vLLM's priority scheduler runs a smaller
+    value first and preempts it last, so the calls of rollouts already in flight go before the first calls of new ones.
+    """
+    return -sum(1 for message in messages if message.get("role") == "assistant")
+
+
 def _effective_budget_key(outbound: Dict[str, Any], keys: tuple[str, ...]) -> str | None:
     """The key of the output budget the engine applies to ``outbound``, or None when it carries none."""
     return next((key for key in keys if outbound.get(key) is not None), None)
@@ -828,6 +837,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    priority_by_turn: bool = Field(
+        default=False,
+        description=(
+            "Send every engine call vLLM's request `priority` set to minus the number of assistant messages in its "
+            "history: 0 for a rollout's first model call, -1 for its second, and so on. An engine started with "
+            "`--scheduling-policy priority` schedules a smaller priority first and preempts it last, so the later "
+            "model calls of rollouts already in flight run before the first model calls of new ones. Without that "
+            "policy the value does not change scheduling. A `priority` set in `extra_body` or `metadata.extra_body` "
+            "is kept. Applies to the chat and Responses routes and to `use_completions_api`, and with "
+            "`dynamo_frontend`, where the priority rides in the `nemo_rl:gym:` annotation; not supported with "
+            "`is_responses_native`."
+        ),
+    )
+
     default_headers: Dict[str, str] = Field(default_factory=dict)
     session_key_headers: List[str] = Field(
         default_factory=list,
@@ -917,6 +940,15 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "preserve_thinking_blocks requires use_completions_api=false: /v1/completions has no assistant "
                 "messages to carry the thinking blocks on"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_priority_by_turn(self) -> "VLLMModelConfig":
+        if self.priority_by_turn and self.is_responses_native:
+            raise ValueError(
+                "priority_by_turn requires is_responses_native=false: the native Responses route forwards the "
+                "request without the chat messages the priority is counted from"
             )
         return self
 
@@ -1742,6 +1774,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = merge_chat_extra_body(body_dict, extra_body=extra_body)
+        if self.config.priority_by_turn:
+            body_dict.setdefault("priority", turn_priority(body_dict["messages"]))
 
         self._splice_audio_from_metadata(body_dict, metadata)
 
@@ -1786,10 +1820,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         Every request carries the ``nemo_rl:gym:`` annotation. Without capture, it holds the last echoed
         turn's tokens as ``required_prefix_token_ids``, which NeMo RL's native server derives from the
         messages itself. A capture call resolves its prefix from staging, and the capture handler has
-        already added its ``ng_capture``. The echoed token fields, which the frontend also rejects, are
-        then stripped from the messages.
+        already added its ``ng_capture``. A request ``priority`` (``priority_by_turn``'s, or one set in
+        ``extra_body``) moves into the annotation too, and NeMo RL's chat engine hands it to the engine.
+        The echoed token fields, which the frontend also rejects, are then stripped from the messages.
         """
         extras = {}
+        if "priority" in body_dict:
+            extras["priority"] = body_dict.pop("priority")
         if self._external_capture_handler is None:
             for message_dict in reversed(body_dict.get("messages") or []):
                 if "prompt_token_ids" in message_dict:
@@ -2741,6 +2778,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # A null request limit is unset; /v1/completions would turn it into its 16-token default.
                 out.pop("max_tokens", None)
             out = extra_body | out
+        if self.config.priority_by_turn:
+            out.setdefault("priority", turn_priority(chat_body_dict.get("messages") or []))
 
         if self.config.return_token_id_information:
             # Prefer vLLM's inline prompt and generation token IDs. Keep the
