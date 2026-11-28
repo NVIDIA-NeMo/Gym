@@ -1,0 +1,9 @@
+-e nemo-gym[dev] @ ../../
+nemo-relay>=0.4.0,<0.5.0
+dspy>=3.3.0b1
+haystack-ai>=2.30.0
+haystack-experimental>=0.19.0
+nvidia-haystack>=0.3.0
+colorama
+python-dotenv
+git+https://github.com/microsoft/tale-suite.git@train_test_splits#egg=tale-suite
