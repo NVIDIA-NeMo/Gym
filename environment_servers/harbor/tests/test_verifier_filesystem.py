@@ -631,3 +631,40 @@ async def test_after_a_turns_verification_the_next_agent_reads_none_of_its_gradi
     # A linked root is replaced, never followed: the folder it pointed at keeps its contents.
     assert (planted / "keep.txt").read_text() == "the agent's own"
     await server.shutdown()
+
+
+@pytest.mark.parametrize("planted", ["none", "agent_link", "agent_file", "logs_link"])
+async def test_before_a_fresh_turn_the_agent_logs_folder_is_emptied_without_following_links(
+    tmp_path, monkeypatch, verifier_tree, planted
+):
+    # What a Codex turn leaves in /logs/agent: its `exec --json` output, its session rollouts and the server's
+    # transcript, all of which hold that turn's conversation. An agent may also have put a link (or a file) in the
+    # place of /logs or /logs/agent.
+    root, logs, _ = verifier_tree
+    own = root / "own"
+    (own / "agent").mkdir(parents=True)
+    (own / "agent" / "keep.txt").write_text("the agent's own")
+    if planted == "logs_link":
+        logs.symlink_to(own, target_is_directory=True)
+    else:
+        logs.mkdir()
+        agent = logs / "agent"
+        if planted == "agent_link":
+            agent.symlink_to(own / "agent", target_is_directory=True)
+        elif planted == "agent_file":
+            agent.write_text("not a folder")
+        else:
+            (agent / "sessions" / "2026" / "11" / "16").mkdir(parents=True)
+            (agent / "sessions" / "2026" / "11" / "16" / "rollout-a.jsonl").write_text("{}\n")
+            (agent / "codex.txt").write_text('{"type":"turn.completed"}\n')
+            (agent / "trajectory.json").write_bytes(TRAJECTORY)
+    server, _, _, _ = make_server(tmp_path, monkeypatch)
+
+    await server._reset_agent_logs(LocalSandbox())
+
+    assert not logs.is_symlink() and not (logs / "agent").is_symlink()
+    assert (logs / "agent").is_dir() and list((logs / "agent").iterdir()) == []
+    assert stat.S_IMODE((logs / "agent").stat().st_mode) == 0o777
+    # A link is removed, never followed: the folder it pointed at keeps its contents.
+    assert (own / "agent" / "keep.txt").read_text() == "the agent's own"
+    await server.shutdown()

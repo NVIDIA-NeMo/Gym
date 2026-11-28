@@ -47,6 +47,7 @@ from nemo_gym.data.tasks.harbor import (
     load_task,
 )
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
 
 
 TASK_TOML = """
@@ -340,6 +341,35 @@ def agent_response() -> NeMoGymResponse:
     )
 
 
+# A command result as Codex hands it to the model and records it in its session rollout.
+CODEX_TOOL_RESULT = (
+    "Chunk ID: 1a2b3c\nWall time: 0.0213 seconds\nProcess exited with code 0\nOriginal token count: 4\n"
+    "Output:\nNeMo Gym v0.9.0\n"
+)
+
+
+def reported_conversation(*later_items: dict) -> dict:
+    """Close observations whose root invocation holds the conversation the model received, as Codex reads it from
+    its session records: its own instructions, the task, one command with its result, the answer, then
+    ``later_items``."""
+    conversation = [
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<permissions>"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Create hello.txt"}]},
+        {"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": '{"cmd":"gym --version"}'},
+        {"type": "function_call_output", "call_id": "call_1", "output": CODEX_TOOL_RESULT},
+        {
+            "type": "message",
+            "role": "assistant",
+            "id": "msg_1",
+            "content": [{"type": "output_text", "text": "Done."}],
+            "phase": "final_answer",
+        },
+        *later_items,
+    ]
+    invocation = AgentInvocation(invocation_id="r1", status="completed", conversation=conversation)
+    return AgentObservationBundle(source="codex", records=[invocation]).model_dump(mode="json")
+
+
 class FakeAgentClient(ServerClient):
     """Stands in for the agent server: answers the session seed, the turn and the close.
 
@@ -360,6 +390,8 @@ class FakeAgentClient(ServerClient):
     trajectory: dict | None = None
     # What the seed response declares: a harness that reads the task's MCP servers and skills directory.
     supports_task_tool_context: bool = True
+    # ... and, when True, that the close's ``observations`` hold the conversation the model received (Codex).
+    reports_model_conversation: bool = False
     # What GET /v1/agent_sessions/capabilities and a continuation seed declare: None is a harness without
     # multi-turn continuation (OpenCode declares one). ``capabilities_status`` 404 stands for an agent server
     # built before the route existed.
@@ -392,6 +424,7 @@ class FakeAgentClient(ServerClient):
                 {
                     "agent_session_id": body["agent_session_id"],
                     "supports_task_tool_context": self.supports_task_tool_context,
+                    **({"reports_model_conversation": True} if self.reports_model_conversation else {}),
                     **(
                         {"capabilities": self.continuation_capabilities}
                         if body.get("continuation") is not None
