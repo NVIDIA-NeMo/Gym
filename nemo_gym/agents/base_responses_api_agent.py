@@ -111,6 +111,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetricsRequest,
     BaseRunRequest,
     BaseVerifyResponse,
+    omit_unchanged_input_from_reply,
 )
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingContextMiddleware
@@ -951,7 +952,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 rollout_context(self.rollout_id_from_run(body)),
                 model_sampling_context(self.model_sampling_segment_for_run(body)),
             ):
-                return await run(*args, **kwargs)
+                return await omit_unchanged_input_from_reply(body, run(*args, **kwargs))
 
         app.post("/run")(_agent_boundary(run_with_rollout_context, app=app, operation="agent.run", stage="agent"))
         app.post("/aggregate_metrics")(self.aggregate_metrics)
