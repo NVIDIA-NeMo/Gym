@@ -58,9 +58,10 @@ VERIFIED_TRAIN_URL = "https://raw.githubusercontent.com/uiuc-kang-lab/ReViSQL/ma
 TRAIN_CORPUS_LIMIT_PER_COLUMN = 2000
 
 
-def output_fpath_for(dialect: str, split: str = "dev") -> Path:
-    """``data/birdbench_<dialect>_<split>.jsonl``."""
-    return DATA_DIR / f"birdbench_{dialect}_{split}.jsonl"
+def output_fpath_for(dialect: str, split: str = "dev", *, agent_context: bool = False) -> Path:
+    """``data/birdbench_<dialect>_<split>.jsonl``, with ``_auto_ontology_agent`` for the rows with an agent context."""
+    suffix = "_auto_ontology_agent" if agent_context else ""
+    return DATA_DIR / f"birdbench_{dialect}_{split}{suffix}.jsonl"
 
 
 # A table heading of a spark/postgres ``sql_context``: ``- `db_id`.`table`:`` (see build_db_values.render_sql_context).
@@ -175,6 +176,7 @@ def prepare(
     dialect: str = "sqlite",
     split: str = "dev",
     train_dir: Optional[str] = None,
+    agent_context: bool = False,
 ) -> Path:
     """Download BIRD dev (or read local train), produce the prepared jsonl for ``split``/``dialect``. Returns its path.
 
@@ -195,22 +197,31 @@ def prepare(
         split: ``dev`` (default; the 1534-task benchmark) or ``train`` (the uberset, see module docstring).
         train_dir: ``split="train"`` only: extracted BIRD ``train/`` directory holding ``train.json`` and
             ``train_databases/``. Default: downloaded by ``ensure_bird_train()``.
+        agent_context: Write rows for ``auto_ontology_agent`` (``auto_ontology_agent.yaml``), which searches its own
+            catalog and writes its own prompts: each row gives the task in its agent context (the question, its
+            evidence and its database), with no ``sql_context``. These rows go to their own file, see
+            ``output_fpath_for``: an agent that takes no agent context, such as ``simple_agent``, refuses a seed that
+            carries one. SQLite only.
     """
     if dialect not in DIALECTS:
         raise ValueError(f"Unsupported dialect {dialect!r}; expected one of {DIALECTS}")
     if split not in SPLITS:
         raise ValueError(f"Unsupported split {split!r}; expected one of {SPLITS}")
-    output_fpath = output_fpath_for(dialect, split)
+    if agent_context and dialect != "sqlite":
+        raise ValueError("The Auto Ontology agent's catalog holds the SQLite databases; use dialect='sqlite'")
+    output_fpath = output_fpath_for(dialect, split, agent_context=agent_context)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
     databases_dir = databases_dir_for(split, train_dir)
     entries = load_entries(split, databases_dir)
     corpus_limit = TRAIN_CORPUS_LIMIT_PER_COLUMN if split == "train" else None
 
-    print("Building per-db schemas (types, PK/FK, descriptions, BM25 indexes)...")
     db_ids = sorted({entry["db_id"] for entry in entries})
     db_handles: Dict[str, DbHandle] = {}
-    for db_id in db_ids:
+    if not agent_context:
+        print("Building per-db schemas (types, PK/FK, descriptions, BM25 indexes)...")
+    # The agent's rows show no schema, so they need no index.
+    for db_id in [] if agent_context else db_ids:
         print(f"Indexing {db_id} ...")
         db_path = databases_dir / db_id / f"{db_id}.sqlite"
         conn = sqlite3.connect(str(db_path))
@@ -240,12 +251,22 @@ def prepare(
                 "task_id": str(entry["question_id"]),
                 "question": question,
                 "gt_sql": entry["SQL"],
-                "sql_context": db_handles[db_id].sql_context_for_question(question),
                 # Train labels (ReViSQL's verified rows) carry no BIRD difficulty tag.
                 "difficulty": entry.get("difficulty"),
                 "db_id": db_id,
                 "id": i,
             }
+            if agent_context:
+                # The agent writes its own prompts from the task, with the evidence apart; it ignores the input.
+                task = {
+                    "question": entry["question"],
+                    "evidence": (evidence or "") if include_evidence else "",
+                    "database": db_id,
+                }
+                row["responses_create_params"] = {"input": [{"role": "user", "content": question}]}
+                row["agent_context"] = {"agent": {"values": task}}
+            else:
+                row["sql_context"] = db_handles[db_id].sql_context_for_question(question)
             f_out.write(json.dumps(row) + "\n")
             count += 1
 
@@ -262,6 +283,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     parser.add_argument("--dscp", default="name_or_col_dscp", help="See prepare()'s `dscp` argument")
     parser.add_argument("--no-evidence", action="store_true", help="Do not prepend BIRD's `evidence` to the question")
+    parser.add_argument("--agent-context", action="store_true", help="See prepare()'s `agent_context` argument")
     args = parser.parse_args(argv)
     prepare(
         include_evidence=not args.no_evidence,
@@ -269,6 +291,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         dialect=args.dialect,
         split=args.split,
         train_dir=args.train_dir,
+        agent_context=args.agent_context,
     )
 
 

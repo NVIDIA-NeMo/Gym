@@ -93,3 +93,16 @@ def test_bird_descriptions_join_the_column_and_value_descriptions(tmp_path):
         {"table_name": "frpm", "column_name": "Charter School (Y/N)", "description": "Charter school, 0: no 1: yes"},
         {"table_name": "schools", "column_name": "City", "description": "Ciudad — city"},
     ]
+
+
+def test_the_pairing_s_rows_are_bird_sql_s_so_its_task_data_checks_them():
+    """bird_sql's instance declares the dataset: collation then checks each row against bird_sql's TaskData."""
+    import yaml
+
+    config = yaml.safe_load((AUTO_ONTOLOGY_DIR.parent / "auto_ontology_agent.yaml").read_text())
+    [dataset] = config["birdbench_bird_sql_resources_server"]["resources_servers"]["bird_sql"]["datasets"]
+    assert dataset["taskset"] == "birdbench"
+    assert dataset["jsonl_fpath"].endswith("birdbench_sqlite_dev_auto_ontology_agent.jsonl")
+    assert "auto_ontology_agent" not in config
+    agent = config["birdbench_bird_sql_environment_server"]["environment_servers"]["single_agent_turn"]["agent_server"]
+    assert agent["name"] == "auto_ontology_agent"

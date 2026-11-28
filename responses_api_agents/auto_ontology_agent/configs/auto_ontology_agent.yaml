@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Auto Ontology Agent Server: Auto Ontology's ReAct agent, one sandbox per episode, on the policy model.
+# benchmarks/birdbench/auto_ontology_agent.yaml pairs it with BIRD dev. See ../README.md.
+
+# The catalog image (benchmarks/birdbench/auto_ontology/build_image.sh), and the key of the embedding endpoint the
+# catalog was built with, which retrieval calls for each search.
+auto_ontology_image: nemo-gym/bird-catalog:dev
+auto_ontology_api_key: ???
+
+# A local Docker sandbox on the host network: the episode's model calls go from the sandbox to the policy's Model
+# Server, which a host firewall often closes to Docker's bridge. Sandboxes then share loopback, so each episode's
+# catalog takes its own port (catalog_ports).
+auto_ontology_sandbox:
+  default_metadata:
+    sandbox-api: docker-cli
+  docker:
+    create:
+      keepalive_shell: /bin/sh
+      keepalive_cmd: "while :; do sleep 2147483647; done"
+      start_timeout_s: 600
+      use_init: true
+      apply_resource_limits: true
+      publish_host: 127.0.0.1
+      network: host
+    exec:
+      default_timeout_s: 180
+
+auto_ontology_agent:
+  responses_api_agents:
+    auto_ontology_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      sandbox_provider: auto_ontology_sandbox
+      sandbox_config:
+        image: ${auto_ontology_image}
+      # Auto Ontology's settings in the sandbox. Its model is always the policy's Model Server.
+      environment:
+        DEFAULT_MODELS_API_KEY: ${auto_ontology_api_key}
+      max_concurrent_episodes: 8
