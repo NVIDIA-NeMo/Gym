@@ -57,6 +57,61 @@ gives every root the job's trace id, so both of those still produce one trace pe
 | `sandbox` | `gym.sandbox.start`, `gym.sandbox.exec`, `gym.sandbox.upload`, `gym.sandbox.download`, `gym.sandbox.stop`, `gym.sandbox.request`, and the resource spans described in [OpenTelemetry](/main/observability/opentelemetry) | Any sandbox provider |
 | `checkpoint` | `gym.checkpoint.<operation>`, `gym.checkpoint.coordinate.<operation>`, and their child spans | Servers taking part in partial-rollout checkpoints and the controller that coordinates them, only when checkpointing is on |
 
+### Model-Call Breakdown
+
+With the `model_call` group on, the `vllm_model` server records its own side of a call as child spans of the
+`gym.model.*` span:
+
+| Span | Covers |
+| --- | --- |
+| `gym.model.llm_execute` | The logical engine call, including transport and any retries, whether or not a hook is configured. |
+| `gym.model.prepare` | From when the server began handling the request until it was sent to the engine. |
+| `gym.model.postprocess` | From when the engine's response came back until the server returns. |
+| `gym.model.tokenize` | A fallback `/tokenize` call to the engine, when one was needed. `postprocess` is then split into `postprocess`, `tokenize` and `finalize`. |
+
+The `gym.model.*` span also carries `nemo.gym.session.id`, the Gym session of the request, which is one per rollout,
+and `nemo.gym.rollout.id` when the request reached the model server under the rollout's URL prefix. A client that sends
+neither a `traceparent` nor that prefix starts its own trace for each call, so filter on these attributes to group the
+calls of one rollout.
+
+Gym creates and activates `gym.model.llm_execute` before sending the engine request, even without a hook.
+HTTP client spans are its children. Backend-native spans can join that HTTP branch when trace context is
+propagated by every intermediary.
+
+An optional hook interprets the engine response, sets attributes on the outer `gym.model.*` span, and emits
+breakdown spans directly under `llm_execute`, alongside the HTTP client spans. The hook does not depend on
+HTTP instrumentation. Use native tracing and the hook independently or together, avoiding duplicate phases.
+Set `llm_span_breakdown_hook` of the `vllm_model` server to `/path/to/file.py:callable`:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      llm_span_breakdown_hook: /path/to/hook.py:llm_span_breakdown
+```
+
+The file is loaded by path inside the model server's process, so it can live in the project that owns the engine
+and needs only the standard library. It is called as
+
+```python
+hook(engine_response, *, span, emit_span, sent_us, received_us, replica_idx)
+```
+
+- `span` is the current `gym.model.*` span; the hook sets attributes with `span.set_attributes`.
+- `emit_span(name, start_us, end_us, attributes=None)` records a child span of `llm_execute` named
+  `gym.model.<name>` with explicit epoch-microsecond times, so it appears in the trace where the time was spent.
+- `sent_us` and `received_us` are when the model server sent the request to the engine and got the response back.
+  They describe the request boundaries within `llm_execute`. `replica_idx` is the generation replica the session was routed to
+  (`None` if unknown).
+
+Gym adds nothing to what the hook records: attribute names, prefixes and span attributes are the hook's. A hook that
+cannot be loaded, or that raises, is logged once and skipped; it never fails a request.
+
+`llm_span_breakdown_hook` is unset by default; Gym still records its boundary spans and `llm_execute`.
+The execution span ends when the engine call returns, fails, or is cancelled, before response postprocessing.
+Hook spans are added after the response using the ended execution span as their parent.
+While the `model_call` group is off, no execution span is created, no timestamps are taken, and no hook is loaded or called.
+
 ### Groups You Should Not Disable
 
 `server` and `http_client` are the two halves of cross-process propagation. `http_client`

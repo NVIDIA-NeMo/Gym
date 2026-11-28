@@ -88,6 +88,7 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.telemetry.concurrency import MeteredSemaphore
+    from nemo_gym.telemetry.model_call import llm_execution_span, model_call_spans_enabled, record_model_call_spans
     from nemo_gym.telemetry.profiling import Profiler
     from nemo_gym.telemetry.resources_operations import ResourcesOperation, resources_operation
 
@@ -95,6 +96,9 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "llm_execution_span": "model_call",
+    "model_call_spans_enabled": "model_call",
+    "record_model_call_spans": "model_call",
     "MeteredSemaphore": "concurrency",
     "Profiler": "profiling",
     "ResourcesOperation": "resources_operations",
