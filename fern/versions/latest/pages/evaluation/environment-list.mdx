@@ -161,6 +161,7 @@ models. Raising both the worker count and the per-worker limit increases resourc
 | [video_qa_rubric](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/video_qa_rubric) | Open-ended video QA graded against each question's weighted-points rubric (training), or against a reference answer on a question set's own score levels | LLM judge (rubric points, arithmetic checked; or reference levels) | |
 | [mm_lifelong_v1_1](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/mm_lifelong_v1_1) | MM-Lifelong v1.1 open-ended questions about a recorded day, week and month, from 256 frames per split ([agentic](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/mm_lifelong_v1_1_agentic): OpenCode in a sandbox image that holds the split's videos, built by the user); evaluation only | LLM judge (the dataset's 0-5 grader) | |
 | [blackjack](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/blackjack) | Gymnasium-style Blackjack (multi-step) | Win/draw/loss | |
+| [scrabble](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/scrabble) | Find the highest-scoring legal Scrabble move for a pinned board and rack (multi-step) | Rule-based (score ratio with illegal-move penalty) | |
 | [grl_sokoban](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/grl_sokoban) | Single-box Sokoban puzzle | Execution (puzzle solved) | |
 | [grl_tetris](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/grl_tetris) | Tetris in Gymnasium API style | Rule-based (score/lines) | |
 

@@ -1,0 +1,46 @@
+scrabble:
+  resources_servers:
+    scrabble:
+      allowed_agents: [gymnasium_agent]
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: Scrabble move finding. The model plays one move on a pinned board and rack; reward is its score over the best possible score.
+      value: Improve vocabulary recall, spatial reasoning, and score optimization under hard word-game rules
+      # Defaults: data/words.txt (ENABLE, written by generate_data.py) and 0.1 per illegal move.
+      # dictionary_path: resources_servers/scrabble/data/words.txt
+      # invalid_attempt_penalty: 0.1
+
+scrabble_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: scrabble
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: environments/scrabble/data/train.jsonl
+          license: Apache 2.0
+        - name: validation
+          type: validation
+          jsonl_fpath: environments/scrabble/data/validation.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: environments/scrabble/data/example.jsonl
+          license: Apache 2.0
+      # Rows allow 3 attempts and every step plays one move, so 3 steps always reach the end of a puzzle.
+      max_steps: 3
+
+scrabble_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: scrabble_gymnasium_agent
