@@ -3,19 +3,23 @@
 """The resources server's session lifecycle, tools and scoring, on a real AutomationBench example task."""
 
 import json
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
+    maybe_auto_expose,
 )
 from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.automationbench import app as app_module
@@ -299,3 +303,148 @@ def test_close_releases_the_world_and_the_session_follows_the_contract():
         holds_state=lambda session_id: session_id in server._episodes,
         verify_body=_verify_body(),
     )
+
+
+# The api tools over MCP, for the session harnesses (opencode.yaml, openclaw.yaml, hermes.yaml, pi.yaml, codex.yaml).
+
+RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+
+
+class _StatelessCookieJar(CookieJar):
+    def extract_cookies(self, response: object, request: object) -> None:
+        # Sessions come from explicit request cookies, as the Environment Server sends them.
+        pass
+
+
+class _MCPClient(TestClient):
+    """A test client whose lifespan starts the MCP session manager, then the MCP handshake."""
+
+    def __enter__(self) -> "_MCPClient":
+        super().__enter__()
+        params = {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}
+        self.post(
+            "/mcp", headers=RPC_HEADERS, json={"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": params}
+        )
+        self.post("/mcp", headers=RPC_HEADERS, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        return self
+
+
+def _mcp_client(**overrides) -> _MCPClient:
+    """The server as the session harness presets configure it, unless overridden."""
+    server = _server(**{"expose_tools_over_mcp": True, "rows_carry_tools": False} | overrides)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    return _MCPClient(app, cookies=_StatelessCookieJar())
+
+
+def _rpc(client: TestClient, method: str, params: dict[str, Any], token: str) -> dict[str, Any]:
+    headers = RPC_HEADERS | {NEMO_GYM_MCP_SESSION_TOKEN_HEADER: token}
+    response = client.post(
+        "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    )
+    return response.json()["result"]
+
+
+def _toolless(task: dict[str, Any] = TASK) -> dict[str, Any]:
+    """The row as prepare_harness_neutral.py writes it: without the tools and the output budget."""
+    params = task["responses_create_params"]
+    return task | {"responses_create_params": {key: params[key] for key in params if key == "input"}}
+
+
+def test_mcp_serves_the_tools_the_rows_send_and_their_calls_change_the_world_verify_scores() -> None:
+    with _mcp_client() as client:
+        # A row without tools is served: the agent gets them from its MCP grant.
+        seeded = _post_seed(client, _seed(task=_toolless()))
+        assert seeded.status_code == 200, seeded.text
+        token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+
+        listed = {tool["name"]: tool for tool in _rpc(client, "tools/list", {}, token)["tools"]}
+        shown = {tool["name"]: tool for tool in TASK["responses_create_params"]["tools"]}
+        assert listed.keys() == shown.keys()
+        for name, tool in listed.items():
+            assert (tool["description"], tool["inputSchema"]) == (
+                shown[name]["description"],
+                shown[name]["parameters"],
+            )
+
+        found = _rpc(
+            client, "tools/call", {"name": "api_search", "arguments": {"query": "salesforce opportunity"}}, token
+        )
+        assert found["isError"] is False and "/sobjects/Opportunity/" in found["content"][0]["text"]
+        patch = {"method": "PATCH", "url": OPPORTUNITY_URL, "params": {}, "body": {"StageName": "Closed Won"}}
+        won = _rpc(client, "tools/call", {"name": "api_fetch", "arguments": patch}, token)
+        assert won["isError"] is False
+        # As over direct HTTP, a failing tool is text for the model, not a protocol error.
+        missing = _rpc(client, "tools/call", {"name": "base64_encode", "arguments": {}}, token)
+        assert missing["isError"] is False and "text" in missing["content"][0]["text"]
+
+        result = client.post("/verify", json=_verify_body(tools=[]), cookies=seeded.cookies).json()
+
+    assert (result["mask_sample"], result["objectives_passed"]) == (False, 1.0)
+    assert result["reward"] == result["aa_headline"] == pytest.approx(1 / 3)
+
+
+@pytest.mark.parametrize("expose_tools_over_mcp", [False, True], ids=["direct_http", "mcp_exposed"])
+def test_a_toolless_row_is_refused_unless_the_config_says_the_rows_carry_none(expose_tools_over_mcp):
+    # Exposing the tools over MCP alone keeps the check: the same server may still serve a direct HTTP agent.
+    server = _server(expose_tools_over_mcp=expose_tools_over_mcp)
+    with TestClient(server.setup_webserver()) as client:
+        response = _post_seed(client, _seed(task=_toolless()))
+
+    assert response.status_code == 422
+    assert "gym eval prepare --benchmark automationbench" in response.json()["detail"]
+
+
+def test_rows_without_tools_need_the_tools_over_mcp():
+    with pytest.raises(ValidationError, match="needs expose_tools_over_mcp"):
+        _server(rows_carry_tools=False)
+
+
+def test_mcp_returns_each_tool_text_as_direct_http_does() -> None:
+    # 56e7 is the base64 of the UTF-8 bytes of this character, and would read as a JSON number.
+    calls = [
+        ("base64_encode", {"text": "\u79fb"}),
+        ("base64_encode", {"text": "hi"}),
+        ("api_search", {"query": "salesforce opportunity"}),
+        ("api_fetch", {"method": "GET", "url": OPPORTUNITY_URL, "params": {}, "body": {}}),
+    ]
+    with _mcp_client() as client:
+        seeded = _post_seed(client, _seed(task=_toolless()))
+        token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+        direct = [client.post(f"/{name}", json=arguments, cookies=seeded.cookies) for name, arguments in calls]
+        over_mcp = [
+            _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token) for name, arguments in calls
+        ]
+
+    assert direct[0].text == "56e7"
+    assert all(response.headers["content-type"] == "text/plain; charset=utf-8" for response in direct)
+    assert [result["content"][0]["text"] for result in over_mcp] == [response.text for response in direct]
+    assert all(result["isError"] is False for result in over_mcp)
+
+
+@pytest.mark.parametrize(
+    "body", [b"{not json", b"\xff", b"[" * 100_000], ids=["malformed", "not_utf8", "nested_too_deeply"]
+)
+def test_tool_arguments_that_are_not_json_are_refused(client, body):
+    _post_seed(client, _seed())
+
+    response = client.post("/api_search", content=body, headers={"Content-Type": "application/json"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("Tool arguments are not valid JSON")
+
+
+def test_an_empty_body_reaches_the_tool_argument_check(client):
+    _post_seed(client, _seed())
+
+    assert client.post("/api_search").text.startswith("Expected tool arguments to be a dict, got NoneType")
+
+
+def test_a_body_of_another_media_type_reaches_the_tool_argument_check_as_bytes(client):
+    # As FastAPI reads a body parameter: only a JSON media type, or none, is parsed.
+    _post_seed(client, _seed())
+
+    response = client.post("/base64_encode", content=b'{"text": "hi"}', headers={"Content-Type": "text/plain"})
+
+    assert response.text.startswith("Expected tool arguments to be a dict, got bytes")
+    assert client.post("/base64_encode", content=b'{"text": "hi"}').text == "aGk="

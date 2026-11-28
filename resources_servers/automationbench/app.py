@@ -4,9 +4,10 @@
 
 Each session holds one task's simulated SaaS world, built by ``/seed_session`` from the task's ``initial_state`` the
 way upstream's verifiers environment builds it. The agent calls the api toolset (``api_search``, ``api_fetch``,
-``base64_encode``) through ``POST /{tool_name}``; each call reads or changes that world. ``/verify`` scores the final
-world with the rubric of ``benchmarks/automationbench``: the Artificial Analysis headline metric (any broken guardrail
-zeroes the task) by default, with upstream's ``partial_credit`` and the guardrail and objective counts alongside.
+``base64_encode``) through ``POST /{tool_name}``, or over MCP with ``expose_tools_over_mcp``; each call reads or
+changes that world. ``/verify`` scores the final world with the rubric of ``benchmarks/automationbench``: the
+Artificial Analysis headline metric (any broken guardrail zeroes the task) by default, with upstream's
+``partial_credit`` and the guardrail and objective counts alongside.
 
 The tools and the rubric are the ones ``verifiers_agent`` runs for this benchmark, imported from
 ``automationbench_env``; only the tool loop moves to the agent.
@@ -15,15 +16,17 @@ The tools and the rubric are the ones ``verifiers_agent`` runs for this benchmar
 from __future__ import annotations
 
 import copy
+import email.message
+import json
 import logging
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import Body, FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponseCreateParamsNonStreaming
@@ -71,6 +74,16 @@ class AutomationBenchResourcesServerConfig(BaseResourcesServerConfig):
     reward_fn: Literal["aa_headline", "partial_credit"] = "aa_headline"
     # Adds every assertion's verdict to the verify response (`assertion_results`).
     export_assertion_results: bool = False
+    # Whether the rows carry the tools, as prepare.py writes them. The session harness presets run the rows of
+    # prepare_harness_neutral.py, which carry none: the harness takes the tools from its MCP grant. Only with false is
+    # a row without tools served.
+    rows_carry_tools: bool = True
+
+    @model_validator(mode="after")
+    def _check_the_model_gets_tools(self) -> "AutomationBenchResourcesServerConfig":
+        if not self.rows_carry_tools and not self.expose_tools_over_mcp:
+            raise ValueError("rows_carry_tools: false needs expose_tools_over_mcp: true, or the model gets no tools")
+        return self
 
 
 class AutomationBenchVerifyRequest(BaseVerifyRequest):
@@ -133,6 +146,32 @@ def run_tool(tool_name: str, arguments: Any, state: Dict[str, Any]) -> str:
         return f"{error}"
 
 
+def _is_json_media_type(content_type: str) -> bool:
+    message = email.message.Message()
+    message["content-type"] = content_type
+    subtype = message.get_content_subtype()
+    return message.get_content_maintype() == "application" and (subtype == "json" or subtype.endswith("+json"))
+
+
+async def read_tool_arguments(request: Request) -> Any:
+    """A tool call's arguments, read as FastAPI reads a body parameter of any type.
+
+    A body with a JSON media type, or with none, is parsed, and any JSON value, not only an object, reaches the tool's
+    argument check; a body of another media type reaches it as bytes; an empty body is ``None``. A body that does not
+    parse (not JSON, not UTF-8, or nested too deeply) is a 422.
+    """
+    raw = await request.body()
+    if not raw:
+        return None
+    content_type = request.headers.get("content-type")
+    if content_type and not _is_json_media_type(content_type):
+        return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as error:
+        raise HTTPException(status_code=422, detail=f"Tool arguments are not valid JSON: {error}") from error
+
+
 def score(state: Dict[str, Any], *, export_assertion_results: bool) -> Dict[str, Any]:
     """The rubric's scores of the final world, and the per-assertion verdicts when asked for."""
     import automationbench_env
@@ -172,7 +211,7 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
         # main process sets up the app before uvicorn starts any worker, so workers only read it.
         run_tool("api_search", {"query": "gmail"}, new_world_state({"initial_state": {}, "assertions": []}))
         # Last, so the routes registered above win over a tool of the same name.
-        app.post("/{tool_name}")(self.call_tool)
+        app.post("/{tool_name}", response_class=PlainTextResponse)(self.call_tool)
         return app
 
     def has_session_state(self, session_id: str) -> bool:
@@ -180,7 +219,11 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
 
     async def initialize_session_state(self, session_id: str, body: AutomationBenchSeedRequest) -> None:
         # A seed without the params (a caller that does not send them) cannot be checked, and is served.
-        if body.responses_create_params is not None and not body.responses_create_params.tools:
+        if (
+            self.config.rows_carry_tools
+            and body.responses_create_params is not None
+            and not body.responses_create_params.tools
+        ):
             raise ResourcesSeedRejectedError(NO_TOOLS_REASON)
         try:
             state = new_world_state(body.info.model_dump())
@@ -193,18 +236,30 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
     async def release_session_state(self, session_id: str) -> None:
         self._episodes.pop(session_id, None)
 
-    async def call_tool(self, request: Request, tool_name: str, arguments: Any = Body(None)) -> PlainTextResponse:
+    def mcp_tools(self, harvested: List[Any], catchall: Optional[Any]) -> List[Any]:
+        """The api toolset over MCP, with the names, descriptions and schemas the prepared rows send.
+
+        The ``/{tool_name}`` catch-all serves the tools, and MCP auto-exposure lists only routes with a fixed path.
+        """
+        tools = tool_env().tool_defs
+        return harvested + [catchall.tool(tool.name, tool.parameters, tool.description) for tool in tools]
+
+    async def call_tool(self, request: Request, tool_name: str) -> str:
         """Run one tool on the session's world.
 
         The model sees the tool's text as it is, and an unknown tool, bad arguments or a failing call as error text,
-        as it would under verifiers.
+        as it would under verifiers. The handler reads the arguments from the body itself, so MCP auto-exposure can
+        call it directly. It returns the text, which the route sends as plain text, so MCP passes it on unchanged as
+        well: MCP auto-exposure parses a returned response's body as JSON when it can, which would turn a tool text
+        such as ``56e7`` into a number.
         """
+        arguments = await read_tool_arguments(request)
         session_id = request.session[SESSION_ID_KEY]
         async with self.session_lock(session_id):
             episode = self._episodes.get(session_id)
             if episode is None:
                 raise ResourcesSessionLostError("No seeded AutomationBench session for this tool call")
-            return PlainTextResponse(run_tool(tool_name, arguments, episode.state))
+            return run_tool(tool_name, arguments, episode.state)
 
     async def verify(self, request: Request, body: AutomationBenchVerifyRequest) -> AutomationBenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -215,7 +270,7 @@ class AutomationBenchResourcesServer(SimpleResourcesServer):
             if verification.is_live:
                 state = self._episodes[session_id].state
                 task_name = state["info"]["task_name"]
-                if not body.responses_create_params.tools:
+                if self.config.rows_carry_tools and not body.responses_create_params.tools:
                     # Only a caller whose seed carried no params gets here; the seed refuses the rest.
                     LOG.error("AutomationBench task %s: %s", body.task_id, NO_TOOLS_REASON)
                     scores = {"failure_reason": NO_TOOLS_REASON}
