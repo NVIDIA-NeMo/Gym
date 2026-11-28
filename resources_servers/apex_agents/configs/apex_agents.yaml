@@ -1,0 +1,50 @@
+apex_agents:
+  resources_servers:
+    apex_agents:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      primary_service: direct
+      description: Apex Agents professional file and workplace benchmark
+      value: Evaluate agents on long-horizon professional tasks
+      judge_model_server:
+        type: responses_api_models
+        name: apex_judge_model
+      judge_model: ${oc.select:judge_model_name,gemini-3-flash}
+      judge_create_params_overrides:
+        reasoning_effort: low
+      judge_context_window_size: ${oc.select:apex_judge_context_window_size,1000000}
+      num_processes: ${oc.select:apex_verifier_concurrency,8}
+      max_snapshot_bytes: ${oc.select:apex_verifier_max_snapshot_bytes,${oc.select:apex_agent_max_snapshot_bytes,null}}
+      max_uncompressed_bytes: ${oc.select:apex_verifier_max_uncompressed_bytes,4294967296}
+      max_artifact_files: ${oc.select:apex_verifier_max_artifact_files,2000}
+      dataset_repo: ${oc.select:apex_dataset_repo,mercor/apex-agents}
+      # Populated by `gym eval prepare --benchmark apex_agents`; rollout
+      # execution reads this cache offline and never contacts Hugging Face.
+      world_cache_dir: ${oc.select:apex_world_cache_dir,benchmarks/apex_agents/data/world_cache}
+      task_files_cache_dir: ${oc.select:apex_task_files_cache_dir,benchmarks/apex_agents/data/task_files_cache}
+      # Trusted-host export of both snapshots, safely extracted changed files,
+      # rubric-free submission metadata, and the upstream grading result.
+      artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
+      # The Archipelago sandbox image contains LibreOffice and Poppler. Formula
+      # recalculation and document rendering open files the model wrote, so the
+      # verifier runs them only inside this image (apptainer exec --containall,
+      # with one scratch directory bound). It defaults to the agent's image.
+      document_converter_image: ${oc.select:apex_agents_image,responses_api_agents/apex_agent/images/archipelago.sif}
+      # Opt in to LibreOffice/Poppler installed in the outer Gym container
+      # instead (preferred over the image when present). Off by default: host
+      # tools process model-written documents outside any sandbox.
+      allow_host_document_tools: ${oc.select:apex_allow_host_document_tools,false}
+
+apex_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${oc.select:judge_model_name,gemini-3-flash}
+      openai_default_headers: {}
+      # Forward the provider's 400 and 413 with their bodies, besides the defaults:
+      # the verifier scores a context-length or payload-size rejection as a failed
+      # criterion, and can only tell it from an outage by its status and body.
+      propagate_upstream_http_status_codes: [400, 401, 403, 413, 429]

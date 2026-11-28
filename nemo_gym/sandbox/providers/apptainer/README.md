@@ -1,9 +1,11 @@
 # Apptainer Sandbox Provider
 
 A [NeMo Gym](../../../../README.md) sandbox provider backed by the local
-[Apptainer](https://apptainer.org/) (formerly Singularity) CLI. It runs each sandbox as
-a persistent Apptainer *instance* on the host and shells out to the `apptainer` binary —
-no daemon, no network service, no Kubernetes.
+[Apptainer](https://apptainer.org/) (formerly Singularity) CLI. By default it runs each
+sandbox as a persistent Apptainer *instance*. It can instead keep a foreground
+`apptainer exec ... bash` process alive on hosts where nested instance namespaces are
+unavailable. Both modes shell out to the `apptainer` binary — no daemon, no network
+service, no Kubernetes.
 
 Use it when you want lightweight, container-based isolation on a single machine or HPC
 node where Apptainer is already the supported container runtime (common on clusters
@@ -34,7 +36,7 @@ from nemo_gym.sandbox.api import Sandbox
 from nemo_gym.sandbox.providers import SandboxSpec
 
 spec = SandboxSpec(
-    image="docker://ubuntu:22.04",   # or "/path/to/image.sif"
+    image="docker://ubuntu:22.04",  # or "/path/to/image.sif"
     workdir="/sandbox",
     env={"GREETING": "hello"},
     files={"/sandbox/input.txt": "some seed content"},
@@ -57,6 +59,7 @@ with Sandbox({"apptainer": {}}, spec) as sandbox:
 ```python
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import SandboxSpec
+
 
 async def run():
     spec = SandboxSpec(image="docker://ubuntu:22.04", workdir="/sandbox")
@@ -93,6 +96,8 @@ apptainer:
     start_timeout_s: 600
     extra_start_args: []
     apply_resource_limits: true
+    direct_exec: false
+    direct_shell: bash
   probe:
     command: printf apptainer-sandbox-ready
     expected_stdout: apptainer-sandbox-ready
@@ -109,6 +114,8 @@ Settings for starting the instance (`apptainer instance start`).
 | `start_timeout_s` | `600` | Max seconds to wait for `instance start` (`None` = no timeout). |
 | `extra_start_args` | `[]` | Extra raw flags appended to `instance start`. |
 | `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resources`. |
+| `direct_exec` | `false` | Keep one foreground `apptainer exec ... <direct_shell>` process per sandbox instead of using `instance start`/`instance://`. Useful when Gym itself runs inside Pyxis. Narrower than instance mode: see [its limits](#limits-of-direct-exec-mode). |
+| `direct_shell` | `bash` | Persistent shell used by direct mode. Bash is started without profile or rc files. |
 
 ### `exec` — `ApptainerExecConfig`
 
@@ -166,6 +173,50 @@ The spec is provider-neutral; the Apptainer provider uses these fields:
 Instances are named `nemo-gym-<uuid>` and persist across `exec` calls, so state written
 by one command is visible to the next — agents rely on this.
 
+### Direct exec mode for nested containers
+
+Some clusters run Gym inside a Pyxis/Enroot container. Apptainer may start an instance
+there but fail when `instance://` tries to re-enter its user namespace. Direct mode uses
+the same persistent foreground pattern as the GDPval and legacy SWE harnesses:
+
+```yaml
+apptainer:
+  create:
+    direct_exec: true
+    extra_start_args:
+      [--writable-tmpfs, --cleanenv, --pid, --no-mount, "home,tmp,bind-paths", --home, /root]
+  exec:
+    fakeroot_for_root: false
+```
+
+The provider sends framed commands through the shell's standard input and serializes
+commands within each sandbox. The same writable overlay remains live across calls.
+`create.extra_start_args` configures the foreground `apptainer exec`; per-command
+`exec.extra_exec_args` applies only to instance mode because direct mode does not launch
+a new Apptainer process for every command.
+
+#### Limits of direct exec mode
+
+Direct mode is one shell per sandbox, so it behaves differently from instance mode and
+from the other providers:
+
+- **One exec at a time per sandbox.** Concurrent `exec` calls on the same sandbox queue
+  and run one after another. Separate sandboxes still run in parallel.
+- **A timeout or a cancellation stops the whole sandbox.** The provider cannot stop one
+  command inside the shell, so an `exec` that times out, or whose call is cancelled,
+  kills the shell and everything it started. Later `exec` calls return
+  `error_type="sandbox"`, `status` reports `STOPPED`, and anything in the writable
+  overlay is lost. Give long commands a `timeout_s` that fits them.
+- **No per-command privileges or flags.** Every command runs as the user the shell was
+  started as. `user="root"` adds no `--fakeroot`, and `exec.fakeroot_for_root` and
+  `exec.extra_exec_args` are ignored. To run as root, put `--fakeroot` in
+  `create.extra_start_args`; switching to another user (`su`) works only from a shell
+  that is already root.
+- **Handles cannot be serialized or lent.** `serialize()` raises `NotImplementedError`,
+  because the shell belongs to the process that created it and there is no instance
+  for another worker to connect to. The sandbox stays usable and closeable. A
+  workflow that hands a sandbox to another process needs instance mode.
+
 ### Why `create` runs `instance start` in "daemonize" mode
 
 `apptainer instance start` is different from every other command the provider runs: it
@@ -196,6 +247,12 @@ channel:
   reads/writes the host side of the shared folder directly (no container call).
 - **Fallback** — for arbitrary in-container paths, the provider stages the bytes in the
   shared folder and runs an in-container `cp` (as root) to move them to/from the target.
+
+Code inside the sandbox can write to the shared folder, so a download does not trust
+what it finds there. It copies only a **regular file** reached **without a symbolic
+link** in any path component below the mount, and raises `RuntimeError` for a symlink,
+FIFO, device or directory. The copy runs in a worker thread, in chunks. Downloads have
+no size limit: callers that need one check the size themselves.
 
 ### Running as a specific user
 
@@ -268,6 +325,9 @@ failed" rather than "the command exited 125".
   was started *without* fakeroot varies by Apptainer version and host configuration.
 - **Resource enforcement.** CPU/memory cgroup flags require cgroups v2 delegation.
   Disable them with `create.apply_resource_limits: false`.
+- **Direct exec mode.** One exec at a time per sandbox, a timeout or cancellation stops
+  the sandbox, no per-command `--fakeroot` or `extra_exec_args`, and no serialization.
+  See [Limits of direct exec mode](#limits-of-direct-exec-mode).
 - **Runtime-failure detection is heuristic.** It keys off Apptainer's stderr line format,
   so a user command that prints a line starting with `FATAL:` could be misclassified as a
   sandbox error.
@@ -316,6 +376,7 @@ binaries (`echo`, `cat`, `sleep`), each guarded so they skip where the binary is
 
 ```python
 import shutil, pytest
+
 
 @pytest.mark.skipif(shutil.which("apptainer") is None, reason="apptainer not installed")
 def test_real_apptainer(): ...

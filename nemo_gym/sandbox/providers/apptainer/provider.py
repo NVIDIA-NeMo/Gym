@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -80,6 +82,11 @@ APPTAINER_RUNTIME_ERROR_MARKERS = ("no instance found", "instance not found")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
+DIRECT_EXEC_MARKER_PREFIX = "__NEMO_GYM_APPTAINER_DONE_"
+# Direct-exec stdout is read in chunks of this size, so no output line can exceed a reader limit.
+DIRECT_EXEC_READ_CHUNK_BYTES = 65536
+# Downloads copy from the staging dir in chunks of this size instead of loading the whole file.
+STAGED_COPY_CHUNK_BYTES = 1024 * 1024
 
 
 class ApptainerCreateError(SandboxCreateError):
@@ -121,12 +128,26 @@ class ApptainerCreateConfig:
     start_timeout_s: float | None = 600
     extra_start_args: list[str] = field(default_factory=list)
     apply_resource_limits: bool = True
+    # Keep one foreground `apptainer exec ... bash` process alive instead of
+    # using `instance start`/`instance://`. This is the established nested
+    # Pyxis pattern used by the GDPval and legacy SWE harnesses.
+    #
+    # Direct mode is narrower than instance mode:
+    # - one exec at a time per sandbox: commands queue behind the shell;
+    # - an exec that times out or is cancelled stops the whole sandbox;
+    # - `user="root"` adds no `--fakeroot`: commands run as the shell's own user, and
+    #   `exec.fakeroot_for_root` and `exec.extra_exec_args` are ignored;
+    # - the handle cannot be serialized, so the sandbox cannot be reconnected or lent.
+    direct_exec: bool = False
+    direct_shell: str = "bash"
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
             raise ValueError("create.start_timeout_s must be > 0")
         if not self.mount_point.startswith("/"):
             raise ValueError("create.mount_point must be an absolute path")
+        if not self.direct_shell:
+            raise ValueError("create.direct_shell must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -180,6 +201,9 @@ class _ApptainerInstance:
     mount_point: str  # where the folder shows up inside
     image: str  # what it was built from
     env: dict[str, str] = field(default_factory=dict)
+    direct_process: Any = None
+    direct_stderr: Any = None
+    direct_exec_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _resource_flags(resources: SandboxResources) -> list[str]:
@@ -323,6 +347,48 @@ def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None
             path.unlink(missing_ok=True)
 
 
+def _copy_staged_file(staging_dir: Path, relative_path: str, target_path: Path, source_path: str) -> None:
+    """Copy one regular file from the host side of the staging dir to ``target_path``. Blocking: run in a thread.
+
+    Code inside the sandbox can write anything into the staging dir, so nothing in it is trusted. The path is
+    walked one component at a time from the staging dir, never following a symbolic link, so the file that is
+    opened cannot be outside it. The file is opened without blocking and must be a regular file: a FIFO would
+    otherwise hold the read forever. ``source_path`` only names the file in errors.
+    """
+
+    def refuse(reason: str) -> RuntimeError:
+        return RuntimeError(f"apptainer download from {source_path!r} failed: {reason}")
+
+    parts = [part for part in relative_path.split("/") if part and part != "."]
+    if not parts or ".." in parts:
+        raise refuse("not a file inside the sandbox mount")
+
+    no_follow = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(staging_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            flags = no_follow | (os.O_NONBLOCK if last else os.O_DIRECTORY)
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except OSError as e:
+                # A symbolic link gives ELOOP, or ENOTDIR or EMLINK where a directory was required.
+                if e.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                    raise refuse(f"{'/'.join(parts[: index + 1])!r} is a symbolic link or not a directory") from e
+                raise
+            os.close(fd)
+            fd = next_fd
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise refuse("not a regular file")
+        with os.fdopen(fd, "rb") as source:
+            fd = -1
+            with target_path.open("wb") as target:
+                shutil.copyfileobj(source, target, STAGED_COPY_CHUNK_BYTES)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 class ApptainerProvider:
     """Sandbox provider backed by the local Apptainer CLI."""
 
@@ -455,8 +521,51 @@ class ApptainerProvider:
         return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
         return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
 
+    async def _start_direct(self, argv: list[str], stderr: Any) -> asyncio.subprocess.Process:
+        """Start one foreground Apptainer shell whose writable overlay persists."""
+        try:
+            return await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    *argv,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=stderr,
+                    start_new_session=True,
+                    env=self._subprocess_env,
+                ),
+                timeout=self._create_config.start_timeout_s,
+            )
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(f"direct apptainer exec timed out while starting: {argv}") from e
+
+    @staticmethod
+    def _direct_stderr_tail(inst: _ApptainerInstance, limit: int = 4000) -> str:
+        stream = inst.direct_stderr
+        if stream is None:
+            return ""
+        with contextlib.suppress(Exception):
+            stream.flush()
+            size = os.fstat(stream.fileno()).st_size
+            return os.pread(stream.fileno(), limit, max(0, size - limit)).decode(errors="replace").strip()
+        return ""
+
+    @staticmethod
+    async def _terminate_direct_process(inst: _ApptainerInstance) -> None:
+        proc = inst.direct_process
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                await proc.wait()
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        """Start an apptainer instance and return a ready handle.
+        """Start an Apptainer instance or direct shell and return a ready handle.
 
         Steps:
         1. Warn once if spec.ttl_s is set (unsupported by apptainer).
@@ -499,14 +608,6 @@ class ApptainerProvider:
             tempfile.mkdtemp(prefix="nemo-gym-apptainer-")
         )  # create a new empty temp directory on the host and returns that path
         name = INSTANCE_NAME_PREFIX + uuid.uuid4().hex
-
-        # build the `apptainer instance start` command line.
-        argv: list[str] = [self._binary, "instance", "start"]
-        argv += ["--bind", f"{staging_dir}:{mount_point}"]
-        for bind in self._exec_config.default_binds:
-            argv += ["--bind", bind]
-        for bind in extra_binds:
-            argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
         if any(arg in {"--contain", "--containall", "-c", "-C"} for arg in start_args) and not any(
             arg in {"--workdir", "-W"} or arg.startswith("--workdir=") for arg in start_args
@@ -516,6 +617,22 @@ class ApptainerProvider:
             private_workdir = staging_dir / ".apptainer-workdir"
             private_workdir.mkdir(mode=0o700)
             start_args += ["--workdir", str(private_workdir)]
+
+        # Build either `apptainer instance start` (default) or one persistent
+        # foreground `apptainer exec ... bash` process. The latter avoids the
+        # instance namespace re-entry that is unavailable inside some Pyxis jobs.
+        if self._create_config.direct_exec:
+            argv: list[str] = [self._binary, "exec"]
+            # Match the proven GDPval/SWE ordering: namespace flags first,
+            # followed by explicit bind mounts and the image.
+            argv += start_args
+        else:
+            argv = [self._binary, "instance", "start"]
+        argv += ["--bind", f"{staging_dir}:{mount_point}"]
+        for bind in self._exec_config.default_binds:
+            argv += ["--bind", bind]
+        for bind in extra_binds:
+            argv += ["--bind", bind]
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
@@ -525,27 +642,55 @@ class ApptainerProvider:
             else:
                 argv += resource_limit_flags
         argv += _resource_passthrough_flags(spec.resources)
-        argv += start_args
+        if not self._create_config.direct_exec:
+            argv += start_args
 
-        # start the instance; clean up the staging dir on any failure.
-        try:
-            with _private_env_file(staging_dir, env_file_content) as env_file:
-                if env_file is not None:
-                    argv += ["--no-eval", "--env-file", str(env_file)]
-                argv += [image, name]
-                code, _out, err = await self._run(
-                    argv,
-                    timeout_s=self._create_config.start_timeout_s,
-                    daemonize=True,
+        direct_process = None
+        direct_stderr = None
+        if self._create_config.direct_exec:
+            # Unlike instance start, the long-lived direct process may read the
+            # env file after subprocess creation returns, so keep it for the
+            # sandbox lifetime instead of using the short-lived context manager.
+            if env_file_content:
+                env_path = staging_dir / ".apptainer-direct-env"
+                env_path.write_bytes(env_file_content)
+                env_path.chmod(0o600)
+                argv += ["--no-eval", "--env-file", str(env_path)]
+            shell = self._create_config.direct_shell
+            argv += [image, shell]
+            if posixpath.basename(shell) == "bash":
+                argv += ["--noprofile", "--norc"]
+            direct_stderr = tempfile.TemporaryFile()
+            try:
+                direct_process = await self._start_direct(argv, direct_stderr)
+            except asyncio.CancelledError:
+                direct_stderr.close()
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise
+            except Exception as e:
+                direct_stderr.close()
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise ApptainerCreateError(f"direct apptainer exec failed to start for image={image!r}: {e}") from e
+        else:
+            # Start the instance; clean up the staging dir on any failure.
+            try:
+                with _private_env_file(staging_dir, env_file_content) as env_file:
+                    if env_file is not None:
+                        argv += ["--no-eval", "--env-file", str(env_file)]
+                    argv += [image, name]
+                    code, _out, err = await self._run(
+                        argv,
+                        timeout_s=self._create_config.start_timeout_s,
+                        daemonize=True,
+                    )
+            except TimeoutError as e:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}: {e}") from e
+            if code != 0:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise ApptainerCreateError(
+                    f"apptainer instance start failed (code={code}) for image={image!r}: {err.strip()}"
                 )
-        except TimeoutError as e:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}: {e}") from e
-        if code != 0:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise ApptainerCreateError(
-                f"apptainer instance start failed (code={code}) for image={image!r}: {err.strip()}"
-            )
 
         # wrap provider-private state on the handle.
         handle = SandboxHandle(
@@ -557,6 +702,8 @@ class ApptainerProvider:
                 mount_point=mount_point,
                 image=image,
                 env=dict(spec.env),
+                direct_process=direct_process,
+                direct_stderr=direct_stderr,
             ),
         )
 
@@ -565,6 +712,14 @@ class ApptainerProvider:
         # running instance / staging dir.
         try:
             await self._verify_created_handle(handle)
+        except asyncio.CancelledError:
+            # No handle is returned, so nothing else can stop the direct shell or remove its staging dir.
+            if direct_process is not None:
+                await kill_cancelled_command(direct_process)
+                with contextlib.suppress(Exception):
+                    direct_stderr.close()
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
         except Exception:
             await self._cleanup_failed_create_handle(handle)
             raise
@@ -616,11 +771,18 @@ class ApptainerProvider:
     async def _cleanup_failed_create_handle(self, handle: SandboxHandle) -> None:
         """Best-effort teardown of a sandbox that failed verification."""
         inst = handle.raw
-        with contextlib.suppress(Exception):
-            await self._run(
-                [self._binary, "instance", "stop", inst.name],
-                timeout_s=self._exec_config.default_timeout_s,
-            )
+        if inst.direct_process is not None:
+            with contextlib.suppress(Exception):
+                await self._terminate_direct_process(inst)
+            if inst.direct_stderr is not None:
+                with contextlib.suppress(Exception):
+                    inst.direct_stderr.close()
+        else:
+            with contextlib.suppress(Exception):
+                await self._run(
+                    [self._binary, "instance", "stop", inst.name],
+                    timeout_s=self._exec_config.default_timeout_s,
+                )
         shutil.rmtree(inst.staging_dir, ignore_errors=True)
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
@@ -629,8 +791,17 @@ class ApptainerProvider:
         This is a trusted control-plane descriptor, not a portable lease. The
         receiving worker needs the same staging filesystem and Apptainer config.
         Either handle can stop the instance; callers must coordinate ownership.
+
+        A direct-exec sandbox is one foreground shell owned by this process, with no
+        instance another worker could re-enter, so it raises ``NotImplementedError``.
+        The sandbox stays usable and closeable.
         """
         inst = handle.raw
+        if inst.direct_process is not None:
+            raise NotImplementedError(
+                "Apptainer direct-exec sandboxes cannot be serialized, reconnected or lent: "
+                "the sandbox is a shell owned by the creating process. Use instance mode (create.direct_exec=false)."
+            )
         return {
             "provider": self.name,
             "sandbox_id": inst.name,
@@ -671,6 +842,145 @@ class ApptainerProvider:
             raise RuntimeError(f"Apptainer instance {name} is not running")
         return handle
 
+    async def _exec_direct(
+        self,
+        inst: _ApptainerInstance,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout_s: int | float | None,
+        user: str | int | None,
+        stdin: bytes | None,
+    ) -> SandboxExecResult:
+        """Run one framed command through a persistent direct Apptainer shell."""
+        merged_env = dict(inst.env)
+        if env:
+            merged_env.update(env)
+        try:
+            _serialize_env_file(merged_env)
+        except (TypeError, ValueError) as e:
+            return SandboxExecResult(
+                stdout="",
+                stderr=f"invalid Apptainer environment: {e}",
+                return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                error_type="sandbox",
+            )
+
+        proc = inst.direct_process
+        if proc is None or proc.returncode is not None or proc.stdin is None or proc.stdout is None:
+            detail = self._direct_stderr_tail(inst)
+            return SandboxExecResult(
+                stdout="",
+                stderr=f"direct apptainer shell is not running: {detail or 'no startup stderr'}",
+                return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                error_type="sandbox",
+            )
+
+        effective_command = command
+        is_root = user == "root" or user == 0
+        if user is not None and not is_root:
+            effective_command = f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(str(user))}"
+        if env:
+            assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+            effective_command = f"env {assignments} sh -c {shlex.quote(effective_command)}"
+        if cwd is not None:
+            effective_command = f"cd {shlex.quote(cwd)} && {effective_command}"
+
+        # The command never reads the shell's own stdin, which carries the next framed commands: it gets the staged
+        # input or nothing.
+        container_stdin = "/dev/null"
+        stdin_path: Path | None = None
+        if stdin is not None:
+            stdin_path = inst.staging_dir / f".stdin-{uuid.uuid4().hex}"
+            stdin_path.write_bytes(stdin)
+            container_stdin = f"{inst.mount_point.rstrip('/')}/{stdin_path.name}"
+
+        marker = f"{DIRECT_EXEC_MARKER_PREFIX}{uuid.uuid4().hex}"
+        stderr_path = inst.staging_dir / f".stderr-{uuid.uuid4().hex}"
+        container_stderr = f"{inst.mount_point.rstrip('/')}/{stderr_path.name}"
+        # The command runs as one quoted `sh -c` argument, so a trailing comment, a heredoc or an unbalanced quote in
+        # it cannot swallow the status line that follows, as instance mode runs it.
+        script = (
+            f"( sh -c {shlex.quote(effective_command)} ) <{shlex.quote(container_stdin)} "
+            f"2>{shlex.quote(container_stderr)}; "
+            f"_nemo_gym_rc=$?; printf '\\n{marker}:%s\\n' \"$_nemo_gym_rc\"\n"
+        )
+        effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
+
+        async with inst.direct_exec_lock:
+            try:
+                proc.stdin.write(script.encode())
+                await proc.stdin.drain()
+                # The status frame is "\n<marker>:<code>\n". Bounded reads rather than readline(): a line longer
+                # than the stream reader's limit is valid output. The frame may straddle two reads, so each search
+                # restarts just before the bytes not yet ruled out.
+                frame = f"\n{marker}:".encode()
+                buffer = bytearray()
+                frame_start = -1
+                scan_from = 0
+                return_code = SANDBOX_RUNTIME_RETURN_CODE
+                async with asyncio.timeout(effective_timeout):
+                    while True:
+                        chunk = await proc.stdout.read(DIRECT_EXEC_READ_CHUNK_BYTES)
+                        if not chunk:
+                            detail = self._direct_stderr_tail(inst)
+                            return SandboxExecResult(
+                                stdout=bytes(buffer).decode(errors="replace"),
+                                stderr=f"direct apptainer shell exited during command: {detail or 'no stderr'}",
+                                return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                                error_type="sandbox",
+                            )
+                        buffer += chunk
+                        if frame_start < 0:
+                            frame_start = buffer.find(frame, scan_from)
+                            scan_from = max(0, len(buffer) - len(frame) + 1)
+                        if frame_start >= 0:
+                            frame_end = buffer.find(b"\n", frame_start + len(frame))
+                            if frame_end >= 0:
+                                with contextlib.suppress(ValueError):
+                                    return_code = int(buffer[frame_start + len(frame) : frame_end])
+                                break
+            except asyncio.CancelledError:
+                # The command still owns the shell and nothing can stop it alone, so stop the sandbox: a later exec
+                # reports it as not running instead of waiting behind the abandoned command and reading its output.
+                await kill_cancelled_command(proc)
+                raise
+            except (TimeoutError, asyncio.TimeoutError):
+                await self._terminate_direct_process(inst)
+                return SandboxExecResult(
+                    stdout=None,
+                    stderr=f"direct apptainer command timed out after {effective_timeout:g}s",
+                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                    error_type="timeout",
+                )
+            except (BrokenPipeError, ConnectionResetError) as e:
+                detail = self._direct_stderr_tail(inst)
+                return SandboxExecResult(
+                    stdout="",
+                    stderr=f"direct apptainer shell pipe failed: {e}; {detail}",
+                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                    error_type="sandbox",
+                )
+            finally:
+                if stdin_path is not None:
+                    stdin_path.unlink(missing_ok=True)
+
+        # Everything before the frame is the command's output, byte for byte.
+        stdout_bytes = bytes(buffer[:frame_start])
+        stderr = ""
+        try:
+            if stderr_path.exists():
+                stderr = stderr_path.read_text(errors="replace")
+        finally:
+            stderr_path.unlink(missing_ok=True)
+        return SandboxExecResult(
+            stdout=stdout_bytes.decode(errors="replace"),
+            stderr=stderr,
+            return_code=return_code,
+            error_type=None,
+        )
+
     def exec_takes_argv(self) -> bool:
         """``apptainer exec`` runs an argument list as the program's argv (``SupportsSandboxExecArgv``)."""
         return True
@@ -702,6 +1012,19 @@ class ApptainerProvider:
         inputs (e.g. prompts) that would exceed the kernel's argv length limit.
         """
         inst = handle.raw
+
+        if inst.direct_process is not None:
+            # The direct shell runs text. An argument list is quoted word by word, so the shell passes it on as the
+            # same argv and reports 127 or 126 when the program cannot be started.
+            return await self._exec_direct(
+                inst,
+                command if isinstance(command, str) else shlex.join(command),
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+                stdin=stdin,
+            )
 
         flags: list[str] = []
         if cwd is not None:
@@ -797,13 +1120,17 @@ class ApptainerProvider:
         Fast path (source under the bind mount): read directly from the host side
         of the shared folder. Fallback (arbitrary path): cp inside the container
         into the shared folder, then read the host side.
+
+        Both paths read the shared folder, which the sandbox can write, through
+        ``_copy_staged_file``: only a regular file reached without a symbolic link
+        is copied, in a worker thread. Anything else raises ``RuntimeError``.
         """
         inst = handle.raw
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         rel = _path_under_mount(inst.mount_point, source_path)
         if rel is not None:
-            target_path.write_bytes((inst.staging_dir / rel).read_bytes())
+            await asyncio.to_thread(_copy_staged_file, inst.staging_dir, rel, target_path, source_path)
             return
 
         tmp_name = uuid.uuid4().hex
@@ -814,7 +1141,7 @@ class ApptainerProvider:
             result = await self.exec(handle, script, user="root")
             if result.return_code != 0:
                 raise RuntimeError(f"apptainer download from {source_path!r} failed: {result.stderr}")
-            target_path.write_bytes(host_tmp.read_bytes())
+            await asyncio.to_thread(_copy_staged_file, inst.staging_dir, tmp_name, target_path, source_path)
         finally:
             host_tmp.unlink(missing_ok=True)
 
@@ -825,6 +1152,8 @@ class ApptainerProvider:
         Look for the instance name of this sandbox. If it is found --> RUNNING. If it's gone --> STOPPED
         """
         inst = handle.raw
+        if inst.direct_process is not None:
+            return SandboxStatus.RUNNING if inst.direct_process.returncode is None else SandboxStatus.STOPPED
 
         try:
             code, out, _err = await self._run(
@@ -856,6 +1185,19 @@ class ApptainerProvider:
         Removes the host staging dir afterward
         """
         inst = handle.raw
+
+        if inst.direct_process is not None:
+            try:
+                await self._terminate_direct_process(inst)
+            finally:
+                if inst.direct_stderr is not None:
+                    with contextlib.suppress(Exception):
+                        inst.direct_stderr.close()
+                try:
+                    shutil.rmtree(inst.staging_dir, ignore_errors=False)
+                except OSError as e:
+                    LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
+            return
 
         stop_error: Exception | None = None
         try:
