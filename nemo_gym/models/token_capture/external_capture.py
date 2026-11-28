@@ -15,6 +15,7 @@ from nemo_gym.models.token_capture.completion import (
     completion_items,
     completion_metadata,
     completion_replay_items,
+    output_evidence_items,
     output_item_fingerprint,
     output_validation_item,
 )
@@ -371,7 +372,12 @@ class _BaseExternalCaptureHandler(ABC):
             str(coords.staging_key)
         ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
-        evidence_items = completion_items(served_payload) if context.parent_resolution_mode == "source_history" else []
+        # Evidence is kept in the form returned history is compared in (see ``output_evidence_items``).
+        evidence_items = (
+            output_evidence_items(completion_items(served_payload))
+            if context.parent_resolution_mode == "source_history"
+            else []
+        )
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
         # cumulative reading). Unfingerprintable content abstains (None)

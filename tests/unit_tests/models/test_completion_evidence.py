@@ -13,6 +13,7 @@ from nemo_gym.models.token_capture.completion import (
     completion_items,
     completion_metadata,
     completion_replay_items,
+    output_evidence_items,
     output_item_fingerprint,
     output_validation_item,
 )
@@ -99,6 +100,62 @@ def test_custom_tool_call_evidence_covers_the_item_kind() -> None:
     for served, returned in ((function_call, custom_tool_call), (custom_tool_call, function_call)):
         (evidence,) = completion_items({"output": [served]})
         assert output_item_fingerprint(evidence) != output_item_fingerprint(returned)
+
+
+def _answer(text):
+    return {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+
+
+def _reasoning(text):
+    return {"type": "reasoning", "summary": [{"type": "summary_text", "text": text}]}
+
+
+def _evidence(items):
+    return [output_item_fingerprint(item) for item in output_evidence_items(items)]
+
+
+CALL = {"type": "function_call", "call_id": "call-1", "name": "check", "arguments": "{}"}
+
+
+@pytest.mark.parametrize(
+    "served,returned",
+    [
+        # A harness that returns a Gym reply's leading reasoning block as a reasoning item (OpenCode).
+        ([_answer("<think>work</think>\n\nanswer")], [_reasoning("work") | {"id": "rs_1"}, _answer("answer")]),
+        ([_answer("<think>work</think>\n\nanswer\n")], [_reasoning("work"), _answer("answer")]),
+        ([_answer("<think>work</think>\n\n"), CALL], [_reasoning("work"), CALL]),
+        ([_answer("<think>work</think>")], [_reasoning("work"), _answer("")]),
+        # A Chat client that returns the text verbatim still matches.
+        ([_answer("<think>work</think>answer"), CALL], [_answer("<think>work</think>answer"), CALL]),
+        ([_answer("answer")], [_answer("answer")]),
+        ([_answer("")], [_answer("")]),
+    ],
+)
+def test_a_reasoning_block_matches_in_either_presentation(served, returned):
+    original = deepcopy(served)
+    assert _evidence(served) == _evidence(returned)
+    assert output_evidence_items(output_evidence_items(served)) == output_evidence_items(served)
+    assert served == original
+
+
+@pytest.mark.parametrize(
+    "served,returned",
+    [
+        ([_answer("<think>work</think>answer")], [_answer("answer")]),
+        ([_answer("<think>work</think>answer")], [_reasoning("edited"), _answer("answer")]),
+        ([_answer("<think>work</think>answer")], [_reasoning("work"), _answer("edited")]),
+        ([_answer("<think>work</think>"), CALL], [CALL]),
+        # Only a block that starts the text is the reply's reasoning; any other think tag is the model's text.
+        ([_answer("answer <think>work</think>")], [_answer("answer"), _reasoning("work")]),
+        ([_answer(" <think>work</think>answer")], [_reasoning("work"), _answer("answer")]),
+    ],
+)
+def test_reasoning_edits_and_omissions_still_change_evidence(served, returned):
+    assert _evidence(served) != _evidence(returned)
+
+
+def test_an_empty_answer_without_reasoning_is_kept():
+    assert [item["type"] for item in output_evidence_items([_answer(""), CALL])] == ["message", "function_call"]
 
 
 @pytest.mark.parametrize(
