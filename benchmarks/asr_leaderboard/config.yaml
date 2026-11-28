@@ -5,7 +5,8 @@ asr_leaderboard_asr_with_pc_resources_server:
   _inherit_from: asr_with_pc
   resources_servers:
     asr_with_pc:
-      task_type: ASR
+      task_type: OpenASR
+      cleanup_generation_loops: true
 
 asr_leaderboard_asr_with_pc_simple_agent:
   _inherit_from: asr_with_pc_simple_agent
@@ -17,9 +18,31 @@ asr_leaderboard_asr_with_pc_simple_agent:
       - name: asr_leaderboard
         type: benchmark
         jsonl_fpath: benchmarks/asr_leaderboard/data/asr_leaderboard_benchmark.jsonl
-        prompt_config: benchmarks/asr_leaderboard/prompts/default.yaml
         prepare_script: benchmarks/asr_leaderboard/prepare.py
+        prepare_dependencies:
+        - soundfile
+        - whisper-normalizer==0.1.15
         license: Creative Commons Attribution 4.0 International
+
+# ASR request settings: reasoning off, greedy decoding, seed 0.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      chat_template_kwargs:
+        enable_thinking: false
+      extra_body:
+        seed: 0
+
+responses_create_params:
+  temperature: 0.0
+  top_p: 1.0
+  max_output_tokens: 16384
+  stream: false
 
 asr_leaderboard_asr_with_pc_environment_server:
   _inherit_from: asr_with_pc_environment_server

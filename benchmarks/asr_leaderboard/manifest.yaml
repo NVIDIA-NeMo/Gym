@@ -3,10 +3,10 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
-description: ASR with WER scoring (standard, case-sensitive, punctuation+capitalization)
+domain: asr
+description: English ASR on the eight Hugging Face Open ASR Leaderboard test sets, scored with the leaderboard's text normalizer and corpus-level WER.
 modality: audio
-licensing: unknown
+licensing: CC-BY-4.0 AND CC0-1.0 AND CC-BY-SA-4.0 AND Apache-2.0 AND LicenseRef-SPGISpeech-Terms AND LicenseRef-URGENT2024-Unspecified
 authors:
 - gwarmstrong
 reward:
@@ -22,9 +22,8 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/asr_leaderboard/data/asr_leaderboard_benchmark.jsonl
   prepare_script: benchmarks/asr_leaderboard/prepare.py
-  prompt_config: benchmarks/asr_leaderboard/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
-standard_prompt_config: benchmarks/asr_leaderboard/prompts/default.yaml
+prompt_source: prepared
 lifecycle: active
