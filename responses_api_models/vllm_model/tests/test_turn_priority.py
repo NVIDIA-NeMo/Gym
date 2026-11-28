@@ -197,14 +197,18 @@ def _dynamo_extras(sent: dict[str, Any]) -> dict[str, Any]:
     return json.loads(annotation.removeprefix("nemo_rl:gym:"))
 
 
-@mark.parametrize("extra_body, priority", [(None, -2), ({"priority": 7}, 7)])
+@mark.parametrize(
+    "messages, extra_body, priority",
+    [(_FIRST_TURN, None, 0), (_THIRD_TURN, None, -2), (_THIRD_TURN, {"priority": 7}, 7)],
+)
 def test_a_dynamo_frontend_call_carries_the_priority_in_its_annotation(
-    extra_body: dict[str, Any] | None, priority: int
+    messages: list[dict[str, Any]], extra_body: dict[str, Any] | None, priority: int
 ) -> None:
     # The Dynamo frontend refuses a top-level priority; NeMo RL's chat engine reads it from the annotation.
+    # A first call's 0 must move too, or the frontend refuses every first call.
     client, sent = _server(priority_by_turn=True, dynamo_frontend=True, extra_body=extra_body)
 
-    response = client.post("/v1/chat/completions", json={"model": "dummy_model", "messages": _THIRD_TURN})
+    response = client.post("/v1/chat/completions", json={"model": "dummy_model", "messages": messages})
 
     assert response.status_code == 200, response.text
     assert "priority" not in sent
