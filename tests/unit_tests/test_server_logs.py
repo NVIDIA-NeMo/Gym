@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import errno
+import json
+from pathlib import Path
+
+import pytest
+from omegaconf import OmegaConf
+
+from nemo_gym.artifacts.server_logs import NO_LOG_LOCATION_REASON, server_log_locations, write_server_log_locations
+
+
+def _config(**top_level) -> object:
+    servers = {
+        "policy_model": {"responses_api_models": {"vllm_model": {"entrypoint": "app.py", "host": "h", "port": 1}}},
+        "telemetry_settings": {"exporter": "console"},  # a mapping that is no server
+    }
+    return OmegaConf.create({**servers, **top_level})
+
+
+def test_gym_server_logs_are_listed_where_gym_tees_them(tmp_path: Path) -> None:
+    locations = server_log_locations(_config(nemo_gym_log_dir=str(tmp_path / "logs"), limit=3), environ={})
+
+    assert locations["status"] == "available"
+    assert locations["gym_servers"] == {"policy_model": str(tmp_path / "logs" / "policy_model.log")}
+    assert "services" not in locations
+
+
+def test_a_submitted_jobs_step_logs_are_listed_for_its_own_job(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name in ("policy-123.log", "driver-123.log", "otel_collector-123.log", "policy-999.log"):
+        (logs / name).write_text("")
+
+    locations = server_log_locations(_config(), environ={"NEMO_GYM_SERVICE_LOG_DIR": str(logs), "SLURM_JOB_ID": "123"})
+
+    assert locations["services"] == {
+        "dir": str(logs),
+        "slurm_job_id": "123",
+        "file_pattern": "<step>-123.log",
+        "files": {
+            "driver": str(logs / "driver-123.log"),
+            "otel_collector": str(logs / "otel_collector-123.log"),
+            "policy": str(logs / "policy-123.log"),
+        },
+    }
+    assert "gym_servers" not in locations
+
+
+def test_a_run_with_no_known_log_location_says_so(tmp_path: Path) -> None:
+    locations = server_log_locations(_config(), environ={"NEMO_GYM_SERVICE_LOG_DIR": str(tmp_path)})
+
+    assert locations == {"schema_version": 1, "status": "unavailable", "reason": NO_LOG_LOCATION_REASON}
+
+
+def test_the_file_is_written_beside_the_rollouts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("NEMO_GYM_SERVICE_LOG_DIR", raising=False)
+    output = tmp_path / "results" / "rollouts.jsonl"
+
+    path = write_server_log_locations(_config(nemo_gym_log_dir=str(tmp_path / "logs")), output)
+
+    assert path == tmp_path / "results" / "rollouts_server_logs.json"
+    assert json.loads(path.read_text())["gym_servers"]["policy_model"] == str(tmp_path / "logs" / "policy_model.log")
+    assert [p.name for p in path.parent.iterdir()] == ["rollouts_server_logs.json"]
+
+
+def test_a_no_serve_run_lists_the_folders_logs_only_as_candidates(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name in ("policy_model.log", "my_agent.log", "notes.txt"):
+        (logs / name).write_text("")
+
+    locations = server_log_locations(OmegaConf.create({"nemo_gym_log_dir": str(logs), "limit": 2}), environ={})
+
+    # A shared folder can hold earlier runs' logs, so a no-serve run lists them as candidates only.
+    assert locations["unverified_log_dir_files"] == {
+        "my_agent": str(logs / "my_agent.log"),
+        "policy_model": str(logs / "policy_model.log"),
+    }
+    assert "gym_servers" not in locations and locations["status"] == "unavailable"
+
+
+def test_an_empty_log_folder_with_no_servers_is_no_location(tmp_path: Path) -> None:
+    locations = server_log_locations(OmegaConf.create({"nemo_gym_log_dir": str(tmp_path)}), environ={})
+
+    assert locations["status"] == "unavailable" and "gym_servers" not in locations
+
+
+def test_earlier_runs_logs_in_a_shared_folder_are_not_this_runs_servers(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "policy_model.log").write_text("")
+    (logs / "last_weeks_judge.log").write_text("")
+
+    locations = server_log_locations(_config(nemo_gym_log_dir=str(logs)), environ={})
+
+    assert locations["gym_servers"] == {"policy_model": str(logs / "policy_model.log")}
+    assert locations["unverified_log_dir_files"] == {"last_weeks_judge": str(logs / "last_weeks_judge.log")}
+
+
+def test_a_collector_that_starts_no_servers_does_not_claim_its_configs_servers(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "policy_model.log").write_text("")
+
+    # `--no-serve` loads the same recipe as the `gym env start` serving it, so its config declares servers.
+    locations = server_log_locations(_config(nemo_gym_log_dir=str(logs)), environ={}, starts_servers=False)
+
+    assert "gym_servers" not in locations and locations["status"] == "unavailable"
+    assert locations["unverified_log_dir_files"] == {"policy_model": str(logs / "policy_model.log")}
+
+
+def _refused_on_open(self):
+    raise PermissionError(errno.EACCES, "Permission denied", str(self))
+
+
+def _refused_on_read(self):
+    raise PermissionError(errno.EACCES, "Permission denied", str(self))
+    yield
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        pytest.param(_refused_on_open, id="a parent it cannot traverse"),
+        pytest.param(_refused_on_read, id="a folder it cannot read"),
+    ],
+)
+def test_a_log_folder_that_cannot_be_listed_is_recorded_not_raised(tmp_path: Path, monkeypatch, listing) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "policy_model.log").write_text("")
+    monkeypatch.setattr(Path, "iterdir", listing)
+
+    locations = server_log_locations(OmegaConf.create({"nemo_gym_log_dir": str(logs)}), environ={})
+
+    assert locations["status"] == "unavailable" and "unverified_log_dir_files" not in locations
+    assert locations["log_dir_error"] == f"{logs} cannot be listed: Permission denied"
+
+
+def test_a_log_folder_whose_path_cannot_be_expanded_is_recorded_not_raised() -> None:
+    config = _config(nemo_gym_log_dir="~no-such-gym-user/logs")
+
+    locations = server_log_locations(config, environ={})
+
+    assert locations["status"] == "unavailable" and "gym_servers" not in locations
+    assert locations["log_dir_error"].startswith("~no-such-gym-user/logs cannot be listed: ")
+
+
+def test_a_log_folder_not_created_yet_is_no_error(tmp_path: Path) -> None:
+    locations = server_log_locations(_config(nemo_gym_log_dir=str(tmp_path / "logs")), environ={})
+
+    assert locations["status"] == "available" and "log_dir_error" not in locations
+
+
+def test_no_serve_collection_records_this_attempts_log_locations_before_collecting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import nemo_gym.cli.eval as cli_eval
+    import nemo_gym.rollouts.rollout_collection as rollout_collection
+    import nemo_gym.telemetry.setup as telemetry_setup
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "policy_model.log").write_text("")
+    sidecar = tmp_path / "run_server_logs.json"
+    config = _config(
+        input_jsonl_fpath=str(tmp_path / "tasks.jsonl"),
+        output_jsonl_fpath=str(tmp_path / "run.jsonl"),
+        disable_health_check=True,
+        nemo_gym_log_dir=str(logs),
+    )
+    seen: list[dict] = []
+
+    class FakeHelper:
+        async def run_from_config(self, config) -> None:
+            seen.append(json.loads(sidecar.read_text()))
+
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(rollout_collection, "RolloutCollectionHelper", FakeHelper)
+    monkeypatch.setattr(telemetry_setup, "init_telemetry", lambda **kwargs: None)
+    monkeypatch.setattr(telemetry_setup, "shutdown_telemetry", lambda *args, **kwargs: None)
+    monkeypatch.setenv("NEMO_GYM_SERVICE_LOG_DIR", str(logs))
+
+    for job_id in ("123", "456"):
+        (logs / f"driver-{job_id}.log").write_text("")
+        monkeypatch.setenv("SLURM_JOB_ID", job_id)
+        cli_eval.collect_rollouts()
+
+    assert [attempt["services"]["files"] for attempt in seen] == [
+        {"driver": str(logs / "driver-123.log")},
+        {"driver": str(logs / "driver-456.log")},
+    ]
+    assert all("gym_servers" not in attempt for attempt in seen)

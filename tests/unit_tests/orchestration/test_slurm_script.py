@@ -3748,3 +3748,39 @@ def test_a_benchmark_without_a_target_saves_the_config_it_always_did(tmp_path):
         .target
         == "/data/bmb"
     )
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        pytest.param(None, "jobs/x/osworld/logs", id="the job's logs folder"),
+        # The step logs stay where `srun --output` writes them, so driver.env cannot move the folder.
+        pytest.param("lit:/scratch/logs", "jobs/x/osworld/logs", id="driver.env cannot move it"),
+    ],
+)
+def test_the_driver_is_told_where_the_jobs_step_logs_are(tmp_path, declared, expected):
+    env = {} if declared is None else {"NEMO_GYM_SERVICE_LOG_DIR": declared}
+    script = _render_command(tmp_path, "harness", env=env)
+
+    values = re.findall(r"\bNEMO_GYM_SERVICE_LOG_DIR=(\S*)", script)
+    assert values and all(value.endswith(expected) for value in values)
+    assert "--output=logs/driver-$SLURM_JOB_ID.log" in script
+
+
+@pytest.mark.parametrize("where", ["compute", "node pool"])
+def test_a_job_whose_extra_args_move_its_working_directory_names_no_step_logs_folder(tmp_path, where):
+    config = _command_config(tmp_path, "harness", env={"NEMO_GYM_SERVICE_LOG_DIR": "lit:/scratch/logs"})
+    compute = config.compute["hsg"]
+    if where == "compute":
+        compute = compute.model_copy(update={"extra_args": {"chdir": "/scratch"}})
+    else:
+        pool = compute.node_pools["gpu"].model_copy(update={"extra_args": {"chdir": "/scratch"}})
+        compute = compute.model_copy(update={"node_pools": {"gpu": pool}})
+
+    script = build_sbatch_script(
+        config, "osworld", config.driver.benchmarks["osworld"], compute, tmp_path / "jobs" / "x" / "osworld"
+    )
+
+    # A later `#SBATCH --chdir` moves where the relative `srun --output` logs land.
+    assert "#SBATCH --chdir=/scratch" in script
+    assert "NEMO_GYM_SERVICE_LOG_DIR=" not in script
