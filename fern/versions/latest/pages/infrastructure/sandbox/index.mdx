@@ -243,6 +243,60 @@ A rule allows a server's whole host, every port on it, since providers allow egr
 
 A block without `network` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning. For a legacy policy with ordered allow and deny rules, review the policy manually before migrating. A later release requires `network`.
 
+## Tool Sandboxes
+
+A Resources Server's tools can run in a sandbox of each episode, so that the sandbox's network rule bounds what they reach, while its verifier stays on the host. This needs a `ToolsetResourcesServer`, which keeps its tools apart from its verifier, joined only by the session's state:
+
+```python
+class CounterSessionState(BaseModel):
+    count: int
+
+
+class CounterTools(ResourcesToolset):
+    state: CounterSessionState
+
+    @episode_tool
+    async def increment_counter(self, arguments: IncrementCounterRequest) -> IncrementCounterResponse:
+        """Add a number to the counter."""
+        self.state.count += arguments.count
+        return IncrementCounterResponse(success=True)
+
+
+class CounterResourcesServer(ToolsetResourcesServer):
+    seed_request_model = CounterSeedSessionRequest
+    session_state_model = CounterSessionState
+    toolset = CounterTools
+
+    async def seed_state(self, body: CounterSeedSessionRequest) -> CounterSessionState:
+        return CounterSessionState(count=body.initial_count)
+
+    async def verify(self, request: Request, body: CounterVerifyRequest) -> BaseVerifyResponse:
+        state = self.session_state(request.session[SESSION_ID_KEY])
+        ...
+```
+
+The server serves each tool at `POST /<tool name>` as before, so datasets and agents do not change. A toolset sees the server's config and one session's state, and nothing else, and it is built again for each call, so everything a tool changes belongs in the state. A server without `session_state_model` has tools that keep no state. The `example_single_tool_call` and `example_session_state_mgmt` servers are complete examples.
+
+The `single_agent_turn` Environment Server runs the tools in a sandbox when its config sets `resources_tool_sandbox`:
+
+```yaml
+sandbox_provider: opensandbox
+resources_tool_transports: [direct_http]
+resources_tool_sandbox:
+  image: my-registry/nemo-gym-tools:1   # the Gym repository at /gym, with nemo-gym and the server's requirements
+  network: no_network
+```
+
+For each episode the Environment Server:
+
+1. Seeds the Resources Server on the host and reads the session's state with `/export_session_state`.
+2. Starts the episode's tool sandbox. `nemo_gym.server_runtime.resources_tool_sandbox_runner` builds the server's toolset over that state with the server's config and serves its tools. It builds no Resources Server, so it has no session, no seed and no verifier, and it writes the state to a file after every tool call.
+3. Grants the agent the sandbox's endpoint as the Resources Server's `direct_http` tools.
+4. After the agent's turn, reads the state file, installs it on the host with `/restore_session_state`, and calls `/verify` there. The task's `verifier_metadata` never enters the sandbox.
+5. Stops the sandbox.
+
+Only a `ToolsetResourcesServer` serves the two state routes; with another Resources Server the first episode fails with a 404. The sandbox holds the server's config, so that config must hold no secret the tools do not need. A toolset knows no other Gym server, so tools that call one, such as a judge model, cannot run in a sandbox. Docker cannot close the egress of a sandbox whose port it publishes, so on Docker the block's rule is `inherit`. An episode whose tools run in a sandbox starts over after a crash instead of continuing from a checkpoint.
+
 ## Lifecycle
 
 `AsyncSandbox` and `Sandbox` are lifecycle objects. Construct one with a provider config and optional `SandboxSpec`, call `start()`, run commands or transfer files, then call `stop()`. Context managers close the provider on exit, but they do not start the sandbox automatically.

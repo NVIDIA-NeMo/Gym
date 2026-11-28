@@ -22,18 +22,18 @@ def test_resource_session_preserves_retries_and_cleans_counter_state() -> None:
         assert client.post("/seed_session", json=seed).status_code == 200
         assert client.post("/increment_counter", json={"count": 3}).status_code == 200
         assert client.post("/seed_session", json=seed).status_code == 200
-        assert client.post("/get_counter_value").json() == {"count": 6}
+        assert client.post("/get_counter_value", json={}).json() == {"count": 6}
         changed = seed | {"task_data": {"initial_count": 0}}
         assert client.post("/seed_session", json=changed).status_code == 409
         close = {"resources_session_id": "counter-resource-session", "episode_id": {"rollout_id": "rollout"}}
         wrong = close | {"episode_id": {"rollout_id": "another"}}
         assert client.post("/close_session", json=wrong).status_code == 409
-        assert client.post("/get_counter_value").json() == {"count": 6}
+        assert client.post("/get_counter_value", json={}).json() == {"count": 6}
         assert client.post("/close_session", json=close).status_code == 200
         assert client.post("/close_session", json=close).status_code == 200
-        assert not server.session_id_to_counter
+        assert server.session_state("counter-resource-session") is None
         assert client.post("/seed_session", json=seed).status_code == 409
-        assert client.post("/get_counter_value").status_code == 409
+        assert client.post("/get_counter_value", json={}).status_code == 404
 
 
 def test_closed_sessions_are_fenced_for_the_close_retry_window(monkeypatch) -> None:
@@ -62,24 +62,24 @@ def test_closed_sessions_are_fenced_for_the_close_retry_window(monkeypatch) -> N
         # Past the window the fence expires, as the worker's ownership of the ID does,
         # so no worker refuses the ID any longer.
         clock[0] = 60.0
-        assert len(server._fences) == 0
+        assert not server.session_is_closed("counter-resource-session")
         # The stale cookie from the first seed must not bring the counter back.
-        assert client.post("/increment_counter", json={"count": 1}).status_code == 409
-        assert client.post("/get_counter_value").status_code == 409
-        assert not server.session_id_to_counter
+        assert client.post("/increment_counter", json={"count": 1}).status_code == 404
+        assert client.post("/get_counter_value", json={}).status_code == 404
+        assert server.session_state("counter-resource-session") is None
         assert client.post("/close_session", json=other_episode).status_code == 200
-        assert len(server._fences) == 1
+        assert server.session_is_closed("counter-resource-session")
 
         clock[0] = 120.0
-        assert len(server._fences) == 0
+        assert not server.session_is_closed("counter-resource-session")
         assert client.post("/seed_session", json=seed).status_code == 200
-        assert client.post("/get_counter_value").json() == {"count": 3}
+        assert client.post("/get_counter_value", json={}).json() == {"count": 3}
 
 
 def test_tool_routes_refuse_a_session_that_was_never_seeded() -> None:
     config = StatefulCounterResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="counter")
     server = NOOAStatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/increment_counter", json={"count": 1}).status_code == 409
-        assert client.post("/get_counter_value").status_code == 409
-        assert not server.session_id_to_counter
+        assert client.post("/increment_counter", json={"count": 1}).status_code == 404
+        assert client.post("/get_counter_value", json={}).status_code == 404
+        assert server.session_state("counter-resource-session") is None

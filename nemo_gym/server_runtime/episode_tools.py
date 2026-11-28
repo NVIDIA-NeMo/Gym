@@ -133,6 +133,21 @@ def _tool_table(owner_type: type) -> dict[str, tuple[type[BaseModel], ToolSpec]]
     return tools
 
 
+def episode_tool_arguments(owner_type: type) -> dict[str, type[BaseModel]]:
+    """The arguments model of each ``@episode_tool`` method of a class, by tool name."""
+    return {name: arguments_model for name, (arguments_model, _) in _tool_table(owner_type).items()}
+
+
+def as_tool_result(result: object) -> ToolResult:
+    """What an ``@episode_tool`` method returned, as a ``ToolResult``: a Pydantic model becomes its JSON, and any
+    other value is the output as it is."""
+    if isinstance(result, ToolResult):
+        return result
+    if isinstance(result, BaseModel):
+        return ToolResult(output=result.model_dump(mode="json"))
+    return ToolResult(output=result)
+
+
 class TypedToolset:
     """An ``EpisodeToolset`` built from the ``@episode_tool`` methods of one object, such as an episode's state.
 
@@ -153,9 +168,4 @@ class TypedToolset:
             parsed = arguments_model.model_validate(arguments)
         except ValidationError as error:
             raise ToolArgumentsError(str(error)) from error
-        result = await getattr(self._owner, name)(parsed)
-        if isinstance(result, ToolResult):
-            return result
-        if isinstance(result, BaseModel):
-            return ToolResult(output=result.model_dump(mode="json"))
-        return ToolResult(output=result)
+        return as_tool_result(await getattr(self._owner, name)(parsed))

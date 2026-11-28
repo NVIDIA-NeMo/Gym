@@ -57,6 +57,15 @@ class TestApp:
         )
         SimpleWeatherResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
+    def test_the_toolset_serves_the_tool_at_its_route(self) -> None:
+        client = TestClient(self._server().setup_webserver())
+
+        reply = client.post("/get_weather", json={"city": "Paris"})
+
+        assert reply.status_code == 200
+        assert reply.json() == {"city": "Paris", "weather_description": "The weather in Paris is cold."}
+        assert client.post("/get_weather", json={}).status_code == 422
+
     def test_verifier_fixture(self) -> None:
         asyncio.run(
             exercise_verifier_fixture(

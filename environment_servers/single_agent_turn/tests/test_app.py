@@ -54,11 +54,13 @@ from nemo_gym.core import (
     encode_model_sampling,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.sandbox import SandboxEndpoint
 from nemo_gym.server_runtime import (
     AgentContext,
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    ResourcesToolSandboxConfig,
     SimpleServer,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
@@ -150,6 +152,107 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert client.calls[4][2]["cookies"] == {"session": "updated-cookie"}
     assert client.calls[5][2]["cookies"] == {"session": "updated-cookie"}
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
+
+
+class _ToolSandboxes:
+    """Stands in for ResourcesToolSandboxes: records the state each episode's sandbox starts and ends with."""
+
+    def __init__(self, final_state: object) -> None:
+        self.final_state = final_state
+        self.started: list[tuple[str, object]] = []
+        self.finished: list[str] = []
+
+    async def start(self, owned: object, *, session_id: str, state: object) -> SandboxEndpoint:
+        self.started.append((session_id, state))
+        return SandboxEndpoint(endpoint="http://127.0.0.1:32768", headers={"x-route": "tools"})
+
+    async def finish(self, owned: object, *, session_id: str) -> object:
+        self.finished.append(session_id)
+        return self.final_state
+
+
+class _Owned:
+    def __init__(self) -> None:
+        self.stopped: list[str] = []
+
+    async def stop(self, key: str) -> None:
+        self.stopped.append(key)
+
+
+async def test_tools_served_from_the_episodes_sandbox_carry_its_state_back_before_verify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base, client = _environment_server(resources_tool_transports=["direct_http"])
+    config = base.config.model_copy(
+        update={
+            "resources_tool_sandbox": ResourcesToolSandboxConfig(image="gym:1"),
+            "sandbox_provider": {"docker": {}},
+        }
+    )
+    environment_server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
+    tool_sandboxes = _ToolSandboxes(final_state={"count": 7})
+    environment_server._tool_sandboxes = tool_sandboxes
+    owned = _Owned()
+    monkeypatch.setattr(SingleAgentTurnEnvironmentServer, "sandboxes", property(lambda self: owned))
+    client.responses.insert(1, _Response({"state": {"count": 3}}))
+    client.responses.insert(5, _Response({"state": None}))
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is None, result.failure
+    assert result.result.reward == 1.0
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/export_session_state",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/restore_session_state",
+        "/verify",
+        "/close_session",
+    ]
+    session_id = ResourcesSeedSessionRequest.model_validate(client.calls[0][2]["json"]).resources_session_id
+    # The sandbox starts with the state the host's seed made, and the host verifies the state the tools left.
+    assert tool_sandboxes.started == [(session_id, {"count": 3})]
+    assert tool_sandboxes.finished == [session_id]
+    assert client.calls[5][2]["json"] == {"state": {"count": 7}}
+    assert client.calls[5][2]["cookies"] == client.calls[6][2]["cookies"] == {"session": "updated-cookie"}
+    # The agent's only tools are the sandbox's: no host URL, no host cookie.
+    [tool_access] = AgentSeedSessionRequest.model_validate(client.calls[2][2]["json"]).tool_accesses
+    assert str(tool_access.base_url) == "http://127.0.0.1:32768/"
+    assert tool_access.headers == {"x-route": "tools"}
+    assert tool_access.cookies == {}
+    # Final cleanup stops the sandbox again, which is a no-op once finish stopped it.
+    assert owned.stopped == [session_id]
+
+
+def test_a_tool_sandboxs_network_rule_is_applied_by_the_server_that_starts_it() -> None:
+    base, client = _environment_server(resources_tool_transports=["direct_http"])
+    config = base.config.model_copy(
+        update={
+            "resources_tool_sandbox": ResourcesToolSandboxConfig(image="gym:1", network="no_network"),
+            "sandbox_provider": {"docker": {}},
+        }
+    )
+    # A restricted rule in a block the server does not start through self.sandboxes is refused at startup.
+    SingleAgentTurnEnvironmentServer(config=config, server_client=client).check_sandbox_provider()
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"resources_tool_transports": ["mcp"]}, "direct_http"),
+        ({"sandbox_provider": None}, "sandbox_provider"),
+    ],
+)
+def test_a_tool_sandbox_needs_direct_http_and_a_sandbox_provider(update: dict, message: str) -> None:
+    base, _ = _environment_server(resources_tool_transports=["direct_http"])
+    fields = base.config.model_dump() | {
+        "resources_tool_sandbox": {"image": "gym:1"},
+        "sandbox_provider": {"docker": {}},
+    }
+    with pytest.raises(ValidationError, match=message):
+        SingleAgentTurnEnvironmentServerConfig.model_validate(fields | update)
 
 
 async def test_the_tasks_agent_context_reaches_the_agent_seed_and_not_the_resources_server() -> None:

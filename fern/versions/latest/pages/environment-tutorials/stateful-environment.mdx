@@ -42,7 +42,7 @@ Flow (state is stored per session_id inside the ResourcesServer)
 
 ## Implementation
 
-**File (simplified from [`resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt/app.py), with improved `seed_session` pattern):**
+**File (a simplified `SimpleResourcesServer` counter; [`resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt/app.py) builds the same counter as a `ToolsetResourcesServer`, whose tools can also run in a [tool sandbox](/infrastructure/sandbox#tool-sandboxes)):**
 
 ```python
 # simplified

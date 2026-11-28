@@ -7,8 +7,9 @@ position: 7
 A partial-rollout checkpoint lets a training run stop and later continue its unfinished rollouts instead of starting
 them over. Each server takes part for the state it owns. This page is for a resources server whose episode seed starts
 a **task sandbox** that the agent works in, as SWE-bench's does. A server whose session state is a small JSON object
-declares `checkpoint_mode = "exported"` and implements `export_session_states` and `restore_session_states` directly;
-see `resources_servers/example_session_state_mgmt`. For the agent side, see
+either keeps it as the `session_state_model` of a `ToolsetResourcesServer`, which exports and restores it (see
+`resources_servers/example_session_state_mgmt`), or declares `checkpoint_mode = "exported"` and implements
+`export_session_states` and `restore_session_states` directly. For the agent side, see
 [Make a Harness Checkpointable](/main/agent-server/checkpointable-harness).
 
 ## Build on `CheckpointedSandboxSessionResourcesServer`

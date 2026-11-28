@@ -36,6 +36,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSeedSessionResponse,
 )
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from resources_servers.example_session_state_mgmt.app import CounterSessionState
 from resources_servers.example_session_state_mgmt.nooa_app import NOOAStatefulCounterResourcesServer
 
 
@@ -68,7 +69,7 @@ class SessionRoutingStressServer(NOOAStatefulCounterResourcesServer):
         if body.task_data.get("fail_seed_once") and session_id not in self.failed_once:
             # Setup creates the counter and then fails, so only the caller's cleanup close removes it.
             self.failed_once.add(session_id)
-            self.session_id_to_counter[session_id] = -1
+            self._session_states[session_id] = CounterSessionState(count=-1)
             self.created.add(session_id)
             raise RuntimeError("injected seed failure")
         response = await super().seed_session(request, body)
@@ -94,12 +95,12 @@ class SessionRoutingStressServer(NOOAStatefulCounterResourcesServer):
         return {
             "pid": os.getpid(),
             "routing_id": getattr(request.app.state, "nemo_gym_routing_id", None),
-            "live": sorted(self.session_id_to_counter),
+            "live": sorted(self._session_states),
             "created": sorted(self.created),
             "plain_live": sorted(self.plain),
             "plain_created": sorted(self.plain_created),
-            "seed_records": len(self.resource_session_seeds),
-            "fences": len(self._fences),
+            "seed_records": len(self._seeds),
+            "fences": len(self._get_lifecycle_fences()),
         }
 
 
