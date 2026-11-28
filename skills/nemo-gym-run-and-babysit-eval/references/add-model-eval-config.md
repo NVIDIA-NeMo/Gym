@@ -224,7 +224,7 @@ What the client sends, and what it leaves to the server:
   so runs of different models stay comparable. Answers the budget cuts off are the model's result under
   the benchmark's protocol. A benchmark that sets no budget leaves the output bounded by the window:
   record `--max-model-len` with the results.
-- When the output budget alone exceeds `--max-model-len`, the client lowers it to fit the window
+- When the output budget is at least `--max-model-len`, the client lowers it to fit the window
   (`refit_output_budget_to_window`, on by default) and records it in the model call's capture. A
   window that is too short therefore shows up as truncated answers, not as an error.
 - System prompts come from the benchmark. A template that rejects the `developer` role needs

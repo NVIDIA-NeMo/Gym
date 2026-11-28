@@ -1028,7 +1028,7 @@ def _failed_request(call: Any) -> tuple[str, Any] | None:
 
 
 # The kind of a request the model server rejected, by the reason it recorded: the conversation outgrew the context
-# window (the model's own limit), the request's output budget alone exceeds it, or a request parameter carries a value
+# window (the model's own limit), the request's output budget alone fills it, or a request parameter carries a value
 # the deployment does not support (both setups the deployment cannot serve, evaluation-side).
 LENGTH_REFUSAL_KINDS = {
     "context_length_exceeded": MODEL_CONTEXT_LIMIT,
