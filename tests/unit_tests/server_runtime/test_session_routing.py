@@ -228,6 +228,7 @@ class Worker:
         close_retry_window_seconds: float = 300,
         server_class: type[StateServer] = StateServer,
         mcp_bearer_token: bool = False,
+        mcp_token_max_age_seconds: Optional[float] = None,
     ) -> None:
         config = BaseResourcesServerConfig(
             host="",
@@ -236,6 +237,7 @@ class Worker:
             name="state",
             expose_tools_over_mcp=mcp,
             mcp_bearer_token=mcp_bearer_token,
+            mcp_token_max_age_seconds=mcp_token_max_age_seconds,
             session_close_retry_window_seconds=close_retry_window_seconds,
         )
         self.server = server_class(config=config, server_client=MagicMock(spec=ServerClient), label=label)
@@ -555,6 +557,28 @@ class TestTheSessionIdSources:
             token = grant.removeprefix("Bearer ")
             assert _mcp_payload(_mcp_call(b.client, "store", {"value": 5}, token, bearer=True)) == {"worker": "a"}
             assert _mcp_payload(_mcp_call(b.client, "take", {}, token, bearer=True)) == {"worker": "a", "value": 5}
+
+    def test_a_bearer_token_past_the_max_age_is_refused_on_any_worker(
+        self, socket_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A token of any age names its session, and the endpoint answers one past the max age with 401.
+        options = dict(mcp=True, mcp_bearer_token=True, server_class=SecretSigningServer, mcp_token_max_age_seconds=60)
+        a, b = Worker("a", socket_dir, **options), Worker("b", socket_dir, **options)
+        with a.client, b.client:
+            with monkeypatch.context() as patched:
+                now = itsdangerous.TimestampSigner.get_timestamp
+                patched.setattr(itsdangerous.TimestampSigner, "get_timestamp", lambda self: now(self) - 61)
+                expired = a.post("/seed_session", json={}).json()["mcp"]["headers"]
+            young = a.post("/seed_session", json={}).json()["mcp"]["headers"]["Authorization"]
+            b.client.cookies.clear()
+            call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "store", "arguments": {}}}
+            refused = b.client.post(
+                "/mcp", headers={"accept": "application/json, text/event-stream", **expired}, json=call
+            )
+            assert refused.status_code == 401 and refused.json()["error"] == "invalid_token"
+            assert a.server.store == {} and b.server.store == {}
+            token = young.removeprefix("Bearer ")
+            assert _mcp_payload(_mcp_call(b.client, "store", {"value": 5}, token, bearer=True)) == {"worker": "a"}
 
     def test_a_cookie_and_a_token_signed_with_the_servers_secret(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, mcp=True, server_class=SecretSigningServer)

@@ -233,10 +233,11 @@ def mcp_session_token(headers: Mapping[str, str], header: str) -> Optional[str]:
     return (token.strip() or None) if scheme.lower() == "bearer" else None
 
 
-def mcp_token_session_id(token: str, *, serializer: itsdangerous.URLSafeSerializer) -> Optional[str]:
+def mcp_token_session_id(token: str, *, serializer: itsdangerous.URLSafeTimedSerializer) -> Optional[str]:
     """Return the session ID in an MCP session token, or None for a token with a bad signature.
 
     A rejected token is handled locally, where the MCP endpoint's own token check refuses it.
+    A token of any age names its session: the endpoint of the session's worker refuses one past the server's max age.
     """
     try:
         payload = serializer.loads(token)
@@ -671,7 +672,7 @@ class SessionRoutingMiddleware:
         owners: Optional[SessionOwners] = None,
         lifetimes: Optional[SessionLifetimes] = None,
         mcp_token_header: Optional[str] = None,
-        mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
+        mcp_token_serializer: Optional[itsdangerous.URLSafeTimedSerializer] = None,
         mcp_path: str = "/mcp",
         session_header: Optional[str] = None,
         session_from_header: Optional[Callable[[str], Optional[str]]] = None,
@@ -1051,7 +1052,7 @@ def install_session_routing(
     session_cookie: str,
     secret_key: str,
     mcp_token_header: Optional[str] = None,
-    mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
+    mcp_token_serializer: Optional[itsdangerous.URLSafeTimedSerializer] = None,
     session_header: Optional[str] = None,
     session_from_header: Optional[Callable[[str], Optional[str]]] = None,
     agent_sessions: Optional[AgentSessionHolder] = None,

@@ -293,6 +293,8 @@ When the MCP client runs where the model can read its configuration, such as a h
 
 Both options are off by default, and the endpoint then answers as described above.
 
+Code that can read a token can also copy it and use it after its episode. Each token carries the time its seed signed it, and `mcp_token_max_age_seconds` bounds how long the endpoint accepts it: a request whose token is older is answered with HTTP 401 and `{"error": "invalid_token", "error_description": ...}`, as an OAuth resource server answers an expired token, before any tool runs. With `mcp_bearer_token` the reply also carries the matching `WWW-Authenticate: Bearer error="invalid_token"` challenge. Set the limit longer than the longest episode, so that only a token used after its episode is refused. With partial-rollout checkpointing, a continuation seeds again and gets a new token. The option is off by default, and a token is then accepted at any age.
+
 ### Run it
 
 A complete, copy-pasteable run (assumes you saved `app_mcp.py` above). The compose config wires that subclass entrypoint to the agent:

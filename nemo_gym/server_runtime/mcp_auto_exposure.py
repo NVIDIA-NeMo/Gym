@@ -33,7 +33,9 @@ Bearer``, requires it for tools/list, answers a tool outside the token's grant a
 and words its errors without naming the framework or the tool's route. With ``mcp_bearer_token``
 the server signs its sessions with a secret made for the run (``SimpleServer.get_session_secret``),
 since code that reads one token could otherwise sign another session's with the public default key;
-exposure refuses to start if an override of ``get_session_secret()`` returns that public key.
+exposure refuses to start if an override of ``get_session_secret()`` returns that public key. A token carries the time
+its seed signed it: with ``mcp_token_max_age_seconds``, a request whose token is older than that is answered with HTTP
+401 (``invalid_token``) before the MCP SDK reads it.
 
 Dispatch is direct: the route's handler runs exactly once per MCP call, invoked with a fabricated
 ``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
@@ -91,12 +93,13 @@ from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
-from itsdangerous import URLSafeSerializer
+from itsdangerous import URLSafeTimedSerializer
 from mcp.server.lowlevel import Server as _LowLevelMCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -112,6 +115,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
     ResourcesSeedSessionResponse,
+    mcp_session_token_expired,
     mcp_session_token_payload,
     mcp_session_token_serializer,
 )
@@ -736,7 +740,7 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 # ==================================================================================================
 
 
-def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: Request, seed_body: dict) -> dict:
+def _mint_session_metadata(server: Any, serializer: URLSafeTimedSerializer, request: Request, seed_body: dict) -> dict:
     """Mint the session token embedded in a /seed_session response (see ``_wrap_seed_session``).
 
     Assigns the rollout its session id, asks the server for any per-session tool narrowing, and
@@ -771,7 +775,7 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
 
 
 def _parse_session_token(
-    serializer: URLSafeSerializer, token: Optional[str], required: bool, *, bearer: bool = False
+    serializer: URLSafeTimedSerializer, token: Optional[str], required: bool, *, bearer: bool = False
 ) -> tuple[Optional[str], Optional[frozenset]]:
     """Decode a Gym MCP session token into ``(session id, token allow-list)``.
 
@@ -864,9 +868,29 @@ def _make_mcp_server(
     return mcp_server
 
 
-def session_token_serializer(server: Any) -> URLSafeSerializer:
+def session_token_serializer(server: Any) -> URLSafeTimedSerializer:
     """The serializer that signs and verifies this server's MCP session tokens."""
     return mcp_session_token_serializer(server.session_secret)
+
+
+def expired_session_token_response(*, bearer: bool) -> JSONResponse:
+    """HTTP 401 for a session token older than the server's ``mcp_token_max_age_seconds``.
+
+    The body carries the OAuth error fields that the MCP SDK's own bearer authentication answers with. A bearer token
+    also gets the matching ``WWW-Authenticate`` challenge (RFC 6750); Gym's own header is no bearer scheme, so its
+    token gets none. With bearer tokens the text names no framework.
+    """
+    description = (
+        "The session token has expired."
+        if bearer
+        else f"The {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} has expired (mcp_token_max_age_seconds)."
+    )
+    challenge = {"WWW-Authenticate": f'Bearer error="invalid_token", error_description="{description}"'}
+    return JSONResponse(
+        status_code=401,
+        content={"error": "invalid_token", "error_description": description},
+        headers=challenge if bearer else None,
+    )
 
 
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
@@ -910,11 +934,20 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
         )
 
     serializer = session_token_serializer(server)
+    max_age_seconds = getattr(server.config, "mcp_token_max_age_seconds", None)
     tools = harvest_tools(app, server)
 
     mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
     _wrap_seed_session(app, mint_metadata)
     _wrap_verify(app, server)
+
+    def refuse_expired_token(headers: Headers) -> Optional[Response]:
+        # Before the SDK reads the request, so an expired token is answered with HTTP 401, as MCP's authorization
+        # spec asks, on every MCP message. A token that does not verify is left to the handlers, as without a max age.
+        token = mcp_session_token(headers, token_header)
+        if token is None or not mcp_session_token_expired(serializer, token, max_age_seconds):
+            return None
+        return expired_session_token_response(bearer=bearer)
 
     def session_claims(ctx_request: Optional[Request], *, required: bool) -> tuple[Optional[str], Optional[frozenset]]:
         token = mcp_session_token(ctx_request.headers, token_header) if ctx_request is not None else None
@@ -949,7 +982,8 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             raise ValueError(f"HTTP {exc.status} from {name if bearer else f'POST /{name}'}: {exc.detail}")
         return to_call_tool_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
 
-    mount_mcp_endpoint(app, advertised_name(server), list_tools, call_tool)
+    refuse = refuse_expired_token if max_age_seconds is not None else None
+    mount_mcp_endpoint(app, advertised_name(server), list_tools, call_tool, refuse=refuse)
     return tools
 
 
@@ -958,12 +992,15 @@ def mount_mcp_endpoint(
     server_name: str,
     list_tools: Callable[[Optional[Request]], Awaitable[list[types.Tool]]],
     call_tool: Callable[[Optional[Request], str, dict], Awaitable[types.CallToolResult]],
+    *,
+    refuse: Optional[Callable[[Headers], Optional[Response]]] = None,
 ) -> None:
     """Serve ``list_tools`` and ``call_tool`` at ``/mcp`` on ``app``.
 
     The endpoint is stateless Streamable HTTP with JSON responses, and runs within the app's lifespan. Each
     handler receives the HTTP request that carried the MCP message (``None`` outside a request), so it can read
-    the caller's headers, such as a session token.
+    the caller's headers, such as a session token. ``refuse`` sees each request's headers before the SDK reads the
+    request, and answers it instead when it returns a response, such as HTTP 401 for an expired session token.
     """
     mcp_server = _make_mcp_server(server_name, list_tools, call_tool)
     manager = StreamableHTTPSessionManager(
@@ -980,6 +1017,10 @@ def mount_mcp_endpoint(
 
     class _MCPEndpoint:
         async def __call__(self, scope, receive, send):
+            refusal = refuse(Headers(scope=scope)) if refuse is not None else None
+            if refusal is not None:
+                await refusal(scope, receive, send)
+                return
             await manager.handle_request(scope, receive, send)
 
     endpoint = _MCPEndpoint()

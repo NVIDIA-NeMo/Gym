@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from typing import Annotated, Any, Optional, get_type_hints
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -174,8 +174,8 @@ class Shapes(SimpleResourcesServer):
         return app
 
 
-def _server(cls=Store, name="store", expose=True) -> SimpleResourcesServer:
-    cfg = BaseResourcesServerConfig(host="", port=0, entrypoint="", name=name, expose_tools_over_mcp=expose)
+def _server(cls=Store, name="store", expose=True, **options: Any) -> SimpleResourcesServer:
+    cfg = BaseResourcesServerConfig(host="", port=0, entrypoint="", name=name, expose_tools_over_mcp=expose, **options)
     return cls(config=cfg, server_client=MagicMock(spec=ServerClient))
 
 
@@ -573,7 +573,7 @@ def test_session_hook_restricts_that_sessions_token():
 _SECRET = "a secret, not the server's name"
 
 
-def _company_server(cls=SessionScoped, mcp_server_name: str = "company") -> SimpleResourcesServer:
+def _company_server(cls=SessionScoped, mcp_server_name: str = "company", **options: Any) -> SimpleResourcesServer:
     """A server whose endpoint presents itself as an ordinary one (mcp_server_name, mcp_bearer_token), and signs its
     tokens with a secret, as a server that hands out bearer tokens must."""
     cfg = BaseResourcesServerConfig(
@@ -584,6 +584,7 @@ def _company_server(cls=SessionScoped, mcp_server_name: str = "company") -> Simp
         expose_tools_over_mcp=True,
         mcp_server_name=mcp_server_name,
         mcp_bearer_token=True,
+        **options,
     )
 
     class Signed(cls):
@@ -644,6 +645,7 @@ def test_bearer_token_and_advertised_name_present_an_ordinary_endpoint():
         {"mcp_server_name": "company"},
         {"mcp_bearer_token": True},
         {"mcp_server_name": "company", "mcp_bearer_token": True},
+        {"mcp_token_max_age_seconds": 3600},
     ],
 )
 def test_the_endpoints_options_need_the_endpoint(options: dict):
@@ -757,6 +759,131 @@ def test_without_the_options_the_endpoint_answers_as_before():
     with TestClient(app) as client:
         mcp = client.post("/seed_session", json={"allowed_tools": ["append"]}).json()["mcp"]
         assert mcp["server_name"] == "store" and list(mcp["headers"]) == [TOKEN_HEADER]
+
+
+# ==================================================================================================
+# Token age: mcp_token_max_age_seconds
+# ==================================================================================================
+
+
+@contextmanager
+def _signed(seconds_ago: int):
+    """Sign the tokens minted inside the block as if ``seconds_ago`` seconds had passed since: a token carries the
+    second its seed signed it."""
+    import itsdangerous
+
+    now = itsdangerous.TimestampSigner.get_timestamp
+    with patch.object(itsdangerous.TimestampSigner, "get_timestamp", lambda self: now(self) - seconds_ago):
+        yield
+
+
+def _seed_headers(client: TestClient) -> dict:
+    """Seed a session as a harness does, which keeps no cookie, and return the MCP headers the seed hands out."""
+    client.cookies.clear()
+    return client.post("/seed_session", json={}).json()["mcp"]["headers"]
+
+
+def _post_mcp(client: TestClient, headers: dict, method: str, params: dict):
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    return client.post("/mcp", headers={**RPC_HEADERS, **headers}, json=body)
+
+
+_INITIALIZE = {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}
+_EXPIRED_BEARER = "The session token has expired."
+
+
+def test_a_bearer_token_older_than_the_max_age_is_answered_with_401():
+    """With mcp_token_max_age_seconds, every request to the endpoint whose token was signed longer ago is answered
+    with HTTP 401 and the OAuth error MCP clients read (RFC 6750), before the SDK reads it, and no tool runs; a token
+    within the limit is served."""
+    server = _company_server(mcp_token_max_age_seconds=3600)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        with _signed(seconds_ago=3601):
+            expired = _seed_headers(client)
+        with _signed(seconds_ago=3590):
+            young = _seed_headers(client)
+        expired_session_id = mcp_session_token_serializer(_SECRET).loads(
+            expired["Authorization"].removeprefix("Bearer ")
+        )["sid"]
+        call = {"name": "append", "arguments": {"value": "x"}}
+        refusals = [
+            _post_mcp(client, expired, "initialize", _INITIALIZE),
+            _post_mcp(client, expired, "tools/list", {}),
+            _post_mcp(client, expired, "tools/call", call),
+            # Not even a body the SDK would reject is read.
+            client.post("/mcp", headers={**RPC_HEADERS, **expired}, content=b"not json"),
+        ]
+        for refused in refusals:
+            assert refused.status_code == 401
+            assert refused.json() == {"error": "invalid_token", "error_description": _EXPIRED_BEARER}
+            assert refused.headers["WWW-Authenticate"] == (
+                f'Bearer error="invalid_token", error_description="{_EXPIRED_BEARER}"'
+            )
+        assert expired_session_id not in server.session_state
+        assert _post_mcp(client, young, "initialize", _INITIALIZE).status_code == 200
+        served = _post_mcp(client, young, "tools/call", call)
+        assert served.status_code == 200 and _payload(served.json()["result"]) == {"values": ["x"]}
+
+
+def test_a_gym_header_token_older_than_the_max_age_is_answered_with_401():
+    """Gym's own header is no bearer scheme: the refusal carries no challenge, and names the header and the option.
+    Requests without a token, which tools/list allows here, are served as before."""
+    server = _server(SessionScoped, mcp_token_max_age_seconds=60)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        with _signed(seconds_ago=61):
+            expired = _seed_headers(client)[TOKEN_HEADER]
+        token = _seed_headers(client)[TOKEN_HEADER]
+        refused = _post_mcp(client, {TOKEN_HEADER: expired}, "tools/list", {})
+        assert refused.status_code == 401 and "WWW-Authenticate" not in refused.headers
+        assert refused.json() == {
+            "error": "invalid_token",
+            "error_description": f"The {TOKEN_HEADER} has expired (mcp_token_max_age_seconds).",
+        }
+        _handshake(client)
+        assert {"append", "raw_step"} <= {t["name"] for t in _list(client)}
+        assert _payload(_call(client, "append", {"value": "x"}, token=token)) == {"values": ["x"]}
+
+
+@pytest.mark.parametrize("bearer", [True, False], ids=["bearer", "gym-header"])
+def test_without_a_max_age_a_token_of_any_age_is_served(bearer: bool):
+    """Tokens carry the time they were signed, and a server without mcp_token_max_age_seconds does not read it."""
+    server = _company_server() if bearer else _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        with _signed(seconds_ago=30 * 24 * 3600):
+            headers = _seed_headers(client)
+        _handshake(client)
+        served = _post_mcp(client, headers, "tools/call", {"name": "append", "arguments": {"value": "x"}})
+        assert served.status_code == 200 and _payload(served.json()["result"]) == {"values": ["x"]}
+
+
+def test_a_token_signed_after_now_counts_as_new():
+    """A step back of the host's clock makes a fresh token look signed in the future, which is no reason to refuse
+    it. A token that does not verify is not an expired one."""
+    from nemo_gym.server_runtime.base_resources_server import mcp_session_token_expired, mcp_session_token_payload
+
+    serializer = mcp_session_token_serializer(_SECRET)
+    with _signed(seconds_ago=-3600):
+        token = serializer.dumps({"sid": "s"})
+
+    assert mcp_session_token_payload(serializer, token, max_age_seconds=60) == {"sid": "s"}
+    assert not mcp_session_token_expired(serializer, token, 60)
+    assert not mcp_session_token_expired(serializer, "forged", 60)
+
+
+@pytest.mark.parametrize("max_age", [0, -1, float("inf"), float("nan")])
+def test_a_max_age_is_a_positive_number_of_seconds(max_age: float):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match=r"mcp_token_max_age_seconds\n"):
+        BaseResourcesServerConfig(
+            host="", port=0, entrypoint="", name="r", expose_tools_over_mcp=True, mcp_token_max_age_seconds=max_age
+        )
 
 
 def test_verify_strips_the_advertised_names_namespace():
