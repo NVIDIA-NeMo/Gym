@@ -1319,10 +1319,13 @@ class Sandbox:
     def start(
         self,
         spec: SandboxSpec | None = None,
+        *,
+        snapshot_id: str | None = None,
     ) -> "Sandbox":
+        """Blocking ``AsyncSandbox.start``; ``snapshot_id`` creates the sandbox from that snapshot."""
         self._runner.run(
             "start",
-            lambda: self._async_sandbox.start(spec),
+            lambda: self._async_sandbox.start(spec, snapshot_id=snapshot_id),
         )
         return self
 
@@ -1368,6 +1371,10 @@ class Sandbox:
 
     def resume(self) -> None:
         self._runner.run("resume", self._async_sandbox.resume)
+
+    def snapshot(self, *, name: str | None = None) -> str:
+        """Blocking ``AsyncSandbox.snapshot``."""
+        return self._runner.run("snapshot", lambda: self._async_sandbox.snapshot(name=name))
 
     def stop(self) -> None:
         if self._closed:

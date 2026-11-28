@@ -1,0 +1,68 @@
+# NeMo RL FlashREINFORCE profile for Nemotron Nano Omni on AgentENV microVMs.
+# The policy server is injected by NeMo RL at runtime.
+#
+# Against osworld_nemo_rl_agentenv.yaml this profile:
+#  - drives the policy with a pinned canonical harness (canonical_agent.py):
+#    RFC0015 observations, execution feedback and the K8/S3 screenshot window;
+#  - runs each prompt group's task setup once and forks one guest per rollout;
+#  - samples the AgentENV template per prompt group from AGENTENV_TEMPLATE_WEIGHTS;
+#  - judges RLVR snapshot tasks with their frozen evaluators (frozen_evaluators.py).
+#
+# Required environment, in addition to AGENTENV_URL / AGENTENV_API_KEY:
+#   OSWORLD_CANONICAL_HARNESS_ROOT    directory with mm_agents/ and desktop_env/
+#   OSWORLD_CANONICAL_AGENT_SHA256    sha256 of mm_agents/nvidia/nemotron_agent.py
+#   OSWORLD_CANONICAL_FEEDBACK_SHA256 sha256 of desktop_env/execution_feedback.py
+#   AGENTENV_TEMPLATE_WEIGHTS         e.g. "{osworld-v1: 1, osworld-slim: 1, osworld-v2: 1}"
+#   OSWORLD_RLVR_FUNCTIONS_ROOT       the snapshot's tmp_funcs/ directory (per-task getters/metrics)
+
+config_paths:
+  - benchmarks/osworld/configs/osworld_agent_nano_omni_agentenv.yaml
+  - benchmarks/osworld/configs/osworld_agentenv.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      propagate_context_overflow_errors: true
+
+osworld_nano_omni_agent:
+  responses_api_agents:
+    osworld_agent:
+      concurrency: ${oc.decode:${oc.env:OSWORLD_MAX_PARALLEL_ROLLOUTS,80}}
+      setup_cache_dir: ${oc.env:OSWORLD_CACHE_ROOT}/osworld-assets
+      asset_input_jsonl: ${oc.env:OSWORLD_GRPO_TRAIN_DATA}
+      agent_class_path: responses_api_agents.osworld_agent.canonical_agent.CanonicalNemotronAgent
+      fork_rollout_groups: ${oc.decode:${oc.env:OSWORLD_FORK_ROLLOUT_GROUPS,true}}
+      fork_post_setup_settle_s: ${oc.decode:${oc.env:OSWORLD_FORK_POST_SETUP_SETTLE_S,20}}
+      sandbox_image_weights: ${oc.decode:${oc.env:AGENTENV_TEMPLATE_WEIGHTS,"{}"}}
+      frozen_evaluator_root: ${oc.env:OSWORLD_RLVR_FUNCTIONS_ROOT}
+      max_steps: ${oc.decode:${oc.env:OSWORLD_MAX_STEPS,200}}
+      max_tokens: ${oc.decode:${oc.env:OSWORLD_MAX_NEW_TOKENS,8192}}
+      temperature: ${oc.decode:${oc.env:OSWORLD_TEMPERATURE,1.0}}
+      top_p: ${oc.decode:${oc.env:OSWORLD_TOP_P,1.0}}
+      sleep_after_execution: 3.0
+      step_timeout: 60.0
+      model_timeout: 900.0
+      rollout_timeout_s: ${oc.decode:${oc.env:OSWORLD_ROLLOUT_TIMEOUT_S,3600}}
+      task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
+      agent_kwargs:
+        canonical_harness:
+          root: ${oc.env:OSWORLD_CANONICAL_HARNESS_ROOT}
+          agent_sha256: ${oc.env:OSWORLD_CANONICAL_AGENT_SHA256}
+          feedback_sha256: ${oc.env:OSWORLD_CANONICAL_FEEDBACK_SHA256}
+          execution_feedback: true
+          image_block_k: 8
+          image_boundary_s: 3
+        assistant_history_replay: raw_full
+        legacy_response_parser: true
+        # One sample per step: an unparseable or truncated reply ends the episode
+        # in FAIL and is trained with the episode reward.
+        parse_retries: 1
+        validate_python_syntax: false
+        unterminated_episode_policy: fail
+        train_invalid_terminal_call: true
+        # Stop at the first prompt that leaves less than the 8192-token output
+        # reserve of a 49152-token window.
+        context_overflow_policy: stop
+        context_prompt_token_limit: ${oc.decode:${oc.env:OSWORLD_CONTEXT_PROMPT_TOKEN_LIMIT,40960}}
+      reward_mode: raw
+      exact_trace_transport_version: 3

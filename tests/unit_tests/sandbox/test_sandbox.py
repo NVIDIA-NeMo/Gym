@@ -1106,6 +1106,45 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
             raise AssertionError("expected closed sync sandbox to reject further calls")
 
 
+class FakeSnapshotSandboxProvider(FakeSandboxProvider):
+    def __init__(self, marker: str = "default") -> None:
+        super().__init__(marker)
+        self.snapshot_calls: list[tuple[SandboxHandle, str | None]] = []
+        self.restored: list[tuple[str, SandboxSpec]] = []
+
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
+        self.snapshot_calls.append((handle, name))
+        return f"snap-{len(self.snapshot_calls)}"
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        return None
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        return None
+
+    async def list_snapshots(self, prefix: str) -> list[Any]:
+        return []
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        self.restored.append((snapshot_id, spec))
+        return await self.create(spec)
+
+
+def test_sync_sandbox_facade_snapshots_and_starts_from_a_snapshot() -> None:
+    provider_name = f"fake-snapshot-{uuid4().hex}"
+    register_provider(provider_name, FakeSnapshotSandboxProvider)
+    spec = SandboxSpec(image="image:tag")
+
+    with Sandbox({provider_name: {}}) as source:
+        source.start(spec)
+        provider = FakeSandboxProvider.last_instance
+        assert source.snapshot(name="group-a") == "snap-1"
+        assert provider.snapshot_calls == [(provider.created_handles[0], "group-a")]
+    with Sandbox({provider_name: {}}) as restored:
+        restored.start(spec, snapshot_id="snap-1")
+        assert FakeSandboxProvider.last_instance.restored == [("snap-1", spec)]
+
+
 def test_sync_loop_runner_close_is_idempotent() -> None:
     runner = _AsyncLoopRunner()
     runner.close()
