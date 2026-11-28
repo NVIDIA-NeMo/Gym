@@ -66,6 +66,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
+from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
@@ -232,6 +233,52 @@ class TestGlobalConfig:
 
         assert config[UV_CACHE_DIR_KEY_NAME] == expected
         assert nemo_gym.config.global_config.environ["UV_CACHE_DIR"] == expected
+
+    @mark.parametrize(
+        ("exported", "configured", "expected_dir", "expected_enabled"),
+        [
+            ("/run/model-calls", {}, "/run/model-calls", True),  # a submitted command's Gym captures
+            ("/run/model-calls", {"model_call_capture_dir": "/mine"}, "/mine", True),  # the config key wins
+            # A config that leaves the directory to submit time, as Inkling Small does.
+            (
+                "/run/model-calls",
+                {"observability_enabled": True, "model_call_capture_dir": None},
+                "/run/model-calls",
+                True,
+            ),
+            ("/run/model-calls", {"observability_enabled": False}, "/run/model-calls", False),  # an opt-out holds
+            ("", {}, None, None),  # an empty export turns nothing on
+            # ... and turns nothing off: capture the config enables itself goes on.
+            ("", {"observability_enabled": True, "model_call_capture_dir": "/mine"}, "/mine", True),
+        ],
+    )
+    def test_an_exported_capture_dir_is_the_default(
+        self,
+        monkeypatch: MonkeyPatch,
+        exported: str,
+        configured: dict,
+        expected_dir: str | None,
+        expected_enabled: bool | None,
+    ) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.config.global_config, "environ", {"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": exported})
+        self._mock_parse_environment(monkeypatch, DictConfig(configured))
+
+        config = get_global_config_dict()
+
+        assert config.get("model_call_capture_dir") == expected_dir
+        assert config.get("observability_enabled") == expected_enabled
+        ModelCallCaptureConfig.model_validate(dict(config))  # what each model server checks at startup
+
+    def test_a_relative_exported_capture_dir_is_refused(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(
+            nemo_gym.config.global_config, "environ", {"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": "model-calls"}
+        )
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        with raises(ConfigError, match="must be an absolute path"):
+            get_global_config_dict()
 
     def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
