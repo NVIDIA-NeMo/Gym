@@ -108,11 +108,16 @@ and PATH are preserved.
 By default Codex gets only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories from the
 sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole environment,
 as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
-`OMP_NUM_THREADS`), keeping only `CODEX_HOME` private. Use it only with remote providers,
-where that environment is the task's own.
+`OMP_NUM_THREADS`), keeping only `CODEX_HOME` and the Gym provider key private. Use it only with
+remote providers, where that environment is the task's own.
 In both cases `SandboxAccess.env` is forwarded over the sandbox's values. A seed whose
 `SandboxAccess.env` holds a `CODEX_*`, `OPENAI_*` or `NEMO_GYM_*` variable is rejected with
 HTTP 422, and the error lists those names without their values.
+Codex's shell commands inherit Codex's environment, and Gym sets no `OPENAI_*` variable in it.
+The Gym model provider takes its address from the generated `config.toml` and its placeholder key
+`gym` from `NEMO_GYM_CODEX_API_KEY`. A task's own `OPENAI_API_KEY` and `OPENAI_BASE_URL` (from the
+sandbox environment with `inherit_sandbox_environment: true`) therefore reach those commands
+unchanged and never change where Codex sends its model calls.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
