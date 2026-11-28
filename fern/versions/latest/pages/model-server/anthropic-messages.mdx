@@ -113,6 +113,10 @@ gym eval run --no-serve \
     --limit 1
 ```
 
+## Long turns
+
+The model server answers a streamed `/v1/messages` request only when the whole generation has returned. Claude Code gives a request up after about 360 seconds without a response byte and sends it again, so a longer generation runs twice and its first answer is lost. Set [`stream_keepalive_s`](/model-server/vllm) on the model server, for example to `15`: a call that runs longer opens the stream with a `ping` event and sends another at that interval until the message follows. A call that fails after the stream opened ends it with an `error` event. Claude Code then sends the request once more without streaming and gets the HTTP error status. No event can hold that request open, and Claude Code gives it up after about 300 seconds without a response. A model server whose response ids come from an upstream Responses API refuses the setting at startup and holds no `/v1/messages` stream open.
+
 ## Smoke-test `/v1/messages`
 
 Launch a model server, take its URL from the `gym env start` log (`'url': 'http://127.0.0.1:<port>'`), then:

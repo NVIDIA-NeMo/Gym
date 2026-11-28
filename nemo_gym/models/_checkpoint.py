@@ -50,6 +50,7 @@ from pydantic import BaseModel, ConfigDict
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
+from nemo_gym.models.anthropic_converter import ANTHROPIC_PING_SSE
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.external_capture import publish_deferred_commit
@@ -83,6 +84,9 @@ LOGGER = logging.getLogger(__name__)
 
 GENERATION_ROUTES = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
 _ROLLOUT_PREFIX = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<capture_key>[^/]+)")
+# The chunk of a ping event, with which ``stream_keepalive_s`` holds a Messages stream open.
+# Like SSE_KEEPALIVE, it starts no answer.
+_ANTHROPIC_PING = ANTHROPIC_PING_SSE.encode()
 
 # Request fields that compile into a structured decoder.
 # A cut prefix cannot restore that decoder's state,
@@ -988,7 +992,9 @@ class PolicyAdmissionMiddleware:
                 # blocked by the framework's snapshot fence, and would skip publishing the row deferred later.
                 # Gate only the first answer chunk; after it starts,
                 # all remaining chunks must drain even while admission is closed.
-                if body and not (event_stream and (body == SSE_KEEPALIVE or is_responses_lifecycle_chunk(body))):
+                if body and not (
+                    event_stream and (body in (SSE_KEEPALIVE, _ANTHROPIC_PING) or is_responses_lifecycle_chunk(body))
+                ):
                     await self.gate.deliver_response(ticket)
                     # Before the answer leaves: a row exists for every answer a client receives.
                     await self.gate.publish(ticket)
