@@ -416,13 +416,15 @@ async def remove_session_directory(
 
     A folder in it that its owner cannot write, such as task skills copied
     read-only by a copy that was stopped before it repaired their modes, is made
-    writable and the removal tried once more.
+    writable and the removal tried once more. A retired path that is a symlink is
+    not made writable, since chmod would follow it out of the session.
     """
     retired = quote(f"{session_dir}.closed")
     result = await sandbox.exec(
         f"if [ -d {quote(session_dir)} ]; then "
         f"mv {quote(session_dir)} {retired} || exit 1; fi; "
-        f"rm -rf -- {retired} 2>/dev/null || {{ chmod -R u+rwX -- {retired} 2>/dev/null; rm -rf -- {retired}; }}",
+        f"rm -rf -- {retired} 2>/dev/null || "
+        f"{{ [ -L {retired} ] || chmod -R u+rwX -- {retired} 2>/dev/null; rm -rf -- {retired}; }}",
         cwd=control_cwd(session_dir=session_dir, workdir=workdir),
         timeout_s=timeout,
     )
