@@ -1,0 +1,739 @@
+{
+  "commit": "cf4bd0043f4e3a91847edf1b799343caf74cf182",
+  "image_name_expression": "_sanitize_docker_image_name(f\"hb__{self.environment_id}\")",
+  "license": "Apache-2.0",
+  "revision": "v0.27.0-13-gcf4bd004",
+  "source": "https://github.com/harbor-framework/harbor",
+  "task_config_schema": {
+    "$defs": {
+      "AgentConfig": {
+        "properties": {
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "network_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/NetworkMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "user": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "ArtifactConfig": {
+        "properties": {
+          "destination": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "Author": {
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "EnvironmentConfig": {
+        "properties": {
+          "allow_internet": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "build_timeout_sec": {
+            "default": 600.0,
+            "type": "number"
+          },
+          "cpus": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "docker_image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "gpu_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "gpus": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "healthcheck": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HealthcheckConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "mcp_servers": {
+            "items": {
+              "$ref": "#/$defs/MCPServerConfig"
+            },
+            "type": "array"
+          },
+          "memory_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "network_mode": {
+            "$ref": "#/$defs/NetworkMode",
+            "default": "public"
+          },
+          "os": {
+            "$ref": "#/$defs/TaskOS",
+            "default": "linux"
+          },
+          "skills_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "storage_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "tpu": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TpuSpec"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "workdir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "HealthcheckConfig": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "interval_sec": {
+            "default": 5.0,
+            "type": "number"
+          },
+          "retries": {
+            "default": 3,
+            "type": "integer"
+          },
+          "start_interval_sec": {
+            "default": 5.0,
+            "type": "number"
+          },
+          "start_period_sec": {
+            "default": 0.0,
+            "type": "number"
+          },
+          "timeout_sec": {
+            "default": 30.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "MCPServerConfig": {
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "transport": {
+            "default": "sse",
+            "enum": [
+              "stdio",
+              "sse",
+              "streamable-http"
+            ],
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "MultiStepRewardStrategy": {
+        "enum": [
+          "mean",
+          "final"
+        ],
+        "type": "string"
+      },
+      "NetworkMode": {
+        "enum": [
+          "no-network",
+          "public",
+          "allowlist"
+        ],
+        "type": "string"
+      },
+      "PackageInfo": {
+        "properties": {
+          "authors": {
+            "items": {
+              "$ref": "#/$defs/Author"
+            },
+            "type": "array"
+          },
+          "description": {
+            "default": "",
+            "type": "string"
+          },
+          "keywords": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "SolutionConfig": {
+        "properties": {
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "StepConfig": {
+        "properties": {
+          "agent": {
+            "$ref": "#/$defs/AgentConfig"
+          },
+          "artifacts": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/ArtifactConfig"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "healthcheck": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HealthcheckConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "min_reward": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "name": {
+            "type": "string"
+          },
+          "verifier": {
+            "$ref": "#/$defs/VerifierConfig"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "TaskOS": {
+        "enum": [
+          "linux",
+          "windows"
+        ],
+        "type": "string"
+      },
+      "TpuSpec": {
+        "properties": {
+          "topology": {
+            "type": "string"
+          },
+          "type": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "topology"
+        ],
+        "type": "object"
+      },
+      "VerifierCollectConfig": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "service": {
+            "default": "main",
+            "type": "string"
+          },
+          "timeout_sec": {
+            "default": 60.0,
+            "type": "number"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "VerifierConfig": {
+        "properties": {
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "collect": {
+            "items": {
+              "$ref": "#/$defs/VerifierCollectConfig"
+            },
+            "type": "array"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "environment": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EnvironmentConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "environment_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/VerifierEnvironmentMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "network_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/NetworkMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout_sec": {
+            "default": 600.0,
+            "type": "number"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "VerifierEnvironmentMode": {
+        "enum": [
+          "shared",
+          "separate"
+        ],
+        "type": "string"
+      }
+    },
+    "properties": {
+      "agent": {
+        "$ref": "#/$defs/AgentConfig"
+      },
+      "artifacts": {
+        "items": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/ArtifactConfig"
+            }
+          ]
+        },
+        "type": "array"
+      },
+      "environment": {
+        "$ref": "#/$defs/EnvironmentConfig"
+      },
+      "metadata": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "multi_step_reward_strategy": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MultiStepRewardStrategy"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "schema_version": {
+        "default": "1.4",
+        "type": "string"
+      },
+      "solution": {
+        "$ref": "#/$defs/SolutionConfig"
+      },
+      "source": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "steps": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/StepConfig"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "task": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PackageInfo"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "verifier": {
+        "$ref": "#/$defs/VerifierConfig"
+      }
+    },
+    "type": "object"
+  },
+  "vendored_definitions": {
+    "_CONTENT_HASH_IGNORE_NAMES": "2e7c495b96edaa0805d6e14419ee6b608d83a854cf65f0cdc8eaeaa39376087c",
+    "environment_content_hash": "f28c006cf999cc63b339e76da48e7f9c0bab4d6f785477dafc01127984bc0d81",
+    "sanitize_docker_image_name": "9397203d621e5ad21e5b37799827de3ea0c8a4cc564c29daaec0134efe82f6d0"
+  },
+  "version": "0.27.0"
+}

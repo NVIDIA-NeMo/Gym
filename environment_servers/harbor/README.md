@@ -165,6 +165,8 @@ live in `nemo_gym/cli/eval.py`):
 | `validation_report.py` | The `gym dataset validate` report |
 | `errors.py` | `HarborTaskError` |
 
+`models.py` and `harbor_compat.py` are tested against a recorded Harbor revision, without the `harbor` package: `tests/unit_tests/data/tasks/harbor/fixtures/harbor_task_format.json` holds Harbor's `TaskConfig` schema and the hashes of the vendored definitions, and `tests/unit_tests/data/tasks/harbor/test_harbor_upstream_format.py` names every field the mirror reads differently. To compare with a newer Harbor, run `uv run python scripts/harbor_task_format_snapshot.py <harbor checkout> --check`; without `--check` it rewrites the snapshot.
+
 `responses_api_agents/harbor_oracle_agent/` is the harness `gym dataset validate` uses: it runs the task's
 reference solution in the sandbox instead of calling a model.
 
