@@ -480,7 +480,7 @@ def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeyp
         assert all(path.read_bytes() == value for path, value in saved.items())
 
 
-@pytest.mark.parametrize("status", [401, 404, 429, 503])
+@pytest.mark.parametrize("status", [401, 404, 408, 429, 503])
 @pytest.mark.parametrize("failed_invocations", [1, 2])
 @pytest.mark.parametrize("body_complete", [False, True])
 def test_judge_transport_failure_recovery_preserves_receipts_and_review_budget(
@@ -516,11 +516,13 @@ def test_judge_transport_failure_recovery_preserves_receipts_and_review_budget(
     for invocation in range(failed_invocations):
         with pytest.raises(RetryableTransportError, match="explicitly resume"):
             asyncio.run(score(judge_payload, **kwargs))
-        expected_calls = (invocation + 1) * (3 if body_complete and status in {429, 503} else 1)
+        expected_calls = (invocation + 1) * (3 if body_complete and status in {408, 429, 503} else 1)
         assert len(calls) == expected_calls
     work = next((kwargs["directory"] / "judges").iterdir())
     original = {path: path.read_bytes() for path in work.glob("attempt*.*")}
     assert len(list(work.glob("attempt*.json"))) == failed_invocations
+    for path in work.glob("attempt*.json"):
+        assert read(path).get("terminal", False) == (status in (401, 404))
     if not body_complete:
         for path in work.glob("attempt*.json"):
             receipt = read(path)
