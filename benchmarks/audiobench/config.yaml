@@ -1,0 +1,46 @@
+config_paths:
+- resources_servers/audio_eval/configs/audio_eval.yaml
+
+# The judge for the open-ended test sets; set judge_base_url, judge_api_key and judge_model_name in env.yaml.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,http://unset.local/v1}
+      openai_api_key: ${oc.select:judge_api_key,unset}
+      openai_model: ${oc.select:judge_model_name,unset}
+
+audiobench_resources_server:
+  _inherit_from: audio_eval
+  resources_servers:
+    audio_eval:
+      profile_contracts: benchmarks/audiobench/profiles.json
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+
+audiobench_simple_agent:
+  _inherit_from: audio_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: audiobench_resources_server
+      datasets:
+      - name: audiobench
+        type: benchmark
+        jsonl_fpath: benchmarks/audiobench/data/audiobench_benchmark.jsonl
+        prepare_script: benchmarks/audiobench/prepare.py
+        prepare_dependencies:
+        - pyarrow
+        - soundfile
+        license: Per-test-set terms of the source corpora, several non-commercial (see benchmarks/audiobench/README.md); the Hugging Face dataset cards state no license
+
+audiobench_environment_server:
+  _inherit_from: audio_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: audiobench_simple_agent
+      resources_server:
+        type: resources_servers
+        name: audiobench_resources_server
