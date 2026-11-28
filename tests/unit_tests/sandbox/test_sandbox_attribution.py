@@ -29,9 +29,15 @@ def test_explicit_values_win_over_env() -> None:
         team="cfg-team",
         user="cfg-user",
         workload="cfg-workload",
-        environ={"NEMO_GYM_TEAM": "env-team", "NEMO_GYM_USER": "env-user", "NEMO_GYM_WORKLOAD": "env-workload"},
+        cluster="cfg-cluster",
+        environ={
+            "NEMO_GYM_TEAM": "env-team",
+            "NEMO_GYM_USER": "env-user",
+            "NEMO_GYM_WORKLOAD": "env-workload",
+            "SLURM_CLUSTER_NAME": "slurm-cluster",
+        },
     )
-    assert resolved == {"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload"}
+    assert resolved == {"team": "cfg-team", "user": "cfg-user", "workload": "cfg-workload", "cluster": "cfg-cluster"}
 
 
 def test_nemo_gym_env_beats_slurm_env() -> None:
@@ -51,12 +57,30 @@ def test_nemo_gym_env_beats_slurm_env() -> None:
 
 
 def test_slurm_env_fallback() -> None:
-    environ = {"SLURM_JOB_ACCOUNT": "account", "SLURM_JOB_USER": "slurm-user", "SLURM_JOB_NAME": "job-name"}
+    environ = {
+        "SLURM_JOB_ACCOUNT": "account",
+        "SLURM_JOB_USER": "slurm-user",
+        "SLURM_JOB_NAME": "job-name",
+        "SLURM_CLUSTER_NAME": "slurm-cluster",
+    }
     assert resolve_attribution(environ=environ) == {
         "team": "account",
         "user": "slurm-user",
         "workload": "job-name",
+        "cluster": "slurm-cluster",
     }
+
+
+def test_cluster_falls_back_to_host_cluster_name() -> None:
+    # Slurm login nodes have no SLURM_CLUSTER_NAME; some clusters export CLUSTER_NAME instead.
+    assert resolve_attribution(environ={"CLUSTER_NAME": "host-cluster"})["cluster"] == "host-cluster"
+    environ = {"SLURM_CLUSTER_NAME": "slurm-cluster", "CLUSTER_NAME": "host-cluster"}
+    assert resolve_attribution(environ=environ)["cluster"] == "slurm-cluster"
+    assert resolve_attribution(cluster="cfg-cluster", environ=environ)["cluster"] == "cfg-cluster"
+
+
+def test_cluster_has_no_nemo_gym_env_var() -> None:
+    assert "cluster" not in resolve_attribution(environ={"NEMO_GYM_CLUSTER": "env-cluster"})
 
 
 def test_workload_falls_back_to_gym_config_path() -> None:
