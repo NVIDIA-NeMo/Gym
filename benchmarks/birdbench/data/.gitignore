@@ -1,1 +1,3 @@
 *.jsonl
+# Cached BIRD question releases (prepare.VERSIONS): data, never committed.
+versions/

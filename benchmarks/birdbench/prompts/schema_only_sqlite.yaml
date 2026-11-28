@@ -1,0 +1,20 @@
+# Schema-only prompt: the question, its evidence when there is any, and the database's CREATE TABLE statements followed
+# by BIRD's column descriptions. Use with rows prepared with `prompt_format=schema_only` (eval.sh --prompt-format).
+#
+### Code provenance: this prompt is auto-ontology-eval's schema-only control arm (SYSTEM_PROMPT and _user_prompt in
+### ontology_sql_eval/gym/tasks.py at e727e4d6e, https://github.com/NVIDIA/auto-ontology-eval, Apache-2.0). Its first
+### sentence is bird_sql's original prompt. It names the engine only, with no dialect tips. Keep it byte-identical:
+### the same model then scores the same here as in auto-ontology-eval's runs.
+
+system: |-
+  Please reason step by step, and put your final answer within the tags "```sql" and "```".
+  Return exactly the requested output fields and NO others.
+
+user: |-
+  ### Question
+  {question}{evidence_section}
+
+  Write a single sqlite query that answers the question.
+
+  The following is a SQL dump that describes the database and the tables in it.
+  {sql_context}
