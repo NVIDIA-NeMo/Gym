@@ -134,7 +134,7 @@ live in `nemo_gym/cli/eval.py`):
 | `prepare.py` | Find, pull (`gym dataset pull`) and prepare a taskset, and build its run config |
 | `task.py` | Load one task folder, or a folder of task folders |
 | `models.py` | Pydantic mirror of Harbor's `task.toml` |
-| `harbor_compat.py` | Environment hashing and image naming vendored from Harbor v0.22.0 |
+| `harbor_compat.py` | Environment hashing and image naming vendored from Harbor v0.27.0 |
 | `dataset_config.py` | The `[gym]` table of `dataset.toml` |
 | `task_data.py` | A dataset's `task_data.py` model for typed task fields |
 | `parameterized.py` | Render a template folder plus `tasks.jsonl` into task folders |

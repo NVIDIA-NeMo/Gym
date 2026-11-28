@@ -54,7 +54,7 @@ Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy sp
 | --- | --- | --- |
 | `docker_image` | none | A prebuilt image. Without it, Gym uses `environment/Dockerfile`; with neither, every episode fails at seed, even with a Compose file. Beside it, a pull-mode Dockerfile's settings apply and other Dockerfiles are ignored, unless `builds.force` builds the Dockerfile. In a single-sandbox task, the image's `ENTRYPOINT` and `HEALTHCHECK` do not run, unless a pull-mode `environment/Dockerfile` sits beside it; then those of its `FROM` image run. In a Compose task they run. |
 | `build_timeout_sec` | `600` | The budget all overlay-mode `RUN` lines share. Builds at prepare have no time limit. |
-| `cpus`, `memory_mb`, `storage_mb` | none | Resource limits, sent with `storage_mb` rounded up to whole GiB. Providers differ in what they enforce (Docker ignores `storage_mb`), and the server's `sandbox_resources_override` replaces any it names. |
+| `cpus`, `memory_mb`, `storage_mb` | none | Resource limits, sent with `storage_mb` rounded up to whole GiB. `cpus` may be a fraction of a core, such as `0.5`. Providers differ in what they enforce (Docker ignores `storage_mb`), and the server's `sandbox_resources_override` replaces any it names. |
 | `gpus`, `gpu_types` | none | GPU count and allowed types. Only the first type is sent, and only when the server sets `request_gpu_type: true`. GPU tasks run on the server's `gpu_sandbox_provider` block when set. |
 | `env` | `{}` | Variables for the agent's sandbox. A whole value `${NAME}` or `${NAME:-default}` is read from the server's host, and an unset `${NAME}` fails the episode at seed. |
 | `workdir` | none | The working directory. Unset, the Dockerfile's final `WORKDIR`, else the image's. |
@@ -132,7 +132,7 @@ None of these keys enters a task digest.
 | `num_repeats` | `1` | Rollouts per task for `gym eval run`. `+num_repeats=<n>` replaces it. |
 | `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`, including a step's own. Collect hooks, health checks and build timeouts do not scale. |
 | `verifier_timeout_multiplier` | `1.0` | Scales the verifier budgets alone, on top of `timeout_multiplier`: `[verifier].timeout_sec`, a step's `[steps.verifier].timeout_sec` and the step default a step inherits. The agent budgets keep `timeout_multiplier`. |
-| `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb` of `[environment]` and `[verifier.environment]`, rounded up. GPUs, `[steps.verifier.environment]` and Compose sidecars do not scale. |
+| `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb` of `[environment]` and `[verifier.environment]`, rounded up. A fractional `cpus` is scaled as written, not rounded up to a whole core, so `0.5` at `1.2` is `0.6` while `2` at `1.2` is `3`. GPUs, `[steps.verifier.environment]` and Compose sidecars do not scale. |
 
 ### [gym.tasks."task-id"]
 

@@ -1,19 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Environment content hashing and image naming vendored from Harbor v0.22.0 (Apache-2.0).
+"""Environment content hashing and image naming vendored from Harbor v0.27.0 (Apache-2.0).
 
 Gym builds the images of Harbor tasks with its own tools (buildah, podman or docker; see
 ``nemo_gym.data.tasks.harbor.image_build``) but hashes the task's ``environment/`` folder and names the image
 the way Harbor does, so a task prepared by either framework resolves to the same image name. Kept
 byte-for-byte so Gym and Harbor compute the same image names for the same build context.
 
-Vendored from https://github.com/harbor-framework/harbor (Apache-2.0, see ``ATTRIBUTIONS.md``):
+Vendored from https://github.com/harbor-framework/harbor at tag ``v0.27.0``, commit
+``96c86af3bc6d7e92f21fc771d21273be4714c8e9`` (Apache-2.0, see ``ATTRIBUTIONS.md``):
 
 - :func:`environment_content_hash` and :data:`_CONTENT_HASH_IGNORE_NAMES`:
-  https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/environments/definition.py
+  https://github.com/harbor-framework/harbor/blob/v0.27.0/src/harbor/environments/definition.py
 - :func:`sanitize_docker_image_name` (``_sanitize_docker_image_name`` upstream):
-  https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/environments/docker/docker.py
+  https://github.com/harbor-framework/harbor/blob/v0.27.0/src/harbor/environments/docker/docker.py
 
 Harbor's environment id is ``environment_content_hash(environment_dir)`` and its task image is
 ``sanitize_docker_image_name(f"hb__{environment_id}")``: ``hb__<32 hex characters>``.
@@ -26,7 +27,7 @@ import re
 from pathlib import Path
 
 
-# -- Vendored from Harbor v0.22.0, unmodified (bodies byte-for-byte; the private sanitiser is exposed
+# -- Vendored from Harbor v0.27.0, unmodified (bodies byte-for-byte; the private sanitiser is exposed
 # -- without its leading underscore). Do not edit: any change breaks image-name parity with Harbor.
 
 _CONTENT_HASH_IGNORE_NAMES = frozenset({".DS_Store", ".git", "__pycache__"})
@@ -57,14 +58,34 @@ def environment_content_hash(
         return hashlib.sha256(seed).hexdigest()[:truncate]
 
     candidates.sort(key=lambda item: item[0])
-    digest = hashlib.sha256()
+
+    paths_and_stems: list[tuple[Path, bytes]] = []
+    sizes: list[int] = []
     for rel_posix, path in candidates:
-        rel_bytes = rel_posix.encode("utf-8")
-        data = path.read_bytes()
-        digest.update(len(rel_bytes).to_bytes(4, "big"))
-        digest.update(rel_bytes)
-        digest.update(len(data).to_bytes(4, "big"))
-        digest.update(data)
+        path_stat = path.stat()
+        paths_and_stems.append((path, rel_posix.encode("utf-8")))
+        sizes.append(path_stat.st_size)
+
+    needs_large = any(sz >= 2**32 for sz in sizes)
+
+    digest = hashlib.sha256()
+    if needs_large:
+        digest.update(b"\x01")
+        content_len_bytes = 8
+    else:
+        content_len_bytes = 4
+
+    chunk_size = 1 << 20  # 1 MiB
+    for (path, stem_bytes), size in zip(paths_and_stems, sizes, strict=True):
+        digest.update(len(stem_bytes).to_bytes(4, "big"))
+        digest.update(stem_bytes)
+        digest.update(size.to_bytes(content_len_bytes, "big"))
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                digest.update(chunk)
     return digest.hexdigest()[:truncate]
 
 
