@@ -421,6 +421,7 @@ def e2e_rollout_collection():  # pragma: no cover
     write_resolved_config(global_config_dict, output_fpath)
 
     supervisor = ServerSupervisor()
+    _interrupt_on_sigterm()
     supervisor.start(None)
 
     rch = RolloutCollectionHelper()
@@ -1364,7 +1365,9 @@ def reverify_rollouts():  # pragma: no cover
     from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 
     supervisor = ServerSupervisor()
+    _interrupt_on_sigterm()
     supervisor.start(None)
+    _interrupt_on_sigterm()  # Ray initialization may replace the handler.
     try:
         global_config_dict = get_global_config_dict()
         config = RolloutReverificationConfig.model_validate(global_config_dict)
