@@ -1,0 +1,5 @@
+# Built row files stay out of git: only the synthetic example files are tracked.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl
+!example_metrics.json
