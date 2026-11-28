@@ -1,0 +1,58 @@
+# SWE-bench wrapper configuration for ProRL-Agent-Server
+#
+# Prerequisites (run before ng_run):
+#   cd /path/to/ProRL-Agent-Server
+#   python scripts/start_server.py --host 0.0.0.0 --port 8006 \
+#       --max-init-workers 64 --max-run-workers 64 --timeout 2700
+#
+# The Gym prorl_agents server will automatically call /start and /add_llm_server
+# on startup via model_post_init().
+prorl_agents:
+  responses_api_agents:
+    prorl_agents:
+      entrypoint: app.py
+
+      # Agent framework: prorl | swe_agent | openhands
+      agent_framework: prorl
+
+      # ProRL-Agent-Server URL.
+      # Single-node (same machine as ng_run): http://localhost:8006
+      # Multi-node: set to http://<actual-node-ip>:8006
+      prorl_url: http://10.49.193.167:8006
+
+      # Timeouts (should match ProRL server's --timeout)
+      swebench_agent_timeout: 2700  # 45 minutes
+      swebench_tests_timeout: 1800  # 30 minutes
+
+      # Concurrency (should not exceed ProRL's max_run_workers)
+      concurrency: 64
+
+      # container_formatter is unused for prorl but required by config schema
+      container_formatter: "unused"
+
+      dataset_path: null
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
