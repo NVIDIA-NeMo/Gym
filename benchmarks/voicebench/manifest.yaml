@@ -1,0 +1,29 @@
+name: voicebench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: Spoken question answering, instruction following and safety on 11 VoiceBench subsets, scored per subset with the VoiceBench evaluators and a GPT judge.
+modality: audio
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: voicebench
+agent_server: simple_agent
+datasets:
+- name: voicebench
+  type: benchmark
+  jsonl_fpath: benchmarks/voicebench/data/voicebench_benchmark.jsonl
+  prepare_script: benchmarks/voicebench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

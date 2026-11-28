@@ -77,7 +77,9 @@ does not require an audio/model call. `scorers.open_judge.score_outputs` also pa
 grades without HTTP for offline score parity.
 
 Start with `configs/voicebench.yaml` and provide subset/scorer/count, model wiring, judge settings
-and versioned judge prompts. This component declares no dataset downloads. The source
+and versioned judge prompts. This component declares no dataset downloads; the
+[`voicebench` benchmark](../../benchmarks/voicebench/README.md) wires every subset into one `subset: all` runtime and
+prepares the data. The source
 license/provenance for vendored rule parsers is recorded under `vendor/`.
 Candidate generation sampling belongs to the selected versioned reference profile. For the
 included baseline profile it is temperature .6, top-p .95, top-k -1 (disabled); judge sampling
