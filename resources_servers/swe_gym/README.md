@@ -33,11 +33,11 @@ For mypy the touched `[case name]` keys from the test patch select the data-driv
 
 The agent works in a sandbox created by `seed_session` from the row's image alone -- no row fields are
 written into it. Before the agent gets control, the shared anti-cheat scrub
-(`resources_servers/swebench/anti_cheat.py`) drops every git ref but HEAD, removes remotes, tags and
-reflogs, and prunes the unreachable objects. That matters here: SWE-bench images clone the full
-upstream history, so without it the fix commit and every later release tag sit in `.git` within reach
-of `git log --all`. The `testbed` env is put first on `PATH` so the agent's shells run the per-instance
-interpreter rather than the conda base one the image defaults to.
+(`resources_servers/swebench/anti_cheat.py`) drops every git ref but HEAD and the tags on its ancestors,
+removes remotes and reflogs, and prunes the unreachable objects. That matters here: SWE-bench images
+clone the full upstream history, so without it the fix commit and every later release tag sit in `.git`
+within reach of `git log --all`. The `testbed` env is put first on `PATH` so the agent's shells run
+the per-instance interpreter rather than the conda base one the image defaults to.
 
 Grading happens in a **second** sandbox created from the same image and seeded with the eval script,
 the candidate patch and the test patch. The golden patch, the test patch and the FAIL_TO_PASS /

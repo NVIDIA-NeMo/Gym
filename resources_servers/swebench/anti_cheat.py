@@ -20,9 +20,10 @@ history -- including the commit(s) that contain the actual fix/tests used to bui
 answer -- even though the working tree is reset to a pre-fix commit. Without this, an agent could
 just run ``git log --all`` / ``git show <future-commit>`` and read the answer directly instead of
 solving the task. ``anti_cheat_setup.sh`` (a single shared script, not duplicated per server)
-rewrites HEAD onto an orphan-ish branch, deletes every other ref (tags, remotes, other branches,
-packed-refs), expires the reflog, and runs ``git gc --prune=now`` to physically delete the
-now-unreachable objects.
+rewrites HEAD onto an orphan-ish branch, deletes every other ref (remotes, other branches,
+packed-refs, and every tag that is not on an ancestor of HEAD), expires the reflog, and runs
+``git gc --prune=now`` to physically delete the now-unreachable objects. Tags on ancestors of HEAD
+stay: they reveal nothing newer, and ``git describe``-based version strings need them.
 
 Originally inline in resources_servers/swebench_pro/app.py; factored out here once multiple
 servers needed the identical upload+exec+cleanup sequence rather than each carrying its own copy.

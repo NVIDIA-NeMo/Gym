@@ -284,9 +284,10 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
     async def _start_task_sandbox(self, session_id: str, body: SWEGymInstanceRequest) -> str:
         """Start the task sandbox for ``session_id`` and return the directory the agent works in.
 
-        The sandbox gets no files from the row. The git scrub drops every ref but HEAD and prunes the
-        objects behind them: SWE-bench images clone the whole upstream history, so without it the fix
-        commit and every later release tag sit in ``.git`` within a ``git log --all`` of the agent.
+        The sandbox gets no files from the row. The git scrub drops every ref but HEAD and the tags on its
+        ancestors, and prunes the objects behind them: SWE-bench images clone the whole upstream history, so
+        without it the fix commit and every later release tag sit in ``.git`` within a ``git log --all`` of
+        the agent.
         """
         self._forget_task_sandbox_state(session_id)
         sandbox = await self._create_sandbox(body, session_id=session_id)
