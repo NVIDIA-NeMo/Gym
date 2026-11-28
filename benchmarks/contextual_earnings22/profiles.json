@@ -1,0 +1,17 @@
+{
+  "defaults": {
+    "prompt_override": {
+      "system_prompt": ""
+    },
+    "request": "greedy",
+    "skills": {
+      "EVAL_ARGS": "++eval_type=contextual_earnings22 ++eval_config.normalization_mode=open_asr ++eval_config.cleanup_generation_loops=true",
+      "METRICS_TYPE": "contextual_earnings22"
+    }
+  },
+  "profiles": {
+    "contextual-earnings22.contextless": {},
+    "contextual-earnings22.local": {},
+    "contextual-earnings22.global": {}
+  }
+}
