@@ -176,9 +176,10 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         default=None,
         description="Inline retrieval system prompt. Takes priority over retrieval_system_prompt_fpath.",
     )
-    retrieval_system_prompt_fpath: str = Field(
+    retrieval_system_prompt_fpath: Optional[str] = Field(
         default="prompt_templates/finance_agent_v2_retrieval.yaml",
-        description="Fallback file path for retrieval system prompt.",
+        description="Fallback file path for retrieval system prompt. Null, with no inline prompt, sends "
+        "the retrieval request without a system message, as the upstream Vals tool does.",
     )
     retrieval_max_output_tokens: Optional[int] = Field(
         default=None,
@@ -496,9 +497,10 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             logger.info("Tool response cache enabled at %s", self._cache.root)
 
         # Retrieval system prompt (inline takes priority over file).
+        self._retrieval_system_prompt: Optional[str] = None
         if self.config.retrieval_system_prompt:
             self._retrieval_system_prompt = self.config.retrieval_system_prompt.strip()
-        else:
+        elif self.config.retrieval_system_prompt_fpath is not None:
             with open(self.config.retrieval_system_prompt_fpath, "r") as f:
                 self._retrieval_system_prompt = yaml.safe_load(f)["retrieval_system_prompt"].strip()
 
@@ -836,10 +838,11 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         retrieval_params = (
             self.config.retrieval_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
         ).model_copy(deep=True)
-        retrieval_params.input = [
-            NeMoGymEasyInputMessage(role="system", content=self._retrieval_system_prompt),
-            NeMoGymEasyInputMessage(role="user", content=prompt),
-        ]
+        retrieval_params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        if self._retrieval_system_prompt is not None:
+            retrieval_params.input.insert(
+                0, NeMoGymEasyInputMessage(role="system", content=self._retrieval_system_prompt)
+            )
         if retrieval_params.max_output_tokens is None and self.config.retrieval_max_output_tokens is not None:
             retrieval_params.max_output_tokens = self.config.retrieval_max_output_tokens
 

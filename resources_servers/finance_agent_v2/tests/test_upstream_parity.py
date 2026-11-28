@@ -95,7 +95,7 @@ class TestUpstreamParity:
         assert "submit_final_result" in _FABV2["no_tool_call_nudge"]
 
     def test_time_budget_matches_upstream(self) -> None:
-        """Upstream v2 bounds the run at one hour; v1 used max_turns=50 instead."""
+        """Upstream v2 bounds the run at two hours; v1 used max_turns=50 instead."""
         assert _FABV2["max_time_seconds"] == MAX_TIME_SECONDS
         assert _FABV1["max_time_seconds"] is None
 

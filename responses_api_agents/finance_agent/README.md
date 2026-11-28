@@ -15,7 +15,7 @@ Three fields have no default, so each instance states its own policy:
 | Field | `finance_agent` | `finance_agent_v2` |
 |-------|-----------------|--------------------|
 | `no_tool_call_nudge` | `Continue.` | names `submit_final_result` |
-| `max_time_seconds` | `null` (turn-bounded) | `3600` |
+| `max_time_seconds` | `null` (turn-bounded) | `7200` |
 | `abort_on_tool_error_types` | `[]` (every tool error is fed back) | `[RetryExhaustedError]` |
 
 `continue_if_not_tool_call` defaults to `true` in the agent (eval keeps nudging).

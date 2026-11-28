@@ -51,8 +51,8 @@ HF_REVISION = "36afd6dc1cbb2c4512536daf917dc28b1225a720"  # pragma: allowlist se
 SOURCE_FNAME = "frontier_finance_public.jsonl"
 SOURCE_URL = f"https://huggingface.co/datasets/{HF_REPO_ID}/resolve/{HF_REVISION}/{SOURCE_FNAME}"
 
-DATE_SENTENCE = "You should answer all questions as if the current date is March 1, 2026."
-SUBMIT_SENTENCE = "Your submission will not be processed unless you call this tool."
+DATE_SENTENCE = "Today's date is March 1, 2026."
+SUBMIT_SENTENCE = "Deliver your final answer by calling the `submit_final_result` tool."
 
 # Must match max_tool_calls and max_tool_time_seconds in resources_servers/finance_agent_v2/configs/frontier_finance.yaml.
 MAX_TOOL_CALLS = 200
@@ -90,7 +90,7 @@ def build_system_prompt(as_of_date: str) -> str:
                 f"The Finance Agent v2 system prompt no longer contains {anchor!r}. Update the anchor to "
                 "match benchmarks/finance_agent_v2/upstream_spec.json."
             )
-    dated = f"You should answer all questions as if the current date is {format_as_of_date(as_of_date)}."
+    dated = f"Today's date is {format_as_of_date(as_of_date)}."
     prompt = SYSTEM_PROMPT.replace(DATE_SENTENCE, dated)
     return prompt.replace(SUBMIT_SENTENCE, f"{SUBMIT_SENTENCE}\n\n{TOOL_LIMITS_PARAGRAPH}")
 

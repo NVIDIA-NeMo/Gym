@@ -34,6 +34,11 @@
       "pyonmttok"
     ]
   },
+  "resources_servers/finance_agent_v2": {
+    "override-dependencies": [
+      "model-library==0.1.25"
+    ]
+  },
   "resources_servers/gdpval": {
     "include-dependencies": [
       "cryptography"
