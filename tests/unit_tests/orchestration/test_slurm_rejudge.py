@@ -61,6 +61,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
                 "gym_install": {"ref": "a" * 40},
                 "benchmarks": {
                     "judge": {
+                        "prepare": {"config_paths": ["fixture.yaml"]},
                         # A collection limit counts tasks; the queued re-judge must not inherit it.
                         "run": {"config_paths": ["fixture.yaml"], "limit": 1},
                         "resumable": {"max_retries": 1, "max_walltime": "00:10:00"},
@@ -185,7 +186,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
             commands = _rendered_gym_commands(script.read_text())
             assert commands and all(_unrecognized_flags(words) == [] for words in commands), commands
             # Model-call capture as a submitted run's job.sh renders it, in the re-judge's own folder.
-            [words] = commands
+            [words] = [words for words in commands if words[:3] == ["gym", "eval", "reverify"]]
             assert "+observability_enabled=True" in words, words
             [capture] = [word for word in words if word.startswith("+model_call_capture_dir=")]
             assert "/reverification/" in capture and capture.endswith("/model-calls"), capture
@@ -203,6 +204,8 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
         assert float((job / ".gym_accumulated_walltime").read_text()) == 60
         script = next(job.glob("reverify-*.sh")).read_text()
         assert "gym eval reverify" in script and "--settle-into-source" in script
+        # A resources server can read a prepared file when it starts, so the job prepares as the run did.
+        assert script.index("gym eval prepare") < script.index("gym eval reverify")
         assert "--withdraw-unresolved-admissions" in script  # dispatched only with no allocation of the run live
         assert "gym eval run" not in script and "afternotok" not in script
         assert "#SBATCH --time=00:05:00" in script

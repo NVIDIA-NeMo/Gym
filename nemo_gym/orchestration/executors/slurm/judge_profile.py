@@ -413,11 +413,12 @@ def judge_job_config(
     gym_ref: str | None = None,
 ) -> SubmitConfig:
     """The submission config of a judge-only job of ``benchmark``: the run's driver (its env, mounts, container and
-    pinned install, at ``gym_ref`` when given) runs ``command`` in place of ``gym eval run``, with no policy model, no
-    preparation, no resume chain, on the profile's compute. It starts the profile's services, the saved judge
-    services of a served-judge profile, and none of a CPU profile."""
+    pinned install, at ``gym_ref`` when given) runs ``command`` in place of ``gym eval run``, with no policy model and
+    no resume chain, on the profile's compute. It keeps the run's preparation, since a server can read a prepared
+    file at start. It starts the profile's services, the saved judge services of a served-judge profile, and none of
+    a CPU profile."""
     original = config.driver.benchmarks[benchmark]
-    bench = original.model_copy(update={"prepare": {}, "run": {}, "command": command, "resumable": False})
+    bench = original.model_copy(update={"run": {}, "command": command, "resumable": False})
     install = config.driver.gym_install
     if gym_ref is not None and install is not None:
         install = install.model_copy(update={"ref": gym_ref})
