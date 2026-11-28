@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import signal
@@ -513,6 +514,7 @@ async def test_removal_makes_folders_its_owner_cannot_write_removable(session, l
     assert not session_dir.exists() and not retired.exists()
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root unlinks from a folder it cannot write, so the removal succeeds")
 async def test_removal_does_not_make_writable_what_a_retired_symlink_points_to(session, tmp_path):
     sandbox, _ = session
     target = tmp_path / "outside"
