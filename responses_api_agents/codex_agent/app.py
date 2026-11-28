@@ -113,6 +113,10 @@ from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
+# The variable the Gym provider reads its placeholder key from in sandbox sessions. Codex's shell tools inherit
+# Codex's environment, so a Gym name, unlike OPENAI_API_KEY, leaves a task's own OPENAI_API_KEY to its commands.
+# The provider keeps a key variable: without one, Codex 0.144.4 sends CODEX_API_KEY from the inherited environment.
+SANDBOX_PROVIDER_KEY_ENV = "NEMO_GYM_CODEX_API_KEY"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
 # Codex's final error when a model response ends at its output-token limit (the output cap), a gradable outcome.
@@ -668,8 +672,9 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions start Codex with only PATH, LANG, LC_ALL, HOME and the XDG directories
     # from the sandbox. Set true to give Codex (and so its shell tools) the sandbox's full
     # environment, as a harness launched directly in the task container sees it, keeping only
-    # CODEX_HOME private. Use only when the sandbox environment is the task's own (remote
-    # providers), not a local provider that inherits the agent host's environment.
+    # CODEX_HOME and the Gym provider key (SANDBOX_PROVIDER_KEY_ENV) private. Use only when the
+    # sandbox environment is the task's own (remote providers), not a local provider that inherits
+    # the agent host's environment.
     inherit_sandbox_environment: bool = False
     # Sandbox sessions: return a failed run (nonzero or signalled exit, failed turn, missing
     # turn.completed) as a `failed` response so Resources still grades it, as Harbor grades after
@@ -1217,6 +1222,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         base_url = self._resolve_call_base_url(invocation_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
+        config["model_providers"]["gym"]["env_key"] = SANDBOX_PROVIDER_KEY_ENV
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         if self.config.tool_pid_namespace:
             config = _deep_merge(config, codex_config_overrides())
@@ -1244,7 +1250,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 **(access.env if access else {}),
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
-                "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+                SANDBOX_PROVIDER_KEY_ENV: "gym",  # pragma: allowlist secret
             },
             "inherit_env": self.config.inherit_sandbox_environment,
             "raise_oom_score_adj": self.config.raise_oom_score_adj,
@@ -1794,7 +1800,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     "base_url": base_url,
                     # A custom provider reads its API key only from the env var named here; the
                     # agent sets it on the codex subprocess from `openai_api_key` (see _run_codex),
-                    # so no `codex login` is ever needed.
+                    # so no `codex login` is ever needed. Sandbox sessions name SANDBOX_PROVIDER_KEY_ENV.
                     "env_key": "OPENAI_API_KEY",
                     "wire_api": "responses",
                     "stream_idle_timeout_ms": self.config.stream_idle_timeout_ms or self.config.timeout * 1000,

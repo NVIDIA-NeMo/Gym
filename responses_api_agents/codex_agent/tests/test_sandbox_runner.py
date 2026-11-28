@@ -13,10 +13,12 @@ import time
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT, SandboxSession
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, RAISE_OOM_SCORE_ADJ, CodexSandboxSession
-from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
+from responses_api_agents.codex_agent.tests.test_sandbox_sessions import close_body, seed
+from responses_api_agents.codex_agent.tests.test_sandbox_sessions import setup as setup
 
 
 pytestmark = pytest.mark.skipif(
@@ -213,6 +215,26 @@ def test_inherited_environment_is_opt_in_and_keeps_explicit_values(tmp_path, mon
         "path": os.environ["PATH"],
         "node_options": "--max-old-space-size=2048",
     }
+
+
+def test_task_openai_variables_reach_codex_in_the_inherited_environment(tmp_path, monkeypatch, setup):
+    agent, sandbox = setup
+    agent.config.inherit_sandbox_environment = True
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Run the eval"})
+        assert response.status_code == 200, response.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    # The task's own endpoint and key, for a task whose commands call its own OpenAI-compatible endpoint.
+    monkeypatch.setenv("OPENAI_API_KEY", "task-key")  # pragma: allowlist secret
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://task-endpoint.example/v1")
+    script = 'printf \'{"key": "%s", "url": "%s"}\\n\' "$OPENAI_API_KEY" "$OPENAI_BASE_URL"'
+    # Stands in for Codex, whose shell commands inherit its environment, with the adapter's environment.
+    process = launch(tmp_path, ["bash", "-c", script], inherit_env=payload["inherit_env"], env=payload["env"])
+    assert result(tmp_path, process)["return_code"] == 0, (tmp_path / "stderr.log").read_text()
+    _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event == {"key": "task-key", "url": "http://task-endpoint.example/v1"}
 
 
 @pytest.mark.parametrize(("start", "expected"), [("0", "1000"), ("500", "1000"), ("-997", "0"), ("-1000", "0")])
