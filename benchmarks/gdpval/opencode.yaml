@@ -47,6 +47,9 @@ gdpval_opencode_agent:
         tools:
           webfetch: false
           websearch: false
+        permission:
+          # OpenCode's headless run denies paths that would prompt for permission.
+          external_directory: allow
       datasets:
         - name: gdpval
           type: benchmark
