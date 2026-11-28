@@ -68,6 +68,14 @@ Embeddings calls are not recorded by [model-call capture](/model-server/model-ca
 
 An embedding model is usually distinct from the policy model, so wire it as a separate Model Server instance (referenced via `ModelServerRef`), following the existing one-server-one-model pattern.
 
+## Decisions
+
+Every Model Server also exposes `POST /v1/systemone`, the decision API that decision models such as Jev serve; the [Decision Index kit](https://github.com/apolinario/decision-index) documents its question and answer types. A request carries `model`, a `state` (a string or a JSON object) and `questions`, a map of typed questions (`choice` with an option map, `noul` for a yes/no probability, `score` with ordered levels); the reply maps every question key to a typed answer with probabilities. The [OpenAI](/main/model-server/openai) and [Inference Providers](/main/model-server/inference-providers) backends implement it as a passthrough to `{base_url}/systemone`, with the same `extra_body` merge and `model` replacement as embeddings, and return the provider's JSON unchanged. Backends without a decision model return `501`.
+
+Provider errors follow the server's usual upstream status and retry settings, as for embeddings. To let a harness tell a capacity refusal (for example a `422` for too many options) from an error, list that status in `propagate_upstream_http_status_codes` on the OpenAI backend, and also in `upstream_retry_policy.terminal_http_status_codes` when `upstream_retry_policy` retries (otherwise the status is retried until the policy is exhausted and then returns `500`); the Inference Providers backend already returns provider errors unchanged.
+
+Decision calls are not recorded by [model-call capture](/main/model-server/model-call-capture) and, like embeddings, the route is declared non-generating, so a call under a token-capture prefix does not mark the rollout incomplete. Decision rollouts therefore carry no token IDs for training.
+
 ## Observe model calls
 
 <Cards>
