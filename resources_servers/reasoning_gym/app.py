@@ -12,11 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
+import builtins
+import importlib
+import io
+import keyword
+import logging
 import re
 import textwrap
+import tokenize
+import unicodedata
 from typing import Any, Optional
 
 import reasoning_gym
+import sympy
 from fastapi import FastAPI
 from reasoning_gym.utils import extract_answer
 
@@ -27,6 +36,70 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+logger = logging.getLogger(__name__)
+
+# reasoning_gym's scorers run in this process, and in 0.1.25 nine of them run the answer as Python: five pass it to
+# sympy's parse_expr, which eval()s it with Python's builtins in scope, and four eval() it to read a Python list.
+# Graders that run code belong in the attempt's sandbox; until that path exists, the two guards below keep the answer
+# from running here.
+
+# Guard 1: the eval() scorers only read Python literals, so their modules get ast.literal_eval as eval. A literal
+# reads the same, and anything else raises, which these scorers already score like any answer they cannot read.
+_EVAL_SCORER_MODULES = (
+    "reasoning_gym.algorithmic.binary_matrix",
+    "reasoning_gym.algorithmic.spiral_matrix",
+    "reasoning_gym.algorithmic.string_insertion",
+    "reasoning_gym.games.n_queens",
+)
+for _module_name in _EVAL_SCORER_MODULES:
+    # A module-level name shadows the builtin for every eval() call in that module.
+    importlib.import_module(_module_name).eval = ast.literal_eval
+
+# Guard 2: a parse_expr scorer only sees an answer made of numbers, arithmetic operators, parentheses and names that
+# cannot reach code. Every other answer is scored as no answer, which these scorers reward like an answer they cannot
+# parse. Each task maps to the names sympy binds that a correct answer to it may use.
+_ANTIDERIVATIVE_NAMES = frozenset(
+    {"E", "pi", "I", "exp", "log", "ln", "sqrt", "cbrt", "Abs", "abs"}
+    | {"sin", "cos", "tan", "cot", "sec", "csc", "asin", "acos", "atan", "acot", "asec", "acsc"}
+    | {"sinh", "cosh", "tanh", "coth", "sech", "csch", "asinh", "acosh", "atanh", "acoth", "asech", "acsch"}
+)
+_PARSE_EXPR_ALLOWED_NAMES = {
+    "countdown": frozenset(),
+    "puzzle24": frozenset(),
+    "polynomial_multiplication": frozenset(),
+    "simple_integration": _ANTIDERIVATIVE_NAMES,
+    "intermediate_integration": _ANTIDERIVATIVE_NAMES,
+}
+_ARITHMETIC_OPERATORS = frozenset({"+", "-", "*", "/", "**", "^", "(", ")"})
+_LAYOUT_TOKENS = frozenset({tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER})
+# parse_expr keeps a name that `from sympy import *` or Python binds and turns any other name into a new Symbol.
+_PARSE_EXPR_BOUND_NAMES = frozenset(sympy.__all__) | frozenset(dir(builtins)) | frozenset(keyword.kwlist)
+
+
+def _is_arithmetic(answer: str, allowed_names: frozenset[str]) -> bool:
+    """Whether parse_expr would read ``answer`` as arithmetic on numbers, new symbols and ``allowed_names``.
+
+    The answer is split with the tokenizer parse_expr uses, so both see the same names. Strings, attribute dots,
+    brackets, commas and other operators are refused, as is a name that starts with an underscore or that sympy or
+    Python binds, unless the task allows it. Names are compared in NFKC form, the form Python resolves them in.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(answer.strip()).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return False
+    for token in tokens:
+        if token.type == tokenize.NAME:
+            name = unicodedata.normalize("NFKC", token.string)
+            if name.startswith("_") or (name in _PARSE_EXPR_BOUND_NAMES and name not in allowed_names):
+                return False
+        elif token.type == tokenize.OP:
+            if token.string not in _ARITHMETIC_OPERATORS:
+                return False
+        elif token.type != tokenize.NUMBER and token.type not in _LAYOUT_TOKENS:
+            return False
+    return True
 
 
 class ReasoningGymResourcesServerConfig(BaseResourcesServerConfig):
@@ -70,9 +143,14 @@ class ReasoningGymResourcesServer(SimpleResourcesServer):
             "answer": body.answer,
             "metadata": body.metadata,
         }
+        scored_answer: str | None = model_answer
+        allowed_names = _PARSE_EXPR_ALLOWED_NAMES.get(task_name)
+        if allowed_names is not None and not _is_arithmetic(model_answer, allowed_names):
+            logger.debug("Scoring a %s answer that is not arithmetic as no answer", task_name)
+            scored_answer = None
         try:
             score_fn = reasoning_gym.get_score_answer_fn(task_name)
-            score = float(score_fn(answer=model_answer, entry=entry))
+            score = float(score_fn(answer=scored_answer, entry=entry))
         except Exception as e:
             print(f"Error scoring answer for task {task_name}: {e}")
             score = 0.0
