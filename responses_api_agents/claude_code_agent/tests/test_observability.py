@@ -635,6 +635,280 @@ def test_compaction_matches_native_continuation_suffix(separator: str) -> None:
     )
 
 
+# The text of a summary record of Claude Code 2.1.312, which kept the latest messages of the conversation.
+SUMMARY_OF_2_1_312 = (
+    "This session is being continued from a previous conversation that ran out of context. "
+    "The summary below covers the earlier portion of the conversation.\n\n"
+    "<system-reminder>\n<tools-used-before-summary>Bash</tools-used-before-summary>\n</system-reminder>\n"
+    "Summary:\nKeep this."
+    "\n\nIf you need specific details from before compaction "
+    "(like exact code snippets, error messages, or content you generated), "
+    "read the full transcript at: /config/projects/work/session.jsonl"
+    "\nContinue the conversation from where it left off without asking the user "
+    "any further questions. Resume directly — do not acknowledge the summary, do not recap "
+    'what was happening, do not preface with "I\'ll continue" or similar. '
+    "Pick up the last task as if the break never happened."
+    "\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim. "
+    "The summary was written without seeing them, so something it says has not happened yet may already have "
+    "happened in them."
+)
+
+
+@pytest.mark.parametrize("tools", ["Bash", "Bash, Read", "unexpected\ncontent"])
+def test_compaction_matches_summary_record_of_claude_code_2_1_312(tools: str) -> None:
+    """Claude Code 2.1.312 keeps the latest messages and summarizes the earlier ones. Its record names the tools
+    used before the summary in front of the summary and ends with a sentence on the kept messages."""
+    bundle = _compaction_bundle()
+    [compaction] = _records(bundle, ContextCompactionObservation)
+    compaction.summary = SUMMARY_OF_2_1_312.replace("Bash", tools)
+    calls = [
+        ModelCallRecord.model_validate(call | {"call_index": index})
+        for index, call in enumerate(
+            [
+                _captured_call("call-before", "msg-before"),
+                _captured_call("call-compact", "msg-compact", compact=True),
+                _captured_call("call-after", "msg-after"),
+            ]
+        )
+    ]
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+    [compaction] = _records(associated, ContextCompactionObservation)
+    assert [ref.model_call_id for ref in compaction.model_calls] == ([] if "\n" in tools else ["call-compact"])
+
+
+def _kept_messages_transcript(tmp_path: Path, turns: int, session: str = "session") -> None:
+    """Write the transcript of a conversation that Claude Code 2.1.312 compacted before its last model call.
+
+    ``turns`` model calls precede the compaction. The ``compact_boundary`` record states the token counts. Two
+    attachment records follow it, and then the summary record, each the child of the record before it. The ids
+    of the records and of the replies of a session other than ``session`` end with its name.
+    """
+    end = "" if session == "session" else f"-{session}"
+    link = {"sessionId": session, "timestamp": "2026-07-22T10:00:10Z"}
+    kept = {"anchorUuid": f"s{end}"}
+    metadata = {"trigger": "auto", "preTokens": 197000, "postTokens": 2400, "preservedSegment": kept}
+    _write(
+        tmp_path / "projects" / "work" / f"{session}.jsonl",
+        _event(session, "user", "2026-07-22T10:00:00Z", "prompt", uuid=f"prompt{end}"),
+        *(
+            _assistant(session, f"2026-07-22T10:00:0{turn}Z", f"msg-{turn}{end}", {"type": "text", "text": "ok"})
+            for turn in range(1, turns + 1)
+        ),
+        {"type": "system", "subtype": "compact_boundary", "uuid": f"b{end}", "compactMetadata": metadata} | link,
+        {"type": "attachment", "uuid": f"a1{end}", "parentUuid": f"b{end}", "attachment": {"type": "session_context"}}
+        | link,
+        {"type": "attachment", "uuid": f"a2{end}", "parentUuid": f"a1{end}", "attachment": {"type": "date"}} | link,
+        _event(session, "user", "2026-07-22T10:00:10Z", SUMMARY_OF_2_1_312, uuid=f"s{end}", parentUuid=f"a2{end}")
+        | {"isCompactSummary": True},
+        _assistant(session, "2026-07-22T10:00:20Z", f"msg-last{end}", {"type": "text", "text": "Done."}),
+    )
+
+
+def _capture(*calls: dict) -> list[ModelCallRecord]:
+    """Return the records of captured calls in their order, each with 10 input tokens and 2 output tokens."""
+    tokens = {"tokens_in": 10, "tokens_out": 2, "tokens_total": 12}
+    return [ModelCallRecord.model_validate(call | tokens | {"call_index": index}) for index, call in enumerate(calls)]
+
+
+def _unused_summary_call(call_id: str, block: dict) -> dict:
+    """Return a captured summary call whose answer is ``block``, which is not the persisted summary."""
+    return _captured_call(call_id, f"msg-{call_id}", compact=True) | {
+        "response": {"id": f"msg-{call_id}", "content": [block]}
+    }
+
+
+def test_summary_record_behind_attachments_joins_its_boundary_record(tmp_path: Path) -> None:
+    """One compaction is one observation: the boundary record states its token counts and the summary record its
+    summary, and the usage counts the summary call."""
+    _kept_messages_transcript(tmp_path, turns=1)
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+
+    [compaction] = _records(bundle, ContextCompactionObservation)
+    assert (compaction.tokens_before, compaction.tokens_after, compaction.trigger) == (197000, 2400, "automatic")
+    assert compaction.summary == SUMMARY_OF_2_1_312 and compaction.outcome == "completed"
+    assert (compaction.before_model_call.response_id, compaction.after_model_call.response_id) == ("msg-1", "msg-last")
+
+    calls = _capture(
+        _captured_call("call-1", "msg-1"),
+        _captured_call("call-summary", "msg-summary", compact=True),
+        _captured_call("call-last", "msg-last"),
+    )
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+
+    [compaction] = _records(associated, ContextCompactionObservation)
+    assert [reference.model_call_id for reference in compaction.model_calls] == ["call-summary"]
+    assert "compaction_model_call_reference_unavailable" not in {gap.code for gap in associated.gaps}
+    usage = captured_claude_code_usage(associated, calls)
+    assert (usage.input_tokens, usage.output_tokens) == (30, 6)
+
+
+REASONING_ALONE = {"type": "thinking", "thinking": "<summary>Keep this.</summary>"}
+NO_SUMMARY_BLOCK = {"type": "text", "text": "The conversation so far, in plain words."}
+
+
+@pytest.mark.parametrize(
+    ("unused", "attempts", "block"),
+    [(2, 2, REASONING_ALONE), (1, 2, REASONING_ALONE), (3, 2, REASONING_ALONE), (1, 0, NO_SUMMARY_BLOCK)],
+    ids=["as many calls as failed attempts", "fewer calls", "more calls", "an answer without a summary block"],
+)
+def test_summary_calls_without_used_answer_are_invocation_calls(
+    tmp_path: Path, unused: int, attempts: int, block: dict
+) -> None:
+    """Claude Code asks for a summary again after an answer of reasoning alone, which its events state as a failed
+    attempt, and after an answer without a summary block. It writes no record for a call whose answer it did not
+    use. The invocation names every such call, so the usage counts it, and the failed attempts take the calls
+    where there are as many of both."""
+    _kept_messages_transcript(tmp_path, turns=3)
+    failed_attempts = [{"invocation_id": "session", "outcome": "failed"}] * attempts
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF, compaction_attempts=failed_attempts)
+    calls = _capture(
+        _captured_call("call-1", "msg-1"),
+        *(_unused_summary_call(f"unused-{number}", block) for number in range(unused)),
+        _captured_call("call-2", "msg-2"),
+        _captured_call("call-3", "msg-3"),
+        _captured_call("call-summary", "msg-summary", compact=True),
+        _captured_call("call-last", "msg-last"),
+    )
+
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+
+    compactions = _records(associated, ContextCompactionObservation)
+    of_the_failed = [
+        [reference.model_call_id for reference in record.model_calls]
+        for record in compactions
+        if record.outcome == "failed"
+    ]
+    [completed] = [record for record in compactions if record.outcome == "completed"]
+    [invocation] = _records(associated, AgentInvocation)
+    names = [f"unused-{number}" for number in range(unused)]
+    assert of_the_failed == ([[name] for name in names] if unused == attempts else [[]] * attempts)
+    assert [reference.model_call_id for reference in completed.model_calls] == ["call-summary"]
+    # In the order of the capture.
+    assert [reference.model_call_id or reference.response_id for reference in invocation.model_calls] == [
+        "msg-1",
+        *names,
+        "msg-2",
+        "msg-3",
+        "call-summary",
+        "msg-last",
+    ]
+    usage = captured_claude_code_usage(associated, calls)
+    assert (usage.input_tokens, usage.output_tokens) == (10 * len(calls), 2 * len(calls))
+
+
+def test_summary_record_behind_message_joins_no_earlier_boundary_record(tmp_path: Path) -> None:
+    """The search for the boundary record of a summary ends at a record that holds a message. A summary record
+    without a boundary record of its own, behind a later message, is a compaction of its own."""
+    _kept_messages_transcript(tmp_path, turns=1)
+    transcript = tmp_path / "projects" / "work" / "session.jsonl"
+    later_summary = SUMMARY_OF_2_1_312.replace("Keep this.", "Keep that.")
+    last = _assistant("session", "2026-07-22T10:00:20Z", "msg-last", {"type": "text", "text": "Done."})
+    _write(
+        transcript,
+        *transcript.read_text().splitlines()[:-1],
+        last | {"parentUuid": "s"},
+        _event("session", "user", "2026-07-22T10:00:30Z", later_summary, uuid="s2", parentUuid=last["uuid"])
+        | {"isCompactSummary": True},
+    )
+
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+
+    first, second = _records(bundle, ContextCompactionObservation)
+    assert (first.summary, first.tokens_before) == (SUMMARY_OF_2_1_312, 197000)
+    assert (second.summary, second.tokens_before) == (later_summary, None)
+    assert second.before_model_call.response_id == "msg-last"
+
+
+def test_unused_summary_call_joins_neither_of_two_invocations(tmp_path: Path) -> None:
+    """With a compaction in each of two invocations, nothing says which of them made a request for a summary whose
+    answer was not used. No invocation names it, and the usage is not stated as a sum without it."""
+    _kept_messages_transcript(tmp_path, turns=1)
+    _kept_messages_transcript(tmp_path, turns=1, session="other")
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    calls = _capture(
+        _captured_call("call-1", "msg-1"),
+        _unused_summary_call("unused", REASONING_ALONE),
+        _captured_call("call-summary", "msg-summary", compact=True),
+        _captured_call("call-last", "msg-last"),
+        _captured_call("call-1-other", "msg-1-other"),
+        _captured_call("call-summary-other", "msg-summary-other", compact=True),
+        _captured_call("call-last-other", "msg-last-other"),
+    )
+
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+
+    named = {
+        invocation.invocation_id: [
+            reference.model_call_id or reference.response_id for reference in invocation.model_calls
+        ]
+        for invocation in _records(associated, AgentInvocation)
+    }
+    assert named == {
+        "session": ["msg-1", "call-summary", "msg-last"],
+        "other": ["msg-1-other", "call-summary-other", "msg-last-other"],
+    }
+    assert captured_claude_code_usage(associated, calls) is None
+
+
+def test_summary_request_without_compaction_leaves_usage_unreconciled(tmp_path: Path) -> None:
+    """A capture can hold a request for a summary where the transcript and the events state no compaction. No
+    invocation names the call, so the sum over the named calls is not the usage."""
+    _write(
+        tmp_path / "projects" / "work" / "session.jsonl",
+        _event("session", "user", "2026-07-22T10:00:00Z", "prompt", uuid="prompt"),
+        _assistant("session", "2026-07-22T10:00:01Z", "msg-1", {"type": "text", "text": "ok"}),
+    )
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    calls = _capture(_captured_call("call-1", "msg-1"), _unused_summary_call("unused", NO_SUMMARY_BLOCK))
+
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+
+    [invocation] = _records(associated, AgentInvocation)
+    assert [reference.response_id for reference in invocation.model_calls] == ["msg-1"]
+    assert captured_claude_code_usage(associated, calls) is None
+    assert captured_claude_code_usage(associated, calls[:1]).input_tokens == 10
+
+
+def test_tool_result_quoting_summary_instruction_is_no_summary_request(tmp_path: Path) -> None:
+    """Claude Code appends its instruction to the last user message as a text block, beside the tool results of
+    that message. A tool result that quotes the instruction makes no summary call of an unowned call."""
+    _kept_messages_transcript(tmp_path, turns=1)
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    instruction = "Your task is to create a detailed summary of this conversation."
+    result = {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": instruction}]}
+    quoting = _captured_call("call-quoting", "msg-quoting") | {
+        "request": {"messages": [{"role": "user", "content": [result, {"type": "text", "text": "Go on."}]}]}
+    }
+    appended = _captured_call("call-summary", "msg-summary", compact=True) | {
+        "request": {"messages": [{"role": "user", "content": [result, {"type": "text", "text": instruction}]}]}
+    }
+    calls = _capture(_captured_call("call-1", "msg-1"), quoting, appended, _captured_call("call-last", "msg-last"))
+
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+
+    [compaction] = _records(associated, ContextCompactionObservation)
+    [invocation] = _records(associated, AgentInvocation)
+    assert [reference.model_call_id for reference in compaction.model_calls] == ["call-summary"]
+    assert [reference.model_call_id or reference.response_id for reference in invocation.model_calls] == [
+        "msg-1",
+        "call-summary",
+        "msg-last",
+    ]
+    usage = captured_claude_code_usage(associated, calls)
+    assert (usage.input_tokens, usage.output_tokens) == (30, 6)
+
+
+def test_compaction_without_summary_call_leaves_usage_unreconciled(tmp_path: Path) -> None:
+    _kept_messages_transcript(tmp_path, turns=1)
+    bundle = extract_claude_code_observations(tmp_path, model_ref=MODEL_REF)
+    calls = _capture(_captured_call("call-1", "msg-1"), _captured_call("call-last", "msg-last"))
+
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+
+    assert captured_claude_code_usage(associated, calls) is None
+    assert "compaction_model_call_reference_unavailable" in {gap.code for gap in associated.gaps}
+
+
 def test_compaction_call_correlation_rejects_ambiguous_matches() -> None:
     calls = [
         ModelCallRecord.model_validate(_captured_call("call-before", "msg-before") | {"call_index": 0}),

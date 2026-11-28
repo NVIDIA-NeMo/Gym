@@ -52,6 +52,10 @@ _COMPACTION_SUMMARY_PREFIX = (
     "This session is being continued from a previous conversation that ran out of context. "
     "The summary below covers the earlier portion of the conversation.\n\n"
 )
+# Claude Code 2.1.312 names the tools used before the summary between the prefix and the summary.
+_COMPACTION_TOOLS_RE = re.compile(
+    r"<system-reminder>\n<tools-used-before-summary>[^\n]*</tools-used-before-summary>\n</system-reminder>\n"
+)
 _COMPACTION_SUFFIX_RE = re.compile(
     r"(?:\n\nIf you need specific details from before compaction "
     r"\(like exact code snippets, error messages, or content you generated\), "
@@ -64,6 +68,9 @@ _COMPACTION_SUFFIX_RE = re.compile(
     r"any further questions\. Resume directly — do not acknowledge the summary, do not recap "
     r'what was happening, do not preface with "I\'ll continue" or similar\. '
     r"Pick up the last task as if the break never happened\.)?"
+    r"(?:\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim\. "
+    r"The summary was written without seeing them, so something it says has not happened yet may already have "
+    r"happened in them\.)?"
     r"$"
 )
 
@@ -103,10 +110,25 @@ def _is_compaction_request(request: Any) -> bool:
     if not isinstance(messages, list) or not messages:
         return False
     final_message = messages[-1]
+    if not isinstance(final_message, dict) or final_message.get("role") != "user":
+        return False
+    # Claude Code appends its instruction to the last user message as a text block. A tool result of that message
+    # can quote the instruction and is not read.
+    content = final_message.get("content")
+    blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
+    texts = [block.get("text") for block in blocks if isinstance(block, dict) and block.get("type") == "text"]
+    return any(marker in text for text in texts if isinstance(text, str) for marker in _COMPACTION_PROMPT_MARKERS)
+
+
+def _is_answered_compaction_request(call: ModelCallRecord) -> bool:
+    """Whether the capture holds the call as an answered request for the summary of a compaction."""
     return (
-        isinstance(final_message, dict)
-        and final_message.get("role") == "user"
-        and any(marker in _text(final_message.get("content")) for marker in _COMPACTION_PROMPT_MARKERS)
+        call.dialect == "messages"
+        and call.status_code is not None
+        and 200 <= call.status_code < 300
+        and call.error_category is None
+        and (call.model_call_id is not None or (call.model_ref is not None and call.response_id is not None))
+        and _is_compaction_request(call.request)
     )
 
 
@@ -132,7 +154,13 @@ def _normalize_compaction_output(text: str) -> str:
 
 
 def _matches_compaction_summary(summary: str, model_output: str) -> bool:
-    expected = _COMPACTION_SUMMARY_PREFIX + _normalize_compaction_output(model_output)
+    if not summary.startswith(_COMPACTION_SUMMARY_PREFIX):
+        return False
+    summary = summary[len(_COMPACTION_SUMMARY_PREFIX) :]
+    tools = _COMPACTION_TOOLS_RE.match(summary)
+    if tools is not None:
+        summary = summary[tools.end() :]
+    expected = _normalize_compaction_output(model_output)
     return summary.startswith(expected) and _COMPACTION_SUFFIX_RE.fullmatch(summary[len(expected) :]) is not None
 
 
@@ -223,6 +251,26 @@ def _compaction(event: dict[str, Any], invocation_id: str) -> ContextCompactionO
         ),
         summary=summary or None,
     )
+
+
+def _summary_boundary_id(event: dict[str, Any], events: dict[str, dict[str, Any]]) -> str | None:
+    """Return the id of the ``compact_boundary`` record that a summary record belongs to.
+
+    Claude Code states the boundary record as the parent of the summary record. Claude Code 2.1.312 keeps the latest
+    messages of a conversation and writes records that hold no message, such as attachments, between the two, each
+    the parent of the next. A record that holds a message ends the search.
+    """
+    seen: set[str] = set()
+    parent = event.get("parentUuid")
+    while isinstance(parent, str) and parent in events and parent not in seen:
+        seen.add(parent)
+        record = events[parent]
+        if record.get("type") == "system" and record.get("subtype") == "compact_boundary":
+            return parent
+        if isinstance(record.get("message"), dict):
+            return None
+        parent = record.get("parentUuid")
+    return None
 
 
 def _message_id(event: dict[str, Any], block_index: int, kind: str) -> str | None:
@@ -431,16 +479,23 @@ def extract_claude_code_observations(
         last_model_call: ModelCallRef | None = None
         pending_compactions: list[ContextCompactionObservation] = []
         previous_compaction: tuple[int, bool, ContextCompactionObservation] | None = None
+        events_by_id = {event["uuid"]: event for _, event in entries if isinstance(event.get("uuid"), str)}
+        boundary_compactions: dict[str, ContextCompactionObservation] = {}
         for entry_index, (ordinal, event) in enumerate(entries):
             compaction = _compaction(event, invocation_id)
             if compaction is not None:
                 is_summary = _is_compaction_summary(event)
+                prior = None
                 if (
                     previous_compaction is not None
                     and previous_compaction[0] + 1 == entry_index
                     and previous_compaction[1] != is_summary
                 ):
                     prior = previous_compaction[2]
+                elif is_summary:
+                    # The boundary record of this summary, which is not the record before it.
+                    prior = boundary_compactions.get(_summary_boundary_id(event, events_by_id))
+                if prior is not None:
                     for field in ("observed_at", "trigger", "tokens_before", "tokens_after", "summary"):
                         if getattr(prior, field) is None:
                             setattr(prior, field, getattr(compaction, field))
@@ -453,6 +508,8 @@ def extract_claude_code_observations(
                     pending_compactions.append(compaction)
                     if last_model_call is None:
                         add_gap("compaction_before_model_call_unavailable")
+                if not is_summary and isinstance(event.get("uuid"), str):
+                    boundary_compactions[event["uuid"]] = compaction
                 previous_compaction = (entry_index, is_summary, compaction)
             else:
                 previous_compaction = None
@@ -736,6 +793,16 @@ def associate_claude_code_compaction_calls(
         for index, call in enumerate(calls)
         if ref_matches_call(reference, call)
     }
+
+    def is_unowned_summary_call(index: int, model_refs: list[ModelServerRef]) -> bool:
+        """Whether no reference of the transcript owns the call and its request asks for a summary."""
+        call = calls[index]
+        return (
+            index not in owned
+            and (not model_refs or call.model_ref in model_refs)
+            and _is_answered_compaction_request(call)
+        )
+
     candidates: list[list[int]] = []
     for compaction in compactions:
         before_index = resolve_call_index(compaction.before_model_call)
@@ -749,17 +816,10 @@ def associate_claude_code_compaction_calls(
             [
                 index
                 for index, call in enumerate(calls)
-                if index not in owned
-                and compaction.outcome == "completed"
+                if compaction.outcome == "completed"
                 and not compaction.model_calls
                 and compaction.summary is not None
-                and call.dialect == "messages"
-                and call.status_code is not None
-                and 200 <= call.status_code < 300
-                and call.error_category is None
-                and (call.model_call_id is not None or (call.model_ref is not None and call.response_id is not None))
-                and (not model_refs or call.model_ref in model_refs)
-                and _is_compaction_request(call.request)
+                and is_unowned_summary_call(index, model_refs)
                 and (response_text := _messages_text(call.response)) is not None
                 and _matches_compaction_summary(compaction.summary, response_text)
                 and (
@@ -808,6 +868,36 @@ def associate_claude_code_compaction_calls(
             if compaction.before_model_call is not None and existing == compaction.before_model_call:
                 insertion_index = index + 1
         invocation.model_calls.insert(insertion_index, reference)
+        owned.add(compaction_candidates[0])
+
+    # Claude Code writes no record for a summary call whose answer it did not use: an answer of reasoning alone,
+    # after which its events state a failed attempt, or an answer without a summary block, after which it asks
+    # again. The capture still holds the call: a request for a summary that no reference owns. Where one
+    # invocation has every compaction, these calls are calls of that invocation.
+    holders = {compaction.invocation_id for compaction in compactions if compaction.invocation_id in invocations}
+    if len(holders) == 1:
+        invocation = invocations[holders.pop()]
+        model_refs = [reference.model_ref for reference in invocation.model_calls if reference.model_ref is not None]
+        unowned = [index for index in range(len(calls)) if is_unowned_summary_call(index, model_refs)]
+        # The failed attempts take the calls in their order where every completed compaction has its call and
+        # there are as many calls as failed attempts.
+        failed = [compaction for compaction in compactions if compaction.outcome == "failed"]
+        completed = [compaction for compaction in compactions if compaction.outcome == "completed"]
+        attempts = failed if len(failed) == len(unowned) and all(c.model_calls for c in completed) else []
+        for position, index in enumerate(unowned):
+            call = calls[index]
+            reference = ModelCallRef(
+                model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id
+            )
+            if attempts:
+                attempts[position].model_calls = [reference]
+            # In the order of the capture, before the first call of the invocation that follows it there.
+            later = [
+                place
+                for place, existing in enumerate(invocation.model_calls)
+                if (existing_index := resolve_call_index(existing)) is not None and existing_index > call.call_index
+            ]
+            invocation.model_calls.insert(later[0] if later else len(invocation.model_calls), reference)
 
     unresolved = {compaction.invocation_id for compaction in compactions if not compaction.model_calls}
     result.gaps = [
@@ -821,8 +911,23 @@ def associate_claude_code_compaction_calls(
 def captured_claude_code_usage(
     bundle: AgentObservationBundle, calls: list[ModelCallRecord]
 ) -> NeMoGymResponseUsage | None:
-    """Total uniquely resolved invocation calls, including helpers, without counting unrelated calls."""
-    if any(isinstance(record, ContextCompactionObservation) and not record.model_calls for record in bundle.records):
+    """Total uniquely resolved invocation calls, including helpers, without counting unrelated calls.
+
+    Five cases leave the total unknown:
+
+    - a completed compaction names no summary call (an attempt that did not complete needs none);
+    - a reference of an invocation does not match exactly one captured call;
+    - the capture holds an answered request for a summary that no invocation names;
+    - the invocations name no call;
+    - a named call lacks a token count.
+
+    ``associate_claude_code_compaction_calls`` names an unowned request for a summary only where one invocation
+    holds every compaction, so the third case arises with compactions in several invocations and with none.
+    """
+    if any(
+        isinstance(record, ContextCompactionObservation) and record.outcome == "completed" and not record.model_calls
+        for record in bundle.records
+    ):
         return None
     references = [
         reference
@@ -844,6 +949,8 @@ def captured_claude_code_usage(
         if len(matches) != 1:
             return None
         resolved.add(matches[0])
+    if any(index not in resolved and _is_answered_compaction_request(call) for index, call in enumerate(calls)):
+        return None
     if not resolved or any(
         calls[index].tokens_in is None or calls[index].tokens_out is None or calls[index].tokens_total is None
         for index in resolved

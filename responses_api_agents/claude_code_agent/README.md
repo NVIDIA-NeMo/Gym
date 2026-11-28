@@ -224,6 +224,18 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   started, is in neither and is not counted. Context compaction is missing, since Claude Code leaves
   it out of its transcripts (each compaction is one call over the whole context, about 0.5% of a
   long run's input).
+- With model-call capture, a sandbox activation takes its usage from the captured calls that its
+  observations name. These are the calls of the assistant records and the summary calls of the
+  compactions: the call whose answer is the persisted summary, and the requests for a summary whose
+  answers Claude Code did not use. A run cut off at the timeout then counts its compactions too. The
+  usage stays Claude Code's own count, and the observations hold the gap
+  `model_usage_reconciliation_unavailable`, in five cases: a completed compaction has no captured
+  summary call; a call that an invocation names is not captured exactly once; the capture holds an
+  answered request for a summary that no invocation names; the invocations name no call; or a named
+  call lacks a token count. The agent names a request for a summary whose answer Claude Code did not
+  use only where one invocation holds every compaction. So the third case arises with compactions
+  in several invocations, such as a subagent's, and with a request for a summary in a run that
+  states no compaction.
 - Through a Gym model server, the Anthropic Messages responses carry the cache reads in
   `cache_read_input_tokens`, so Claude Code counts them as against an Anthropic endpoint.
 - Usage is Claude Code's own count. Against vLLM it counts a call's prompt twice when the call's
