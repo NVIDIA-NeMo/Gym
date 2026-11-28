@@ -62,6 +62,13 @@ repos:
         additional_dependencies: [pyyaml]
         files: ^resources_servers/.*/configs/.*\.yaml$
         pass_filenames: true
+      - id: check-manifest-selection-fields
+        name: Require selection fields in manifests
+        language: python
+        entry: python scripts/check_manifest_selection_fields.py
+        additional_dependencies: [pyyaml]
+        files: ^(benchmarks|environments)/.*manifest\.yaml$
+        pass_filenames: true
       - id: update-readme-table
         name: Update environment list in README
         language: python

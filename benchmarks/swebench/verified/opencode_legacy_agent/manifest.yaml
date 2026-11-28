@@ -10,6 +10,14 @@ modality: text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- bxyu-nvidia
+capabilities: unknown
+domains: unknown
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

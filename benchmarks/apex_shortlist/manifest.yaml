@@ -4,11 +4,32 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
-description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
+description: MathArena APEX Shortlist math problems with symbolic-only math-verify
+  grading.
 modality: text
 licensing: unknown
 authors:
 - gwarmstrong
+maintainers:
+- gwarmstrong
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+domains:
+- mathematics
+primary_metric: pass@1[avg-of-1]/symbolic_accuracy
+requirements:
+  gpu: false
+  network: no-network
 reward:
   range:
   - 0.0
@@ -25,6 +46,6 @@ datasets:
   prompt_config: benchmarks/prompts/generic/math.yaml
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: train
 standard_prompt_config: benchmarks/prompts/generic/math.yaml
 lifecycle: active

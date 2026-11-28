@@ -11,6 +11,14 @@ modality: text,image
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
+maintainers:
+- trintamaki
+capabilities: unknown
+domains: unknown
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0

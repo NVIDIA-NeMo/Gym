@@ -10,6 +10,14 @@ modality: text
 licensing: CC-BY-4.0
 authors:
 - ushnish-de
+maintainers:
+- ushnish-de
+capabilities: unknown
+domains: unknown
+primary_metric: frontier_finance/macro_avg_qualification_rate_on_all_queries
+requirements:
+  gpu: false
+  network: public
 reward:
   range:
   - 0.0
@@ -25,6 +33,10 @@ datasets:
   prepare_script: benchmarks/frontier_finance/prepare.py
   num_repeats: 1
 model_server: policy_model
-canonical_split: benchmark
+canonical_split: full
 prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/samaya-ai/FrontierFinance
+  ref: 36afd6dc1cbb2c4512536daf917dc28b1225a720  # pragma: allowlist secret
+  reconciled: '2026-11-18'
 lifecycle: active

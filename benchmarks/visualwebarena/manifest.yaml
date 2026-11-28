@@ -11,6 +11,14 @@ modality: multimodal
 licensing: Apache-2.0
 authors:
   - Jeff Peng
+maintainers:
+- JeffPengCoder
+capabilities: unknown
+domains: unknown
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: allowlist
 reward:
   range: [0.0, 1.0]
   higher_is_better: true
@@ -25,6 +33,10 @@ datasets:
     jsonl_fpath: benchmarks/visualwebarena/data/visualwebarena.jsonl
     prepare_script: benchmarks/visualwebarena/prepare.py
     num_repeats: 1
-canonical_split: test
+canonical_split: full
 prompt_source: agent
+adopted_from:
+  source: https://github.com/jayl940712/webarena_benchmarks
+  ref: 6a2977939b157b0ab9de7799bb089c721f1ac115  # pragma: allowlist secret
+  reconciled: '2026-11-19'
 lifecycle: active

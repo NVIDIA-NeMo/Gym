@@ -64,7 +64,11 @@ def test_benchmark_config_routes_the_rows_through_an_agent_session(benchmark):
     # The benchmark's rows replace the example rows, and match its manifest.
     manifest = yaml.safe_load((ROOT / "benchmarks" / benchmark / "manifest.yaml").read_text())
     assert manifest["agent_server"] == "opencode_agent"
-    assert [OmegaConf.to_container(dataset) for dataset in agent["datasets"]] == manifest["datasets"]
+    # A manifest mirrors the dataset declaration without prepare_dependencies, which only preparation reads.
+    mirrored = [OmegaConf.to_container(dataset) for dataset in agent["datasets"]]
+    assert [{k: v for k, v in dataset.items() if k != "prepare_dependencies"} for dataset in mirrored] == manifest[
+        "datasets"
+    ]
 
 
 def test_only_the_policy_model_takes_a_launcher_s_host_address():
