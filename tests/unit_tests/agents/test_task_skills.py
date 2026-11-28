@@ -218,8 +218,12 @@ async def test_a_retry_copies_over_read_only_skills_an_interrupted_copy_left(loc
     local_sandbox.context.write_text(json.dumps({"skills_dir": str(read_only_skills)}))
     session_dir = local_sandbox.root / "session"
     destination = session_dir / "config" / "skills"
-    # What the interrupted copy left: the task's skills with the task's modes.
+    # What the interrupted copy left: the task's skills with the task's modes, one of them copied only in part.
     shutil.copytree(read_only_skills, destination)
+    partial = destination / "demo" / "SKILL.md"
+    partial.chmod(0o644)
+    partial.write_text("# dem")
+    partial.chmod(0o444)
     assert _lacking_owner_access(destination)
 
     await stage_task_skills(local_sandbox.sandbox, str(destination))
