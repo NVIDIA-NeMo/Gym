@@ -360,6 +360,9 @@ class FakeAgentClient(ServerClient):
     trajectory: dict | None = None
     # What the seed response declares: a harness that reads the task's MCP servers and skills directory.
     supports_task_tool_context: bool = True
+    # What the seed response declares for the skills alone: a harness that stages the task's ``skills_dir`` for its
+    # CLI at seed (Claude Code, Codex) but does not read the MCP servers. Like a real harness it is sent only when True.
+    supports_task_skills: bool = False
     # What GET /v1/agent_sessions/capabilities and a continuation seed declare: None is a harness without
     # multi-turn continuation (OpenCode declares one). ``capabilities_status`` 404 stands for an agent server
     # built before the route existed.
@@ -392,6 +395,7 @@ class FakeAgentClient(ServerClient):
                 {
                     "agent_session_id": body["agent_session_id"],
                     "supports_task_tool_context": self.supports_task_tool_context,
+                    **({"supports_task_skills": True} if self.supports_task_skills else {}),
                     **(
                         {"capabilities": self.continuation_capabilities}
                         if body.get("continuation") is not None

@@ -4,9 +4,11 @@
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -490,6 +492,52 @@ async def test_stop_and_removal_do_not_need_a_workdir_the_task_moved(session, tm
 
     assert receipt["cleanup_confirmed"] is True
     assert not session_dir.exists() and not moved.exists()
+
+
+@pytest.mark.parametrize("left_by", ["seed", "earlier close"])
+async def test_removal_makes_folders_its_owner_cannot_write_removable(session, left_by):
+    """A skills copy stopped before it repaired its modes leaves read-only folders, which ``rm -rf`` cannot empty
+    as their non-root owner. A close that failed on them left them under the retired path for the next close."""
+    sandbox, session_dir = session
+    skill = session_dir / "skills" / "demo"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# demo\n")
+    (skill / "SKILL.md").chmod(0o444)
+    (skill / "scripts").chmod(0o555)
+    skill.chmod(0o555)
+    retired = Path(f"{session_dir}.closed")
+    if left_by == "earlier close":
+        session_dir.rename(retired)
+
+    await remove_session_directory(sandbox, session_dir=str(session_dir), workdir=None, timeout=5, harness="test")
+
+    assert not session_dir.exists() and not retired.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root unlinks from a folder it cannot write, so the removal succeeds")
+async def test_removal_does_not_make_writable_what_a_retired_symlink_points_to(session, tmp_path):
+    sandbox, _ = session
+    target = tmp_path / "outside"
+    (target / "inner").mkdir(parents=True)
+    (target / "inner" / "file").write_text("kept\n")
+    (target / "inner" / "file").chmod(0o444)
+    (target / "inner").chmod(0o555)
+    parent = tmp_path / "sessions"
+    parent.mkdir()
+    (parent / "s.closed").symlink_to(target)
+    # The link cannot be removed from a folder its owner cannot write, so the removal fails and falls back.
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(RuntimeError, match="Could not remove test session files"):
+            await remove_session_directory(
+                sandbox, session_dir=str(parent / "s"), workdir=None, timeout=5, harness="test"
+            )
+    finally:
+        parent.chmod(0o755)
+
+    assert stat.S_IMODE((target / "inner").stat().st_mode) == 0o555
+    assert stat.S_IMODE((target / "inner" / "file").stat().st_mode) == 0o444
+    (target / "inner").chmod(0o755)
 
 
 def test_a_relative_session_directory_still_resolves_against_the_workdir():

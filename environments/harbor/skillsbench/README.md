@@ -15,5 +15,5 @@ gym eval run skillsbench --agent miniswe_sandboxed_agent --sandbox opensandbox -
 `dataset.toml` declares no source: the tasks come from the pinned upstream checkout, not from a Harbor hub, so the
 prepare script writes them into this folder (the task folders and `manifest.toml` are gitignored beside this
 README), and both commands resolve the entry name to it. Only a harness that declares `supports_task_tool_context`
-runs this condition. [`benchmarks/skillsbench/README.md`](../../../benchmarks/skillsbench/README.md) covers the
+or `supports_task_skills` (Claude Code and Codex) runs this condition. [`benchmarks/skillsbench/README.md`](../../../benchmarks/skillsbench/README.md) covers the
 conditions, the images, the known limits and the OpenHands path.

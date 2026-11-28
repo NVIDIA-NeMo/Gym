@@ -108,6 +108,7 @@ if TYPE_CHECKING:
         parse_cleanup_receipt,
         stop_and_confirm_cleanup,
     )
+    from nemo_gym.agents.utils.task_skills import stage_task_skills
     from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 
 
@@ -194,6 +195,7 @@ _PUBLIC_API = {
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
     "stage_skills": "skills",
+    "stage_task_skills": "utils.task_skills",
     "stop_and_confirm_cleanup": "utils.supervisor_client",
     "verification_failure_fields": "agent_tools",
     "verify_agent_response": "agent_tools",

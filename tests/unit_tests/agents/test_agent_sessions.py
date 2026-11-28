@@ -146,6 +146,46 @@ def test_the_capabilities_route_declares_continuation_without_seeding() -> None:
         assert agent._session_records == {}
 
 
+class _CapabilitiesBeforeTaskSkills(BaseModel):
+    """The capabilities reply as an environment server that predates ``supports_task_skills`` reads it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports_task_tool_context: bool = False
+    continuation: AgentContinuationCapabilities | None = None
+
+
+@pytest.mark.parametrize("stages_skills", [False, True], ids=["no-task-skills", "task-skills"])
+def test_the_capabilities_reply_sends_supports_task_skills_only_when_declared(stages_skills: bool) -> None:
+    """A harness that stages no task skills answers as it did before the field existed, so an environment server
+    whose reply model forbids unknown fields still reads it, continuation included. A harness that stages them
+    sends the field, and it round-trips."""
+
+    class _Continues(_Agent):
+        def supports_task_tool_context(self) -> bool:
+            return True
+
+        def supports_task_skills(self) -> bool:
+            return stages_skills
+
+        def _agent_continuation_capabilities(self):
+            return AgentContinuationCapabilities(observations=["trajectory", "timing"])
+
+    agent = _Continues.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    wire = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities").json()
+    reply = AgentSessionCapabilitiesResponse.model_validate(wire)
+
+    assert reply.supports_task_skills is stages_skills
+    assert reply.continuation == AgentContinuationCapabilities(observations=["trajectory", "timing"])
+    if stages_skills:
+        assert wire["supports_task_skills"] is True
+        assert AgentSessionCapabilitiesResponse.model_validate(reply.model_dump(mode="json")) == reply
+    else:
+        assert set(wire) == {"supports_task_tool_context", "continuation"}
+        earlier = _CapabilitiesBeforeTaskSkills.model_validate(wire)
+        assert earlier.continuation == reply.continuation and earlier.supports_task_tool_context is True
+
+
 class _GrantCheckingAgent(_Agent):
     """Serves sessions without tool grants and refuses a seed that requires one."""
 
@@ -276,6 +316,33 @@ def test_seed_response_carries_the_harness_task_tool_context_declaration() -> No
         )
     # The field has a default so an older harness's reply still validates, as not supporting it.
     assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).supports_task_tool_context is False
+
+
+def test_seed_response_carries_the_harness_task_skills_declaration() -> None:
+    """The environment server admits a task whose only tool declaration is ``skills_dir`` to a harness that answers
+    True here, because it staged the folder for its CLI during the seed."""
+
+    class _Seeded(_Agent):
+        async def _seed_agent_session_state(self, body):
+            return AgentSessionState(request=body)
+
+    class _StagesTaskSkills(_Seeded):
+        def supports_task_skills(self) -> bool:
+            return True
+
+    for agent_cls, declared in ((_Seeded, False), (_StagesTaskSkills, True)):
+        agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        response = asyncio.run(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
+        assert response.supports_task_skills is declared
+        # The declaration does not stand for the MCP servers, which `supports_task_tool_context` answers for.
+        assert response.supports_task_tool_context is False
+        # Sent only when declared: every other harness's seed reply is as it was before the field existed.
+        wire = response.model_dump(mode="json")
+        assert ("supports_task_skills" in wire) is declared
+        assert AgentSeedSessionResponse.model_validate(wire) == response
+        reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
+        assert AgentSessionCapabilitiesResponse.model_validate(reply.json()).supports_task_skills is declared
+    assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).supports_task_skills is False
 
 
 def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:

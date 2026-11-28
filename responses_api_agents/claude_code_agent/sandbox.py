@@ -120,6 +120,8 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     stderr: str = ""
+    # The task's ``skills_dir``, when the seed copied it into the CLI's skills folder.
+    task_skills: str | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage runner input using the shared file-transfer utility."""

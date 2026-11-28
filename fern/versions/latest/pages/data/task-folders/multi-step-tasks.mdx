@@ -70,6 +70,8 @@ but not their collect hooks or health checks. See
    `/logs/agent/trajectory.json` is removed, keeping only declared
    [sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs). Everything else the agent left stays.
 2. **Prepare.** Switch to the step's agent user, merge `workdir/`, run `setup.sh`, poll `[steps.healthcheck]`.
+   For a task that declares MCP servers or a `skills_dir`, write `/tmp/.nemo-gym/task.json` again, so the step's
+   harness reads it even if an earlier step or `setup.sh` removed it.
 3. **Run the agent.** A fresh session receives `steps/<name>/instruction.md` as its only input, under the step's
    agent budget, or the harness's own cap if lower, such as `opencode_agent`'s `timeout`. It keeps no conversation
    from earlier steps unless you [continue one harness session](#continue-one-harness-session).
