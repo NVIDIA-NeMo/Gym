@@ -9219,6 +9219,24 @@ def test_a_backend_without_a_control_url_fails_its_cut_instead_of_guessing_a_roo
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+# Codex's tools for subagents, which a chat engine is offered as `collaboration__<name>`.
+COLLABORATION_TOOLS = {
+    "type": "namespace",
+    "name": "collaboration",
+    "description": "Tools for spawning and managing subagents.",
+    "tools": [
+        {
+            "type": "function",
+            "name": name,
+            "description": "Manage a subagent.",
+            "strict": False,
+            "parameters": {"type": "object", "properties": {}},
+        }
+        for name in ("spawn_agent", "wait_agent")
+    ],
+}
+
+
 class TestCodexRequests:
     """Options that let the chat-backed Responses path serve the Codex CLI's requests as sent."""
 
@@ -9788,6 +9806,120 @@ class TestCodexRequests:
         assert response.status_code == 200
         assert self._events(response.text)[-1]["type"] == "response.failed"
         client.create_chat_completion.assert_not_awaited()
+
+    SPAWN_CALL = {
+        "type": "function_call",
+        "call_id": "call_spawn",
+        "namespace": "collaboration",
+        "name": "spawn_agent",
+        "arguments": json.dumps({"task_name": "check", "message": "Check the result."}),
+    }
+    SPAWN_OUTPUT = {"type": "function_call_output", "call_id": "call_spawn", "output": '{"task_name":"/root/check"}'}
+    WAIT_CALL = {
+        "type": "function_call",
+        "call_id": "call_wait",
+        "namespace": "collaboration",
+        "name": "wait_agent",
+        "arguments": "{}",
+    }
+    WAIT_OUTPUT = {
+        "type": "function_call_output",
+        "call_id": "call_wait",
+        "output": '{"message":"Wait completed.","timed_out":false}',
+    }
+    # The reasoning item of a response whose tool call Codex discarded, as Codex sends it back.
+    WAIT_REASONING = {
+        "type": "reasoning",
+        "id": "rs_wait",
+        "summary": [{"type": "summary_text", "text": "I wait for the subagent."}],
+        "content": None,
+        "encrypted_content": None,
+    }
+    TASK_TEXT = "Message Type: NEW_TASK\nTask name: /root/check\nSender: /root\nPayload:\nCheck the result."
+    # The task as Codex sends it: the payload is the `message` argument of the spawn call.
+    TASK = {
+        "type": "agent_message",
+        "author": "/root",
+        "recipient": "/root/check",
+        "content": [
+            {"type": "input_text", "text": TASK_TEXT.removesuffix("Check the result.")},
+            {"type": "encrypted_content", "encrypted_content": "Check the result."},
+        ],
+    }
+    ANSWER_TEXT = "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/check\nPayload:\nThe result holds."
+    ANSWER = {
+        "type": "agent_message",
+        "author": "/root/check",
+        "recipient": "/root",
+        "content": [{"type": "input_text", "text": ANSWER_TEXT}],
+    }
+
+    @staticmethod
+    def _developer(text: str) -> dict[str, Any]:
+        """Return a developer message that holds ``text`` in one ``input_text`` part."""
+        return {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}
+
+    def _chat_messages(self, server: VLLMModel, client: MagicMock, input_items: list[dict[str, Any]]) -> list[dict]:
+        """Send a Codex request with the subagent tools and return the messages that reach the engine."""
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "done"})
+        )
+        body = {**self._codex_body(input_items), "tools": [COLLABORATION_TOOLS]}
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json=body)
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.completed"
+        return client.create_chat_completion.await_args.kwargs["messages"]
+
+    @mark.parametrize(
+        ("settings", "role"),
+        [({}, "developer"), ({"replace_developer_role_with_system": True}, "system")],
+        ids=["default", "developer-as-system"],
+    )
+    def test_subagent_request_ends_with_its_task(self, settings: dict[str, bool], role: str) -> None:
+        """A spawned agent's first request holds its parent's conversation, which Codex passes on by default.
+
+        Codex's developer messages follow that conversation. They reach the engine with the developer role, or
+        as system messages when that role is replaced.
+        """
+        server, client = self._server(**self.CODEX_FIELDS, **settings)
+        inherited = [self.USER, self.SPAWN_CALL, {**self.SPAWN_OUTPUT, "output": "aborted"}]
+        developer_messages = [
+            self._developer("You are now a newly spawned child agent."),
+            self._developer("Report to /root."),
+        ]
+
+        messages = self._chat_messages(server, client, [*inherited, *developer_messages, self.TASK])
+
+        assert [message["role"] for message in messages] == ["system", "user", "assistant", "tool", role, role, "user"]
+        assert messages[2]["tool_calls"][0]["function"]["name"] == "collaboration__spawn_agent"
+        assert messages[-1] == {"role": "user", "content": [{"type": "text", "text": self.TASK_TEXT}]}
+
+    def _messages_since_the_spawn(self, later_items: list[dict[str, Any]]) -> list[dict]:
+        """Return the messages that a parent's later request adds to those of its request after the spawn."""
+        server, client = self._server(**self.CODEX_FIELDS)
+        thread = [self.USER, self.SPAWN_CALL, self.SPAWN_OUTPUT]
+        before = self._chat_messages(server, client, thread)
+        after = self._chat_messages(server, client, [*thread, *later_items])
+        # The later items extend the thread: the earlier messages reach the engine unchanged.
+        assert after[: len(before)] == before
+        return after[len(before) :]
+
+    def test_parent_request_carries_the_answer_after_the_wait(self) -> None:
+        added = self._messages_since_the_spawn([self.WAIT_CALL, self.WAIT_OUTPUT, self.ANSWER])
+
+        assert [message["role"] for message in added] == ["assistant", "tool", "user"]
+        assert added[-1] == {"role": "user", "content": [{"type": "text", "text": self.ANSWER_TEXT}]}
+
+    def test_parent_request_carries_the_answer_after_a_discarded_response(self) -> None:
+        """Codex discards the tool call of a parent response that it reads while the answer arrives."""
+        added = self._messages_since_the_spawn([self.WAIT_REASONING, self.ANSWER])
+
+        # The reasoning that Codex keeps is an assistant turn of its own, without text and without a call.
+        reasoning = self.WAIT_REASONING["summary"][0]["text"]
+        assert added == [
+            {"role": "assistant", "content": "", "reasoning": reasoning, "reasoning_content": reasoning},
+            {"role": "user", "content": [{"type": "text", "text": self.ANSWER_TEXT}]},
+        ]
 
 
 def _custom_tool_config(**overrides: Any) -> VLLMModelConfig:

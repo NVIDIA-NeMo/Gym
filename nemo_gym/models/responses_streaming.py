@@ -24,7 +24,8 @@ this module provides:
 
 - the request-side sanitizer that flattens namespace tools into plain functions (joined as
   ``<namespace>__<name>``), rewrites replayed namespaced calls in the input history the same
-  way, and drops the fields the params model does not know;
+  way, converts a message between two agents of the harness (an ``agent_message`` item) into a
+  user message, and drops the fields the params model does not know;
 - the response-side synthesizer that re-emits a complete ``NeMoGymResponse`` as the minimal
   Responses SSE event sequence streaming clients require (``response.created`` ->
   ``response.output_item.done`` per output item -> the matching completed/incomplete/failed
@@ -41,6 +42,7 @@ from uuid import uuid4
 
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseInputItem
 from nemo_gym.models.token_capture.records import NAMESPACE_TOOL_DELIMITER
@@ -150,6 +152,46 @@ def _input_message_text(item: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+# The field that holds the text of each kind of content part of an ``agent_message`` item.
+_AGENT_MESSAGE_TEXT_FIELDS = {"input_text": "text", "encrypted_content": "encrypted_content"}
+_AGENT_MESSAGE_CONTENT_ERROR = PydanticCustomError(
+    "agent_message_content",
+    "The content of an agent_message item must be a list of one or more parts, each an input_text part with a "
+    "string `text` or an encrypted_content part with a string `encrypted_content`",
+)
+
+
+def _agent_message_to_user_message(item: dict[str, Any]) -> dict[str, Any]:
+    """Convert an ``agent_message`` input item into a user message with the same text.
+
+    The Codex CLI sends each message that one of its agents gets from another agent as an
+    ``agent_message`` item. The content parts hold the message in order. An ``input_text`` part
+    holds text. An ``encrypted_content`` part holds the ``message`` argument of the sender's tool
+    call as the model wrote it, which is plain text for a model behind a Gym model server. The
+    joined parts are the whole message, and the text keeps its white space.
+
+    The item's ``author`` and ``recipient`` fields are not copied. The text of a message that
+    Codex's subagent tools send states both.
+
+    The message takes the ``user`` role, because the model that reads it did not write it and it
+    answers none of that model's tool calls. An item whose content is not a list of one or more
+    such parts is returned unchanged. ``validate_streaming_responses_params`` then refuses the
+    request, so the model reads no message without a part and never only some parts of a message.
+    """
+    parts = item.get("content")
+    if not isinstance(parts, list) or not parts:
+        return item
+    texts = []
+    for part in parts:
+        kind = part.get("type") if isinstance(part, dict) else None
+        field = _AGENT_MESSAGE_TEXT_FIELDS.get(kind) if isinstance(kind, str) else None
+        text = part.get(field) if field else None
+        if not isinstance(text, str):
+            return item
+        texts.append(text)
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "".join(texts)}]}
+
+
 def sanitize_streaming_responses_body(
     body: dict[str, Any],
     *,
@@ -195,6 +237,10 @@ def sanitize_streaming_responses_body(
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                # Like a message, it is conversation content, so it is converted or refused, never dropped.
+                kept_items.append(_agent_message_to_user_message(item))
+                continue
             if isinstance(item, dict) and item.get("type") == "message":
                 content = item.get("content")
                 if (
@@ -326,8 +372,23 @@ def validate_streaming_responses_params(body: dict[str, Any]) -> NeMoGymResponse
     ``reasoning.context``, which the SDK's ``Reasoning`` model forbids). Any field pydantic flags
     as ``extra_forbidden`` is removed and validation retried, so only errors that cannot be fixed
     by dropping an unknown field surface to the client.
+
+    The sanitizer converts every ``agent_message`` item whose content it can read. An item that
+    is still in the body is refused with an error that states the content it needs. The index in
+    the location of that error is the item's index in the sanitized input. It differs from the
+    index in the client's request when the sanitizer hoisted leading developer messages into
+    ``instructions``, or when it left out an earlier item: an ``additional_tools`` item or an
+    item of an unknown type.
     """
     body = deepcopy(body)
+    items = body.get("input")
+    unread = [
+        InitErrorDetails(type=_AGENT_MESSAGE_CONTENT_ERROR, loc=("input", index, "content"), input=item.get("content"))
+        for index, item in enumerate(items if isinstance(items, list) else [])
+        if isinstance(item, dict) and item.get("type") == "agent_message"
+    ]
+    if unread:
+        raise ValidationError.from_exception_data(NeMoGymResponseCreateParamsNonStreaming.__name__, unread)
     while True:
         try:
             return NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
