@@ -492,6 +492,7 @@ DatasetLicense = Union[
     Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
     Literal["CC BY-SA 4.0"],
     Literal["CC BY-NC 3.0"],
+    Literal["CC-BY-NC-SA-4.0"],
     Literal["NVIDIA Internal Use Only, Do Not Distribute"],
     Literal["NVIDIA Evaluation Dataset License Agreement"],
     Literal["TBD"],
