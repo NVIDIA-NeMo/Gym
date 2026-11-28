@@ -239,10 +239,11 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
         except Exception:
             return False, eval_record
 
-        eq_pos = text.find(cfg.judge_equal_label)
-        neq_pos = text.find(cfg.judge_not_equal_label)
+        # The prompt asks for the verdict last; an earlier label may be quoted from the answer.
+        eq_pos = text.rfind(cfg.judge_equal_label)
+        neq_pos = text.rfind(cfg.judge_not_equal_label)
 
-        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
+        if eq_pos > neq_pos:
             eval_record.verdict_label = cfg.judge_equal_label
             return True, eval_record
 
