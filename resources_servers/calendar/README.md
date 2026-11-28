@@ -27,7 +27,7 @@ Rollouts can be collected using the example dataset as follows:
 
 ```bash
 gym eval run --no-serve \
-    --agent calendar_agent \
+    --agent calendar_simple_agent \
     --input data/example.jsonl \
     --output results/example_rollouts.jsonl \
     --limit 5
