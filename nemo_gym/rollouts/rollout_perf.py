@@ -19,9 +19,9 @@ import logging
 from collections import Counter
 from typing import Any, List, Optional
 
+from nemo_gym.trajectory.captured_calls import build_captured_calls, model_call_matcher
 from nemo_gym.trajectory.trajectory_record import (
     NG_TRAJECTORY_KEY,
-    ModelCallRef,
     TrajectoryRecord,
 )
 
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 NG_PERF_KEY = "ng_perf"
+NG_CAPTURED_CALLS_KEY = "ng_captured_calls"
 
 
 def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float]) -> Optional[dict[str, Any]]:
@@ -52,7 +53,9 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
 
     ``token_observability_coverage`` reports what fraction of those turns actually resolved to a
     captured call: a turn whose ``ModelCallRef`` was unmatched or ambiguous silently loses its
-    tokens from the sums below, and this is the only signal that it happened.
+    tokens from the sums below, and this is the only signal that it happened. It covers agent turns
+    only: a value of 1.0 does not mean every captured call is in these totals. Calls made outside agent
+    invocations, such as judge calls during verification, are counted in ``ng_captured_calls``.
     """
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if not isinstance(raw_trajectory, dict):
@@ -64,39 +67,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     if not trajectory.invocations:
         return None
 
-    # Index captured calls by both identities ModelCallRef supports, mirroring
-    # join_agent_model_calls: a ref may carry model_call_id, or the exact
-    # (model_ref, response_id) pair.
-    calls_by_id: dict[str, list[int]] = {}
-    calls_by_response: dict[tuple[str, str, str], list[int]] = {}
-    for index, call in enumerate(trajectory.model_calls):
-        if call.model_call_id:
-            calls_by_id.setdefault(call.model_call_id, []).append(index)
-        call_model_ref = call.response_metadata.model_ref
-        call_response_id = call.response_metadata.response_id
-        if call_model_ref is not None and call_response_id:
-            calls_by_response.setdefault((call_model_ref.type, call_model_ref.name, call_response_id), []).append(
-                index
-            )
-
-    def _match_call_index(ref: ModelCallRef) -> Optional[int]:
-        if ref.model_call_id:
-            candidates = [
-                index
-                for index in calls_by_id.get(ref.model_call_id, [])
-                if (
-                    ref.model_ref is None or ref.model_ref == trajectory.model_calls[index].response_metadata.model_ref
-                )
-                and (
-                    ref.response_id is None
-                    or ref.response_id == trajectory.model_calls[index].response_metadata.response_id
-                )
-            ]
-        elif ref.model_ref is not None and ref.response_id:
-            candidates = calls_by_response.get((ref.model_ref.type, ref.model_ref.name, ref.response_id), [])
-        else:
-            candidates = []
-        return candidates[0] if len(candidates) == 1 else None
+    _match_call_index = model_call_matcher(trajectory)
 
     # De-duplicate by matched call *position* rather than model_call_id; the id is
     # optional because a (model_ref, response_id)-only match has none. One physical call
@@ -167,6 +138,19 @@ def _attach_ng_perf(
         return
     if ng_perf is not None:
         result[NG_PERF_KEY] = ng_perf
+
+
+def _attach_captured_calls(result: dict[str, Any], *, observability_enabled: bool) -> None:
+    """Count every captured model call by role into ``ng_captured_calls``; absent with observability off."""
+    if not observability_enabled:
+        return
+    try:
+        captured_calls = build_captured_calls(result)
+    except Exception:
+        logger.warning("Could not summarize captured model calls for a rollout.", exc_info=True)
+        return
+    if captured_calls is not None:
+        result[NG_CAPTURED_CALLS_KEY] = captured_calls
 
 
 class DispatchLatencyTracker:

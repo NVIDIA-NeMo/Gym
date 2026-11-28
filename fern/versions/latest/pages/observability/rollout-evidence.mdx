@@ -371,6 +371,58 @@ Collection adds measured wall-clock latency when available. `ng_perf` is absent 
 is disabled or no valid trajectory invocation exists. Aggregate metrics include `perf_summary`
 when rollouts contain `ng_perf`.
 
+### Every captured call
+
+`ng_perf` covers agent turns only, so `token_observability_coverage` can be 1.0 while other captured
+calls, such as judge calls made during verification, are outside its totals. `ng_captured_calls`
+counts every captured call of the rollout by the role that owns it:
+
+| Role | Owner |
+| --- | --- |
+| `agent` | Referenced by an agent invocation. Counted once even when several invocations reference it. |
+| `verifier` | Referenced by a verifier invocation. |
+| `unattributed` | Captured under the rollout but referenced by neither. |
+
+Only calls the model server captured under the rollout's identity are counted. A call sent without it, such
+as a GDPVal judge request to the model server's unprefixed `/v1` URL, is not captured for the rollout and is
+not in these counts.
+
+```json
+"ng_captured_calls": {
+  "calls": 3, "calls_without_usage": 0, "attributed_call_coverage": 0.333, "capture_complete": true,
+  "by_role": {
+    "agent": {"calls": 1, "calls_without_usage": 0, "prompt_tokens": 100, "call_latency_ms": 40.0},
+    "unattributed": {"calls": 2, "calls_without_usage": 0, "prompt_tokens": 500, "call_latency_ms": 50.0}
+  }
+}
+```
+
+Token fields use the `ng_perf` names (`prompt_tokens`, `cached_prompt_tokens`, `completion_tokens`,
+`reasoning_tokens`, `total_tokens`) and include only reported values. A call that reports no token
+counts adds to `calls_without_usage` instead of adding zero. `attributed_call_coverage` is the share of
+captured calls with a role other than `unattributed`, or null when there are no calls.
+`call_latency_ms` sums call durations; calls can overlap, so it is not wall-clock time.
+
+`ng_captured_calls` is absent when observability is disabled or the rollout's trajectory holds no captured
+call, whether its capture was missing, unreadable, or failed to project: those calls are unknown, not zero.
+A missing capture file and a rollout that made no model call look the same, so neither reports zero.
+`capture_complete` is false when capture writes were still pending or incomplete, some records could not be
+read, the rollout's own capture was empty or unreadable while another producer supplied calls, or a judge
+episode captured apart from the rollout (SWE-Together) could not be read in full or lacks a call its receipt
+names, so the counts are a lower bound. A re-judged row has no `ng_captured_calls`: its predecessor's totals, which count
+the replaced judge calls, stay in `_ng_rejudged_failure_observations`.
+
+`perf_summary.captured_calls` adds up the summaries of the rows the aggregate scores, by role, with
+`rollouts_with_capture` out of `total_rollouts`, and `rollouts_with_incomplete_capture` of those (with
+`capture_complete` false when any was). A run without capture has no `captured_calls` block rather than
+zero totals. The rows the aggregate scores are each rollout's selected outcome, plus the failures and missing
+rollouts the run counts as zero. An attempt that a retry replaced, and a failure the aggregate leaves out, are
+not in these totals, so they are not the run's whole model usage.
+
+The run summary is computed by the shared aggregation (`compute_aggregate_metrics`, or `add_perf_metrics`
+on a server's own metrics). A server whose `/aggregate_metrics` returns only its own metrics, such as the
+SaaS-Bench agent, publishes no `perf_summary`: its aggregate has neither the `ng_perf` summary nor
+`captured_calls`, though each rollout's `ng_captured_calls` is still saved.
 
 ## Run Provenance
 

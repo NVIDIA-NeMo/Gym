@@ -2735,7 +2735,7 @@ async def run_e2e_multistage(
     from contextlib import nullcontext
 
     from nemo_gym.rollouts import RolloutCollectionHelper, observability_enabled_from_config
-    from nemo_gym.rollouts.rollout_perf import _attach_ng_perf
+    from nemo_gym.rollouts.rollout_perf import _attach_captured_calls, _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
     observability_enabled = observability_enabled_from_config(global_config_dict)
@@ -2780,7 +2780,7 @@ async def run_e2e_multistage(
     def attach_rollout_evidence(
         row: Dict[str, Any], result: Dict[str, Any], rollout_latency_ms: Optional[float]
     ) -> None:
-        """Join the rollout's evidence and attach ``ng_perf``, as ``run_from_config`` does."""
+        """Join the rollout's evidence and attach ``ng_perf`` and ``ng_captured_calls``, as ``run_from_config`` does."""
         # The capture is keyed by the rollout identity, which the result only gets from its row.
         for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME, ROLLOUT_ID_KEY_NAME):
             if key in row:
@@ -2797,6 +2797,7 @@ async def run_e2e_multistage(
         if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
             _attach_trajectory_record(row, result, schema_version=trajectory_schema_version)
         _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+        _attach_captured_calls(result, observability_enabled=observability_enabled)
 
     async def verify_cached(
         row: Dict[str, Any], semaphore: Any, server_client: Any, on_result: RolloutResultSink

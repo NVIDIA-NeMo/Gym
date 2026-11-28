@@ -136,6 +136,7 @@ from nemo_gym.rollouts.rollout_collection import (
     _failures_path_for,
     _final_zero_failure_rows,
     _get_max_rollout_attempts,
+    _is_collector_key,
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
     _rollout_order_key,
@@ -148,7 +149,14 @@ from nemo_gym.rollouts.rollout_collection import (
     refresh_agent_complete_files,
 )
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
-from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf, _build_ng_perf
+from nemo_gym.rollouts.rollout_perf import (
+    NG_CAPTURED_CALLS_KEY,
+    NG_PERF_KEY,
+    DispatchLatencyTracker,
+    _attach_captured_calls,
+    _attach_ng_perf,
+    _build_ng_perf,
+)
 from nemo_gym.rollouts.rollout_records import prepare_append as _drop_truncated_tail
 from nemo_gym.rollouts.rollout_recovery import manifest_path_for, matches_failure_class
 from nemo_gym.rollouts.trajectory_builder import (
@@ -2460,6 +2468,8 @@ class TestRolloutCollection:
         assert result["ng_trajectory"]["gaps"] == [
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
+        _attach_captured_calls(result, observability_enabled=True)
+        assert NG_CAPTURED_CALLS_KEY not in result, "a trajectory that failed to project counted no call"
 
     def test_rollout_for_export_keeps_canonical_facts_without_trajectory_or_capture_payloads(self) -> None:
         result = {
@@ -2634,6 +2644,32 @@ class TestRolloutCollection:
             "reasoning_tokens": 3,
             "total_latency_ms": 1234.5,
         }
+
+    @staticmethod
+    def _three_call_trajectory(**extra: object) -> dict:
+        """NVIDIA-NeMo/Gym#4722: three captured calls, only the first in the single agent turn."""
+        return {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root", "model_calls": [{"model_call_id": "call-1"}]}],
+                "model_calls": [
+                    {"model_call_id": "call-1", "duration_ms": 40.0, "token_stats": {"prompt_tokens": 100}},
+                    {"model_call_id": "call-2", "duration_ms": 30.0, "token_stats": {"prompt_tokens": 200}},
+                    {"model_call_id": "call-3", "duration_ms": 20.0, "token_stats": {"prompt_tokens": 300}},
+                ],
+                **extra,
+            }
+        }
+
+    def test_captured_calls_are_attached_only_with_observability_on(self) -> None:
+        off = self._three_call_trajectory()
+        _attach_captured_calls(off, observability_enabled=False)
+        assert NG_CAPTURED_CALLS_KEY not in off
+        on = self._three_call_trajectory()
+        _attach_captured_calls(on, observability_enabled=True)
+        assert on[NG_CAPTURED_CALLS_KEY]["calls"] == 3
+        assert _is_collector_key(NG_CAPTURED_CALLS_KEY)
 
     def test_build_ng_perf_omits_absent_token_fields_and_latency(self) -> None:
         # No model_calls/tool_calls at all on the trajectory, and no independent latency
@@ -8982,6 +9018,69 @@ class TestRolloutCollection:
 
         written = json.loads(metrics_fpath.read_text())
         assert "perf_summary" not in written[0]
+
+    async def test_run_from_config_writes_captured_call_totals_and_incomplete_rollouts_to_the_aggregate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.models.model_call_capture import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            assert url_path == "/aggregate_metrics"
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("agent",))
+        input_fpath, output_fpath = tmp_path / "input.jsonl", tmp_path / "rollouts.jsonl"
+        input_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {"responses_create_params": {"input": [], "task": task}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+                )
+                + b"\n"
+                for task in ("complete", "incomplete")
+            )
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    rollout_id = f"{example[TASK_INDEX_KEY_NAME]}-0"
+                    calls = 2 if example[TASK_INDEX_KEY_NAME] == 0 else 1
+                    for index in range(calls):
+                        store.record(
+                            rollout_id,
+                            {
+                                "model_call_id": f"{rollout_id}-{index}",
+                                "dialect": "responses",
+                                "request": {},
+                                "response": {"usage": {"input_tokens": 5}},
+                            },
+                        )
+                    if example[TASK_INDEX_KEY_NAME] == 1:
+                        store.mark_incomplete(rollout_id)
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=example, result={"response": {}, "reward": 1.0}, rollout_latency_ms=1.0)
+                    )
+                    futures.append(future)
+                return futures
+
+        await Helper().run_from_config(
+            RolloutCollectionConfig(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath))
+        )
+
+        [entry] = orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        captured = entry["perf_summary"]["captured_calls"]
+        assert (captured["calls"], captured["rollouts_with_capture"], captured["total_rollouts"]) == (3, 2, 2)
+        assert (captured["rollouts_with_incomplete_capture"], captured["capture_complete"]) == (1, False)
 
     async def test_call_aggregate_metrics_multiple_agents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -16266,6 +16365,23 @@ class TestEnrichRunResult:
             call["response"]["output"][0]["content"][0]["text"] for call in result["ng_trajectory"]["model_calls"]
         ]
         assert texts == ["first", "second"]
+        # Both calls are counted, though no agent turn references them: enrichment summarizes every captured call.
+        captured = result[NG_CAPTURED_CALLS_KEY]
+        assert (captured["calls"], captured["by_role"]["unattributed"]["calls"], captured["capture_complete"]) == (
+            2,
+            2,
+            True,
+        )
+
+    async def test_a_rollout_whose_capture_file_is_missing_has_no_captured_call_counts(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+        result = {"response": {"output": []}, "reward": 1.0}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert {"code": "model_call_capture_no_records"} in result["ng_model_call_capture"]["gaps"]
+        assert NG_CAPTURED_CALLS_KEY not in result, "a capture the collector could not find is unknown, not zero"
 
     async def test_metadata_only_keeps_the_capture_file(self, tmp_path: Path) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore
@@ -16418,6 +16534,63 @@ class TestEnrichRunResult:
         )
 
         assert CaptureStore(tmp_path).path_for("g1_g0_a0").exists(), "a pending write may still land"
+
+    async def test_a_write_that_lands_during_the_read_leaves_the_counts_incomplete(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import nemo_gym.rollouts.model_calls as model_calls
+        import nemo_gym.rollouts.rollout_collection as rollout_collection
+        from nemo_gym.models.model_call_capture import CaptureStore
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        CaptureStore(tmp_path).mark_pending("g1_g0_a0", "c2")
+        read = model_calls._read_capture_records
+
+        def read_before_the_late_write(store, rollout_id):
+            records = read(store, rollout_id)
+            self._store_call(tmp_path, rollout_id, "c2", "late")
+            store.clear_pending(rollout_id, "c2")
+            return records
+
+        async def not_quiesced(*args, **kwargs) -> bool:
+            return False
+
+        monkeypatch.setattr(model_calls, "_read_capture_records", read_before_the_late_write)
+        monkeypatch.setattr(rollout_collection, "await_model_call_capture_quiescence", not_quiesced)
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await rollout_collection.enrich_run_result(
+            self._row(), result, capture_dirs=[tmp_path], observability_enabled=True
+        )
+
+        assert {"code": "model_call_capture_pending"} in result["ng_model_call_capture"]["gaps"]
+        captured = result[NG_CAPTURED_CALLS_KEY]
+        assert (captured["calls"], captured["capture_complete"]) == (1, False)
+
+    async def test_a_write_claimed_after_the_read_started_leaves_the_counts_incomplete(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import nemo_gym.rollouts.model_calls as model_calls
+        from nemo_gym.models.model_call_capture import CaptureStore
+        from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        read = model_calls._read_capture_records
+
+        def read_then_a_whole_late_write(store: CaptureStore, rollout_id: str):
+            records = read(store, rollout_id)
+            store.mark_pending(rollout_id, "c2")
+            self._store_call(tmp_path, rollout_id, "c2", "late")
+            store.clear_pending(rollout_id, "c2")
+            return records
+
+        monkeypatch.setattr(model_calls, "_read_capture_records", read_then_a_whole_late_write)
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        captured = result[NG_CAPTURED_CALLS_KEY]
+        assert (captured["calls"], captured["capture_complete"]) == (1, False)
 
     async def test_the_capture_is_kept_when_a_record_could_not_be_read(self, tmp_path: Path) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore
