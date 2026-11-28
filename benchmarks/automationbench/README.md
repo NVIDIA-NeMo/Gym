@@ -7,6 +7,7 @@ AutomationBench scored with the Artificial Analysis headline metric by default.
 | Config | Version | Agent | Path |
 | --- | --- | --- | --- |
 | `config.yaml` | 0.2.0 | `simple_agent` | `single_agent_turn` Environment Server with the [`automationbench` resources server](../../resources_servers/automationbench/README.md) |
+| `nooa.yaml` | none | `nooa_agent` (embedded) | `single_agent_turn_legacy` Environment Server, direct HTTP tools |
 | `config_legacy_agent.yaml` (deprecated) | 0.1.0 | `verifiers_agent` | `legacy_agent` relay |
 
 Both run the same tasks, prompts, tools and rubric. `config.yaml` keeps each
@@ -40,6 +41,27 @@ depends on verifiers at the same git pin as `verifiers_agent`, with its uv
 constraint, override and exclude lists copied. Dropping
 verifiers would mean calling upstream `automation-bench`'s tools directly and
 carrying those overrides in the server.
+
+## Other harnesses
+
+`nooa.yaml` runs `nooa_agent` in its embedded mode on top of `config.yaml`: the same resources server, rows,
+sampling and `aa_headline` scoring, and the api tools over the same direct HTTP grant. It has no manifest and is
+not an AA-comparable run: NOOA's own CodeAct loop replaces `simple_agent`'s tool loop, and the step limit changes
+from `max_steps: 49` tool rounds to `max_policy_calls: 50` model calls (verifiers' `max_turns`). The composed config
+resolves; no rollout was run, so whether NOOA honors the run-level `temperature` and `top_p` and the rows'
+131072-token output budget is unchecked.
+
+Hermes, OpenCode, Codex and Claude Code have no recipe, because the config cannot supply what they need:
+
+- Hermes, OpenCode and Codex take tools only over MCP grants and reject the direct HTTP grant this server uses.
+  The server would need `expose_tools_over_mcp: true` and an `mcp_tools` override that lists its three tools (its
+  only tool route is the `/{tool_name}` catch-all, which auto-exposure does not list), and the environment
+  server `resources_tool_transports: [mcp]`.
+- Codex also rejects a tool list in the request, so these rows (which carry one) need a harness-neutral
+  preparation, as `benchmarks/gdpval/prepare_harness_neutral.py` does.
+- All three would run in their own sandbox (`sandbox_provider` and an `image` in `sandbox_config`, as in each
+  agent's `profiles/benchmark.yaml`), which this task does not otherwise need.
+- Claude Code takes no tool grants at all, so it cannot reach the world's tools without an adapter change.
 
 ## Metric
 

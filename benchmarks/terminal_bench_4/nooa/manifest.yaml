@@ -1,0 +1,27 @@
+name: terminal_bench_4/nooa
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: The pinned 66-task Terminal-Bench 4.1 dataset in its Harbor task folders, run by NOOA
+  agent sessions through the Harbor environment server with separate official verification.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../nooa.yaml
+harbor_target: terminal_bench_4
+resources_server: null
+agent_server: nooa_agent
+datasets: []
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active
