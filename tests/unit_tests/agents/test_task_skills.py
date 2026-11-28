@@ -273,6 +273,7 @@ async def test_read_only_skills_copied_again_over_an_earlier_copy_are_staged(loc
 
     assert staged == str(read_only_skills)
     assert (destination / "demo" / "SKILL.md").read_text() == (read_only_skills / "demo" / "SKILL.md").read_text()
+    assert _lacking_owner_access(destination) == []
     await _close_seeded_session(local_sandbox.sandbox, session_dir)
 
 
