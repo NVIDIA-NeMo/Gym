@@ -6,10 +6,13 @@
 The oracle is an agent harness like any other. It borrows the sandbox the ``harbor``
 environment server seeded, where that server placed the task's ``solution/`` at ``/solution``
 because the agent it serves is this oracle, and runs ``bash /solution/solve.sh`` as the task
-user within the ``[agent].timeout_sec`` the seed request carries. Verification then scores the
-result the same way it scores a model's work, so ``gym dataset validate`` is an ordinary run
-with this agent selected. The oracle never reads a task folder itself: the task, its digest and
-its solution are the environment server's.
+user within the ``[agent].timeout_sec`` the seed request carries. ``/logs/agent`` then holds what Harbor's
+oracle leaves there: the script's output in ``oracle.txt`` and, when it exits non-zero, the exit code in
+``exit-code.txt``. The environment server also writes its ``trajectory.json`` there, as for every harness, which
+Harbor's oracle does not. Each turn first removes the two files an earlier turn left
+(:meth:`OracleAgent._clear_turn_logs`). Verification then scores the result the same way it scores a model's
+work, so ``gym dataset validate`` is an ordinary run with this agent selected. The oracle never reads a task
+folder itself: the task, its digest and its solution are the environment server's.
 
 A task with ``solution/answer.md`` instead of ``solve.sh`` (one verified by its answer rather than by a
 script) gets that file copied to ``answer.md`` in the working directory (``ANSWER_WRITE_COMMAND``: the file the
@@ -84,6 +87,8 @@ ANSWER_WRITE_COMMAND = f"cat {ANSWER_FILE} > answer.md"
 SOLVE_LOG_DIR = "/logs/agent"
 # Harbor's oracle writes its output under this name, so tools written for Harbor find the log.
 SOLVE_LOG = f"{SOLVE_LOG_DIR}/oracle.txt"
+# Where Harbor's oracle records a non-zero solve.sh exit code, as the bare number.
+EXIT_CODE_LOG = f"{SOLVE_LOG_DIR}/exit-code.txt"
 # Extra time the exec may wait after the in-container `timeout` should have fired.
 SOLVE_GRACE_S = 60.0
 ORACLE_METADATA_KEY = "oracle"
@@ -95,6 +100,11 @@ ORACLE_ERROR_WRAPPER = "wrapper"
 # `oracle_error_type` when the reference answer could not be read (no `base64` in the image, not UTF-8 text) or
 # could not be written to the working directory.
 ORACLE_ERROR_ANSWER = "answer"
+
+
+def exit_code_write_command(return_code: int) -> str:
+    """The root shell line that records ``return_code`` in ``exit-code.txt``: the bare number, readable by all."""
+    return f"printf %s {int(return_code)} > {EXIT_CODE_LOG} && chmod a+r {EXIT_CODE_LOG}"
 
 
 class OracleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -182,6 +192,7 @@ class OracleAgent(SimpleResponsesAPIAgent):
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         session = self._session_for(request)
+        await self._clear_turn_logs(session)
         # The environment server put the solution in place for this harness; a task that ships none left
         # nothing there. The probe runs as the task user, who must be able to reach the script.
         present = await session.sandbox.exec(f"test -f {SOLVE_SCRIPT}", cwd="/", timeout_s=60, user=session.user)
@@ -251,6 +262,8 @@ class OracleAgent(SimpleResponsesAPIAgent):
             user=session.user,
             preserve_background_services=True,
         )
+        if result.error_type is None and result.return_code != 0:
+            await self._record_exit_code(session, result.return_code)
         tail = self.config.output_tail_chars
         # `tail` fails when the log does not exist: the guard exited before the redirection created it.
         log = await session.sandbox.exec(f"tail -c {tail} {SOLVE_LOG} 2>/dev/null", cwd="/", timeout_s=60)
@@ -272,6 +285,47 @@ class OracleAgent(SimpleResponsesAPIAgent):
             extra["oracle_error_type"] = ORACLE_ERROR_WRAPPER
             output = output or "solve.sh could not be started: timeout wrapper or bash missing (exit 127)"
         return self._response(body, status, output or f"solve.sh exited with {result.return_code}", extra)
+
+    @staticmethod
+    async def _clear_turn_logs(session: OracleSession) -> None:
+        """Remove the ``oracle.txt`` and ``exit-code.txt`` an earlier turn left in this sandbox, as root.
+
+        Harbor empties ``/logs/agent`` before every step of a multi-step task, so each step's verifier sees that
+        step's oracle output and exit code only. The environment server keeps a harness's own files there between
+        turns, so the oracle removes its two itself: a later step that succeeds, or has no solution to run, must not
+        show an earlier step's failure. A file that cannot be removed is warned about; a lost sandbox propagates.
+        """
+        cleared = await exec_as_root(session.sandbox, f"rm -f -- {SOLVE_LOG} {EXIT_CODE_LOG}", timeout_s=60)
+        if cleared.return_code != 0:
+            LOGGER.warning(
+                "%s: episode %s: could not remove an earlier turn's %s and %s: %s",
+                session.request.task_id.task_id,
+                session.request.episode_id.capture_key,
+                SOLVE_LOG,
+                EXIT_CODE_LOG,
+                cleared.stderr or cleared.stdout,
+            )
+
+    @staticmethod
+    async def _record_exit_code(session: OracleSession, return_code: int) -> None:
+        """Write ``solve.sh``'s non-zero exit code to ``exit-code.txt``, as Harbor's oracle does after a failed run.
+
+        Harbor 0.22.0 (``agents/oracle.py``) writes ``str(return_code)``, without a newline, to the trial's agent
+        folder, which is ``/logs/agent`` in the environment. Only an exit the sandbox reported is recorded: a provider
+        error (Harbor's exec raises on its timeout) leaves no file. Root creates the file under the sandbox shell's
+        umask (``0600`` under umask 077), so it is then opened to every reader, as the environment server does for
+        ``trajectory.json``: a non-root ``[verifier].user`` must be able to read it. A write that fails is warned
+        about; the turn is already reported as a failed oracle with its return code.
+        """
+        written = await exec_as_root(session.sandbox, exit_code_write_command(return_code), timeout_s=60)
+        if written.return_code != 0:
+            LOGGER.warning(
+                "%s: episode %s: could not write %s: %s",
+                session.request.task_id.task_id,
+                session.request.episode_id.capture_key,
+                EXIT_CODE_LOG,
+                written.stderr or written.stdout,
+            )
 
     async def _submit_answer(
         self, session: OracleSession, body: NeMoGymResponseCreateParamsNonStreaming

@@ -4143,6 +4143,32 @@ GREETING = "hi"
         seed = server.server_client.seed_bodies()[0]
         assert "env" not in seed["sandbox_access"]
 
+    @pytest.mark.parametrize("implementation", ["harbor_oracle_agent", "hermes_agent"])
+    async def test_the_oracles_verifier_gets_the_transcript_as_every_harness_does(
+        self, tmp_path, monkeypatch, implementation
+    ):
+        """Harbor's oracle writes no /logs/agent/trajectory.json, but Gym writes the server's ATIF transcript there for
+        the oracle as for any other harness, so a task verifier that reads it also passes under the oracle. The
+        reserved path is cleared, then the transcript uploaded, before test.sh, and the same bytes are kept with the
+        verifier logs."""
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=self.SOLUTION_TOML, agent_implementation=implementation, solution=True
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.reward == 1.0 and result.verifier_mode == "shared"
+        commands = [c["command"] for c in sandbox.execs]
+        test_sh = next(i for i, c in enumerate(commands) if "test.sh" in c and "timeout" in c)
+        cleared = next(i for i, c in enumerate(commands) if "rm -rf -- /logs/agent/trajectory.json" in c)
+        (upload,) = [i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent;" in c]
+        assert cleared < upload < test_sh
+        host_copy = (Path(result.verifier_logs_dir) / "trajectory.json").read_bytes()
+        assert uploaded_file(sandbox, "trajectory.json") == [host_copy]
+        assert json.loads(host_copy)["steps"][0]["message"] == "Create hello.txt"
+
     async def test_a_task_without_a_solution_uploads_nothing_for_the_oracle(self, tmp_path, monkeypatch):
         """The oracle finds no /solution/solve.sh and reports the task unvalidated; the seed is not at fault."""
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, agent_implementation="harbor_oracle_agent")

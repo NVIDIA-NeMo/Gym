@@ -321,6 +321,45 @@ async def test_an_artifact_that_reaches_the_tests_or_the_verifier_outputs_is_col
     assert staged.is_file() if shape in ("verifier_file", "file_through_link") else staged.is_dir()
 
 
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_the_oracles_shared_verifier_finds_oracle_txt_exit_code_txt_and_the_transcript(
+    tmp_path, monkeypatch, verifier_tree
+):
+    """An oracle run's /logs/agent holds what Harbor's oracle leaves there (oracle.txt and, after a failed solve.sh,
+    exit-code.txt) and, unlike under Harbor, the server's transcript, so a task verifier that requires
+    trajectory.json passes under the oracle. test.sh records what it finds: the oracle's files as it left them, and
+    the server's transcript in place of one planted at the reserved path."""
+    root, logs, _ = verifier_tree
+    agent_logs = logs / "agent"
+    agent_logs.mkdir(parents=True)
+    (agent_logs / "oracle.txt").write_text("solve.sh output\n")
+    (agent_logs / "exit-code.txt").write_text("1")
+    (agent_logs / "trajectory.json").write_text('{"planted": true}')
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    seen = shlex.quote(str(logs / "verifier" / "agent-files.txt"))
+    transcript = shlex.quote(str(agent_logs / "trajectory.json"))
+    reward = shlex.quote(str(logs / "verifier" / "reward.txt"))
+    (task.path / "tests" / "test.sh").write_text(
+        f"#!/bin/bash\nls -1 {shlex.quote(str(agent_logs))} > {seen}\n"
+        f"if test -f {transcript}; then echo 1; else echo 0; fi > {reward}\n"
+    )
+    # The oracle's session, as the seed marks it when the harness is ``harbor_oracle_agent``.
+    oracle = SimpleNamespace(
+        task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None, solution_for_oracle=True
+    )
+
+    outcome = await server._run_verifier(oracle, TRAJECTORY)
+
+    assert outcome["reward"] == 1 and not outcome.get("mask_sample", False), outcome
+    verifier_logs = Path(outcome["verifier_logs_dir"])
+    assert (verifier_logs / "agent-files.txt").read_text() == "exit-code.txt\noracle.txt\ntrajectory.json\n"
+    assert (agent_logs / "trajectory.json").read_bytes() == TRAJECTORY
+    assert (verifier_logs / "trajectory.json").read_bytes() == TRAJECTORY
+    assert (agent_logs / "oracle.txt").read_text() == "solve.sh output\n"
+    assert (agent_logs / "exit-code.txt").read_text() == "1"
+    await server.shutdown()
+
+
 @pytest.mark.parametrize("literal", ["9" * 400, "NaN"], ids=["overflow", "nan"])
 async def test_non_finite_numeric_reward_is_measured_zero(tmp_path, monkeypatch, literal):
     """An integer too large for a float and a JSON NaN are both numbers that cannot be a score."""

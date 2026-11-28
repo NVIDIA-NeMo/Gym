@@ -25,7 +25,8 @@ One `/run` call is one whole episode, and no Resources Server takes part. For ea
    `artifacts`, stop the agent's sandbox and restore them into a fresh one, which gets `tests/` only if its image
    has no `/tests/test.sh` or a Python verifier grades the task. Then write the agent's transcript to
    `/logs/agent/trajectory.json` (ATIF; from the conversation the model received when the harness's seed declares
-   `reports_model_conversation`, else from its response output), run `test.sh` and read `reward.json`, else
+   `reports_model_conversation`, else from its response output; for `harbor_oracle_agent` too, though Harbor's oracle
+   writes none, so a verifier that reads it works under the oracle), run `test.sh` and read `reward.json`, else
    `reward.txt`.
 4. **Cleanup.** Stop every sandbox of the episode, whatever happened before.
 
