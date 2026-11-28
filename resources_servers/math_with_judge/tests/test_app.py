@@ -519,6 +519,44 @@ class TestApp:
             "reward",
         ]
 
+    @mark.parametrize(
+        ("messages", "reward", "extracted"),
+        [
+            ([r"\boxed{5}", r"\boxed{-3}"], 1.0, "-3"),
+            ([r"\boxed{-3}", r"\boxed{5}"], 0.0, "5"),
+            ([r"Plan: guess \boxed{5}.", "Check fails.", r"So the answer is \boxed{-3}."], 1.0, "-3"),
+            ([r"First \boxed{5}. Wait, that is wrong: \boxed{-3}"], 1.0, "-3"),
+            ([r"The answer is \boxed{-3}"], 1.0, "-3"),
+            (["The answer is -3"], 0.0, None),
+        ],
+    )
+    async def test_verify_grades_only_final_boxed_answer(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        messages: list[str],
+        reward: float,
+        extracted: str | None,
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}), server_client=server_mock
+        )
+        response = NeMoGymResponse(
+            **self._create_response("multi_message_id", self._create_response_output_message(""))
+        )
+        response.output = [self._create_response_output_message(message) for message in messages]
+        verify_response = await resources_server.verify(
+            LibraryJudgeMathVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=response,
+                question="question",
+                expected_answer="-3",
+            )
+        )
+        assert verify_response.reward == verify_response.library_reward == reward
+        assert verify_response.extracted_answer == extracted
+        server_mock.post.assert_not_called()
+
     async def test_verify_answer(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
@@ -598,7 +636,7 @@ class TestApp:
             )
             library_verifier.assert_awaited_once_with(
                 judge_equal_expected_answer,
-                judge_equal_generated_answer,
+                "\\boxed{" + exact_boxed_answer + "}",
             )
         assert judge_equal_reward == approx(1.0)
         assert judge_equal_extracted_answer == "math-verify extraction"
