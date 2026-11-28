@@ -119,7 +119,6 @@ _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _EXECUTED_FORM_GAP = "tool_calls_in_executed_form"
 _CLI_RESULT_GAP = "tool_results_from_cli_events"
-_UNKNOWN_RECORDS_GAP = "unknown_session_records_skipped"
 _PROVIDER_ERROR = "provider_error"
 # Codex's final error when a model response ends at its output-token limit (the output cap), a gradable outcome.
 # Codex 0.144.4 and 0.154.0 retry such a response as a stream disconnect and report the first text; Codex 0.163.0
@@ -1486,10 +1485,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 )
                 output_gaps.append(ObservationGap(code=_CLI_RESULT_GAP, detail=detail))
                 LOG.warning("Codex tool results are kept as the CLI events show them: %s", detail)
-            if session_output.unknown_records:
-                detail = ", ".join(f"{kind} {count}" for kind, count in sorted(session_output.unknown_records.items()))
-                output_gaps.append(ObservationGap(code=_UNKNOWN_RECORDS_GAP, detail=detail))
-                LOG.warning("Codex session records of unknown kinds are left out of the output: %s", detail)
+            # The observation reader skips the same records, and names those of unknown kinds in a gap.
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
