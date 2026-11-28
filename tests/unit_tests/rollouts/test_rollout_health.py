@@ -2046,6 +2046,54 @@ def test_a_rollout_ending_on_a_context_overflow_is_not_flagged(tmp_path, overflo
     assert digest.model_call_errors == 1
 
 
+@pytest.mark.parametrize("overflow", CONTEXT_OVERFLOWS.values(), ids=CONTEXT_OVERFLOWS.keys())
+def test_context_refusals_are_typed_and_split_into_final_and_recovered(tmp_path, overflow):
+    """A refusal on the model's last call is final; one the model called past is recovered; unordered is neither."""
+    answer = {"model_ref": _POLICY_REF}
+    refusal = {"tokens_in": None, "tokens_out": 0, "model_ref": _POLICY_REF} | overflow
+    rows = []
+    for task, (first, second) in enumerate(
+        [
+            (answer | {"started_at": 1.0}, refusal | {"started_at": 2.0}),  # ends on the refusal
+            (refusal | {"started_at": 1.0}, answer | {"started_at": 2.0}),  # continues after it
+            (refusal, answer),  # cannot be ordered
+        ]
+    ):
+        calls = [
+            _call(call_index=0, model_call_id=f"a{task}", response_id=f"ra{task}", **first),
+            _call(call_index=1, model_call_id=f"b{task}", response_id=f"rb{task}", **second),
+        ]
+        refs = [{"model_call_id": call["model_call_id"]} for call in calls]
+        rows.append((_record(task, 0, refs=refs, usage={"input_tokens": 3, "output_tokens": 2}), calls))
+
+    result = run_health_checks(_write_fixture(tmp_path, rows), workers=1)
+
+    assert result.summary["run"]["stats"]["model_call_errors"]["by_failure_kind"] == {
+        "model_context_limit": {
+            "calls": 3,
+            "final": 1,
+            "recovered": 1,
+            "rollouts_final": 1,
+            "rollouts_recovered_only": 1,
+        }
+    }
+    verdicts = [json.loads(line) for line in result.verdicts_path.read_text().splitlines()]
+    assert [row.get("model_call_failures") for row in verdicts] == [
+        {"model_context_limit": {"calls": 1, "final": 1, "recovered": 0}},
+        {"model_context_limit": {"calls": 1, "final": 0, "recovered": 1}},
+        {"model_context_limit": {"calls": 1, "final": 0, "recovered": 0}},
+    ]
+
+
+def test_a_final_context_refusal_finding_names_its_failure_kind(tmp_path):
+    """Before any answer the refusal is flagged, and the finding carries the typed cause."""
+    refusal = _call(started_at=1.0, tokens_in=None, tokens_out=0, **CONTEXT_OVERFLOWS["answered_locally"])
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(_owned_attempts(refusal), [refusal])]), workers=1).rollouts
+
+    [finding] = [f for f in digest.findings if f.check == "rollout_ended_on_failed_model_call"]
+    assert finding.detail["failure_kind"] == "model_context_limit"
+
+
 @pytest.mark.parametrize(
     "refusal",
     [INVALID_OUTPUT_BUDGETS["answered_locally"], CONTEXT_OVERFLOWS["answered_locally"]],

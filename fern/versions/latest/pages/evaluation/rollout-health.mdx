@@ -288,6 +288,9 @@ This abridged example omits the other check-coverage entries and zero-valued iss
         "by_status": {"408": 1},
         "rollouts_affected": 1,
         "ended_on_error": 1,
+        "by_failure_kind": {
+          "model_context_limit": {"calls": 0, "final": 0, "recovered": 0, "rollouts_final": 0, "rollouts_recovered_only": 0}
+        },
         "usage_unknown": 1
       },
       "duplicated_calls": {
@@ -327,6 +330,13 @@ unreferenced auxiliary calls, except `run.stats.timeouts`, whose time split read
 `model_call_errors.ended_on_error` counts rollouts that `rollout_ended_on_failed_model_call` would flag. It leaves out a
 rollout whose model-call capture gaps leave that check unobserved, and one that ended on a context-length overflow after
 the model answered in the same conversation.
+`model_call_errors.by_failure_kind.model_context_limit` counts the calls the upstream refused because the context window
+was full, including those `vllm_model` answers locally with HTTP 200 and `incomplete_details.reason: max_output_tokens`.
+The cause is the evaluated model's deployment and its context window. A refusal is `final` when it is its model's last
+call in the rollout, and `recovered` when the same model has a later call. A chain whose calls cannot be ordered counts
+its refusals in `calls` only. `rollouts_final` counts rollouts with a final refusal, and `rollouts_recovered_only`
+counts rollouts whose refusals were all recovered. These counts do not change a rollout's `failure_kind`, `mask_sample`
+or reward.
 `model_call_errors.usage_unknown` counts failed calls that returned no finished response and carry no token counts. The
 token checks skip these calls, so any tokens the server spent on them before a cancellation or timeout are counted only here,
 as a number of calls.
@@ -471,7 +481,9 @@ The per-rollout report contains one row for every non-empty input line and is so
 
 Each finding contains a stable check ID, an optional locator for the affected turn or model call, and check-specific detail. The
 file stores each displayed object on one JSONL line. `unobserved` lists enabled rollout-level checks that lacked required
-evidence. Ignored checks are recorded only in `quality_summary.json`, so consumers must read the summary before interpreting
+evidence. A row with context-length refusals also has `model_call_failures.model_context_limit` with its `calls`,
+`final` and `recovered` counts, and a `rollout_ended_on_failed_model_call` finding on such a refusal has
+`failure_kind: model_context_limit` in its detail. Ignored checks are recorded only in `quality_summary.json`, so consumers must read the summary before interpreting
 verdicts produced with a reduced check set.
 
 If a rollout line is unreadable, its real identity is unavailable. The report assigns a synthetic `_ng_task_index` such as
