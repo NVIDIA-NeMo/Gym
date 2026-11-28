@@ -40,18 +40,31 @@ preserved (so a partially-completed conversation can be resumed) — only
 
 For tasks that only have a single user turn, this collapses to a single
 model call (same shape as simple_agent).
+
+Under an Environment Server, the agent sessions API runs the same replay as
+the session's one activation. The session holds no tools and no sandbox, the
+timing metrics cover only the replay, as they do under `/run`, and the replay's
+evidence is returned when the session closes.
 """
 
 import json
+from dataclasses import dataclass, field
 from time import perf_counter, time
-from typing import List
+from typing import Any, List
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import (
+    ActivationConflictError,
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionConflictError,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    OrderedOperationLedger,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -96,6 +109,17 @@ class SpeedBenchAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+@dataclass
+class _SpeedBenchSession(AgentSessionState):
+    operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
+    # The route of the first activation; a retry on another route is refused rather than joined.
+    activation_path: str | None = None
+    # The replay's evidence, returned at close. Both stay None while model-call capture is off;
+    # a failed replay keeps its observations and has no trajectory, as on /run.
+    observations: AgentObservationBundle | None = None
+    trajectory: TrajectoryRecord | None = None
+
+
 def _content_text(content) -> str:
     """Best-effort flatten of a message's `content` field to a string."""
     if isinstance(content, str):
@@ -117,12 +141,112 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
 
     config: SpeedBenchAgentConfig
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> _SpeedBenchSession:
+        # The replay calls only the model, so a session holds no tools and no sandbox.
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("SPEED-Bench agent does not support sandbox access")
+        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required:
+            raise AgentSeedRejectedError(
+                f"SPEED-Bench agent does not support required tool access: {', '.join(required)}"
+            )
+        return _SpeedBenchSession(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, _SpeedBenchSession):
+            raise TypeError("Expected SPEED-Bench session state")
+        await state.operations.close(timeout=self.config.session_close_timeout_seconds)
+        observations = state.observations
+        if observations is None and self._model_call_capture_enabled():
+            # Capture is on but no activation started, so close says why it returns no replay.
+            # With capture off there is nothing to report, as on /run.
+            observations = AgentObservationBundle(
+                source="speed_bench_agent",
+                gaps=[ObservationGap(code="observation_capture_failed", detail="No activation started a replay.")],
+            )
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            trajectory=state.trajectory,
+        )
+
     async def responses(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        model_url_path = self.url_path_for_request("/v1/responses", request)
+        rollout_id = request.path_params.get("rollout_id")
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is None:
+            observations = self._start_observations(request, rollout_id, in_session=False)
+            replay, trajectory, model_server_cookies = await self._replay(
+                body, model_url_path=model_url_path, rollout_id=rollout_id, observations=observations
+            )
+            # Propagate any cookies the resources server set so /verify sees them.
+            for k, v in (*request.cookies.items(), *(model_server_cookies or {}).items()):
+                response.set_cookie(k, v)
+            if trajectory is not None:
+                # /run binds this trajectory to its task and strips it before verification.
+                replay = replay.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
+            return replay
+        state = self._require_agent_session(agent_session_id)
+        if not isinstance(state, _SpeedBenchSession):
+            raise TypeError("Expected SPEED-Bench session state")
+        if rollout_id != state.request.episode_id.capture_key:
+            raise AgentSessionConflictError("Activation requires the seeded session's rollout path")
+        if state.activation_path is None:
+            state.activation_path = request.url.path
+        elif state.activation_path != request.url.path:
+            raise AgentSessionConflictError("Activation path does not match the session's first activation")
+
+        async def activation() -> NeMoGymResponse:
+            state.observations = self._start_observations(request, rollout_id, in_session=True)
+            replay, trajectory, _ = await self._replay(
+                body,
+                model_url_path=model_url_path,
+                rollout_id=rollout_id,
+                observations=state.observations,
+                task_id=state.request.task_id.task_id,
+            )
+            # The reply carries no trajectory: the Environment Server takes the session's evidence at close.
+            state.trajectory = trajectory
+            return replay
+
+        try:
+            # A retried activation gets the replay it already ran, not a second set of timed model calls.
+            return await state.operations.execute(index=1, request=body, operation=activation)
+        except ActivationConflictError as error:
+            raise AgentSessionConflictError(str(error)) from error
+
+    def _start_observations(
+        self, request: Request, rollout_id: object, *, in_session: bool
+    ) -> AgentObservationBundle | None:
+        """Open the replay's evidence when model-call capture is on: one root invocation owns every model call."""
+        if not (self._model_call_capture_enabled() and isinstance(rollout_id, str)):
+            return None
+        observations = AgentObservationBundle(
+            source="speed_bench_agent",
+            records=[AgentInvocation(invocation_id="root", in_session=in_session)],
+        )
+        # A failed replay's reply carries these identity-free observations.
+        request.state.nemo_gym_agent_observations = observations
+        return observations
+
+    async def _replay(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        model_url_path: str,
+        rollout_id: Any,
+        observations: AgentObservationBundle | None,
+        task_id: str = "unknown",
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any]:
+        """Replay the trailing user turns, one model call each.
+
+        Returns the summary response, its trajectory (None while capture is off) and the last model cookies.
+        """
         generation_started_at = time()
         generation_start = perf_counter()
         request_metrics: list[dict[str, JsonValue] | None] = []
@@ -164,19 +288,8 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         usage = None
         last_response: NeMoGymResponse = None
         model_server_cookies = None
-        resources_server_cookies = request.cookies
-        rollout_id = request.path_params.get("rollout_id")
-        invocation = None
-        observations = None
+        invocation = observations.records[0] if observations is not None else None
         turns: list[TrajectoryTurn] = []
-        if self._model_call_capture_enabled() and isinstance(rollout_id, str):
-            invocation = AgentInvocation(invocation_id="root", in_session=False)
-            observations = AgentObservationBundle(
-                source="speed_bench_agent",
-                records=[invocation],
-            )
-            # The inner route has no task identity; only /run publishes a bound trajectory.
-            request.state.nemo_gym_agent_observations = observations
 
         async def _call_model(turn_input):
             new_body = body.model_copy(update={"input": turn_input})
@@ -184,7 +297,7 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             try:
                 model_response = await self.server_client.post(
                     server_name=self.config.model_server.name,
-                    url_path=self.url_path_for_request("/v1/responses", request),
+                    url_path=model_url_path,
                     json=new_body,
                     cookies=model_server_cookies,
                     **({"headers": {"x-session-id": "root"}} if invocation is not None else {}),
@@ -223,7 +336,7 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
                 turns.append(
                     TrajectoryTurn(
                         invocation_id="root",
-                        task_id="unknown",
+                        task_id=task_id,
                         rollout_id=rollout_id,
                         turn_no=turn_no,
                         timestamp=turn_timestamp,
@@ -270,10 +383,6 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, last_response.usage)
             last_response.usage = None
 
-        # Propagate any cookies the resources server set so /verify sees them.
-        for k, v in (*resources_server_cookies.items(), *(model_server_cookies or {}).items()):
-            response.set_cookie(k, v)
-
         last_response.output = accumulated_outputs
         last_response.usage = usage
         duration = perf_counter() - generation_start
@@ -283,18 +392,16 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             "generation_finished_at": generation_started_at + duration,
             "generation_duration": duration,
         }
+        trajectory = None
         if observations is not None:
             trajectory = TrajectoryRecord(
-                task_id="unknown",
+                task_id=task_id,
                 rollout_id=rollout_id,
                 invocations=[invocation],
                 turns=turns,
                 gaps=observations.gaps,
             )
-            last_response = last_response.model_copy(
-                update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
-            )
-        return last_response
+        return last_response, trajectory, model_server_cookies
 
     async def run(self, request: Request, body: SpeedBenchAgentRunRequest) -> SpeedBenchAgentVerifyResponse:
         def bind_trajectory(raw: object) -> TrajectoryRecord:
