@@ -8413,7 +8413,7 @@ class TestPrefixSupply:
     """
 
     @staticmethod
-    def _server(monkeypatch: MonkeyPatch, *, enabled: bool) -> VLLMModel:
+    def _server(monkeypatch: MonkeyPatch, *, enabled: bool, match_chat_tool_reasoning: bool = False) -> VLLMModel:
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -8423,7 +8423,8 @@ class TestPrefixSupply:
             entrypoint="",
             name="",
             return_token_id_information=enabled,
-            uses_reasoning_parser=False,
+            uses_reasoning_parser=match_chat_tool_reasoning,
+            match_chat_tool_reasoning=match_chat_tool_reasoning,
             supply_prefix_token_ids=enabled,
         )
         get_global_config_dict_mock = MagicMock(return_value={})
@@ -8453,6 +8454,34 @@ class TestPrefixSupply:
                 uses_reasoning_parser=False,
                 supply_prefix_token_ids=True,
             )
+
+    @mark.parametrize(
+        ("enabled", "dialect", "override", "expected"),
+        [
+            (False, "chat", False, False),
+            (True, "chat", False, True),
+            (True, "chat", True, False),
+            (True, "responses", False, False),
+        ],
+    )
+    def test_reasoning_equivalence_capture_is_opt_in_for_chat_without_request_overrides(
+        self, monkeypatch, tmp_path, enabled, dialect, override, expected
+    ) -> None:
+        server = self._server(monkeypatch, enabled=False, match_chat_tool_reasoning=enabled)
+        context = self._armed("reasoning", tmp_path)
+        if dialect == "chat":
+            body = NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "user", "content": "Use a tool"}],
+                metadata={"extra_body": '{"messages": []}'} if override else None,
+            )
+        else:
+            body = NeMoGymResponseCreateParamsNonStreaming(input="Use a tool")
+        token = set_token_sink(context)
+        try:
+            server._validate_capture_request(body)
+            assert context.match_chat_tool_reasoning is expected
+        finally:
+            reset_token_sink(token)
 
     def test_rejects_completions_api_prefix_supply(self) -> None:
         with raises(ValueError, match="not supported with use_completions_api=true"):
