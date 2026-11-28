@@ -1,0 +1,29 @@
+name: aishell4_sot
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: asr
+description: Speaker-attributed transcription of the 20 AISHELL-4 test meetings (single-channel Mandarin), scored by session-level cpCER.
+modality: audio
+licensing: CC-BY-SA-4.0
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 0.0
+  higher_is_better: true
+determinism: unknown
+resources_server: audio_eval
+agent_server: simple_agent
+datasets:
+- name: aishell4_sot
+  type: benchmark
+  jsonl_fpath: benchmarks/aishell4_sot/data/aishell4_sot_benchmark.jsonl
+  prepare_script: benchmarks/aishell4_sot/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active
