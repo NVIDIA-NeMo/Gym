@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
-from time import time
+from time import perf_counter, time
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -88,6 +88,7 @@ from nemo_gym.trajectory import (
     ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
+    TrajectoryToolCall,
     TrajectoryTurn,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -96,6 +97,59 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 logger = logging.getLogger(__name__)
 
 _EMPTY_OUTPUT_ITEM_ID = "msg_empty"
+
+
+@dataclass
+class _ToolCallTiming:
+    """One tool call as verifiers ran it: its wall-clock start and end, duration and outcome."""
+
+    tool_name: str
+    started_at: float
+    completed_at: float
+    duration_ms: float
+    status: str
+    error_type: Optional[str]
+
+
+# The tool calls of the rollout this task runs, by tool call ID. Each rollout sets its own collector, so rollouts that
+# run concurrently on one cached environment record only their own calls.
+_TOOL_CALL_TIMINGS: ContextVar[Optional[dict[str, _ToolCallTiming]]] = ContextVar("_TOOL_CALL_TIMINGS", default=None)
+
+
+def _time_tool_calls(vf_env: Any) -> None:
+    """Time each call of a verifiers tool environment where it runs the tool, once per environment.
+
+    verifiers' tool environments run every tool call of a turn through ``call_tool``; the timing covers the tool
+    itself, in this process. An exception is a failed call; verifiers then turns it into the tool message.
+    """
+    call_tool = getattr(vf_env, "call_tool", None)
+    if call_tool is None or getattr(call_tool, "_nemo_gym_timed", False):
+        return
+
+    @functools.wraps(call_tool)
+    async def timed_call_tool(tool_name: str, tool_args: dict, tool_call_id: str, **kwargs: Any) -> Any:
+        timings = _TOOL_CALL_TIMINGS.get()
+        if timings is None:
+            return await call_tool(tool_name, tool_args, tool_call_id, **kwargs)
+        started_at, started = time(), perf_counter()
+        status, error_type = "completed", None
+        try:
+            return await call_tool(tool_name, tool_args, tool_call_id, **kwargs)
+        except BaseException as error:
+            status, error_type = "failed", type(error).__name__
+            raise
+        finally:
+            timings[tool_call_id] = _ToolCallTiming(
+                tool_name=tool_name,
+                started_at=started_at,
+                completed_at=max(started_at, time()),
+                duration_ms=(perf_counter() - started) * 1000,
+                status=status,
+                error_type=error_type,
+            )
+
+    timed_call_tool._nemo_gym_timed = True  # type: ignore[attr-defined]
+    vf_env.call_tool = timed_call_tool
 
 
 def _as_dict(msg: Any) -> dict:
@@ -593,6 +647,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         if vf_env_id not in self.envs_cache:
             env = vf.load_environment(vf_env_id, **self.config.vf_env_args)
             self.programmatic_rubrics[vf_env_id] = _programmatic_rubric(env)
+            _time_tool_calls(env)
             self.envs_cache[vf_env_id] = env
         return self.envs_cache[vf_env_id]
 
@@ -788,6 +843,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         response_ids: list[str],
         conversation: list,
         status: str,
+        tool_timings: Mapping[str, _ToolCallTiming],
     ) -> TrajectoryRecord:
         """Project the verifiers rollout into turns the health checks can read.
 
@@ -796,6 +852,10 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         call it came from, which is what `_canonical_model_call_references`
         needs -- an invocation-level list is not enough, since the BOUND_CALLS
         checks read `turns[*].model_calls`.
+
+        Each function call becomes a tool call of the turn that requested it, with the timing verifiers' tool
+        environment recorded where it ran the tool and the result the model saw. A call it never ran, such as one
+        with unparseable arguments, has no timing and a ``tool_timing_unavailable`` gap.
         """
         gaps: list[ObservationGap] = []
         model_calls = [ModelCallRef(model_ref=self.config.model_server, response_id=rid) for rid in response_ids]
@@ -803,6 +863,34 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="model_call_reference_unavailable", invocation_id=invocation_id))
 
         groups = _assistant_turn_groups(output)
+        results = {item.get("call_id"): item for item in output if item.get("type") == "function_call_output"}
+        tool_calls: list[TrajectoryToolCall] = []
+        for index, items in enumerate(groups):
+            ref = model_calls[index] if index < len(model_calls) else None
+            for item in items:
+                if item.get("type") != "function_call":
+                    continue
+                call_id = item["call_id"]
+                timing = tool_timings.get(call_id)
+                if timing is None:
+                    gaps.append(
+                        ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id, detail=call_id)
+                    )
+                tool_calls.append(
+                    TrajectoryToolCall(
+                        invocation_id=invocation_id,
+                        tool_call_id=call_id,
+                        tool_name=item.get("name") or None,
+                        model_call_ref=ref,
+                        started_at=timing.started_at if timing else None,
+                        completed_at=timing.completed_at if timing else None,
+                        duration_ms=timing.duration_ms if timing else None,
+                        timing_source="executor" if timing else None,
+                        status=timing.status if timing else ("completed" if call_id in results else "incomplete"),
+                        error_type=timing.error_type if timing else None,
+                        output=results[call_id].get("output") if call_id in results else None,
+                    )
+                )
         turns: list[TrajectoryTurn] = []
         now = time()
         step_count = 0
@@ -837,6 +925,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 )
             ],
             turns=turns,
+            tool_calls=tool_calls,
             gaps=gaps,
         )
 
@@ -881,13 +970,18 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
             extra_columns = [c for c in self.config.export_state_columns if c != "trajectory"]
-            outputs = await vf_env.run_group(
-                group_inputs=[rollout_input],
-                client=client,
-                model=self.config.model_name,
-                sampling_args=sampling_args,
-                state_columns=["trajectory", *extra_columns],
-            )
+            tool_timings: dict[str, _ToolCallTiming] = {}
+            timings_token = _TOOL_CALL_TIMINGS.set(tool_timings if invocation_id is not None else None)
+            try:
+                outputs = await vf_env.run_group(
+                    group_inputs=[rollout_input],
+                    client=client,
+                    model=self.config.model_name,
+                    sampling_args=sampling_args,
+                    state_columns=["trajectory", *extra_columns],
+                )
+            finally:
+                _TOOL_CALL_TIMINGS.reset(timings_token)
 
             rollout_output = outputs[0]
             reward = rollout_output.get("reward", 0.0) or 0.0
@@ -909,6 +1003,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                     response_ids=response_ids,
                     conversation=list(body.responses_create_params.input or []),
                     status="completed" if response_ids else "incomplete",
+                    tool_timings=tool_timings,
                 )
                 observations = AgentObservationBundle(source="verifiers", records=list(trajectory.invocations))
 
