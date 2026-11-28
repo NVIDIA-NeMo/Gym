@@ -1,0 +1,51 @@
+name: reasoning_gym
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Procedurally generated Reasoning Gym tasks from Nemotron-RL-ReasoningGym-v1
+  (algebra, arithmetic, logic, graph and game puzzles and more), each scored by its
+  task's own checker.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- reasoning/inductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/procedural_knowledge
+domains:
+- mathematics
+- computer_science
+- general
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: reasoning_gym
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/reasoning_gym/data/example.jsonl
+  num_repeats: 1
+- name: train
+  type: train
+  jsonl_fpath: environments/reasoning_gym/data/train.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

@@ -1,0 +1,49 @@
+name: arc_agi
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: ARC-AGI grid puzzles. The model infers the transformation from example
+  input and output grids and writes the test output grid, scored by exact match.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+- qiaochuz-nv
+capabilities:
+- reasoning
+- reasoning/inductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- general
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: arc_agi
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/arc_agi/data/example.jsonl
+  num_repeats: 1
+- name: training_1
+  type: validation
+  jsonl_fpath: environments/arc_agi/data/arc_agi_1_training.jsonl
+  num_repeats: 1
+- name: evaluation_1
+  type: validation
+  jsonl_fpath: environments/arc_agi/data/arc_agi_1_evaluation.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

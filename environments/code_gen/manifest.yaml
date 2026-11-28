@@ -1,0 +1,53 @@
+name: code_gen
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: coding
+description: Competitive programming. The model's code runs against unit tests in
+  a sandbox and earns 1 when every test passes; trains on OpenCodeReasoning and validates
+  on LiveCodeBench v5.
+modality: text
+licensing: Apache-2.0 AND MIT
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+capabilities:
+- coding
+- coding/code_generation
+- reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+domains:
+- computer_science
+- mathematics
+requirements:
+  gpu: false
+  network: allowlist
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: code_gen
+agent_server: simple_agent
+datasets:
+- name: opencodereasoning_filtered_train
+  type: train
+  jsonl_fpath: environments/code_gen/data/opencodereasoning_filtered_25k_train.jsonl
+  num_repeats: 1
+- name: livecodebench_v5_validation
+  type: validation
+  jsonl_fpath: environments/code_gen/data/livecodebench_v5_2024-07-01_2025-02-01_validation.jsonl
+  num_repeats: 10
+- name: example
+  type: example
+  jsonl_fpath: environments/code_gen/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

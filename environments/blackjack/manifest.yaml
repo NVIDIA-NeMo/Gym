@@ -1,0 +1,50 @@
+name: blackjack
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-agent-loop
+domain: games
+description: Multi-step blackjack. The model hits or stands each turn and earns 1
+  for a win, 0 for a draw and -1 for a loss or bust.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+capabilities:
+- reasoning
+- reasoning/probabilistic_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/optimization
+- knowledge
+- knowledge/procedural_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- tool_and_computer_use
+- tool_and_computer_use/env_feedback_interpretation
+domains:
+- sports_recreation
+- statistics
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - -1.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: blackjack
+agent_server: gymnasium_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/blackjack/data/example.jsonl
+  num_repeats: 1
+- name: train
+  type: train
+  jsonl_fpath: environments/blackjack/data/train.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active
