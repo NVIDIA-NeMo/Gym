@@ -1295,6 +1295,21 @@ class NeMoGymChatCompletion(ChatCompletion):
     # Providers can return deployment-specific tiers. Accept any string.
     service_tier: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def keep_malformed_cache_write_unknown(cls, value: Any) -> Any:
+        """Treat a reported ``cache_write_tokens`` that is not an integer as unreported.
+
+        The SDK field would coerce ``true`` to 1 or ``"60"`` to 60, a count the model-call record of the same payload
+        rejects, and a coerced value would hide a valid count in another spelling.
+        """
+        usage = value.get("usage") if isinstance(value, dict) else None
+        details = usage.get("prompt_tokens_details") if isinstance(usage, dict) else None
+        written = details.get("cache_write_tokens") if isinstance(details, dict) else None
+        if written is None or type(written) is int:
+            return value
+        return {**value, "usage": {**usage, "prompt_tokens_details": {**details, "cache_write_tokens": None}}}
+
 
 ########################################
 # Chat Completion API inputs

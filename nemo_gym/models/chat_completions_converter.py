@@ -70,6 +70,7 @@ from nemo_gym.core.responses_api_types import (
     _validate_atomic_token_metadata,
     training_variant_of,
 )
+from nemo_gym.trajectory.model_call_record import extract_cache_write_tokens
 
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,8 @@ def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) ->
         input_tokens=usage.prompt_tokens,
         input_tokens_details=NeMoGymResponseInputTokensDetails(
             cached_tokens=cached_tokens,
-            cache_write_tokens=_usage_detail(usage, "prompt_tokens_details", "cache_write_tokens"),
+            # The model-call record's lookup, so the raw call and its converted usage record the same count.
+            cache_write_tokens=extract_cache_write_tokens(usage.model_dump()),
         ),
         output_tokens=usage.completion_tokens,
         output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),

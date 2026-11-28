@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.trajectory import extract_cache_write_tokens
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
     LiteLLMModelServerConfig,
@@ -171,6 +172,76 @@ class TestNormalizeToResponse:
         assert validated.usage.input_tokens == 10
         assert validated.usage.input_tokens_details.cached_tokens is None
         assert validated.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.parametrize(
+        "cache_write",
+        [
+            {"prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 60}},
+            {"prompt_tokens_details": {"cached_tokens": 100, "cache_creation_tokens": 60}},
+            {"prompt_tokens_details": {"cached_tokens": 100}, "cache_creation_input_tokens": 60},
+        ],
+        ids=["openai", "litellm", "anthropic"],
+    )
+    def test_chat_completion_cache_writes_reach_the_response_usage(self, cache_write) -> None:
+        data = {
+            "object": "chat.completion",
+            "id": "c1",
+            "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 300, "completion_tokens": 20, "total_tokens": 320} | cache_write,
+        }
+
+        result = _normalize_to_response(data)
+
+        assert result["usage"]["input_tokens_details"] == {"cached_tokens": 100, "cache_write_tokens": 60}
+
+    def test_native_response_cache_writes_reach_the_response_usage(self) -> None:
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {
+            "prompt_tokens": 300,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 100, "cache_creation_tokens": 60},
+        }
+
+        result = _normalize_to_response(data)
+
+        assert result["usage"]["input_tokens_details"] == {"cached_tokens": 100, "cache_write_tokens": 60}
+        assert NeMoGymResponse.model_validate(result).usage.input_tokens_details.cache_write_tokens == 60
+
+    @pytest.mark.parametrize(
+        ("usage", "expected"),
+        [
+            (
+                {
+                    "input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 0},
+                    "cache_creation_input_tokens": 60,
+                },
+                60,
+            ),
+            ({"input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": "60"}}, None),
+            ({"input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 60}}, 60),
+            ({"input_tokens_details": {"cached_tokens": 100}}, None),
+        ],
+        ids=["anthropic wins over a canonical zero", "malformed canonical", "canonical", "none reported"],
+    )
+    def test_native_response_cache_writes_match_the_model_call_record(self, usage, expected) -> None:
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {"input_tokens": 300, "output_tokens": 20, "total_tokens": 320} | deepcopy(usage)
+
+        result = _normalize_to_response(data)
+
+        details = NeMoGymResponse.model_validate(result).usage.input_tokens_details
+        assert (details.cached_tokens, details.cache_write_tokens) == (100, expected)
+        # The model-call record of the same payload counts the same writes.
+        assert extract_cache_write_tokens(usage) == expected
+
+    def test_hybrid_response_cache_reads_and_writes_reach_the_response_usage(self) -> None:
+        data = deepcopy(HYBRID_RESPONSE)
+        data["usage"]["input_tokens_details"] = {"cached_tokens": 2, "cache_write_tokens": 3}
+
+        result = _normalize_to_response(data)
+
+        assert result["usage"]["input_tokens_details"] == {"cached_tokens": 2, "cache_write_tokens": 3}
 
     def test_native_response_reasoning_item_normalized(self) -> None:
         """Native response reasoning item missing summary and with output_text is normalized."""

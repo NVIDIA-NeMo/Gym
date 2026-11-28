@@ -77,6 +77,26 @@ def _usage_detail_token(
     return None
 
 
+def extract_cache_write_tokens(usage: Any) -> Optional[int]:
+    """Tokens written to the prompt cache; ``None`` when the provider reported no valid count, never 0.
+
+    Anthropic-compatible top-level ``cache_creation_input_tokens`` wins, an explicit 0 included. Then OpenAI's nested
+    ``cache_write_tokens`` (Responses ``input_tokens_details``, then Chat Completions ``prompt_tokens_details``), then
+    LiteLLM's ``prompt_tokens_details.cache_creation_tokens``.
+    """
+    if not isinstance(usage, Mapping):
+        return None
+    cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
+    # Nested cache writes are a subset of the prompt count, so they never change tokens_in.
+    if cache_creation is None:
+        cache_creation = _usage_detail_token(
+            usage, ("input_tokens_details", "prompt_tokens_details"), ("cache_write_tokens",)
+        )
+    if cache_creation is None:
+        cache_creation = _usage_detail_token(usage, ("prompt_tokens_details",), ("cache_creation_tokens",))
+    return cache_creation
+
+
 def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage.
 
@@ -99,12 +119,6 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     tokens_out = _token_count(usage.get("output_tokens"))
     if tokens_out is None:
         tokens_out = _token_count(usage.get("completion_tokens"))
-    cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
-    if cache_creation is None:
-        # OpenAI reports cache writes as a subset of its prompt count, so they never change tokens_in.
-        cache_creation = _usage_detail_token(
-            usage, ("input_tokens_details", "prompt_tokens_details"), ("cache_write_tokens",)
-        )
     tokens_total = _token_count(usage.get("total_tokens"))
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -118,7 +132,7 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
         "tokens_out": tokens_out,
         "tokens_reasoning": tokens_reasoning,
         "tokens_total": tokens_total,
-        "cache_creation_tokens": cache_creation,
+        "cache_creation_tokens": extract_cache_write_tokens(usage),
     }
 
 

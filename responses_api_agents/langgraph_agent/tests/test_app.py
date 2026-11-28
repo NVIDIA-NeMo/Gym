@@ -127,6 +127,15 @@ class TestReflectionAgent:
         assert usage.output_tokens_details.accepted_prediction_tokens == 1
         assert usage.total_tokens == 62
 
+    def test_aggregate_response_usage_keeps_an_unknown_cache_write_count_unknown(self) -> None:
+        def usage(cache_write_tokens):
+            data = _usage(10, 20, 7, cached_tokens=2)
+            data["input_tokens_details"]["cache_write_tokens"] = cache_write_tokens
+            return NeMoGymResponseUsage.model_validate(data)
+
+        assert aggregate_response_usage([usage(60), usage(40)]).input_tokens_details.cache_write_tokens == 100
+        assert aggregate_response_usage([usage(60), usage(None)]).input_tokens_details.cache_write_tokens is None
+
     def test_response_output_items_drop_internal_input_messages(self) -> None:
         user_prompt = NeMoGymEasyInputMessage(role="user", content="internal prompt")
         assistant_message = NeMoGymResponseOutputMessage(
