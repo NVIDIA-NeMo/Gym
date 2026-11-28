@@ -30,6 +30,11 @@ renders mirror the captured harness exactly, because the candidate reads them.
 | `record_git_state` | false | record whether HEAD moved and how many files are staged or untracked before grading |
 | `uncommit_worktree` | false | before grading, fold commits, staged edits and new files back into unstaged edits, for verifiers that grade `git diff` (SWE-bench Verified) |
 | `offline` | false | before the replay, make hostnames unresolvable in the sandbox, for traces captured with no network (SWE-bench Pro); grading runs in the resources server's own sandbox and stays online |
+| `relay` | false | post-trained candidates: relay the harness's own request to a chat model server, as the reference did, instead of the base-model bridge; a function-calling reply with no tool call is answered with mini's tool-call error rather than resampled |
+| `tool_definitions_json` | none | the tool schema `relay` sends on the function-calling wire (base_model renders its own) |
+| `handover` | target | `target`: hand over at the decisive turn T after replaying 1..T-1. `midpoint`: hand over halfway to T after replaying 1..floor((T-1)/2), adding the skipped turns to the budget so it still ends `max_forwards` turns past T |
+| `handover_fraction` | 0.5 | where the `midpoint` handover sits: after replaying 1..floor(fraction * (T-1)) |
+| `forward_budget` | none | a fixed number of turns after the handover for every row, replacing the per-row budget (the post-trained arms set one per benchmark) |
 | `replay_through_target` | false | gold check, below |
 
 ## Required-commit outcomes

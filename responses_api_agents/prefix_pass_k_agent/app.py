@@ -18,7 +18,9 @@
 The rollout replays the captured turns 1..T-1 into a fresh task container — the
 assistant text verbatim, each action re-executed so the repo reaches the state
 the trajectory was in — and from turn T the candidate model drives the agent to
-finish. The resources server scores whatever patch results, so K rollouts of one
+finish. With `handover: midpoint` the candidate takes over part way to T instead (halfway
+by default; see `handover_fraction`).
+The resources server scores whatever patch results, so K rollouts of one
 row give mean reward (n_pass/K) and true pass@K (n_pass >= 1) from Gym's own
 `num_repeats` aggregation.
 
@@ -33,6 +35,7 @@ must not drift is the *wire* — see `ACTION_FENCE`, `render_observation` and
 
 import asyncio
 import json
+import math
 import re
 import sys
 from shlex import quote
@@ -100,6 +103,11 @@ SUBMIT_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 # max_tokens alone exceeds the window is a config error and must still raise --
 # vLLM words that one without "context length".
 CONTEXT_OVERFLOW = re.compile(r"context length", re.IGNORECASE)
+
+# A chat model server folds a reasoning model's thinking into the reply as a
+# leading <think> block. The harness keeps only the reply -- mini stores
+# `content` and never `reasoning_content` -- so relay mode drops the block.
+THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 
 # `offline` points the sandbox's resolver at a port nothing listens on, so every
 # lookup fails at once, as it does in a container with no network.
@@ -213,11 +221,12 @@ def render_tool_observation(returncode: Any, output: str, exception_info: Option
 
 
 def tool_call_error_observation() -> str:
-    """The function-calling harness's reply to a captured turn with no tool call.
+    """The function-calling harness's reply to a turn with no tool call.
 
-    Only replay uses it. A LIVE generation with no usable call is never answered:
-    the reference bridge returns a 502 and mini retries the identical request, so
-    the failure costs its forward and leaves the transcript untouched.
+    Replay uses it for captured turns, and relay mode for live ones. Through the
+    base-model bridge a live generation with no usable call is never answered:
+    the bridge returns a 502 and mini retries the identical request, so the
+    failure costs its forward and leaves the transcript untouched.
     """
     return (
         "Tool call error:\n\n"
@@ -366,6 +375,21 @@ class PrefixPassKAgentConfig(BaseResponsesAPIAgentConfig):
     max_forwards: int = 3
     step_timeout: int = 60
 
+    # Where the candidate takes over. "target": at the decisive turn T, after
+    # replaying turns 1..T-1 (the base arms). "midpoint": part way from the first
+    # turn to T, after replaying only turns 1..floor(handover_fraction * (T-1)),
+    # so the candidate must find the decisive edit itself. A model that follows instructions needs
+    # no hand-off at the very turn that resolves the task. The turns the
+    # candidate now covers are added to its budget, so `max_forwards` keeps its
+    # meaning: the room left once it reaches turn T.
+    handover: Literal["target", "midpoint"] = "target"
+    # How far toward T the "midpoint" handover sits: 0.5 is halfway.
+    handover_fraction: float = Field(default=0.5, gt=0, lt=1)
+    # A fixed number of turns after the handover for every row, in place of the
+    # budget above. The post-trained arms use one per benchmark: the 90th
+    # percentile of the midpoint budget over that benchmark's rows.
+    forward_budget: Optional[int] = None
+
     # Gold check: replay 1..T INCLUSIVE and take no model turns, which must
     # reproduce the trajectory's resolving patch. Run this before trusting any
     # score — a pass@K of 0 is more often a broken replay than a weak model.
@@ -403,6 +427,19 @@ class PrefixPassKAgentConfig(BaseResponsesAPIAgentConfig):
     # resolving ("Could not resolve host", the capture's own error), while
     # localhost and the exec channel keep working.
     offline: bool = False
+
+    # Post-trained candidates. The reference sent base checkpoints through its
+    # base-model bridge (rendered transcript, steer, prefill), but relayed mini's
+    # own request to a post-trained model unchanged. Relay mode does the same:
+    # the tool schema rides in each function-calling request, and a reply with
+    # no usable tool call is answered with mini's tool-call error and kept in
+    # the transcript, as mini keeps it, instead of being resampled -- the
+    # bridge's 502-and-retry has no counterpart on the relay path. Pair it with
+    # a chat model server (see benchmarks/prefix_pass_k/post_trained_model.yaml).
+    relay: bool = False
+    # The tool schema relay mode sends on the function-calling wire: a JSON array
+    # of OpenAI tool definitions, as base_model's `tool_definitions_json`.
+    tool_definitions_json: Optional[str] = None
 
     debug: bool = False
 
@@ -751,6 +788,8 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         """One model turn over chat completions. Returns (assistant message, finish_reason),
         or (None, "context_overflow") when the transcript no longer fits the model."""
         params: Dict[str, Any] = {"model": body.model or self.config.model_server.name, "messages": messages}
+        if self.config.relay and self.config.tool_definitions_json:
+            params["tools"] = json.loads(self.config.tool_definitions_json)
         if body.temperature is not None:
             params["temperature"] = body.temperature
         if body.top_p is not None:
@@ -779,8 +818,8 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         request: Request,
         messages: List[Dict[str, Any]],
         body: NeMoGymResponseCreateParamsNonStreaming,
-    ) -> tuple[str, Any]:
-        """One model turn. Returns (assistant text, usage)."""
+    ) -> tuple[str, bool]:
+        """One model turn. Returns (assistant text, whether the generation was cut off at max_output_tokens)."""
         params = body.model_copy(update={"input": messages})
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
@@ -793,10 +832,17 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         text = ""
         for item in parsed.output or []:
             dumped = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+            if dumped.get("type", "message") != "message":
+                # A reasoning model's thinking arrives as its own item; the
+                # harness reads only the reply.
+                continue
             for part in dumped.get("content") or []:
                 if isinstance(part, dict) and part.get("text"):
                     text += part["text"]
-        return text, parsed.usage
+        # A Responses reply carries no finish_reason; the model server reports a cut-off
+        # generation as an incomplete response instead.
+        details = parsed.incomplete_details
+        return text, details is not None and details.reason == "max_output_tokens"
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -834,15 +880,25 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
             # Commands the sandbox failed to run at all; the first one aborts the attempt.
             "exec_errors": 0,
         }
+        prefix = spec.get("prefix") or []
+        # The gold check replays the whole prefix whatever the handover: it vouches
+        # for the row, not the arm.
+        midpoint = self.config.handover == "midpoint" and not self.config.replay_through_target
+        # The epsilon keeps float error from flooring an exact product one turn short.
+        n_replayed = math.floor(len(prefix) * self.config.handover_fraction + 1e-9) if midpoint else len(prefix)
+        budget = self.config.max_forwards + len(prefix) - n_replayed
+        if self.config.forward_budget is not None and not self.config.replay_through_target:
+            budget = self.config.forward_budget
+        stats.update({"handover": self.config.handover, "handover_turn": n_replayed + 1, "forward_budget": budget})
 
         try:
-            await self._replay_prefix(sandbox, messages, spec.get("prefix") or [], stats)
+            await self._replay_prefix(sandbox, messages, prefix[:n_replayed], stats)
 
             if self.config.replay_through_target:
                 # Gold check: play the captured decisive turn instead of generating.
                 stats["submitted"] = await self._replay_step(sandbox, messages, spec.get("target") or {})
             elif self.config.wire == "function_calling":
-                for _ in range(self.config.max_forwards):
+                for _ in range(budget):
                     message, finish_reason = await self._generate_chat(request, messages, body)
                     stats["forwards"] += 1
                     stats["candidate_turns"].append(
@@ -865,14 +921,20 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                     tool_calls = message.get("tool_calls")
                     commands = tool_call_commands(tool_calls)
                     if not commands:
-                        # Resample from the SAME transcript: the reference bridge
-                        # answers an unparseable generation with a 502 and mini
-                        # retries the identical request, so the failure costs its
-                        # forward and the model never sees it.
+                        # Bridge: resample from the SAME transcript -- the reference
+                        # bridge answers an unparseable generation with a 502 and
+                        # mini retries the identical request, so the failure costs
+                        # its forward and the model never sees it. Relay: mini keeps
+                        # the reply and answers it with its tool-call error.
                         stats["unparsed_forwards"] += 1
                         stats["truncated_forwards"] += finish_reason == "length"
+                        if self.config.relay:
+                            reply = THINK_BLOCK.sub("", message.get("content") or "", count=1)
+                            messages.append({"role": "assistant", "content": reply})
+                            messages.append({"role": "user", "content": tool_call_error_observation()})
                         continue
-                    messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+                    content = THINK_BLOCK.sub("", message.get("content") or "", count=1) if self.config.relay else None
+                    messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
                     for call_id, command in commands:
                         observation, submitted = await self._exec(sandbox, command)
                         messages.append({"role": "tool", "tool_call_id": call_id, "content": observation})
@@ -884,14 +946,15 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                     if stats["submitted"]:
                         break
             else:
-                for _ in range(self.config.max_forwards):
-                    text, _usage = await self._generate(request, messages, body)
+                for _ in range(budget):
+                    text, truncated = await self._generate(request, messages, body)
                     stats["forwards"] += 1
                     stats["candidate_turns"].append({"content": text})
                     messages.append({"role": "assistant", "content": text})
                     action = parse_action(text)
                     if action is None:
                         stats["unparsed_forwards"] += 1
+                        stats["truncated_forwards"] += truncated
                         n_actions = len(ACTION_FENCE.findall(text or ""))
                         messages.append({"role": "user", "content": format_error_observation(n_actions)})
                         continue

@@ -202,6 +202,11 @@ def _bare_agent(**config):
         step_timeout=30,
         max_forwards=3,
         replay_through_target=False,
+        handover="target",
+        handover_fraction=0.5,
+        forward_budget=None,
+        relay=False,
+        tool_definitions_json=None,
         debug=False,
         model_server=SimpleNamespace(name="policy_model"),
         outcome_policy=AGENT._default_commit_outcome_policy(),
@@ -360,13 +365,161 @@ class TestFunctionCallingReplay:
             {"content": None, "tool_calls": [submit], "finish_reason": "tool_calls"},
         ]
 
+    def test_relay_answers_a_reply_without_a_tool_call_as_mini_does(self):
+        # A post-trained model is relayed mini's own request, and mini keeps a
+        # reply with no tool call and answers it with its tool-call error.
+        agent = _bare_agent(relay=True)
+        agent._session_id_to_sandbox["s"] = FakeSandbox(_result(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"))
+        submit = _call("c", "bash", '{"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}')
+        replies = iter(
+            [
+                ({"content": "Let me look first."}, "stop"),
+                ({"content": "Submitting.", "tool_calls": [submit]}, "tool_calls"),
+            ]
+        )
+        seen = []
+
+        async def fake_generate_chat(request, messages, body):
+            seen.append(copy.deepcopy(messages))
+            return next(replies)
+
+        object.__setattr__(agent, "_generate_chat", fake_generate_chat)
+        request = SimpleNamespace(
+            session={AGENT.SESSION_ID_KEY: "s"},
+            state=SimpleNamespace(_ng_prefix_pass_k_row={"prefix_pass_k": {"target_turn": 1, "prefix": []}}),
+        )
+        body = SimpleNamespace(
+            input=[{"role": "user", "content": "task"}],
+            model=None,
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+        asyncio.run(agent.responses(request, body))
+
+        assert seen[1] == [
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "Let me look first."},
+            {"role": "user", "content": AGENT.tool_call_error_observation()},
+        ]
+        stats = agent._session_id_to_stats["s"]
+        assert (stats["forwards"], stats["unparsed_forwards"], stats["submitted"]) == (2, 1, True)
+
+    def test_relay_drops_the_thinking_a_chat_server_folds_into_the_reply(self):
+        agent = _bare_agent(relay=True)
+        agent._session_id_to_sandbox["s"] = FakeSandbox(_result(stdout="ok\n"))
+        look = _call("c1", "bash", '{"command": "ls"}')
+        replies = iter(
+            [({"content": "<think>the bug is in x</think>Checking.", "tool_calls": [look]}, "tool_calls")]
+            + [({"content": "<think>still thinking</think>", "tool_calls": None}, "stop")] * 2
+        )
+        seen = []
+
+        async def fake_generate_chat(request, messages, body):
+            seen.append(copy.deepcopy(messages))
+            return next(replies)
+
+        object.__setattr__(agent, "_generate_chat", fake_generate_chat)
+        request = SimpleNamespace(
+            session={AGENT.SESSION_ID_KEY: "s"},
+            state=SimpleNamespace(_ng_prefix_pass_k_row={"prefix_pass_k": {"target_turn": 1, "prefix": []}}),
+        )
+        body = SimpleNamespace(
+            input=[{"role": "user", "content": "task"}],
+            model=None,
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+        asyncio.run(agent.responses(request, body))
+
+        # What the model sees next carries the replies, never the thinking.
+        assert seen[1][1] == {"role": "assistant", "content": "Checking.", "tool_calls": [look]}
+        assert seen[2][3] == {"role": "assistant", "content": ""}
+        # The record keeps the raw reply, so nothing is lost for analysis.
+        assert agent._session_id_to_stats["s"]["candidate_turns"][0]["content"].startswith("<think>")
+
+    def test_relay_sends_the_tool_schema(self):
+        tools = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+        posted = []
+
+        async def post(**kwargs):
+            posted.append(kwargs["json"])
+            return SimpleNamespace()
+
+        async def no_error(response):
+            return None
+
+        async def reply(response):
+            return {"choices": [{"message": {"content": "", "tool_calls": []}, "finish_reason": "stop"}]}
+
+        body = SimpleNamespace(model=None, temperature=None, top_p=None, max_output_tokens=None)
+        request = SimpleNamespace(cookies={})
+        for relay in (False, True):
+            agent = _bare_agent(relay=relay, tool_definitions_json=json.dumps(tools))
+            object.__setattr__(agent, "server_client", SimpleNamespace(post=post))
+            object.__setattr__(agent, "url_path_for_request", lambda path, request: path)
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(AGENT, "raise_for_status", no_error)
+                patch.setattr(AGENT, "get_response_json", reply)
+                asyncio.run(agent._generate_chat(request, [{"role": "user", "content": "task"}], body))
+        # The bridge renders its own tool block; a chat server needs the schema in the request.
+        assert "tools" not in posted[0]
+        assert posted[1]["tools"] == tools
+
+    def test_reasoning_is_not_part_of_the_reply(self):
+        response = {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 0,
+            "model": "m",
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": "maybe ```mswea_bash_command\nrm -rf /\n```"}],
+                },
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "```mswea_bash_command\nls\n```", "annotations": []}],
+                },
+            ],
+        }
+
+        async def post(**kwargs):
+            return SimpleNamespace()
+
+        async def no_error(response):
+            return None
+
+        async def reply(response):
+            return response_json
+
+        response_json = response
+        agent = _bare_agent(wire="backticks")
+        object.__setattr__(agent, "server_client", SimpleNamespace(post=post))
+        object.__setattr__(agent, "url_path_for_request", lambda path, request: path)
+        body = SimpleNamespace(model_copy=lambda update: update)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(AGENT, "raise_for_status", no_error)
+            patch.setattr(AGENT, "get_response_json", reply)
+            text, _ = asyncio.run(agent._generate(SimpleNamespace(cookies={}), [], body))
+        assert text == "```mswea_bash_command\nls\n```"
+
     def test_backticks_forwards_are_recorded(self):
         agent = _bare_agent(wire="backticks")
         agent._session_id_to_sandbox["s"] = FakeSandbox(_result(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"))
         texts = iter(["no fence here", "```mswea_bash_command\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"])
 
         async def fake_generate(request, messages, body):
-            return next(texts), {}
+            return next(texts), False
 
         object.__setattr__(agent, "_generate", fake_generate)
         request = SimpleNamespace(
@@ -461,6 +614,130 @@ class TestFunctionCallingReplay:
         )
         with pytest.raises(AGENT.ClientResponseError):
             asyncio.run(agent.responses(request, body))
+
+
+class TestHandover:
+    """Backticks rows whose prefix is turns 1..T-1 = 5 numbered actions and whose decisive turn T = 6."""
+
+    PREFIX = [{"content": f"```mswea_bash_command\necho step{i}\n```", "action": f"echo step{i}"} for i in range(1, 6)]
+    TARGET = {"content": "```mswea_bash_command\necho target\n```", "action": "echo target"}
+
+    def _rollout(self, **config):
+        agent = _bare_agent(wire="backticks", **config)
+        sandbox = FakeSandbox(_result(stdout="ok\n"))
+        agent._session_id_to_sandbox["s"] = sandbox
+        seen = []
+
+        async def fake_generate(request, messages, body):
+            seen.append(len(messages))
+            return "```mswea_bash_command\nls\n```", False
+
+        object.__setattr__(agent, "_generate", fake_generate)
+        row = {"prefix_pass_k": {"target_turn": 6, "prefix": self.PREFIX, "target": self.TARGET}}
+        request = SimpleNamespace(
+            session={AGENT.SESSION_ID_KEY: "s"}, state=SimpleNamespace(_ng_prefix_pass_k_row=row)
+        )
+        body = SimpleNamespace(
+            input=[{"role": "user", "content": "task"}],
+            model=None,
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+        asyncio.run(agent.responses(request, body))
+        replayed = [c for c in sandbox.commands if "echo step" in c or "echo target" in c]
+        return agent._session_id_to_stats["s"], replayed, seen
+
+    def test_target_replays_the_whole_prefix_and_keeps_the_budget(self):
+        stats, replayed, seen = self._rollout()
+        assert len(replayed) == 5
+        assert (stats["handover_turn"], stats["forward_budget"], stats["forwards"]) == (6, 3, 3)
+        # The task, then one assistant/observation pair per replayed turn.
+        assert seen[0] == 1 + 2 * 5
+
+    def test_midpoint_replays_half_and_adds_the_skipped_turns_to_the_budget(self):
+        stats, replayed, seen = self._rollout(handover="midpoint")
+        # floor((T-1)/2) = 2 turns replayed: the candidate takes over at turn 3 and
+        # may run the 3 skipped turns plus max_forwards.
+        assert [c for c in replayed if "step3" in c] == []
+        assert len(replayed) == 2
+        assert (stats["handover"], stats["handover_turn"], stats["forward_budget"]) == ("midpoint", 3, 6)
+        assert stats["forwards"] == 6
+        assert seen[0] == 1 + 2 * 2
+
+    def test_handover_fraction_moves_the_handover_toward_the_target(self):
+        stats, replayed, seen = self._rollout(handover="midpoint", handover_fraction=0.8)
+        # floor(0.8 * 5) = 4 turns replayed: the candidate takes over at turn 5.
+        assert len(replayed) == 4 and "step4" in replayed[-1]
+        assert (stats["handover_turn"], stats["forward_budget"], stats["forwards"]) == (5, 4, 4)
+        assert seen[0] == 1 + 2 * 4
+
+    def test_a_fixed_forward_budget_replaces_the_per_row_one(self):
+        stats, replayed, _ = self._rollout(handover="midpoint", forward_budget=10)
+        assert len(replayed) == 2
+        assert (stats["handover_turn"], stats["forward_budget"], stats["forwards"]) == (3, 10, 10)
+
+    def test_the_gold_check_replays_through_the_target_whatever_the_handover(self):
+        stats, replayed, seen = self._rollout(handover="midpoint", replay_through_target=True)
+        assert len(replayed) == 6 and "echo target" in replayed[-1]
+        assert (stats["handover_turn"], stats["forwards"], seen) == (6, 0, [])
+
+
+def _responses_reply(text, *, truncated):
+    """A /v1/responses reply as responses_api_models/base_model builds one for the backticks wire."""
+    return {
+        "id": "resp_1",
+        "created_at": 0,
+        "model": "model",
+        "object": "response",
+        "status": "incomplete" if truncated else "completed",
+        "incomplete_details": {"reason": "max_output_tokens"} if truncated else None,
+        "output": [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
+        "parallel_tool_calls": False,
+        "tool_choice": "none",
+        "tools": [],
+    }
+
+
+class TestGenerate:
+    """A Responses reply has no finish_reason: a cut-off generation arrives as an incomplete response."""
+
+    def _generate(self, monkeypatch, reply):
+        agent = _bare_agent(wire="backticks")
+
+        async def post(**kwargs):
+            return SimpleNamespace()
+
+        async def no_error(response):
+            return None
+
+        async def as_json(response):
+            return reply
+
+        object.__setattr__(agent, "server_client", SimpleNamespace(post=post))
+        monkeypatch.setattr(AGENT, "raise_for_status", no_error)
+        monkeypatch.setattr(AGENT, "get_response_json", as_json)
+        messages = [{"role": "user", "content": "task"}]
+        body = AGENT.NeMoGymResponseCreateParamsNonStreaming(input=messages)
+        return asyncio.run(agent._generate(SimpleNamespace(cookies={}), messages, body))
+
+    def test_a_generation_cut_off_at_max_output_tokens_is_truncated(self, monkeypatch):
+        text = "```mswea_bash_command\ncat <<'EOF' > fix.py\nwhile"
+        assert self._generate(monkeypatch, _responses_reply(text, truncated=True)) == (text, True)
+
+    def test_a_completed_generation_is_not(self, monkeypatch):
+        assert self._generate(monkeypatch, _responses_reply("no fence here", truncated=False)) == (
+            "no fence here",
+            False,
+        )
 
 
 class TestGitState:

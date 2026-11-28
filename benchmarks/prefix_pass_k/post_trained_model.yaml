@@ -1,0 +1,40 @@
+# Chat model server for the post-trained prefix pass@K arms (*_post_trained.yaml).
+#
+# The base arms send a raw checkpoint through a bridge -- a rendered transcript,
+# a steer naming the repo root, a primer, a prefilled action fence, a stop list,
+# temperature 0.6 and 1024 tokens -- because a base model has no chat template.
+# A post-trained model has one, so none of that applies. As the reference did
+# for post-trained candidates, the agent's own request is relayed to the model
+# unchanged: through its chat template, with native tool calls on the
+# function-calling wire, at the model's own sampling defaults (`relay` on the
+# agent; see responses_api_agents/prefix_pass_k_agent).
+#
+# The function-calling arm (DeepSWE) needs a server that parses tool
+# calls: vLLM with --enable-auto-tool-choice and a --tool-call-parser.
+policy_model_post_trained:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      # Reason before every reply, whatever the chat template's own default. A
+      # template that names its switch differently ignores this; override per
+      # model with ++policy_model_post_trained.responses_api_models.vllm_model.chat_template_kwargs=...
+      # The thinking must come back apart from the reply: start vLLM with a
+      # --reasoning-parser, or it is read as part of the reply.
+      chat_template_kwargs:
+        enable_thinking: true
+      # Cap each turn, thinking included. The agent sends no max_tokens, and
+      # uncapped a reasoning model can loop to the end of its context: on
+      # one run, 64 such turns held every slot of the server for 25
+      # minutes and stalled the run. A turn that hits the cap counts as
+      # truncated (finish_reason "length").
+      extra_body:
+        max_tokens: 32768
+      # A transcript that outgrows the context must reach the agent as an error,
+      # which ends the rollout on the prefix's state; by default this server
+      # answers it with an empty reply instead.
+      propagate_context_overflow_errors: true

@@ -1,0 +1,51 @@
+# Prefix pass@K on SWE-bench Verified for POST-TRAINED (chat) checkpoints (backticks wire).
+#
+# The rows, the replay settings and the grading are those of verified.yaml; only
+# how the candidate is called and where it takes over differ:
+#   * relay: the harness's own request goes to the model unchanged, through its
+#     chat template -- no steer, primer, prefill or stop list (see
+#     post_trained_model.yaml);
+#   * handover: midpoint: the candidate takes over halfway from the first turn
+#     to the decisive turn T, after replaying turns 1..floor((T-1)/2), and must
+#     find the decisive edit itself;
+#   * forward_budget: 10 turns after the handover for every row, the 90th
+#     percentile over this benchmark's rows of the midpoint budget (the skipped
+#     turns plus max_forwards, 3).
+#
+#   gym env start \
+#       --config benchmarks/prefix_pass_k/verified_post_trained.yaml \
+#       --config responses_api_models/base_model/configs/base_model.yaml \
+#       --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+#       ++policy_base_url=<endpoint>/v1 ++policy_model_name=<served id> ++policy_api_key=<key>
+#   gym eval run --no-serve --agent prefix_pass_k_agent_verified_post_trained \
+#       --input benchmarks/prefix_pass_k/data/prefix_pass_k_verified_benchmark.jsonl ...
+config_paths:
+- benchmarks/prefix_pass_k/verified.yaml
+- benchmarks/prefix_pass_k/post_trained_model.yaml
+
+prefix_pass_k_agent_verified_post_trained:
+  _inherit_from: prefix_pass_k_agent
+  responses_api_agents:
+    prefix_pass_k_agent:
+      resources_server:
+        type: resources_servers
+        name: prefix_pass_k_verified_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model_post_trained
+      relay: true
+      handover: midpoint
+      forward_budget: 10
+      interpreter: [bash, -c]
+      exec_env:
+        LANG: C.UTF-8
+        LC_ALL: C.UTF-8
+        PAGER: cat
+        MANPAGER: cat
+        LESS: -R
+        PIP_PROGRESS_BAR: "off"
+        TQDM_DISABLE: "1"
+        BASH_ENV: /root/.bashrc
+      record_git_state: true
+      uncommit_worktree: true
+      datasets: []
