@@ -39,6 +39,7 @@ from environment_servers.harbor.tests.conftest import (
     agent_response,
     archive_of,
     make_server,
+    reported_conversation,
     write_image_config,
 )
 from environment_servers.harbor.verifier import COLLECT_HOOK_GRACE_S
@@ -901,6 +902,72 @@ async def test_the_previous_turns_grading_files_are_gone_before_the_next_agent_s
     assert "rm -rf -- /logs/agent/trajectory.json" in second[reset]["command"]
 
 
+# The command that empties /logs/agent before a fresh turn's agent, as Harbor's `_reset_agent_logs_for_step` does.
+AGENT_LOGS_RESET = "find /logs/agent -mindepth 1 -delete"
+
+
+@pytest.mark.parametrize("mode", ["shared", "separate", "continue"])
+async def test_a_fresh_turns_agent_finds_none_of_the_previous_harnesss_logs(tmp_path, monkeypatch, mode):
+    """Codex leaves codex.txt and its session rollouts in /logs/agent after every turn, and they hold that turn's
+    conversation. Harbor 0.22.0 empties /logs/agent before every step that does not resume, whatever mode the
+    previous step verified in, so the next fresh agent cannot read them and the next verifier sees its own turn's
+    alone. A continued session keeps them, as a resumed Harbor step does."""
+    steps = {"plan": "P", "build": "B", "check": "C"}
+    if mode == "separate":
+        artifacts = ArtifactSandbox(
+            present={"/app/out.txt": "file"}, archives={"/app": archive_of({"out.txt": "v1\n"})}
+        )
+        server, task, sandbox, _ = multi_turn_server(
+            tmp_path,
+            monkeypatch,
+            SEPARATE_STEPS,
+            steps,
+            head=SEPARATE_STEPS_HEAD,
+            sandbox=artifacts,
+            base=TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'),
+        )
+        wire_verifier_sandboxes(server, monkeypatch)
+    else:
+        three = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n[[steps]]\nname = "check"\n'
+        sessions = {"turn_sessions": "continue"} if mode == "continue" else {}
+        server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, three, steps, **sessions)
+        if mode == "continue":
+            server.server_client.continuation_capabilities = CONTINUES
+    # The names /logs/agent holds: each agent turn leaves Codex's logs there, and only a root reset empties it.
+    held: set[str] = set()
+    execute = sandbox.exec
+
+    async def exec(command, **kwargs):
+        if AGENT_LOGS_RESET in command and kwargs.get("user") == "root":
+            held.clear()
+        return await execute(command, **kwargs)
+
+    sandbox.exec = exec
+    found: list[list[str]] = []
+
+    def agent_turn():
+        found.append(sorted(held))
+        held.update({"codex.txt", f"sessions/2026/11/16/rollout-{len(found)}.jsonl"})
+
+    server.server_client.turn_hooks.append(agent_turn)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    resets = sum(AGENT_LOGS_RESET in record["command"] for record in sandbox.execs)
+    if mode == "continue":
+        assert resets == 0
+        assert found == [
+            [],
+            ["codex.txt", "sessions/2026/11/16/rollout-1.jsonl"],
+            ["codex.txt", "sessions/2026/11/16/rollout-1.jsonl", "sessions/2026/11/16/rollout-2.jsonl"],
+        ]
+    else:
+        # One reset before each turn after the first; none before the first, where no agent has run yet.
+        assert resets == 2
+        assert found == [[], [], []]
+
+
 async def test_a_sandbox_that_cannot_clear_the_grading_files_ends_the_episode_before_the_next_agent(
     tmp_path, monkeypatch
 ):
@@ -1015,6 +1082,52 @@ async def test_each_turn_seeds_its_own_budget_and_hands_its_own_transcript_to_th
     assert [turn.verifier_network for turn in result.turns] == ["public"] * 3
     assert len({turn.verifier_logs_dir for turn in result.turns}) == 3
     assert all((Path(turn.verifier_logs_dir) / "trajectory.json").is_file() for turn in result.turns)
+
+
+async def test_each_fresh_turn_hands_its_verifier_the_conversation_its_model_received(tmp_path, monkeypatch):
+    """A harness that reports the model's conversation (Codex) gets each fresh turn's trajectory.json from that
+    turn's own close, as Harbor's agent writes the file after each step."""
+    steps = {"plan": "Agree on a plan.", "build": "Build it.", "check": "Hand off."}
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, THREE_STEPS, steps)
+    client = server.server_client
+    client.reports_model_conversation = True
+    results = [f"Process exited with code 0\nOutput:\n{name}\n" for name in steps]
+    pending = list(results)
+
+    def report_this_turn():
+        bundle = reported_conversation()
+        bundle["records"][0]["conversation"][3]["output"] = pending.pop(0)
+        client.observations = bundle
+
+    client.turn_hooks.append(report_this_turn)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.result is not None, response.failure
+    transcripts = [json.loads(data) for data in uploaded_files(sandbox, "trajectory.json")]
+    assert [transcript["steps"][2]["observation"]["results"][0]["content"] for transcript in transcripts] == results
+    assert {transcript["extra"]["nemo_gym"]["source"]["format"] for transcript in transcripts} == {
+        "agent_observations"
+    }
+
+
+async def test_a_continued_sessions_turns_keep_their_response_transcripts(tmp_path, monkeypatch):
+    """A continued session reports its observations once, at its close after the last step, and they span every
+    step; each step's verifier reads that step's response transcript, as without the declaration."""
+    steps = {"plan": "Agree on a plan.", "build": "Build it.", "check": "Hand off."}
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, THREE_STEPS, steps, turn_sessions="continue")
+    server.server_client.continuation_capabilities = CONTINUES
+    server.server_client.reports_model_conversation = True
+    server.server_client.observations = reported_conversation()
+
+    response = await server.run_request(request_for(task))
+
+    assert response.result is not None, response.failure
+    transcripts = [json.loads(data) for data in uploaded_files(sandbox, "trajectory.json")]
+    assert [transcript["steps"][0]["message"] for transcript in transcripts] == list(steps.values())
+    assert {transcript["extra"]["nemo_gym"]["source"]["format"] for transcript in transcripts} == {
+        "responses_transcript"
+    }
 
 
 async def test_the_task_deadline_counts_every_turn(tmp_path, monkeypatch):

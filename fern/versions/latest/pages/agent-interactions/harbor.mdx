@@ -21,7 +21,8 @@ row, the server runs one episode:
 2. **Activate.** Open an agent session on the configured Agent Server, hand it access to the sandbox and send it
    the instruction. The harness works in the sandbox until it finishes or runs out of time.
 3. **Close.** Close the agent session and keep what the agent observed. The agent leaves the sandbox to the server.
-4. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json`, upload the verifier to `/tests` and
+4. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json` (from the conversation the model
+   received, for a harness that reports it, such as `codex_agent`), upload the verifier to `/tests` and
    run it in the same sandbox, or in a fresh one when the task or the server asks for separate verification. A
    separate verifier image that ships `/tests/test.sh` gets no upload, unless a Python verifier grades the task.
    Read the reward from `/logs/verifier/reward.json`, or from `reward.txt` when there is no `reward.json`.

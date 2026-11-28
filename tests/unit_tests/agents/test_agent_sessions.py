@@ -278,6 +278,28 @@ def test_seed_response_carries_the_harness_task_tool_context_declaration() -> No
     assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).supports_task_tool_context is False
 
 
+def test_seed_response_carries_the_model_conversation_declaration_only_when_made() -> None:
+    """A harness that reports the model's own conversation says so in its seed; every other seed reply is
+    unchanged on the wire, so an environment server keeps exporting their response output."""
+
+    class _Seeded(_Agent):
+        async def _seed_agent_session_state(self, body):
+            return AgentSessionState(request=body)
+
+    class _ReportsConversation(_Seeded):
+        def reports_model_conversation(self) -> bool:
+            return True
+
+    for agent_cls, declared in ((_Seeded, False), (_ReportsConversation, True)):
+        agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        response = asyncio.run(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
+        assert response.reports_model_conversation is declared
+        wire = response.model_dump(mode="json")
+        assert ("reports_model_conversation" in wire) is declared
+        assert AgentSeedSessionResponse.model_validate(wire) == response
+    assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).reports_model_conversation is False
+
+
 def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
     """The environment server hands the task's `[agent].timeout_sec` to the harness in the seed."""
     seed = _seed_request()
