@@ -6,11 +6,13 @@ import asyncio
 import io
 import json
 import logging
+import re
 import tarfile
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
+from time import time
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
@@ -26,7 +28,13 @@ from nemo_gym.agents import (
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
-from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 from responses_api_agents.claude_code_agent.observability import (
     ClaudeCodeTranscripts,
     extract_claude_code_observations,
@@ -35,6 +43,8 @@ from responses_api_agents.claude_code_agent.observability import (
 
 
 LOG = logging.getLogger(__name__)
+# The ``uuid`` key of a saved Claude Code transcript record, as ``grep -o`` prints it.
+_SAVED_UUID = re.compile(r'"uuid": ?"([^"]+)"')
 
 
 class HarnessProcessInfo(BaseModel):
@@ -120,10 +130,172 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     stderr: str = ""
+    # Multi-turn continuation: the activation running now, the Claude Code session the next one resumes, the system
+    # prompt every activation passes again, and the session's cumulative evidence.
+    activation_id: int | None = None
+    harness_session_id: str | None = None
+    system_prompt: str | None = None
+    instructions_set: bool = False
+    # Whether any activation launched Claude Code, so a saved conversation may exist.
+    conversation_started: bool = False
+    # The last activation whose evidence was recorded.
+    recorded_activation: int | None = None
+    trajectory: TrajectoryRecord | None = None
+    observations_so_far: AgentObservationBundle | None = None
+    # Transcript records that earlier activations already reported.
+    _seen_transcript_records: set[str] = field(default_factory=set, init=False, repr=False)
+
+    @property
+    def is_continuation(self) -> bool:
+        """Whether the seed opted into multi-turn continuation."""
+        return self.request.continuation is not None
+
+    @property
+    def config_dir(self) -> str:
+        """Claude Code's ``CLAUDE_CONFIG_DIR``, which holds its saved sessions across activations."""
+        return f"{self.session.root_dir}/config"
+
+    @property
+    def invocation_prefix(self) -> str:
+        """Identity of the current activation, unique within the agent session."""
+        assert self.activation_id is not None
+        return f"{self.request.agent_session_id}:activation-{self.activation_id}"
+
+    async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
+        """Rearm the supervisor in a fresh directory; the saved Claude Code session stays in ``config_dir``."""
+        assert self.is_continuation
+        self.activation_id = activation_id
+        self.runtime_info = None
+        self.stderr = ""
+        directory = f"{self.session.root_dir}/activation-{activation_id}"
+        await self.session.begin_activation(session_dir=directory, timeout=timeout)
+        result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
+        if result.error_type == "timeout":
+            raise TimeoutError("Claude activation directory preparation timed out")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot prepare Claude activation directory: {result.stderr}")
+        await self._mark_saved_transcript_records(timeout=timeout)
+
+    async def _mark_saved_transcript_records(self, *, timeout: float) -> None:
+        """Mark every transcript record saved before this launch as seen: the high-water mark of earlier activations.
+
+        Records of an earlier activation whose transcripts could not be collected are then not reported as this one's.
+        """
+        projects = quote(f"{self.config_dir}/projects")
+        result = await self.session.sandbox.exec(
+            f'if [ -d {projects} ]; then grep -rhoE \'"uuid": ?"[^"]+"\' {projects} || [ "$?" = 1 ]; fi',
+            cwd="/",
+            timeout_s=timeout,
+        )
+        if result.error_type == "timeout":
+            raise TimeoutError("Reading the saved Claude transcript timed out")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot read the saved Claude transcript: {result.stderr}")
+        self._seen_transcript_records.update(_SAVED_UUID.findall(result.stdout or ""))
+
+    def new_transcript_records(self, transcripts: ClaudeCodeTranscripts) -> ClaudeCodeTranscripts:
+        """Keep the records that no earlier activation reported, and remember them.
+
+        A resumed Claude Code session appends to the transcript it resumed, so an activation's evidence is the
+        records added since the previous activation.
+        """
+        records = []
+        for record in transcripts.records:
+            key = record.get("uuid")
+            key = key if isinstance(key, str) and key else json.dumps(record, sort_keys=True)
+            if key not in self._seen_transcript_records:
+                self._seen_transcript_records.add(key)
+                records.append(record)
+        return ClaudeCodeTranscripts(records=records, gaps=transcripts.gaps, files_read=transcripts.files_read)
+
+    def record_activation(
+        self,
+        bundle: AgentObservationBundle,
+        *,
+        root_sessions: set[str],
+        status: str,
+        error_type: str | None,
+        question: str,
+        answer: str | None,
+    ) -> AgentObservationBundle:
+        """Add one activation's evidence to the session's observations and trajectory, and return it.
+
+        Each activation of a resumed session reports the same Claude Code session id, so its root invocation is
+        renamed ``<agent session>:activation-<N>:<Claude session>`` and tagged with the activation. An activation
+        that left no transcript gets a root invocation with its outcome alone.
+        """
+        assert self.activation_id is not None
+        self.recorded_activation = self.activation_id
+        renamed = {root: f"{self.invocation_prefix}:{root}" for root in root_sessions}
+
+        def rename(value: object) -> object:
+            if isinstance(value, dict):
+                return {
+                    key: renamed.get(item, item)
+                    if key in {"invocation_id", "parent_invocation_id"} and isinstance(item, str)
+                    else rename(item)
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [rename(item) for item in value]
+            return value
+
+        bundle = AgentObservationBundle.model_validate(rename(bundle.model_dump(mode="json")))
+        roots = [
+            record
+            for record in bundle.records
+            if isinstance(record, AgentInvocation) and record.invocation_id in renamed.values()
+        ]
+        if not roots:
+            invocation_id = self.invocation_prefix
+            if self.harness_session_id is not None:
+                invocation_id += f":{self.harness_session_id}"
+            roots = [AgentInvocation(invocation_id=invocation_id, status=status, error_type=error_type)]
+            bundle.records.insert(0, roots[0])
+        for record in roots:
+            record.activation_id = self.activation_id
+            record.harness_session_id = self.harness_session_id
+
+        previous = self.observations_so_far
+        self.observations_so_far = AgentObservationBundle(
+            source=bundle.source,
+            records=[*(previous.records if previous else []), *bundle.records],
+            gaps=[*(previous.gaps if previous else []), *bundle.gaps],
+        )
+        so_far = self.trajectory or TrajectoryRecord(
+            task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
+        )
+        root = roots[0]
+        self.trajectory = so_far.model_copy(
+            update={
+                "invocations": [
+                    *so_far.invocations,
+                    *(record for record in bundle.records if isinstance(record, AgentInvocation)),
+                ],
+                "turns": [
+                    *so_far.turns,
+                    TrajectoryTurn(
+                        invocation_id=root.invocation_id,
+                        activation_id=self.activation_id,
+                        task_id=so_far.task_id,
+                        rollout_id=so_far.rollout_id,
+                        turn_no=1,
+                        timestamp=time(),
+                        question=question,
+                        answer=answer,
+                        step_count=len(root.model_calls),
+                        model_calls=list(root.model_calls),
+                    ),
+                ],
+                "gaps": [*so_far.gaps, *bundle.gaps],
+            }
+        )
+        return self.observations_so_far
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage runner input using the shared file-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
+        """Stage runner input at ``name``, an absolute path or one relative to the activation's directory."""
+        path = name if name.startswith("/") else f"{self.session.session_dir}/{name}"
+        await upload_text(self.session.sandbox, path=path, text=json.dumps(payload))
 
     async def read_text(self, name: str) -> str:
         """Read a session artifact using file transfer."""
@@ -136,7 +308,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
             await asyncio.to_thread(stage_skills, path, skills)
             for source in sorted(skills.rglob("*")):
                 if source.is_file():
-                    target = f"{self.session.session_dir}/config/skills/{source.relative_to(skills).as_posix()}"
+                    target = f"{self.config_dir}/skills/{source.relative_to(skills).as_posix()}"
                     await self.session.sandbox.upload(source, target)
 
     async def close(self, timeout: float) -> None:
@@ -179,7 +351,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
         """Stage the invocation and return the runner command."""
         payload = dict(payload)
-        await self.upload_json("config/settings.json", payload.pop("settings"))
+        await self.upload_json(f"{self.config_dir}/settings.json", payload.pop("settings"))
         mcp_config = payload.pop("mcp_config")
         if mcp_config is not None:
             await self.upload_json("mcp.json", mcp_config)
@@ -203,7 +375,9 @@ class ClaudeCodeSandboxSession(AgentSessionState):
             "stderr": f"{directory}/stderr.log",
         }
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
-        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
+        # The seed uploaded the runner to the directory the session started in.
+        runner = f"{self.session.root_dir}/{HARNESS_RUNNER_FILE}"
+        return SandboxCommand(argv=["bash", runner, f"{directory}/params.sh"])
 
     async def collect_artifacts(self) -> ClaudeCodeArtifacts:
         """Copy dedicated stdout and transcripts after confirmed harness termination."""
@@ -225,7 +399,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         directory = self.session.session_dir
         try:
             result = await self.session.sandbox.exec(
-                f"tar -czf {quote(directory + '/transcripts.tar.gz')} -C {quote(directory + '/config')} projects",
+                f"tar -czf {quote(directory + '/transcripts.tar.gz')} -C {quote(self.config_dir)} projects",
                 timeout_s=30,
             )
             if result.return_code or result.error_type:
