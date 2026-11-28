@@ -965,7 +965,11 @@ def _rejudge_saved_judge_failures(
     during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
-    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_collection import (
+        RolloutAggregationConfig,
+        RolloutAggregationHelper,
+        selected_outcomes,
+    )
 
     # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
     if isinstance(global_config_dict, DictConfig):
@@ -974,6 +978,15 @@ def _rejudge_saved_judge_failures(
         run_config = dict(global_config_dict)
     scored = 0
     raised = False
+    # Record each rollout's selected outcome before the pass, so a strict run that stays incomplete removes only the
+    # completion files of the outcomes the pass saved. If they cannot be read, every file is removed.
+    try:
+        selected_before: dict[str, Any] | None = selected_outcomes(output)
+    except Exception as error:  # not fatal: the pass reads the same Store and reports the failure itself
+        print(
+            f"The saved outcomes could not be read before the re-judgment: {type(error).__name__}: {error}", flush=True
+        )
+        selected_before = None
     before = _saved_artifact_state(output)
     try:
         scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
@@ -994,10 +1007,10 @@ def _rejudge_saved_judge_failures(
         return complete
     if complete_only and not complete:
         # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
-        # pass settled: the aggregation that rewrites it is skipped with the metrics. No completion file can follow
-        # it either, so they are removed.
+        # pass settled: the aggregation that rewrites it is skipped with the metrics. The completion files of
+        # the outcomes the pass saved now hold stale scores, so they are removed; the other files still match.
         if scored or raised or changed:
-            _remove_completion_files(output)
+            _remove_regraded_completion_files(output, selected_before)
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
         return complete
     try:
@@ -1028,6 +1041,25 @@ def _refresh_completion_files(output: Path, run_config: Mapping[str, Any]) -> No
         print(
             f"Per-agent completion files were not refreshed after the re-judgment ({type(error).__name__}: {error}); "
             f"they are removed, and {output.stem}_aggregate_metrics.json holds every agent's metrics.",
+            flush=True,
+        )
+        _remove_completion_files(output)
+
+
+def _remove_regraded_completion_files(output: Path, selected_before: Mapping[str, Any] | None) -> None:
+    """Remove the completion files of the environment servers whose outcomes the re-judge pass saved. If the outcomes
+    or their environment servers cannot be read, remove every file rather than risk keeping one with stale scores."""
+    from nemo_gym.rollouts.rollout_collection import remove_agent_complete_files
+
+    if selected_before is None:
+        _remove_completion_files(output)
+        return
+    try:
+        remove_agent_complete_files(output, selected_before)
+    except Exception as error:  # without the environment servers, any file may be stale, so none is kept
+        print(
+            f"The re-judged environment servers could not be identified ({type(error).__name__}: {error}); "
+            "all completion files are removed.",
             flush=True,
         )
         _remove_completion_files(output)
