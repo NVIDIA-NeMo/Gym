@@ -275,7 +275,7 @@ _TOY_RUN = (
 
 
 class TestLocalProvider:
-    """The real runner and unchanged evaluator through the unisolated `local` provider."""
+    """The real runner and evaluator through the unisolated `local` provider."""
 
     async def _grade_locally(
         self, tmp_path: Path, code: str, subtask: str = "01-a", run_script: str = _TOY_RUN
@@ -306,6 +306,14 @@ class TestLocalProvider:
         subtask = result["test_case_results"]["01-a"]
         assert subtask["score"] == 0.0
         assert {output["test_name"]: output["score"] for output in subtask["outputs"]}["t2"] == 0.0
+
+    async def test_code_that_cannot_be_written_as_utf8_fails_to_compile(self, tmp_path: Path) -> None:
+        # A lone surrogate comes from the model. A runner failure would be masked and drop the penalty.
+        result = await self._grade_locally(tmp_path, "// \ud800 answer=5 answer=30")
+        subtask = result["test_case_results"]["01-a"]
+        assert subtask["score"] == 0.0
+        assert subtask["outputs"][0]["compile_success"] is False
+        assert "surrogates not allowed" in subtask["outputs"][0]["compile_stderr"]
 
     @pytest.mark.skipif(not Path("/proc/self/limits").exists(), reason="reads /proc/self/limits")
     @pytest.mark.skipif(
