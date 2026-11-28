@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PrivateAttr
 from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -227,7 +228,7 @@ class ProofWithJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
-    problem: str = ""
+    problem: str = Field(min_length=1)
 
 
 class ProofWithJudgeVerifyResponse(BaseVerifyResponse):
@@ -237,7 +238,7 @@ class ProofWithJudgeVerifyResponse(BaseVerifyResponse):
 class IncorrectGroupCoordinator(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    verifier_rewards: list[float] = Field(default_factory=list)
+    verifier_rewards: list[Optional[float]] = Field(default_factory=list)
     zero_out_group_reward: Optional[bool] = None
     event: Event = Field(default_factory=Event)
 
@@ -258,7 +259,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
     )
 
     async def verify(self, body: ProofWithJudgeVerifyRequest) -> ProofWithJudgeVerifyResponse:
-        problem = getattr(body, "problem", "") or (body.model_dump().get("problem") or "")
+        problem = body.problem
         full_response = self._extract_assistant_text(body.response)
         if not full_response:
             reward, details = 0.0, {"r_format": 0.0, "reason": "empty_response", "judge_generated_tokens": 0}
@@ -275,7 +276,13 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
                 reward=reward,
                 details=details,
             )
-        return ProofWithJudgeVerifyResponse(**body.model_dump(), reward=reward)
+        return ProofWithJudgeVerifyResponse(
+            **body.model_dump(),
+            reward=reward,
+            mask_sample=details.get("mask_sample", False),
+            failure_kind=details.get("failure_kind"),
+            failure_reason=details.get("failure_reason"),
+        )
 
     async def _append_log_jsonl(
         self,
@@ -307,15 +314,18 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
     ) -> tuple[float, dict[str, Any]]:
         if not self.config.zero_reward_incorrect_groups:
             return reward, details
-        if not problem:
-            raise ValueError("problem must be set when zero_reward_incorrect_groups is enabled")
 
-        verifier_reward = float(details["r_y"]) if "r_y" in details else 0.0
+        # None marks a proof the verifier did not score. A row masked for its meta-verifier reply keeps its r_y.
+        if details.get("r_y_measured", True):
+            verifier_reward = float(details["r_y"]) if "r_y" in details else 0.0
+        else:
+            verifier_reward = None
         coordinator = self._incorrect_group_coordinators[problem]
         coordinator.verifier_rewards.append(verifier_reward)
 
         if len(coordinator.verifier_rewards) == self.config.expected_group_size:
-            coordinator.zero_out_group_reward = all(r_y == 0.0 for r_y in coordinator.verifier_rewards)
+            measured = [r_y for r_y in coordinator.verifier_rewards if r_y is not None]
+            coordinator.zero_out_group_reward = bool(measured) and all(r_y == 0.0 for r_y in measured)
             self._incorrect_group_coordinators.pop(problem)
             coordinator.event.set()
         else:
@@ -489,22 +499,28 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
             beta=beta,
         )
         verifier_response, verifier_generated_tokens = verifier_result
-        r_y = extract_boxed_score(verifier_response) or 0.0
+        r_y_score = extract_boxed_score(verifier_response)
+        # Distinguish between 0 score and unparseable score.
+        r_y = r_y_score if r_y_score is not None else 0.0
 
         if beta == 0:
-            return alpha * r_y, {
+            details = {
                 "r_y": r_y,
                 "s_prime": s_prime,
                 "judge_generated_tokens": verifier_generated_tokens,
                 "verifier_generated_tokens": verifier_generated_tokens,
                 "verifier_response": verifier_response,
             }
+            if r_y_score is None:
+                details |= _unparseable_verdict("verifier", verifier_response, r_y_measured=False)
+            return alpha * r_y, details
 
         assert meta_result is not None
         meta_response, meta_generated_tokens = meta_result
-        r_meta = extract_boxed_score(meta_response) or 0.0
+        r_meta_score = extract_boxed_score(meta_response)
+        r_meta = r_meta_score if r_meta_score is not None else 0.0
         r_z = (1.0 - abs(s_prime - r_y)) * r_meta
-        return alpha * r_y + beta * r_z, {
+        details = {
             "judge_generated_tokens": verifier_generated_tokens + meta_generated_tokens,
             "r_y": r_y,
             "r_meta": r_meta,
@@ -514,6 +530,21 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
             "verifier_response": verifier_response,
             "meta_response": meta_response,
         }
+        # The reward needs both scores: with either one missing it is not a measurement, so the row is masked at 0.
+        if r_y_score is None:
+            return 0.0, details | _unparseable_verdict("verifier", verifier_response, r_y_measured=False)
+        if r_meta_score is None:
+            return 0.0, details | _unparseable_verdict("meta-verifier", meta_response, r_y_measured=True)
+        return alpha * r_y + beta * r_z, details
+
+
+def _unparseable_verdict(judge: str, reply: str, *, r_y_measured: bool) -> dict[str, Any]:
+    return {
+        "failure_kind": JUDGE_UNPARSEABLE,
+        "failure_reason": f"{judge} replied without a boxed score: {reply[:200]!r}",
+        "mask_sample": True,
+        "r_y_measured": r_y_measured,
+    }
 
 
 if __name__ == "__main__":
