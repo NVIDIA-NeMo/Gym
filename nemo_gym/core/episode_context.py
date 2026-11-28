@@ -26,6 +26,9 @@ from nemo_gym.core.episode_types import EpisodeId
 
 
 VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
+# Names the Gym server instance (its NEMO_GYM_CONFIG_PATH) that made a rollout-attributed model call, so model-call
+# capture can record which environment made it.
+CALLER_SERVER_HEADER = "x-ng-caller-server"
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)

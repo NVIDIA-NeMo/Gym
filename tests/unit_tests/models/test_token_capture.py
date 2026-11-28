@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 from time import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -1335,6 +1336,31 @@ def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
     assert len(records) == 1
     # The training entry joins its eval record by the middleware-minted model_call_id.
     assert tokens[0].model_call_id == records[0].model_call_id
+
+
+@pytest.mark.parametrize(
+    "selection, incomplete",
+    [
+        ({"model_call_capture_servers": ["judge_model"]}, False),
+        ({"model_call_capture_sample_every": 4, "model_call_capture_min_free_gib": 5}, False),
+        ({"model_call_capture_min_free_gib": 5}, True),
+    ],
+    ids=["unlisted-server", "sampled-out", "low-disk"],
+)
+def test_training_tokens_survive_evaluation_capture_selection(tmp_path, monkeypatch, selection, incomplete) -> None:
+    monkeypatch.setattr("os.statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=1))
+    config = {**_both_enabled(tmp_path), "judge_model": {"responses_api_models": {"vllm_model": {}}}, **selection}
+    client = TestClient(_server(config).setup_webserver())
+
+    # The sampling hash of "4-2" falls outside the selected quarter.
+    response = client.post("/ng-rollout/4-2/training-token-capture/v1/responses", json={"input": "hi"})
+
+    assert response.status_code == 200
+    store = CaptureStore(tmp_path)
+    assert store.read("4-2") == []
+    assert store.is_incomplete("4-2") is incomplete
+    [entry] = TokenCaptureStore(tmp_path).read_entries("4-2")
+    assert entry.prompt_token_ids == PTOKS and entry.generation_token_ids == GTOKS
 
 
 def test_two_agent_instances_on_one_model_server_name_every_record(tmp_path):
