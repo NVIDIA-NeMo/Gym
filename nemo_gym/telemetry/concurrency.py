@@ -35,8 +35,13 @@ and ``nemo.gym.server.name`` when the limit belongs to a server.
 All three are bounded: no rollout, request, or sandbox ID is ever an attribute.
 Limits with the same attributes in one process are summed.
 
+``gym.concurrency.queue_wait_duration_ms`` is a histogram of how long an admitted caller waited for a slot. Only callers
+that had to queue record a sample, so it does not count admissions; a wait that timed out or was cancelled is counted
+by the totals above instead.
+
 A component without a configured limit creates no ``MeteredSemaphore``, so it reports no series at all rather than a limit of zero.
-Acquiring and releasing cost a few integer updates and no OpenTelemetry call.
+Acquiring a free slot and releasing cost a few integer updates and no OpenTelemetry call; a caller that queued records
+one histogram sample once it gets its slot.
 The exporter's background thread reads the totals through observable instruments,
 which exist only while the process observer runs, that is, while metrics are exported.
 """
@@ -44,10 +49,11 @@ which exist only while the process observer runs, that is, while metrics are exp
 import asyncio
 import logging
 import threading
+import time
 import weakref
 from typing import Any, Callable, Literal, NamedTuple, Optional
 
-from nemo_gym.telemetry.gym_metrics import SERVER_NAME_ATTRIBUTE
+from nemo_gym.telemetry.gym_metrics import SERVER_NAME_ATTRIBUTE, record_concurrency_queue_wait
 
 
 logger = logging.getLogger(__name__)
@@ -147,6 +153,7 @@ class MeteredSemaphore(asyncio.BoundedSemaphore):
             self._active += 1
             return True
         self._queued += 1
+        queued_at = time.perf_counter()
         try:
             async with asyncio.timeout(self._admission_timeout_s):
                 await super().acquire()
@@ -159,6 +166,7 @@ class MeteredSemaphore(asyncio.BoundedSemaphore):
         finally:
             self._queued -= 1
         self._active += 1
+        record_concurrency_queue_wait((time.perf_counter() - queued_at) * 1000, self._key.attributes())
         return True
 
     def release(self) -> None:

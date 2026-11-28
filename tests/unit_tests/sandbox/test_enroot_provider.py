@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import hashlib
 import io
 import json
@@ -1173,6 +1174,24 @@ async def test_run_real_echo(fake_binary: str, tmp_path: Path) -> None:
     assert code == 0
     assert out.strip() == "hi"
     assert err == ""
+
+
+@pytest.mark.skipif(shutil.which("sleep") is None, reason="sleep not available")
+async def test_an_enroot_command_beyond_the_exec_concurrency_queues_on_a_metered_limit(
+    fake_binary: str, tmp_path: Path
+) -> None:
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "home")}, exec={"concurrency": 1})
+    runs = [asyncio.create_task(provider._run([shutil.which("sleep"), "0.2"], timeout_s=10)) for _ in range(2)]
+    async with asyncio.timeout(5):
+        while provider._semaphore.queued == 0:
+            await asyncio.sleep(0.01)
+
+    assert (provider._semaphore.active, provider._semaphore.queued) == (1, 1)
+    assert provider._semaphore.attributes == {
+        "nemo.gym.concurrency.component": "sandbox_provider",
+        "nemo.gym.concurrency.limit_name": "enroot_exec",
+    }
+    assert [code for code, _out, _err in await asyncio.gather(*runs)] == [0, 0]
 
 
 @pytest.mark.skipif(shutil.which("cat") is None, reason="cat not available")

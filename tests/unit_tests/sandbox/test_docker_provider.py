@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -1034,6 +1035,22 @@ async def test_run_real_echo(fake_binary: str) -> None:
     assert code == 0
     assert out.strip() == "hi"
     assert err == ""
+
+
+@pytest.mark.skipif(shutil.which("sleep") is None, reason="sleep not available")
+async def test_a_docker_command_beyond_the_exec_concurrency_queues_on_a_metered_limit(fake_binary: str) -> None:
+    provider = docker_provider.DockerProvider(exec={"concurrency": 1})
+    runs = [asyncio.create_task(provider._run([shutil.which("sleep"), "0.2"], timeout_s=10)) for _ in range(2)]
+    async with asyncio.timeout(5):
+        while provider._semaphore.queued == 0:
+            await asyncio.sleep(0.01)
+
+    assert (provider._semaphore.active, provider._semaphore.queued) == (1, 1)
+    assert provider._semaphore.attributes == {
+        "nemo.gym.concurrency.component": "sandbox_provider",
+        "nemo.gym.concurrency.limit_name": "docker_exec",
+    }
+    assert [code for code, _out, _err in await asyncio.gather(*runs)] == [0, 0]
 
 
 @requires_sh

@@ -89,6 +89,8 @@ from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, r
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
+from nemo_gym.telemetry.observer import flush_observed_metrics, observe_event_loop
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
@@ -1831,10 +1833,20 @@ class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # With settle_into_source the source run lock is held from binding through judging to settlement, so a second
         # re-judgment of the same run is refused (non-blocking flock) instead of judging against the same budget.
-        with ExitStack() as settle_lock:
-            return await self._run_from_config(config, settle_lock)
+        # ``limits`` keeps the pass's limit reporting until it has been exported once, after settlement and the run
+        # lock, since an export can wait seconds on a slow exporter. Releasing the last observer exports; beside another
+        # observer, such as the head server's, flush_observed_metrics does.
+        limits: List[MeteredSemaphore] = []
+        try:
+            async with observe_event_loop("driver"):
+                with ExitStack() as settle_lock:
+                    return await self._run_from_config(config, settle_lock, limits)
+        finally:
+            flush_observed_metrics()
 
-    async def _run_from_config(self, config: RolloutReverificationConfig, settle_lock: ExitStack) -> List[Dict]:
+    async def _run_from_config(
+        self, config: RolloutReverificationConfig, settle_lock: ExitStack, limits: List[MeteredSemaphore]
+    ) -> List[Dict]:
         # A separate output may reuse selected source answers. Updating a managed
         # run in place still needs the history-aware recovery follow-up.
         for name in (config.output_jsonl_fpath,):
@@ -2026,7 +2038,10 @@ class RolloutReverificationHelper(BaseModel):
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
-            semaphore = Semaphore(config.num_samples_in_parallel)
+            semaphore = MeteredSemaphore(
+                config.num_samples_in_parallel, component="rollout_driver", limit_name="reverifications"
+            )
+            limits.append(semaphore)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         run_labels = rollout_run_labels(payloads_to_reverify)
