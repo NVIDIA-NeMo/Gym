@@ -152,7 +152,7 @@ symbolic link. A missing file leaves the task out unless the entry says `require
 
 Beyond `image`, `command`, `entrypoint`, `environment`, `working_dir`, `user`, `depends_on`, `healthcheck`, `expose`,
 `labels`, `cap_add`, `shm_size` and `network_mode: service:<name>`, these fields have a defined meaning. Any other
-service key, such as `privileged` or `secrets`, leaves the task out. So does a top-level key other than `name`,
+service key, such as `devices` or `secrets`, leaves the task out. So does a top-level key other than `name`,
 `services`, `networks` and `volumes`, such as `version` or an `x-` block. A `depends_on` entry with `required: false`
 or `restart: true`, or a `user` with a group, such as `1000:1000`, fails when the group starts.
 
@@ -170,6 +170,7 @@ with no `user:` it runs as the image's user. The agent keeps its own user.
 | `ports` | A container port alone. Fixed published ports, `host_ip`, non-TCP protocols and ranges fail. |
 | `extra_hosts` | Host-to-IP entries. `host-gateway` fails, and a non-root sidecar cannot take them. |
 | `post_start` | Run once the command starts. `privileged` hooks and `pre_stop` fail. |
+| `privileged` | `true` starts that service, and no other, as a privileged container. Not supported on OpenSandbox, so the task is left out there. A provider that supports privileged sandboxes, such as Docker, runs it only when its config sets `allow_privileged: true`; without that, prepare leaves the task out and names the setting. |
 | `tmpfs`, `ulimits`, `sysctls`, `security_opt` | Not supported on OpenSandbox, the only provider that starts a group, so the task is left out. |
 
 ## Volumes

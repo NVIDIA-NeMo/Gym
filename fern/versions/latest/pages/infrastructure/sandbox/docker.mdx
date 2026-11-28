@@ -54,13 +54,14 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
-The provider constructor accepts three optional config sections:
+The provider constructor accepts three optional config sections and one switch:
 
 | Section | Purpose |
 | --- | --- |
 | `create` | Keep-alive command, `docker run` start timeout, `--init` zombie reaping, isolation flags (network, read-only root, dropped capabilities, security options, pids limit), and CPU/memory limit behavior. |
 | `exec` | Per-command timeout, the shell used for `<shell> -c <command>` (auto-detected when unset), extra `docker exec` flags, and subprocess concurrency. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
+| `allow_privileged` | `false` by default. `true` lets a Compose service that declares `privileged: true` run with `--privileged`. See Isolation and Security. |
 
 ## SandboxSpec Provider Options
 
@@ -243,7 +244,8 @@ is the program's stderr too, and is classified as `exec()` classifies its stderr
 Docker containers share the host kernel. This is process and namespace isolation, not a virtual machine, and is not a hard boundary for hostile code. For adversarial or untrusted workloads, run Docker on a disposable VM or use a stronger runtime such as gVisor, Kata Containers, or a microVM.
 </Warning>
 
-- Never run with `--privileged` and never mount the Docker socket into the sandbox; either grants host root.
+- Never pass `--privileged` through `extra_run_args` or a deployment's `run_args`, which makes every sandbox privileged, and never mount the Docker socket into the sandbox; either grants host root.
+- A Compose service that declares `privileged: true`, such as a task that runs its own Docker daemon, starts only when the operator sets `allow_privileged: true` under `docker:` in the provider config. Only that service's container gets `--privileged`; the group's other services, its volume helper and its copy-up seed do not. Without the switch, prepare and `gym dataset validate` leave the task out and name the setting. A privileged container can take over the host, so turn the switch on only on a disposable VM and only for task folders you trust.
 - Networking is on by default because most tasks need egress (pip, git). Set `network: none` to cut it entirely, or `network: <name>` to attach a locked-down internal network.
 - Harden with `read_only: true`, `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges"]`, and `pids_limit: <n>` as a fork-bomb guard. Enforce `resources` so one sandbox cannot starve the host. `read_only: true` leaves `/tmp` read-only too (add `extra_run_args: ["--tmpfs", "/tmp"]` for programs that need one); PTY sessions keep working, their pid record moves to `/dev/shm` (see Interactive Terminals).
 - Rootless Docker narrows the blast radius (container root is not host root) and is recommended for shared machines; `docker cp` ownership and some `--user` behaviors differ under it.

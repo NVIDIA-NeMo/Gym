@@ -130,6 +130,7 @@ from nemo_gym.eval.eval_plan import (
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.sandbox.providers.base import PRIVILEGED_SETTING
 from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
 from nemo_gym.utils.path_utils import materialized_path_for
 
@@ -1656,6 +1657,41 @@ def _block_shared_storage(overrides: list[str], sandbox: str | None, block: str)
     return bool(host_path)
 
 
+def allow_privileged_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
+    """Whether the ``sandbox:`` block allows privileged sandboxes, for checking a Compose service's ``privileged:
+    true`` at prepare: its one provider's ``allow_privileged`` (``PRIVILEGED_SETTING``), read from the ``--sandbox``
+    provider file and the configuration the command names. ``None`` when the block names no single provider (the
+    adapter then decides at seed); otherwise whether the setting is ``true``, as the provider reads it, ``False`` when
+    absent. A configured value that is not a boolean, ``null`` included, raises ``ValueError`` naming the key, as the
+    provider would refuse it."""
+    return _block_allow_privileged(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_allow_privileged_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
+    """:func:`allow_privileged_from_overrides` for the block GPU-declaring tasks and GPU sidecars run on
+    (``GPU_SANDBOX_PROVIDER_KEY``); ``None`` when no GPU block is set."""
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_allow_privileged(overrides, sandbox, block)
+
+
+def _block_allow_privileged(overrides: list[str], sandbox: str | None, block: str) -> bool | None:
+    provider = _block_provider_name(overrides, sandbox, block)
+    if provider is None:
+        return None
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    key = f"{block}.{provider}.{PRIVILEGED_SETTING}"
+    value = _block_from_overrides(overrides, key, config_files=files, default=False)
+    # Absent is off. The provider rejects anything but a boolean, so a configured null or a quoted "true" is a
+    # configuration error, not a refusal.
+    if not isinstance(value, bool):
+        raise ValueError(f"`{key}` must be true or false; got {value!r}")
+    return value
+
+
 def _patterns(args: argparse.Namespace, name: str) -> list[str]:
     raw = getattr(args, name, None) or ""
     return [part.strip() for part in raw.split(",") if part.strip()]
@@ -1821,6 +1857,8 @@ def _prepare_for_agent(
             gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
             shared_storage=shared_storage_from_overrides(overrides, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
+            allow_privileged=allow_privileged_from_overrides(overrides, sandbox),
+            gpu_allow_privileged=gpu_allow_privileged_from_overrides(overrides, sandbox),
             compose_overlay=compose_overlay_from_overrides(overrides),
             output_root=output_root_from_overrides(overrides),
             rows_name=_rows_name(agent),
@@ -2100,6 +2138,8 @@ def validate_target(
             gpu_volume_sources=gpu_volume_sources_from_overrides(preparation, sandbox),
             shared_storage=shared_storage_from_overrides(preparation, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(preparation, sandbox),
+            allow_privileged=allow_privileged_from_overrides(preparation, sandbox),
+            gpu_allow_privileged=gpu_allow_privileged_from_overrides(preparation, sandbox),
             compose_overlay=compose_overlay_from_overrides(preparation),
             rows_name=_rows_name(agent),
             registry_credentials=registry_credentials_from_overrides(preparation, sandbox),

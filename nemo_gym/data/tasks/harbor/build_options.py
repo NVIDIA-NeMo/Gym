@@ -147,9 +147,11 @@ def _merged_cli_config(overrides: list[str], config_files: Sequence[Path] = ()) 
     return OmegaConf.merge(*(_load_config_yaml(path) for path in config_files), *extra_configs, dotenv, cli)
 
 
-def _block_from_overrides(overrides: list[str], key: str, *, config_files: Sequence[Path] = ()) -> Any:
-    """The ``key`` node (dotted) of the configuration the command names, resolved; a scalar as it is, ``None`` when
-    absent. Only that node's own interpolations are evaluated, so a provider block's credentials are not needed
+def _block_from_overrides(
+    overrides: list[str], key: str, *, config_files: Sequence[Path] = (), default: Any = None
+) -> Any:
+    """The ``key`` node (dotted) of the configuration the command names, resolved; a scalar as it is, ``default`` when
+    absent (a configured ``null`` stays ``None``). Only that node's own interpolations are evaluated, so a provider block's credentials are not needed
     to read a sibling key; a node that is configured but does not resolve (``builds: ${missing_profile}``) is
     reported as a configuration error rather than read as absent. Merged as :func:`_merged_cli_config` does."""
     from omegaconf import OmegaConf
@@ -159,7 +161,7 @@ def _block_from_overrides(overrides: list[str], key: str, *, config_files: Seque
 
     merged = _merged_cli_config(overrides, config_files)
     try:
-        block = OmegaConf.select(merged, key)
+        block = OmegaConf.select(merged, key, default=default)
         if not OmegaConf.is_config(block):
             return block
         return OmegaConf.to_container(block, resolve=True)

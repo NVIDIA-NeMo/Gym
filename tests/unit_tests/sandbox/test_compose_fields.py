@@ -59,7 +59,8 @@ class TestUnsupportedComposeFields:
         assert unsupported_compose_fields(document) == [
             "Unsupported Compose fields: ['x-extra']",
             "Service 'main': unsupported Compose fields ['logging']",
-            "Service 'task-server': unsupported Compose fields ['devices', 'privileged']",
+            # ``privileged`` is on the list: the deployment's opt-in decides it (image_configs, the adapter).
+            "Service 'task-server': unsupported Compose fields ['devices']",
             "Service 'api': unsupported Compose fields ['build']",
         ]
 
@@ -348,6 +349,29 @@ def test_service_options_are_normalized_and_checked_against_the_provider():
     assert info.value.field == "security_opt"
     full = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
     assert check_compose_fields({"services": {"svc": dict(service)}}, provider="docker", service_option_fields=full)
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"), [(True, True), ("true", True), (" TRUE ", True), (False, False), ("false", False)]
+)
+def test_privileged_passes_as_a_boolean_and_false_is_dropped(value, kept):
+    """A Docker-in-Docker main service (``privileged`` with ``environment``) passes the field check, ``${X:-true}`` as the
+    boolean it resolves to; ``false`` is Compose's default spelled out and asks for nothing. Whether the deployment
+    may start a privileged service is its ``allow_privileged``, checked by the caller and the adapter."""
+    environment = {"DOCKER_HOST": "unix:///var/run/docker.sock"}
+    document = {"services": {"main": {"image": MAIN, "privileged": value, "environment": dict(environment)}}}
+    checked = check_compose_fields(document, provider="docker", service_option_fields=frozenset())
+    assert checked["services"]["main"] == {"image": MAIN, "environment": environment} | (
+        {"privileged": True} if kept else {}
+    )
+    assert check_compose_fields(deepcopy(checked)) == checked
+
+
+@pytest.mark.parametrize("value", ["yes", 1, ["true"]])
+def test_a_privileged_value_that_is_not_a_boolean_is_named(value):
+    with pytest.raises(ComposeFieldError, match="service 'main' privileged must be true or false") as info:
+        check_compose_fields({"services": {"main": {"image": MAIN, "privileged": value}}})
+    assert info.value.field == "privileged"
 
 
 def test_normalize_platform_folds_architecture_aliases():

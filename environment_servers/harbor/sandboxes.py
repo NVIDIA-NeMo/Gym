@@ -63,6 +63,7 @@ from nemo_gym.data.tasks.harbor import (
 )
 from nemo_gym.sandbox import (
     ORPHAN_REAP_TIMEOUT_S,
+    PRIVILEGED_SETTING,
     AsyncSandbox,
     AsyncSandboxCompose,
     SandboxCreateError,
@@ -172,6 +173,15 @@ def _pull_retry_delay(attempt: int) -> float:
 def _provider_name(provider_config: Any) -> str | None:
     """The registry name of a resolved single-key provider config; ``None`` for a provider instance (tests)."""
     return next(iter(provider_config)) if isinstance(provider_config, Mapping) else None
+
+
+def _allows_privileged(provider_config: Any) -> bool | None:
+    """Whether a resolved single-key provider config sets ``allow_privileged: true``, as the provider reads it;
+    ``None`` for a provider instance (tests), which the adapter checks live."""
+    if not isinstance(provider_config, Mapping):
+        return None
+    options = next(iter(provider_config.values()))
+    return isinstance(options, Mapping) and options.get(PRIVILEGED_SETTING) is True
 
 
 def _discard_private_document(done: "asyncio.Task[tuple[dict[str, Any], Path]]") -> None:
@@ -509,9 +519,9 @@ class HarborSandboxMixin:
                 raise HarborTaskError(f"{task.task_id}: {reason}")
         # The same field check prepare ran, with the same inputs: deploy.resources, networks, extra_hosts, post_start
         # and the rest take their normalized forms, each service is checked against the provider it runs on (a GPU
-        # sidecar against the GPU block's) and `platform` against this deployment's, so a field the deployment cannot
-        # apply fails here, before a sandbox. A provider instance in place of the config (tests) has no registry
-        # name; the adapter checks it live.
+        # sidecar against the GPU block's), a `privileged: true` service against that block's `allow_privileged`, and
+        # `platform` against this deployment's, so a field the deployment cannot apply fails here, before a sandbox.
+        # A provider instance in place of the config (tests) has no registry name; the adapter checks it live.
         gpu_provider = (
             resolve_provider_config(self.config.gpu_sandbox_provider, global_config_dict)
             if self.config.gpu_sandbox_provider
@@ -524,6 +534,8 @@ class HarborSandboxMixin:
             gpu_provider=_provider_name(gpu_provider),
             platform=self._compose_platform(),
             overlay=self.config.compose_overlay,
+            allow_privileged=_allows_privileged(provider),
+            gpu_allow_privileged=_allows_privileged(gpu_provider),
         )
         # The same planner prepare used: task-file bind mounts become uploads, named volumes stay for shared
         # storage, external ones resolve through the block each service runs on (a GPU-routed sidecar through the

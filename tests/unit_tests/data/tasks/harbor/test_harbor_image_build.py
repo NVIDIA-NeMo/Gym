@@ -241,7 +241,7 @@ class TestPrepareBuilds:
         from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
-        refused_compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    privileged: true\n"
+        refused_compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    devices: [/dev/fuse]\n"
         write_separate_task(folder / "a", extra={"docker-compose.yaml": refused_compose})
         write_separate_task(folder / "b", dockerfile=BUILD_DOCKERFILE + "ENV B=1\n")
         write_base_record(folder)
@@ -263,7 +263,7 @@ class TestPrepareBuilds:
         refused = prepare_builds._build_dockerfiles(folder, build, select=None)
 
         assert list(refused) == ["a"]
-        assert "Service 'main': unsupported Compose fields ['privileged']" in refused["a"]
+        assert "Service 'main': unsupported Compose fields ['devices']" in refused["a"]
         # b's main and the shared verifier were handed to the builder, the verifier entry for b alone; not a's main.
         assert {(entry.digest, entry.service, entry.tasks, entry.verifier) for entry in handed} == {
             (harbor_hash(folder / "b" / "environment"), "main", ("b",), False),
@@ -277,7 +277,7 @@ class TestPrepareBuilds:
 
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=build)
 
-        assert list(prepared.skipped) == ["a"] and "unsupported Compose fields ['privileged']" in prepared.skipped["a"]
+        assert list(prepared.skipped) == ["a"] and "unsupported Compose fields ['devices']" in prepared.skipped["a"]
         (b,) = prepared.tasks
         assert b.task_id == "b"
         assert b.image == f"reg.example/r/hb__{harbor_hash(folder / 'b' / 'environment')}@sha256:pushed01"
@@ -1485,6 +1485,10 @@ class TestSandboxProviderAtPrepare:
         monkeypatch.setattr(cli_eval, "gpu_volume_sources_from_overrides", lambda overrides, sandbox: None)
         monkeypatch.setattr(cli_eval, "shared_storage_from_overrides", lambda overrides, sandbox: None)
         monkeypatch.setattr(cli_eval, "gpu_shared_storage_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(
+            cli_eval, "allow_privileged_from_overrides", lambda overrides, sandbox: sandbox == "docker"
+        )
+        monkeypatch.setattr(cli_eval, "gpu_allow_privileged_from_overrides", lambda overrides, sandbox: None)
         monkeypatch.setattr(cli_eval, "registry_credentials_from_overrides", lambda overrides, sandbox: None)
         # The rows file is scoped to the agent, so the stub has to name one.
         monkeypatch.setattr(
@@ -1499,12 +1503,15 @@ class TestSandboxProviderAtPrepare:
         assert seen["run-target"]["sandbox_provider"] == "p:docker"
         assert seen["run-target"]["gpu_sandbox_provider"] == "g:docker"
         assert seen["run-target"]["compose_platform"] == "linux/arm64"
+        # The block's allow_privileged reaches prepare, so a privileged service is refused there, not at seed.
+        assert (seen["run-target"]["allow_privileged"], seen["run-target"]["gpu_allow_privileged"]) == (True, None)
         args = argparse.Namespace(target="validate-target", sandbox=None, _parser=parser)
         with pytest.raises(SystemExit, match="stop here"):
             cli_eval.validate_target(args, [])
         assert seen["validate-target"]["sandbox_provider"] == "p:None"
         assert seen["validate-target"]["gpu_sandbox_provider"] == "g:None"
         assert seen["validate-target"]["compose_platform"] == "linux/arm64"
+        assert seen["validate-target"]["allow_privileged"] is False
 
     def test_the_gpu_block_provider_and_the_platform_are_read_from_the_same_configuration(self, tmp_path, monkeypatch):
         """The server routes GPU sidecars to `gpu_sandbox_provider` and checks `platform` against
