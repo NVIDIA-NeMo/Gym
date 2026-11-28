@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+robolab:
+  responses_api_agents:
+    robolab_agent:
+      entrypoint: app.py
+      model_server: {type: responses_api_models, name: policy_model}
+      datasets:
+        - name: robolab
+          type: benchmark
+          jsonl_fpath: ${oc.env:NEMO_GYM_BENCH_DIR,benchmarks/robolab/data}/case.jsonl
+          prepare_script: benchmarks/robolab/prepare.py
+          num_repeats: 1
+          taskset: robolab
+        - name: example
+          type: example
+          jsonl_fpath: benchmarks/robolab/data/example.jsonl
+          num_repeats: 1
+          taskset: robolab
+
+robolab_environment:
+  environment_servers:
+    robolab:
+      entrypoint: app.py
+      num_workers: 1
+      agent_server: {type: responses_api_agents, name: robolab}
+      model_server: {type: responses_api_models, name: policy_model}
+      case_manifest: ${oc.env:ROBOLAB_CASE_MANIFEST,null}
+      backend: ${oc.env:ROBOLAB_BACKEND,null}
+      output_root: ${oc.env:ROBOLAB_OUTPUT_ROOT,null}
+      native_source_sha256: ${oc.env:ROBOLAB_NATIVE_SOURCE_SHA256,null}
+
+environment_server_routes:
+  robolab: robolab_environment
