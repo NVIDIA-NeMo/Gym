@@ -67,9 +67,9 @@ env:
       - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
       - environment_servers/harbor/configs/harbor.yaml
       - results/harbor/agentic_vbench_train/run_config_opencode_agent.yaml
+      - nemo_gym/sandbox/providers/docker/configs/docker.yaml  # or another provider's; defines the top-level `sandbox:` block the harbor server's `sandbox_provider: sandbox` resolves to
       - environments/harbor/agentic_vbench_train/harbor_train.yaml
       # optional: environments/harbor/agentic_vbench_train/compaction_plugins.yaml
-    sandbox: docker   # or the provider the run config names; the sandbox provider block goes in the overlay
 ```
 
 NeMo RL carries its sampling values into every model call the trained agent makes and configures the capture
