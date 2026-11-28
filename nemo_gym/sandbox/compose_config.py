@@ -15,7 +15,7 @@ import hashlib
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -484,17 +484,21 @@ def _peer_url(value: Any, services: dict) -> bool:
     return True
 
 
-def non_root_sidecar_users(document: dict, image_configs: dict) -> dict[str, str]:
-    """The sidecars whose recorded image ``USER`` is not root, with that user.
+def non_root_sidecar_users(
+    document: dict, image_configs: dict, *, exec_as_any_user: Collection[str] = ()
+) -> dict[str, str]:
+    """The sidecars whose recorded image ``USER`` is not root, with that user, leaving out ``exec_as_any_user``.
 
     These are the services :func:`adapt_non_root_sidecars` keeps on their own user without host injection;
-    prepare uses the same predicate so what it accepts is what the group runs. ``image_configs`` is read
-    by reference and by pinned image, so the published document and the resolved one both work.
+    prepare uses the same predicate so what it accepts is what the group runs. ``exec_as_any_user`` names the
+    services whose provider runs each command as the user it names (``SupportsSandboxExecAsAnyUser``, Docker):
+    they need none of that, whatever user their image runs as. ``image_configs`` is read by reference and by
+    pinned image, so the published document and the resolved one both work.
     """
     by_image = {record["image"]: record for record in image_configs.values() if "image" in record}
     users: dict[str, str] = {}
     for name, service in document["services"].items():
-        if name == "main" or not isinstance(service, dict):
+        if name == "main" or name in exec_as_any_user or not isinstance(service, dict):
             continue
         record = by_image.get(service.get("image")) or image_configs.get(service.get("image")) or {}
         user = str((record.get("config") or {}).get("User") or "")
@@ -503,14 +507,14 @@ def non_root_sidecar_users(document: dict, image_configs: dict) -> dict[str, str
     return users
 
 
-def check_sidecar_extra_hosts(document: dict, image_configs: dict) -> None:
+def check_sidecar_extra_hosts(document: dict, image_configs: dict, *, exec_as_any_user: Collection[str] = ()) -> None:
     """Refuse ``extra_hosts`` on a sidecar the group runs without host injection, naming the service.
 
-    A non-root sidecar gets no hosts file entries (see :func:`adapt_non_root_sidecars`), so host entries it
-    declares would be silently lost; the adapter rejects that document at seed. Prepare runs this check once
-    the image configurations are recorded, so the task fails there, with the same reason.
+    A non-root sidecar outside ``exec_as_any_user`` gets no hosts file entries (see :func:`adapt_non_root_sidecars`),
+    so host entries it declares would be silently lost; the adapter rejects that document at seed. Prepare runs
+    this check once the image configurations are recorded, so the task fails there, with the same reason.
     """
-    for name, user in non_root_sidecar_users(document, image_configs).items():
+    for name, user in non_root_sidecar_users(document, image_configs, exec_as_any_user=exec_as_any_user).items():
         if document["services"][name].get("extra_hosts"):
             raise ComposeFieldError(
                 "extra_hosts",
@@ -519,18 +523,20 @@ def check_sidecar_extra_hosts(document: dict, image_configs: dict) -> None:
             )
 
 
-def adapt_non_root_sidecars(document: dict, image_configs: dict) -> dict:
+def adapt_non_root_sidecars(document: dict, image_configs: dict, *, exec_as_any_user: Collection[str] = ()) -> dict:
     """Keep a sidecar on its image's default non-root user without host-file injection.
 
     A non-root process cannot edit ``/etc/hosts``, so peer names are resolved into the
     environment variables that carry ``http://<service>`` URLs instead, and the explicit
     ``user`` copied from image metadata is dropped so the provider does not try to ``su``
     to the user it already runs as. Such a sidecar cannot take ``extra_hosts``
-    (:func:`check_sidecar_extra_hosts` raises first). Mutates and returns ``document``.
+    (:func:`check_sidecar_extra_hosts` raises first). The services in ``exec_as_any_user`` run
+    on a provider that sets each command's user itself (``SupportsSandboxExecAsAnyUser``, Docker):
+    they keep their ``user``, their host entries and ``extra_hosts``. Mutates and returns ``document``.
     """
-    check_sidecar_extra_hosts(document, image_configs)
+    check_sidecar_extra_hosts(document, image_configs, exec_as_any_user=exec_as_any_user)
     services = document["services"]
-    for name in non_root_sidecar_users(document, image_configs):
+    for name in non_root_sidecar_users(document, image_configs, exec_as_any_user=exec_as_any_user):
         service = services[name]
         service.pop("user", None)
         peers = [key for key, value in (service.get("environment") or {}).items() if _peer_url(value, services)]

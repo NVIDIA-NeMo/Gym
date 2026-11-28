@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -49,9 +50,16 @@ class RunRecorder:
         self._responder = responder
 
     async def __call__(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        spawned: asyncio.Event | None = None,
     ) -> tuple[int, str, str]:
         self.calls.append({"argv": list(argv), "timeout_s": timeout_s, "stdin": stdin})
+        if spawned is not None:
+            spawned.set()
         return self._responder(list(argv))
 
 

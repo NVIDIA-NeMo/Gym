@@ -2775,6 +2775,33 @@ name = "check"
 """
 
 
+def test_each_separate_turns_budget_reserves_its_verifier_providers_cancelled_create_hold(tmp_path, monkeypatch):
+    """Every turn that verifies separately reserves, beyond its ready timeout, the time the provider its verifier
+    starts on may hold a cancelled create (Docker: its docker run, then an inspect and a removal). The provider is
+    the turn's own, which GPU routing can make differ from the task's; nothing is reserved without enforced task
+    timeouts, where no task deadline exists and the budget only meets default_episode_timeout_seconds."""
+    server, task, _, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        SEPARATE_STEPS,
+        {"plan": "P", "build": "B", "check": "C"},
+        head=SEPARATE_STEPS_HEAD,
+        base=TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'),
+    )
+    task = load_task(task.path)
+    separate_turns = sum(server._turn_separate(task, turn) for turn in task.turns)
+    assert separate_turns == 3
+    docker = {"docker": {"create": {"start_timeout_s": 100.0}, "exec": {"default_timeout_s": 10.0}}}
+    blocks = {"sandbox": {"opensandbox": {}}, "sandbox_gpu": docker}
+    monkeypatch.setattr("environment_servers.harbor.sandboxes.get_global_config_dict", lambda: blocks)
+    base = server._post_seed_budget_s(task)
+    # The verifiers start on the GPU block, here Docker, while the task's own block is OpenSandbox.
+    monkeypatch.setattr(server, "_provider_ref", lambda view: "sandbox" if view is task else "sandbox_gpu")
+    assert server._post_seed_budget_s(task) == base + separate_turns * 120.0
+    server.config.enforce_task_timeouts = False
+    assert server._post_seed_budget_s(task) == base
+
+
 async def test_a_separate_mode_task_verifies_each_turn_in_its_own_sandbox_while_the_agents_keeps_running(
     tmp_path, monkeypatch
 ):

@@ -4028,6 +4028,20 @@ class TestComposeVolumeSourcesAtPrepare:
             is True
         )
 
+    def test_a_docker_block_always_has_shared_storage(self, sources):
+        """The Docker provider keeps shared storage on a named volume it creates itself, so prepare passes a Compose
+        task's named volumes on a ``docker`` block without any setting, where an OpenSandbox block needs its
+        ``shared_storage.host_path``."""
+        from nemo_gym.cli.eval import (
+            GPU_SANDBOX_PROVIDER_KEY,
+            gpu_shared_storage_from_overrides,
+            shared_storage_from_overrides,
+        )
+
+        assert shared_storage_from_overrides(["++sandbox.docker.create.use_init=true"], None) is True
+        gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
+        assert gpu_shared_storage_from_overrides([gpu_block, "++sandbox_gpu.docker.exec.concurrency=4"], None) is True
+
     def test_gpu_volume_sources_come_from_the_gpu_sandbox_provider_block(self, tmp_path, sources):
         # Review: GPU-declaring tasks are seeded from the server's `gpu_sandbox_provider` block, so prepare reads
         # that block's volume_sources too: None without a GPU block, {} for a GPU block without the key.

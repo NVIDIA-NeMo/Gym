@@ -411,11 +411,19 @@ class SandboxCapabilities:
         reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
             ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
             ``never``.
+        cancelled_create_hold_s: How long a create may keep running after its caller cancels it, finishing a
+            request it already sent and removing what that made rather than leaving a sandbox nobody holds, as the
+            provider class and its deployment config set it; ``None`` when nothing bounds it. A caller that cancels
+            a create on its own deadline and still needs time afterwards reserves this too. ``0`` means the provider
+            declares no hold (OpenSandbox does not yet declare the up to ``ORPHAN_REAP_TIMEOUT_S`` it spends reaping
+            an orphaned create). The value does not count a wait for a command slot that other work on the same
+            provider instance holds.
     """
 
     snapshot_keeps: frozenset[SnapshotContent] = frozenset()
     network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
     reconnect: Reconnect = "always"
+    cancelled_create_hold_s: float | None = 0.0
 
 
 def provider_capabilities(provider: object, *, config: Mapping[str, Any] | None = None) -> SandboxCapabilities:
@@ -542,6 +550,29 @@ class SupportsSandboxExecScopedProcesses(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxDetachedExec(Protocol):
+    """Optional provider capability: start a command that keeps running after the call returns.
+
+    ``exec_detached`` returns once the command has started, without waiting for it to end, and the running command
+    holds none of the provider's command capacity (such as Docker's ``exec.concurrency``). The command ends by itself
+    or with the sandbox; its output is discarded unless it redirects it. The result reports whether the command could
+    be started, never how it ends. ``cwd``, ``env`` and ``user`` apply as they do in ``exec``. The Compose adapter
+    starts each service this way where the provider can, so that running services cannot take the capacity their
+    startup checks need; elsewhere a service's exec stays attached for the service's lifetime.
+    """
+
+    async def exec_detached(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
 class SupportsSandboxExecArgv(Protocol):
     """Optional provider capability: ``exec`` runs an argument list without a shell.
 
@@ -642,6 +673,22 @@ class SupportsSandboxServiceOptions(Protocol):
         sysctls: Mapping[str, str] | None = None,
         security_opt: tuple[str, ...] = (),
     ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxExecAsAnyUser(Protocol):
+    """Optional provider capability: ``exec`` runs a command as the user it names, root included, whatever user the
+    sandbox's image runs as.
+
+    Docker sets the user of each ``docker exec`` from outside the container. A provider that switches users inside
+    the sandbox (``su``) can only do so from root, so in a sandbox whose image runs as a non-root user its commands
+    run as that user. ``EXEC_AS_ANY_USER`` is a class attribute, ``True``, so prepare can read it by provider name
+    without instantiating the provider (``provider_execs_as_any_user``). A Compose sidecar whose image runs as a
+    non-root user keeps its ``user`` and its hosts-file entries on such a provider; on others it stays on its image's
+    user without host injection (``nemo_gym.sandbox.compose_config.adapt_non_root_sidecars``).
+    """
+
+    EXEC_AS_ANY_USER: bool
 
 
 @runtime_checkable

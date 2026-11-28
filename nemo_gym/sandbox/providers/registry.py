@@ -135,6 +135,15 @@ def provider_service_option_fields(name: str) -> frozenset[str]:
     return frozenset(getattr(get_provider_class(name), "SERVICE_OPTION_FIELDS", frozenset()))
 
 
+def provider_execs_as_any_user(name: str) -> bool:
+    """Whether provider ``name`` runs each command as the user it names, whatever user the image runs as.
+
+    Read from the provider class's ``EXEC_AS_ANY_USER`` (see ``SupportsSandboxExecAsAnyUser``), so prepare can
+    decide it by provider name without instantiating the provider. A provider without the attribute does not.
+    """
+    return getattr(get_provider_class(name), "EXEC_AS_ANY_USER", False) is True
+
+
 def list_providers() -> list[str]:
     """List available provider names from all sources."""
     return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS, *_entry_point_loaders()})
