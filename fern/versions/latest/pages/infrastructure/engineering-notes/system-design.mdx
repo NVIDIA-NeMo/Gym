@@ -22,7 +22,7 @@ flowchart LR
 
 The `gym` CLI accepts two kinds of configuration input, and both become entries in the `config_paths` list.
 
-- Named selectors such as `--resources-server`, `--model-type`, `--agent-type`, `--benchmark`, and `--environment` take a component name. The CLI resolves each name to that component's config file. For example, `--resources-server example_single_tool_call` resolves to `resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml`.
+- Named selectors such as `--resources-server`, `--model-type`, `--agent-type`, `--benchmark`, and `--environment` take a component name. The CLI resolves each name to that component's config file. For example, `--resources-server example_single_tool_call` resolves to `resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml`. A `--benchmark` or `--environment` name is first read as a catalog name: when `benchmarks/<name>/manifest.yaml` (or `environments/<name>/manifest.yaml`) exists, the name resolves to the config its `config_path` names, which may sit outside that folder. Otherwise it resolves to `<name>/config.yaml`, then to `<name>/<flavor>.yaml`. Each search root is checked in that order before the next root.
 - `--config` takes an explicit file path. It is repeatable, so you can pass several files.
 
 This command uses named selectors:
