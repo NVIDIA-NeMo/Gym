@@ -13,21 +13,40 @@ image's settings file (``env_file``) and other settings (``environment``). The e
 point at the Model Server, so every model call goes through Gym on the rollout's route. RESULT_JSON gets the submitted
 query, or none, Auto Ontology's record of the episode, and the model call that ended it when the loop gave up on one
 (``model_failure``).
+
+An Environment Server's tools can take part, for a benchmark such as BIRD-Interact whose user the agent asks.
+``tools`` are offered to the model beside Auto Ontology's own, each called over HTTP at its ``url``; ``submit`` is where
+the query Auto Ontology accepts goes, as ``{"sql": ...}``. ``custom_prompts`` extends the system prompt. RESULT_JSON
+then also gets each call of those tools and the reply to the submission. A tool call the server fails or refuses
+replies with the error, which the model reads as the tool's result.
+
+An episode that raises writes RESULT_JSON with ``error`` and exits 1, so the agent reports the cause.
 """
 
+import http.client
 import json
 import os
 import sys
+import traceback
+import urllib.error
+import urllib.request
 from pathlib import Path
+from string import Template
 from typing import Any
 
 
 # Auto Ontology's client needs a key; the Model Server holds the provider's.
 MODEL_SERVER_API_KEY = "gym-model-server"
+# A call of an Environment Server's tool, such as a question its simulated user answers.
+TOOL_TIMEOUT_SECONDS = 600
 
 
 def episode_environment(task: dict[str, Any]) -> dict[str, str]:
-    """The settings Auto Ontology reads at import: the image's, then the task's, then its model, which always wins."""
+    """The settings Auto Ontology reads at import: the image's, then the task's, then its model, which always wins.
+
+    A value may name another setting as ``${NAME}``, such as a source database on the catalog's ``${POSTGRES_PORT}``,
+    which each episode sets.
+    """
     settings: dict[str, str] = {}
     env_file = task.get("env_file")
     if env_file and Path(env_file).is_file():
@@ -37,6 +56,7 @@ def episode_environment(task: dict[str, Any]) -> dict[str, str]:
                 key, value = line.split("=", 1)
                 settings[key.strip()] = value.strip()
     settings.update({str(key): str(value) for key, value in (task.get("environment") or {}).items()})
+    settings = {key: Template(value).safe_substitute(settings) for key, value in settings.items()}
     settings.update(
         {
             "REASONING_ENDPOINT": task["model_base_url"],
@@ -58,6 +78,76 @@ def model_failure(error: BaseException) -> dict[str, Any]:
         "no_reply": isinstance(error, openai.APIConnectionError),
         "error": f"{type(error).__name__}: {error}"[:2000],
     }
+
+
+class ToolCallError(RuntimeError):
+    """A call of an Environment Server's tool that the server did not answer.
+
+    ``refused`` is True when the server refused the call's arguments (HTTP 4xx). Otherwise the call got no reply (a
+    refused connection, a timeout or a server error): the task cannot go on without the server, so the activation
+    fails as an infrastructure error, not as the model's.
+    """
+
+    def __init__(self, message: str, *, refused: bool) -> None:
+        super().__init__(message)
+        self.refused = refused
+
+
+def call_tool(endpoint: dict[str, Any], arguments: dict[str, Any]) -> str:
+    """POST ``arguments`` to an Environment Server's tool and return its reply: a JSON string's text, or the JSON.
+
+    A call the server does not answer raises ToolCallError.
+    """
+    headers = {"Content-Type": "application/json", **endpoint.get("headers", {})}
+    if cookies := endpoint.get("cookies"):
+        headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in cookies.items())
+    request = urllib.request.Request(
+        endpoint["url"], data=json.dumps(arguments).encode(), headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TOOL_TIMEOUT_SECONDS) as response:
+            reply = response.read().decode(errors="replace")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode(errors="replace")
+        raise ToolCallError(f"The tool call failed with HTTP {error.code}: {body[:2000]}", refused=error.code < 500)
+    except (OSError, http.client.HTTPException) as error:
+        # No reply, or a reply cut short (IncompleteRead, a reset connection): the server may have counted the call.
+        raise ToolCallError(f"The tool call failed: {type(error).__name__}: {error}", refused=False) from error
+    try:
+        output = json.loads(reply)
+    except json.JSONDecodeError:
+        return reply
+    return output if isinstance(output, str) else reply
+
+
+def extra_tools(task: dict[str, Any], calls: list[dict[str, Any]]) -> list[Any]:
+    """The task's Environment Server tools, as Auto Ontology's extra tools that record each call in ``calls``.
+
+    A call the server refused replies with the refusal, which the model reads. A call that got no reply is recorded
+    with its error: Auto Ontology's loop catches what a tool raises, so ``run`` raises it once the loop returns.
+    """
+    if not task.get("tools"):
+        return []
+    # Only an episode with such tools needs an Auto Ontology that takes them.
+    from auto_ontology.retrieval.text_to_sql.react.loop import ExtraTool
+
+    def runner(tool: dict[str, Any]) -> Any:
+        name = tool["definition"]["function"]["name"]
+
+        def run(**arguments: Any) -> str:
+            try:
+                reply = call_tool(tool, arguments)
+            except ToolCallError as error:
+                calls.append({"name": name, "arguments": arguments, "error": str(error), "refused": error.refused})
+                if error.refused:
+                    return str(error)
+                raise
+            calls.append({"name": name, "arguments": arguments, "reply": reply})
+            return reply
+
+        return run
+
+    return [ExtraTool(definition=tool["definition"], run=runner(tool)) for tool in task["tools"]]
 
 
 def run(task: dict[str, Any]) -> dict[str, Any]:
@@ -98,21 +188,30 @@ def run(task: dict[str, Any]) -> dict[str, Any]:
             raise
 
     loop.invoke_with_retry = invoke_with_retry
+    calls: list[dict[str, Any]] = []
+    options = {"extra_tools": tools} if (tools := extra_tools(task, calls)) else {}
     result = run_episode(
         get_llm_client(),
         context,
         question=task["question"],
         evidence=task.get("evidence") or None,
         dialect=getattr(connector_for(context), "dialect", None),
+        custom_prompts=task.get("custom_prompts") or None,
+        **options,
     )
+    if undelivered := [call for call in calls if "error" in call and not call["refused"]]:
+        raise ToolCallError(undelivered[0]["error"], refused=False)
     submission = result.submission
-    ran = submission is not None and submission.db_response is not None
+    sql = submission.sql if submission is not None and submission.db_response is not None else None
+    submit = task.get("submit")
     return {
-        "sql": submission.sql if ran else None,
+        "sql": sql,
         "reason": result.reason,
         "tool_calls": result.tool_calls,
         "trajectory": result.trajectory,
         "model_failure": model_failure(failures[-1]) if result.reason == "model_error" else None,
+        "environment_tool_calls": calls,
+        "submit_reply": call_tool(submit, {"sql": sql}) if submit and sql else None,
     }
 
 
@@ -121,7 +220,12 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     task_path, result_path = (Path(arg) for arg in argv)
-    result = run(json.loads(task_path.read_text()))
+    try:
+        result = run(json.loads(task_path.read_text()))
+    except Exception as error:
+        traceback.print_exc()
+        result_path.write_text(json.dumps({"error": f"{type(error).__name__}: {error}"[:4000]}))
+        return 1
     result_path.write_text(json.dumps(result, default=str))
     return 0
 
