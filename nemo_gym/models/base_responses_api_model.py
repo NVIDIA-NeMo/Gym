@@ -62,7 +62,7 @@ from nemo_gym.models._checkpoint_workers import (
     PolicyWorkerLink,
     coordinator_socket_path,
 )
-from nemo_gym.models.anthropic_converter import AnthropicConverter
+from nemo_gym.models.anthropic_converter import ANTHROPIC_PING_SSE, AnthropicConverter
 from nemo_gym.models.chat_completions_converter import CustomToolStrategy
 from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.models.model_call_capture import (
@@ -318,6 +318,25 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "server. Minimal response.created keepalive events are unaffected."
         ),
     )
+    forward_anthropic_reasoning_effort: bool = Field(
+        default=False,
+        description=(
+            "Forward the effort of an Anthropic Messages request (`output_config.effort`) to the backend as the "
+            "Responses `reasoning.effort`, as a /v1/responses request states it. Off by default, which drops the "
+            "effort: the Claude Code CLI states one in every request, `high` unless configured, and a backend can "
+            "refuse a level that it does not serve."
+        ),
+    )
+    anthropic_nonleading_system_note: str | None = Field(
+        default=None,
+        description=(
+            "Hand a nonleading `system` message of an Anthropic Messages request, which is one that follows a message "
+            "of another role, to the backend as a user message that begins with this text, in a text block of its "
+            "own. The Claude Code CLI describes its environment in such a message after the prompt, and a chat "
+            "template can refuse a system message that is not the first message. The system messages that open a "
+            "conversation keep their role. Unset by default, which passes every system message on with its role."
+        ),
+    )
     stream_keepalive_s: Optional[float] = Field(
         default=None,
         gt=0,
@@ -333,6 +352,12 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "response ids come from an upstream Responses API refuse the setting at startup. A call that fails "
             "after the stream opened ends with response.failed instead of an HTTP error status. Off (null) by "
             "default, which sends nothing until the response is complete."
+            " A streaming /v1/messages request is buffered and held open in the same way: a call still running "
+            "after this many seconds opens the stream with a ping event and then sends another every this many "
+            "seconds; the events of the message that follow are unchanged. A /v1/messages call that fails after "
+            "the stream opened ends with an error event. The Claude Code CLI abandons a request after about "
+            "360 s without a response byte and re-sends it. It answers the error event with a request that is "
+            "not streamed, which no event can hold open and which it abandons after about 300 s."
         ),
     )
     custom_tool_strategy: CustomToolStrategy = Field(
@@ -944,19 +969,104 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         result back to an Anthropic Messages response. When the client requested ``stream: true``
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
+        ``stream_keepalive_s`` holds the event stream open while the call runs.
         """
-        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
-        response = await self._invoke_responses(request, params)
-        model_name = body.get("model") or response.model
-        anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
+        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(
+            body,
+            forward_reasoning_effort=self.config.forward_anthropic_reasoning_effort,
+            nonleading_system_note=self.config.anthropic_nonleading_system_note,
+        )
         if body.get("stream"):
-            return await self._stream_served_response(
-                anthropic_response,
-                _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
-            )
+            return await self._stream_messages(request, body, params)
+        anthropic_response = self._anthropic_response(body, await self._invoke_responses(request, params))
         dispatched = _orjson_dispatch_response(anthropic_response)
         await self._finalize_served_response(anthropic_response)
         return dispatched
+
+    @staticmethod
+    def _anthropic_response(body: dict, response: NeMoGymResponse) -> dict:
+        """Convert ``response`` to an Anthropic Messages response.
+
+        The result states the model that the request ``body`` names, and the model of ``response`` without one.
+        """
+        return _ANTHROPIC_CONVERTER.responses_to_anthropic_response(
+            response, model=body.get("model") or response.model
+        )
+
+    async def _stream_messages(
+        self, request: Request, body: dict, params: NeMoGymResponseCreateParamsNonStreaming
+    ) -> StreamingResponse:
+        """Serve a streamed Messages request from the complete response of ``responses()``.
+
+        Without ``stream_keepalive_s`` nothing is sent until the response is complete. With it, a call still running
+        after one interval opens the stream and sends a ``ping`` event every interval until the call ends.
+        """
+
+        async def served(response: NeMoGymResponse) -> StreamingResponse:
+            """Convert the complete ``response`` to an Anthropic Messages response and return its event stream."""
+            anthropic_response = self._anthropic_response(body, response)
+            return await self._stream_served_response(
+                anthropic_response, _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response)
+            )
+
+        keepalive_s = self.config.stream_keepalive_s
+        if keepalive_s is None:
+            return await served(await self._invoke_responses(request, params))
+        pending = asyncio.create_task(self._invoke_responses(request, params))
+        try:
+            # StreamingResponse commits HTTP headers before iterating its body. Wait one interval
+            # first, so a call that finishes sooner keeps its HTTP error statuses.
+            done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+            if done:
+                return await served(await pending)
+        except BaseException:
+            await _cancel_and_wait_for_backend(pending)
+            raise
+
+        async def events() -> AsyncIterator[str | bytes]:
+            """Yield a ``ping`` event per interval while the call runs, then the events of its message.
+
+            A call that failed ends the stream with one ``error`` event instead.
+            """
+            try:
+                yield ANTHROPIC_PING_SSE
+                while not pending.done():
+                    done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+                    if not done:
+                        yield ANTHROPIC_PING_SSE
+                try:
+                    response = await pending
+                except Exception as exc:
+                    # The stream is already open, so only an event can report the failure.
+                    yield _ANTHROPIC_CONVERTER.anthropic_error_to_sse(*self._streamed_messages_failure(exc))
+                    return
+                # Capture finalization and serialization failures must propagate:
+                # treating them as backend SSE errors would hide an invalid capture.
+                async for event in (await served(response)).body_iterator:
+                    yield event
+            finally:
+                await _cancel_and_wait_for_backend(pending)
+
+        return _BackendStreamingResponse(events(), backend=pending)
+
+    def _streamed_messages_failure(self, exc: Exception) -> tuple[str, str]:
+        """The ``(type, message)`` of the ``error`` event that reports a failure after ``ping`` events.
+
+        The message is the one a Responses stream reports (``_streamed_responses_failure``). The type is the one
+        that Anthropic's API gives the HTTP status that the client would have seen before the stream opened.
+        """
+        _, message = self._streamed_responses_failure(exc)
+        status = 500
+        if is_propagated_refusal(exc):
+            status = 400
+        elif isinstance(exc, ClientResponseError):
+            if self._should_propagate_upstream_http_error(exc):
+                status = exc.status
+        elif isinstance(exc, HTTPException):
+            status = exc.status_code
+        if status == 429:
+            return "rate_limit_error", message
+        return ("api_error" if status >= 500 else "invalid_request_error"), message
 
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, *, response_id: Optional[str] = None

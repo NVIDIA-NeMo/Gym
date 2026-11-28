@@ -10,6 +10,9 @@ Every NeMo Gym model server speaks the [Anthropic Messages API](https://docs.ant
 
 `SimpleResponsesAPIModel` registers `POST /v1/messages` on every model server by default. The handler maps the inbound Anthropic Messages request to Gym's native Responses schema, calls that server's own `responses()` implementation (whatever upstream the server is configured for), and maps the result back to an Anthropic Messages response. When the client sets `stream: true` (Claude Code always does), the complete response is re-emitted as a synthesized Anthropic SSE event stream.
 
+The conversion drops the effort that a request states (`output_config.effort`) unless the model server sets [`forward_anthropic_reasoning_effort`](/model-server/vllm).
+It passes a `system` message that follows a message of another role on with its role unless the model server sets [`anthropic_nonleading_system_note`](/model-server/vllm), which hands the message to the backend as a user message.
+
 Buffered SSE also supports [external token staging](/model-server/model-call-capture#buffered-sse-with-external-token-staging).
 The inference worker stores training tokens separately, and Gym replays the completed answer as SSE.
 Generation completes before replay begins, so no content is delivered during generation.
@@ -112,6 +115,10 @@ gym eval run --no-serve \
     --output results/claude_code_rollout.jsonl \
     --limit 1
 ```
+
+## Long turns
+
+The model server answers a streamed `/v1/messages` request only when the whole generation has returned. Claude Code gives a request up after about 360 seconds without a response byte and sends it again, so a longer generation runs twice and its first answer is lost. Set [`stream_keepalive_s`](/model-server/vllm) on the model server, for example to `15`: a call that runs longer opens the stream with a `ping` event and sends another at that interval until the message follows. A call that fails after the stream opened ends it with an `error` event. Claude Code then sends the request once more without streaming and gets the HTTP error status. No event can hold that request open, and Claude Code gives it up after about 300 seconds without a response. A model server whose response ids come from an upstream Responses API refuses the setting at startup and holds no `/v1/messages` stream open.
 
 ## Smoke-test `/v1/messages`
 

@@ -27,6 +27,7 @@ from nemo_gym.models._checkpoint import (
     ledger_removal_refusal,
     note_generation_backend,
 )
+from nemo_gym.models.anthropic_converter import ANTHROPIC_PING_SSE
 from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.models.responses_streaming import synthesize_responses_keepalive_sse
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
@@ -1641,6 +1642,63 @@ async def test_responses_lifecycle_events_are_liveness_not_the_answer(tmp_path: 
     assert sent_at_publication == [1 + len(RESPONSES_LIFECYCLE_EVENTS)], "published before the terminal event"
     assert [row["model_call_id"] for row in ledger.export_rows("r")] == [contexts[0].model_call_id]
     assert contexts[0].committed
+
+
+async def test_messages_ping_events_are_liveness_not_the_answer() -> None:
+    """``stream_keepalive_s`` opens a Messages stream with ``ping`` events long before generation finishes.
+
+    A ping starts no answer: a checkpoint holds the call instead of waiting for it, and the call's ledger row is
+    published when the first event of the message reaches the gate.
+    """
+    participant = PolicyModelParticipant()
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    ping = ANTHROPIC_PING_SSE.encode()
+    message_start = b'event: message_start\ndata: {"type": "message_start"}\n\n'
+    sent, generated = [], asyncio.Event()
+    delivering = watch_delivery(participant.gate)
+    sent_at_publication = []
+    publish = participant.gate.publish
+
+    async def recording_publish(ticket) -> None:
+        sent_at_publication.append(len(sent))
+        await publish(ticket)
+
+    participant.gate.publish = recording_publish
+
+    async def app(scope, receive, send):
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]}
+        )
+        await send({"type": "http.response.body", "body": ping, "more_body": True})
+        await generated.wait()
+        await send({"type": "http.response.body", "body": message_start, "more_body": False})
+
+    async def send(message):
+        sent.append(message)
+
+    call = asyncio.create_task(
+        PolicyAdmissionMiddleware(app, participant.gate)(
+            {"type": "http", "path": "/ng-rollout/r/v1/messages"}, None, send
+        )
+    )
+    try:
+        await wait_until(lambda: len(sent) == 2)
+        assert not delivering.is_set()
+        prepared = await asyncio.wait_for(controller.prepare(CheckpointRequest(**control())), timeout=5)
+        assert prepared["phase"] == "prepared"
+        assert prepared["report"]["counts"]["held"] == 1
+        generated.set()
+        await asyncio.wait_for(delivering.wait(), timeout=5)
+        assert len(sent) == 2, "the message waits for resume"
+        await controller.resume(CheckpointRequest(**control()))
+        await asyncio.wait_for(call, timeout=5)
+    finally:
+        await controller.resume(CheckpointRequest(**control()))
+        call.cancel()
+        await asyncio.gather(call, return_exceptions=True)
+
+    assert [message.get("body") for message in sent[1:]] == [ping, message_start]
+    assert sent_at_publication == [2], "published before the message leaves"
 
 
 async def test_a_call_that_leaves_before_its_response_starts_leaves_no_row_and_is_not_poisoned(tmp_path: Path) -> None:
