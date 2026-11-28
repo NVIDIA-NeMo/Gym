@@ -23,6 +23,7 @@ import shutil
 import signal
 import tempfile
 from asyncio import Semaphore
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import deepcopy
@@ -94,8 +95,10 @@ from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, Observa
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
+    CodexOutputUnavailable,
     associate_codex_compaction_calls,
     parse_codex_observations,
+    parse_codex_output,
     parse_codex_usage,
     read_codex_observations,
 )
@@ -114,6 +117,9 @@ from responses_api_agents.codex_agent.transport import rate_limit_proxy
 LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
+_EXECUTED_FORM_GAP = "tool_calls_in_executed_form"
+_CLI_RESULT_GAP = "tool_results_from_cli_events"
+_UNKNOWN_RECORDS_GAP = "unknown_session_records_skipped"
 _PROVIDER_ERROR = "provider_error"
 # Codex's final error when a model response ends at its output-token limit (the output cap), a gradable outcome.
 # Codex 0.144.4 and 0.154.0 retry such a response as a stream disconnect and report the first text; Codex 0.163.0
@@ -390,6 +396,10 @@ def parse_exec_jsonl(
     message inside ``<think>`` tags (mirroring the Claude Code agent). The pinned CLI defaults absent
     backend cache/reasoning counters to zero, so only positive integers establish measured details;
     otherwise ``cached_input_tokens`` and ``reasoning_tokens`` are None.
+
+    The tool items show each tool as the command Codex executed, not as the model called it. A sandbox session builds
+    its output from Codex's session record instead (``parse_codex_output``) and uses this one for the usage, the
+    errors, and the output only when that record cannot stand in.
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
@@ -543,6 +553,125 @@ def parse_exec_jsonl(
     if errors:
         metadata["errors"] = errors
     return output_items, metadata
+
+
+def _executed_command(item: dict[str, Any]) -> Optional[str]:
+    """The command a CLI ``command_execution`` item ran. Codex runs a command as ``<shell> -lc <command>`` (``-c``
+    without a login shell) and shows that argv joined with shell quoting; any other form gives None."""
+    try:
+        argv = shlex.split(item["command"])
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return None
+    return argv[2] if len(argv) == 3 and argv[1] in ("-lc", "-c") else None
+
+
+def _mcp_callable_name(name: str) -> str:
+    """An MCP server or tool name as Codex shows it to the model: each character other than an ASCII letter, digit
+    or ``_`` becomes ``_``."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", name)
+
+
+def _cli_result_key(item: dict[str, Any]) -> Optional[tuple[str, ...]]:
+    """What a finished CLI tool item is joined to a model call by: a shell command's text, or an MCP call's
+    namespace, tool name and arguments in the form the model called them. None for any other item.
+
+    Codex calls an MCP tool ``<tool>`` in the namespace ``mcp__<server>``, both with :func:`_mcp_callable_name`
+    applied (Codex 0.144.4, 0.154.0 and 0.155.1). It names a tool otherwise only to tell two names apart, to fit a
+    length limit, or when configured to leave out the prefix; a call under such a name has no key equal to one of
+    these, so it is not joined.
+    """
+    if item.get("type") == "command_execution":
+        command = _executed_command(item)
+        return None if command is None else ("exec_command", command)
+    server, tool = item.get("server"), item.get("tool")
+    if item.get("type") != "mcp_tool_call" or not isinstance(server, str) or not isinstance(tool, str):
+        return None
+    namespace = _mcp_callable_name(server)
+    if not namespace.startswith("mcp__"):
+        namespace = f"mcp__{namespace}"
+    return ("mcp", namespace, _mcp_callable_name(tool), json.dumps(item.get("arguments"), sort_keys=True))
+
+
+def _call_key(item: Any) -> Optional[tuple[str, ...]]:
+    """The :func:`_cli_result_key` of a call the model made: an ``exec_command`` call's ``cmd``, or an MCP call's
+    namespace, name and arguments. None for any other item."""
+    if getattr(item, "type", None) != "function_call":
+        return None
+    try:
+        arguments = json.loads(item.arguments)
+        canonical_arguments = json.dumps(arguments, sort_keys=True)
+    except (ValueError, RecursionError):
+        return None
+    if item.name == "exec_command" and not item.namespace:
+        command = arguments.get("cmd") if isinstance(arguments, dict) else None
+        return ("exec_command", command) if isinstance(command, str) else None
+    if item.namespace and item.namespace.startswith("mcp__"):
+        return ("mcp", item.namespace, item.name, canonical_arguments)
+    return None
+
+
+def _with_cli_results(output: list[Any], events: list[tuple[float, dict[str, Any]]]) -> tuple[list[Any], list[Any]]:
+    """Add the CLI's result for each shell command or MCP call the session record has a call for but no result,
+    where the CLI events show that call finished, or show output of a command still running. Returns the output and
+    the results added.
+
+    Codex starts each call while the model's response streams, and runs the calls of a batch at once where the tool
+    allows it (a shell command; an MCP tool marked read-only or on a server configured for parallel calls), but it
+    writes their results to the record only after the response ends, in call order. The CLI reports each tool when
+    it ends. So a run stopped before a result was written can have it in the CLI events and not in the record.
+    A CLI item and a call are joined only when their :func:`_cli_result_key` is the same and no other call or CLI
+    item, finished or not, has it; display IDs are never matched to calls by position. The result is the CLI's (a
+    command's output, and its exit code when not 0; an MCP tool's text or error), not the text Codex would have
+    given the model.
+
+    A command the CLI shows still running gets the output of its latest ``item.updated`` snapshot, as a result with
+    the status ``incomplete``; one that showed no output gets none. Codex 0.144.4, 0.154.0 and 0.155.1 send no such
+    snapshot (their only ``item.updated`` is the plan's), so with them a running command stays without a result.
+    They send none for an MCP call either, whose result arrives whole, so only a finished MCP call is joined.
+
+    Other calls stay without a result: the CLI shows an ``apply_patch`` only as the paths it changed, which does not
+    identify the call, and an ``update_plan`` without a result.
+    """
+    answered = {item.call_id for item in output if item.type in ("function_call_output", "custom_tool_call_output")}
+    unanswered = [
+        item for item in output if item.type in ("function_call", "custom_tool_call") and item.call_id not in answered
+    ]
+    if not unanswered:
+        return output, []
+    # Each CLI item by display ID: the item it completed with, or else the latest snapshot of it.
+    latest: dict[str | int, tuple[dict[str, Any], bool]] = {}
+    for index, (_, event) in enumerate(events):
+        kind, item = event.get("type"), event.get("item")
+        if kind not in ("item.started", "item.updated", "item.completed") or not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            if kind == "item.completed":
+                latest[index] = (item, True)  # A finished item without an ID stands alone.
+            continue
+        snapshot, finished = latest.get(item_id, ({}, False))
+        if not finished:
+            latest[item_id] = (item, True) if kind == "item.completed" else (snapshot | item, False)
+    cli_items: dict[tuple[str, ...], list[tuple[dict[str, Any], bool]]] = {}
+    for item, finished in latest.values():
+        key = _cli_result_key(item)
+        if key is not None:
+            cli_items.setdefault(key, []).append((item, finished))
+    calls_per_key = Counter(_call_key(item) for item in output)
+    results = []
+    for call in unanswered:
+        key = _call_key(call)
+        if key is None or calls_per_key[key] != 1 or len(cli_items.get(key, ())) != 1:
+            continue
+        [(item, finished)] = cli_items[key]
+        # Only a command shows output before it ends; an MCP call's snapshot has none.
+        output_so_far = item.get("aggregated_output")
+        if not finished and not (isinstance(output_so_far, str) and output_so_far):
+            continue
+        cli_output, _ = parse_exec_jsonl(json.dumps({"type": "item.completed", "item": item}))
+        update = {"call_id": call.call_id} | ({} if finished else {"status": "incomplete"})
+        results.append(cli_output[-1].model_copy(update=update))
+    return [*output, *results], results
 
 
 def _is_error_event(event: dict[str, Any]) -> bool:
@@ -1336,6 +1465,31 @@ class CodexAgent(SimpleResponsesAPIAgent):
             structured_reasoning=True,
             include_partial=True,
         )
+        # The CLI's events show each tool as the command Codex executed (a shell-wrapped string, without the model's
+        # other arguments, merged results, display IDs). The session record holds what the model called, so the
+        # output comes from it, and from the events only when it cannot stand in.
+        # The exported trajectory carries no mark of any of these gaps, so the server log says each next to its gap.
+        output_gaps = []
+        try:
+            session_output = parse_codex_output(state.native_transcript)
+        except CodexOutputUnavailable as exc:
+            if any(getattr(item, "type", None) == "function_call" for item in output):
+                output_gaps.append(ObservationGap(code=_EXECUTED_FORM_GAP, detail=str(exc)))
+                LOG.warning("Codex tool calls are kept in the executed form the CLI shows: %s", exc)
+        else:
+            output, cli_results = _with_cli_results(session_output.items, events)
+            if cli_results:
+                # A partial result holds a running command's output so far, not a result the model received.
+                detail = "the session record has no result for " + ", ".join(
+                    f"{result.call_id} (partial)" if result.status == "incomplete" else result.call_id
+                    for result in cli_results
+                )
+                output_gaps.append(ObservationGap(code=_CLI_RESULT_GAP, detail=detail))
+                LOG.warning("Codex tool results are kept as the CLI events show them: %s", detail)
+            if session_output.unknown_records:
+                detail = ", ".join(f"{kind} {count}" for kind, count in sorted(session_output.unknown_records.items()))
+                output_gaps.append(ObservationGap(code=_UNKNOWN_RECORDS_GAP, detail=detail))
+                LOG.warning("Codex session records of unknown kinds are left out of the output: %s", detail)
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
@@ -1425,6 +1579,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable"),
+            *output_gaps,
             *(ObservationGap(code="config_key_deprecated", detail=warning) for warning in deprecation_warnings),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),

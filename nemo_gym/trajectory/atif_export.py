@@ -41,6 +41,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymMessage,
+    NeMoGymResponseCustomToolCall,
+    NeMoGymResponseCustomToolCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputItem,
     NeMoGymResponseOutputMessage,
@@ -1133,6 +1135,8 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
 # turn, so a converter defect can never appear as a reward.
 
 TRANSCRIPT_EXPORT_PROFILE = "ng-transcript-to-atif-v1"
+_TOOL_CALLS = (NeMoGymResponseFunctionToolCall, NeMoGymResponseCustomToolCall)
+_TOOL_RESULTS = (NeMoGymFunctionCallOutput, NeMoGymResponseCustomToolCallOutput)
 _TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 
 
@@ -1212,6 +1216,10 @@ def transcript_to_atif(
     partial``, ``reasons``); raises :class:`AtifExportError` only for what the mapping cannot represent at
     all (a copied assistant turn, a later system turn, a result for no call or a second
     ``function_call_output`` for the same ``call_id``, item types ATIF has no place for).
+
+    A custom (free-form) tool call exports under its name with its text as the one argument, ``input``, and a call
+    with a namespace (an MCP server's) under its bare name with the namespace in ``extra.nemo_gym.namespace``. A
+    result whose status is ``incomplete`` has ``extra.nemo_gym.status`` set to ``incomplete``.
     """
     if not isinstance(session_id, str) or not session_id.strip():
         raise _path_error("session_id", "expected a non-empty string")
@@ -1279,9 +1287,9 @@ def transcript_to_atif(
             pending_reasoning.append(item)
             index += 1
             continue
-        if isinstance(item, NeMoGymResponseFunctionToolCall):
-            calls: list[NeMoGymResponseFunctionToolCall] = []
-            while index < len(conversation) and isinstance(conversation[index], NeMoGymResponseFunctionToolCall):
+        if isinstance(item, _TOOL_CALLS):
+            calls: list[NeMoGymResponseFunctionToolCall | NeMoGymResponseCustomToolCall] = []
+            while index < len(conversation) and isinstance(conversation[index], _TOOL_CALLS):
                 calls.append(conversation[index])
                 index += 1
             atif_calls: list[AtifToolCall] = []
@@ -1291,8 +1299,17 @@ def transcript_to_atif(
                     raise _path_error(call_path, "function calls need a call_id and a name")
                 if call.call_id in open_calls or any(call.call_id == c.tool_call_id for c in atif_calls):
                     raise _path_error(call_path, f"duplicate function call ID {call.call_id!r}")
-                arguments, argument_extra = _live_arguments(call, reasons=reasons)
-                extra = ({"source_item_id": call.id} if call.id is not None else {}) | (argument_extra or {})
+                if isinstance(call, NeMoGymResponseCustomToolCall):
+                    # A free-form call carries one text input, not a JSON object: it is the call's only argument.
+                    arguments, argument_extra = {"input": call.input}, {"item_type": "custom_tool_call"}
+                else:
+                    arguments, argument_extra = _live_arguments(call, reasons=reasons)
+                # ATIF names the tool alone; the namespace that scopes the name (an MCP server's) travels in extra.
+                extra = (
+                    ({"source_item_id": call.id} if call.id is not None else {})
+                    | ({"namespace": call.namespace} if call.namespace else {})
+                    | (argument_extra or {})
+                )
                 atif_calls.append(
                     AtifToolCall(
                         tool_call_id=call.call_id,
@@ -1314,17 +1331,22 @@ def transcript_to_atif(
             steps.append(step)
             agent_steps.append(step)
             continue
-        if isinstance(item, NeMoGymFunctionCallOutput):
+        if isinstance(item, _TOOL_RESULTS):
             flush_reasoning(path)
             step = open_calls.pop(item.call_id, None)
             if step is None:
                 raise _path_error(path, f"function result {item.call_id!r} matches no pending call")
             results = list(step.observation.results) if step.observation is not None else []
+            # The result item's own status, whose meaning is the harness's: codex_agent sets it on a command's output
+            # so far, which the model never read; other harnesses set it on a failed tool's result, which it read.
+            result_extra = ({"source_item_id": item.id} if item.id is not None else {}) | (
+                {"status": "incomplete"} if getattr(item, "status", None) == "incomplete" else {}
+            )
             results.append(
                 AtifObservationResult(
                     source_call_id=item.call_id,
                     content=_transcript_text(item.output, path=f"{path}.output"),
-                    extra={"nemo_gym": {"source_item_id": item.id}} if item.id is not None else None,
+                    extra={"nemo_gym": result_extra} if result_extra else None,
                 )
             )
             step.observation = AtifObservation(results=results)

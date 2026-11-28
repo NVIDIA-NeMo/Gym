@@ -7,9 +7,10 @@ import json
 import logging
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
@@ -17,6 +18,8 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputItem,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -49,6 +52,7 @@ _COMPACTION_PREFIX = (
 
 
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)
+_OUTPUT_ITEM = TypeAdapter(NeMoGymResponseOutputItem)
 LOG = logging.getLogger(__name__)
 TESTED_CODEX_VERSION = "0.144.4"
 # Codex writes U+2028 and similar unescaped inside JSON strings, so str.splitlines() would cut a record in two.
@@ -61,6 +65,15 @@ def _jsonl_lines(text: str) -> list[str]:
     if lines[-1] == "":
         lines.pop()
     return lines
+
+
+def _decode(text: str) -> object:
+    """Decode JSON text. Text nested past the decoder's recursion limit raises RecursionError, not ValueError; it is
+    as unreadable as malformed JSON, so it raises ValueError here, which every reader of a record handles."""
+    try:
+        return json.loads(text)
+    except RecursionError as exc:
+        raise ValueError("JSON nested too deeply to decode") from exc
 
 
 def _token_usage(payload: dict) -> NeMoGymResponseUsage | None:
@@ -95,7 +108,7 @@ def parse_codex_usage(transcript: str | None) -> NeMoGymResponseUsage | None:
     for line in reversed(_jsonl_lines(transcript or "")):
         usage_record = False
         try:
-            event = json.loads(line)
+            event = _decode(line)
             if event["type"] != "event_msg" or event["payload"]["type"] != "token_count":
                 continue
             usage_record = True
@@ -141,7 +154,7 @@ def _session_transcripts(transcript: str | None) -> list[tuple[dict, str]] | Non
     lines = []
     for line in _jsonl_lines(transcript or ""):
         try:
-            event = json.loads(line)
+            event = _decode(line)
         except ValueError:
             event = None
         if isinstance(event, dict) and event.get("type") == "session_meta":
@@ -173,7 +186,7 @@ def _child_status(transcript: str) -> Literal["completed", "incomplete", "unknow
     status = "unknown"
     for line in _jsonl_lines(transcript):
         try:
-            event = json.loads(line)
+            event = _decode(line)
             if event.get("type") != "event_msg":
                 continue
             kind = event["payload"].get("type")
@@ -204,7 +217,7 @@ def _persisted_item_ids(lines: list[str]) -> set[str]:
     reserved = set()
     for line in lines:
         try:
-            event = json.loads(line)
+            event = _decode(line)
             payload = event["payload"] if event["type"] == "response_item" else {}
         except (ValueError, TypeError, KeyError):
             continue
@@ -376,7 +389,7 @@ def parse_codex_observations(
             ):
                 continue
             try:
-                output = json.loads(item.output)
+                output = _decode(item.output)
             except ValueError:
                 continue
             if isinstance(output, dict) and output.get("agent_id") == identity:
@@ -445,7 +458,7 @@ def _parse_codex_transcript(
     for index, line in enumerate(lines):
         native_event = False
         try:
-            event = json.loads(line)
+            event = _decode(line)
             if not isinstance(event, dict):
                 raise ValueError("expected a Codex CLI session record")
             if event.get("type") == "event_msg":
@@ -609,6 +622,260 @@ def _parse_codex_transcript(
         ],
         gaps=gaps,
     )
+
+
+class CodexOutputUnavailable(ValueError):
+    """The Codex session record cannot stand in for ``response.output``; the message says why."""
+
+
+# Codex writes what the model produced, and each tool result it gave the model, only as `response_item` records
+# (RolloutItem in codex-rs/history, checked for 0.144.4, 0.154.0 and 0.155.1). Every other kind is Codex's own
+# bookkeeping, and these are the kinds those versions write: runtime events, turn settings, the compaction summary
+# and world state (the observation bundle keeps those), inter-agent delivery, and, added after 0.144.4, per-response
+# token usage, retained context, security risk scores and realtime facts.
+_NON_OUTPUT_RECORDS = frozenset(
+    {
+        "event_msg",
+        "turn_context",
+        "compacted",
+        "world_state",
+        "inter_agent_communication",
+        "inter_agent_communication_metadata",
+        "token_usage_record",
+        "retained_context",
+        "security_risk_score",
+        "realtime_item",
+    }
+)
+_TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
+_IMAGE_PART_TYPES = frozenset({"input_image", "image"})
+
+
+def _tool_result_text(output: object, *, call_id: str) -> str:
+    """A tool result as text: a string as it is, content items as their text parts, and an image as ``[image]``."""
+    if isinstance(output, str):
+        return output
+    if not isinstance(output, list):
+        raise CodexOutputUnavailable(f"the result of call {call_id} is neither text nor content items")
+    parts = []
+    for part in output:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind in _TEXT_PART_TYPES and isinstance(part.get("text"), str):
+            parts.append(part["text"])
+        elif kind in _IMAGE_PART_TYPES:
+            parts.append("[image]")
+        else:
+            raise CodexOutputUnavailable(f"the result of call {call_id} holds an unsupported content item")
+    return "\n".join(parts)
+
+
+def _own_id(payload: dict[str, Any], fallback: str) -> str:
+    """The ID Codex wrote for an item, or ``fallback`` where it kept none. Codex writes an ID as text: any other value
+    could make the output model read the item as another kind (an assistant message with no content and a numeric ID
+    reads as a copied input message, which the export rejects), so it makes the record unavailable."""
+    item_id = payload.get("id")
+    if item_id is None or item_id == "":
+        return fallback
+    if not isinstance(item_id, str):
+        raise CodexOutputUnavailable(f"a {payload.get('type')} record has an ID that is not text")
+    return item_id
+
+
+def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[str, Any]]:
+    """The Responses output items for one session ``response_item``; none for what is not model output.
+
+    ``position`` numbers the items that lack an ID of their own, which Codex does not always keep.
+    """
+    kind = payload.get("type")
+    if kind == "message":
+        if payload.get("role") != "assistant":
+            return []  # The prompt and Codex's own instructions: Gym already holds the request.
+        content = []
+        for part in payload.get("content") or []:
+            if not isinstance(part, dict) or part.get("type") not in ("output_text", "refusal"):
+                raise CodexOutputUnavailable("an assistant message holds an unsupported content part")
+            content.append({"annotations": [], **part} if part["type"] == "output_text" else part)
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "id": _own_id(payload, f"msg_{position}"),
+            "status": "completed",
+            "content": content,
+        }
+        if payload.get("phase") in ("commentary", "final_answer"):
+            message["phase"] = payload["phase"]
+        return [message]
+    if kind == "reasoning":
+        # Only reasoning text is kept: the encrypted payload is opaque, and the observation bundle holds it.
+        summary = [
+            {"type": "summary_text", "text": part["text"]}
+            for part in payload.get("summary") or []
+            if isinstance(part, dict) and part.get("text")
+        ]
+        content = [
+            {"type": "reasoning_text", "text": part["text"]}
+            for part in payload.get("content") or []
+            if isinstance(part, dict) and part.get("text")
+        ]
+        if not summary and not content:
+            return []
+        reasoning = {"type": "reasoning", "id": _own_id(payload, f"rs_{position}"), "summary": summary}
+        if content:
+            reasoning["content"] = content
+        return [reasoning]
+    if kind in ("function_call", "custom_tool_call"):
+        field = "arguments" if kind == "function_call" else "input"
+        # The export that reads this output rejects a blank call_id or name, and masks the whole turn for it.
+        identity_given = all(isinstance(payload.get(key), str) and payload[key].strip() for key in ("call_id", "name"))
+        if not identity_given or not isinstance(payload.get(field), str):
+            raise CodexOutputUnavailable(f"a {kind} record lacks its call_id, name or {field}")
+        call = {"type": kind, "call_id": payload["call_id"], "name": payload["name"], field: payload[field]}
+        call.update({key: payload[key] for key in ("id", "namespace") if isinstance(payload.get(key), str)})
+        return [call]
+    if kind in ("function_call_output", "custom_tool_call_output"):
+        call_id = payload.get("call_id")
+        if not isinstance(call_id, str):
+            raise CodexOutputUnavailable(f"a {kind} record lacks its call_id")
+        result = {
+            "type": kind,
+            "call_id": call_id,
+            "output": _tool_result_text(payload.get("output"), call_id=call_id),
+        }
+        if kind == "custom_tool_call_output":
+            result |= {"id": _own_id(payload, f"ctco_{call_id}"), "status": "completed"}
+        return [result]
+    if kind == "web_search_call":
+        # Codex runs this search on the model's side and reports no result, so it is a call with an empty result.
+        # Its name and arguments are those Harbor's own Codex agent exports, which graders read to tell a search from
+        # a page open (action_type).
+        call_id = payload.get("id")
+        if not isinstance(call_id, str) or not call_id.strip():
+            call_id = f"ws_{position}"
+        action = payload.get("action") or {}
+        if not isinstance(action, dict):
+            raise CodexOutputUnavailable("a web_search_call record has an action that is not an object")
+        arguments = {"action_type": action.get("type", "")}
+        arguments |= {key: action[key] for key in ("query", "queries", "url") if key in action}
+        return [
+            {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": "web_search_call",
+                "arguments": json.dumps(arguments),
+            },
+            {"type": "function_call_output", "call_id": call_id, "output": ""},
+        ]
+    raise CodexOutputUnavailable(f"unsupported session item {kind!r}")
+
+
+def _session_items(transcript: str | None) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """The Responses output items of a Codex session record, with each result matched to its open call, and the
+    number of records of each other kind left out."""
+    if transcript is None:
+        raise CodexOutputUnavailable("the Codex session record is unavailable")
+    items: list[dict[str, Any]] = []
+    skipped: Counter[str] = Counter()
+    calls: dict[str, bool] = {}  # call ID -> whether its result has arrived
+    sessions = 0
+    for line in _jsonl_lines(transcript):
+        try:
+            record = _decode(line)
+        except ValueError as exc:
+            raise CodexOutputUnavailable("a session record is not JSON") from exc
+        if not isinstance(record, dict):
+            raise CodexOutputUnavailable("a session record is not an object")
+        kind = record.get("type")
+        if not isinstance(kind, str) or not kind:
+            raise CodexOutputUnavailable("a session record has no kind")
+        if kind == "session_meta":
+            sessions += 1
+            if sessions > 1:
+                raise CodexOutputUnavailable("the Codex session record holds several sessions")
+            continue
+        if kind != "response_item":
+            skipped[kind] += 1
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise CodexOutputUnavailable("a response_item record has no payload object")
+        for item in _session_output_items(payload, len(items)):
+            call_id = item.get("call_id")
+            if item["type"] in ("function_call", "custom_tool_call"):
+                if call_id in calls:
+                    raise CodexOutputUnavailable(f"call {call_id} is made more than once")
+                calls[call_id] = False
+            elif item["type"] in ("function_call_output", "custom_tool_call_output"):
+                if calls.get(call_id) is not False:
+                    raise CodexOutputUnavailable(f"the result of call {call_id} matches no open call")
+                calls[call_id] = True
+            items.append(item)
+    if not items:
+        raise CodexOutputUnavailable("the Codex session record holds no model output")
+    return items, skipped
+
+
+@dataclass(frozen=True)
+class CodexSessionOutput:
+    """``response.output`` built from a Codex session record, and the records left out of it."""
+
+    items: list[NeMoGymResponseOutputItem]
+    # Every record of a kind other than session_meta and response_item, counted by kind.
+    skipped_records: dict[str, int]
+
+    @property
+    def unknown_records(self) -> dict[str, int]:
+        """The skipped records of kinds the checked Codex versions do not write: most likely the bookkeeping of a later
+        Codex version, but nothing shows that they carry no model output."""
+        return {kind: count for kind, count in self.skipped_records.items() if kind not in _NON_OUTPUT_RECORDS}
+
+
+def parse_codex_output(transcript: str | None) -> CodexSessionOutput:
+    """The model's own output from a Codex session record, in the order the model produced it.
+
+    ``codex exec --json`` reports each tool as the command Codex executed: a shell-wrapped command string, without
+    the model's other arguments, with results merged and ordered by completion and display IDs for call IDs. The
+    session record holds what the model called: each call's name, namespace, arguments and ``call_id`` exactly, in
+    model order, and each result under its call's ID. This turns that record into Responses output items, so
+    ``response.output`` and the trajectory exported from it show the model's calls.
+
+    Reasoning is kept as text only, and a content-item result as its text with ``[image]`` for each image.
+    A web search, which Codex runs on the model's side and reports without a result, becomes a ``web_search_call``
+    call with the arguments ``action_type`` and the action's ``query``, ``queries`` or ``url``, as Harbor's own Codex
+    agent exports it, and an empty result.
+
+    Only ``response_item`` records hold the model's items and the results Codex gave it. A record of any other kind
+    is left out and counted (``skipped_records``), whether or not it is a kind the checked versions write
+    (``unknown_records``): Codex adds such kinds between releases (four between 0.144.4 and 0.154.0), and rejecting
+    one would discard a record that is complete. A ``response_item`` is different: it is a model item or a tool
+    result, so one this cannot map, or a malformed one, makes the whole record unavailable rather than leave out a
+    call or a result.
+
+    Raises :class:`CodexOutputUnavailable`, and nothing else, when the record is missing, holds no model output, cannot
+    be read or has a shape this does not expect, holds a session other than the first or an item type with no mapping,
+    or has a call with a blank ID or name, a message, reasoning item or custom tool result whose ID is not text, a
+    result with no open call or a call ID used twice: output built from it would misstate the run, or fail the export
+    that reads it. A call ID is not reused even after its result, because the observations key each tool by it.
+    """
+    try:
+        items, skipped = _session_items(transcript)
+        return CodexSessionOutput(
+            # The output union reads a message it cannot place as an output message as a copied input message, which
+            # the export rejects, so an assistant message is checked against the output message itself.
+            items=[
+                NeMoGymResponseOutputMessage.model_validate(item)
+                if item["type"] == "message"
+                else _OUTPUT_ITEM.validate_python(item)
+                for item in items
+            ],
+            skipped_records=dict(skipped),
+        )
+    except ValidationError as exc:
+        raise CodexOutputUnavailable(
+            f"a session item is not a Responses output item: {exc.errors()[0]['loc']}"
+        ) from exc
+    except (TypeError, RecursionError) as exc:
+        # A record whose JSON has a shape the mapping did not expect, such as a list where Codex writes text.
+        raise CodexOutputUnavailable(f"a session record has an unexpected shape: {type(exc).__name__}: {exc}") from exc
 
 
 def associate_codex_compaction_calls(

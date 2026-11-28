@@ -41,6 +41,7 @@ from responses_api_agents.codex_agent.app import (
     CodexAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
+    _executed_command,
     _extract_instruction,
     parse_exec_jsonl,
     toml_dumps,
@@ -1091,3 +1092,19 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     assert wait.await_args.kwargs["timeout"] == expected
     assert response.metadata == {"agent_timeout_sec": str(float(expected))}
     assert agent.config.timeout == 1800
+
+
+@pytest.mark.parametrize(
+    ("command", "executed"),
+    [
+        ("/bin/bash -lc 'cat a.txt'", "cat a.txt"),
+        ("/bin/zsh -c \"python3 -c 'print(1)'\"", "python3 -c 'print(1)'"),
+        ("bash -lc 'echo '\"'\"'hi'\"'\"''", "echo 'hi'"),
+        ("pwd", None),
+        ("/bin/bash -x -lc ls", None),
+        ("/bin/bash -lc 'unterminated", None),
+        (None, None),
+    ],
+)
+def test_the_command_a_cli_item_ran_is_read_from_the_shell_wrapped_form_only(command, executed):
+    assert _executed_command({"type": "command_execution", "command": command}) == executed

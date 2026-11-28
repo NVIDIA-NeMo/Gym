@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -2218,11 +2219,20 @@ async def test_malformed_session_markers_cannot_fall_back_to_host(setup, marker)
     sandbox.launch.assert_not_awaited()
 
 
+@pytest.mark.parametrize("record", [False, True], ids=["cli-events-only", "session-record"])
 @pytest.mark.parametrize("complete", [False, True])
-async def test_latest_item_update_survives_cancel_without_duplicate_completion(setup, complete):
+async def test_latest_item_update_survives_cancel_without_duplicate_completion(setup, complete, record):
+    """A command stopped while it runs keeps the output of the CLI's latest item.updated, marked incomplete, and a
+    finished one its result, each once. With Codex's session record the call is the model's own, with its ID and
+    arguments, and the record has no result for it, so the result is the CLI's. The stopped run then ends at its time
+    limit rather than by close, which cancels the activation: the Harbor verifier's trajectory is the response's."""
+    from nemo_gym.trajectory import transcript_to_atif
+
     agent, sandbox = setup
-    started = {"id": "running-test", "type": "command_execution", "command": "pytest -x", "status": "in_progress"}
-    updated = started | {"aggregated_output": "collected 42 tests\ntest_first PASSED\n"}
+    command = "/bin/bash -lc 'pytest -x'"
+    started = {"id": "running-test", "type": "command_execution", "command": command, "status": "in_progress"}
+    so_far = "collected 42 tests\ntest_first PASSED\n"
+    updated = started | {"aggregated_output": so_far}
     items = [{"type": "item.started", "item": started}, {"type": "item.updated", "item": updated}]
     if complete:
         items += [
@@ -2230,22 +2240,53 @@ async def test_latest_item_update_survives_cancel_without_duplicate_completion(s
             {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 2}},
         ]
     sandbox.events = "\n".join(json.dumps([float(i), item]) for i, item in enumerate(items))
-    sandbox.blocked = not complete
+    arguments = json.dumps({"cmd": "pytest -x", "workdir": "/app", "yield_time_ms": 10000})
+    if record:
+        call = {"type": "function_call", "call_id": "call_test", "name": "exec_command", "arguments": arguments}
+        user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}
+        publish_session_record(sandbox, native_transcript([user, call]))
+        if not complete:
+            sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    sandbox.blocked = not complete and not record
     request, session_id, task = await activate(agent, sandbox)
-    if complete:
-        response = await task
-        assert len(response.output) == 2
+    response = await task if complete or record else None
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    if not complete:
+    if response is None:
         with pytest.raises(asyncio.CancelledError):
             await task
-    conversation = closed.agent_observations.records[0].conversation
-    calls = [item for item in conversation if item.type == "function_call"]
-    outputs = [item for item in conversation if item.type == "function_call_output"]
-    assert len(calls) == len(outputs) == 1
-    assert json.loads(calls[0].arguments) == {"cmd": "pytest -x"}
-    assert outputs[0].output == "collected 42 tests\ntest_first PASSED\n"
-    assert calls[0].status == outputs[0].status == ("completed" if complete else "incomplete")
+    if not record:
+        if complete:
+            assert len(response.output) == 2
+        conversation = closed.agent_observations.records[0].conversation
+        calls = [item for item in conversation if item.type == "function_call"]
+        outputs = [item for item in conversation if item.type == "function_call_output"]
+        assert len(calls) == len(outputs) == 1
+        assert json.loads(calls[0].arguments) == {"cmd": command}
+        assert outputs[0].output == so_far
+        assert calls[0].status == outputs[0].status == ("completed" if complete else "incomplete")
+        return
+
+    assert response.status == ("completed" if complete else "incomplete")
+    call, result = response.output
+    assert (call.type, call.call_id, call.arguments) == ("function_call", "call_test", arguments)
+    assert (result.type, result.call_id, result.output) == ("function_call_output", "call_test", so_far)
+    assert result.status == ("completed" if complete else "incomplete")
+    gaps = {gap.code: gap.detail for gap in closed.agent_observations.gaps}
+    partial = "" if complete else " (partial)"
+    assert gaps["tool_results_from_cli_events"] == f"the session record has no result for call_test{partial}"
+    trajectory = transcript_to_atif(
+        "task",
+        [item.model_dump(mode="json") for item in response.output],
+        session_id="rollout",
+        agent_name="codex_agent",
+        agent_version="test",
+    )
+    [step] = [step for step in trajectory.steps if step.tool_calls]
+    assert [(c.tool_call_id, c.arguments) for c in step.tool_calls] == [("call_test", json.loads(arguments))]
+    [observed] = step.observation.results
+    assert (observed.source_call_id, observed.content) == ("call_test", so_far)
+    assert observed.extra == (None if complete else {"nemo_gym": {"status": "incomplete"}})
+    assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == []
 
 
 @pytest.mark.parametrize("alias", ["workdir", "sessions", "runtime"])
@@ -3742,6 +3783,528 @@ def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     assert not any(gap["code"] == "model_call_join_key_unavailable" for gap in bundle["gaps"])
 
 
+def publish_session_record(sandbox, transcript: str) -> None:
+    """Have the sandbox leave Codex's session record beside the events, as the runner's snapshot does."""
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n'
+
+    sandbox.publish = publish
+
+
+def executed_form_events() -> str:
+    """The CLI's events for a run of three commands: it shows each as the shell command Codex executed, under a
+    display ID, with the slow command's result merged with its polls and reported when the process ended."""
+    slow = "sleep 5 && echo slow"
+    commands = {
+        "item_0": (f"/bin/bash -lc {shlex.quote(slow)}", "slow\n"),
+        "item_1": ("/bin/bash -lc \"sed -n '1,120p' /skills/demo/SKILL.md\"", "skill text\n"),
+    }
+    records = [{"type": "turn.started"}]
+    records += [
+        {"type": "item.started", "item": {"id": key, "type": "command_execution", "command": command}}
+        for key, (command, _) in commands.items()
+    ]
+    records += [
+        {
+            "type": "item.completed",
+            "item": {
+                "id": key,
+                "type": "command_execution",
+                "command": command,
+                "aggregated_output": output,
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }
+        for key, (command, output) in reversed(commands.items())
+    ]
+    records += [
+        {"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": "Done"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 17, "output_tokens": 5}},
+    ]
+    return "\n".join(json.dumps([float(index), record]) for index, record in enumerate(records))
+
+
+def test_session_output_holds_the_models_calls_not_the_cli_display(setup):
+    """The Harbor verifier's trajectory is exported from response.output: it must show the commands the model sent,
+    with their arguments and IDs, in the order the model made them, and the polls of a long-running command."""
+    from nemo_gym.trajectory import transcript_to_atif
+
+    agent, sandbox = setup
+    sandbox.events = executed_form_events()
+    skill = "sed -n '1,120p' \"$SKILLS/demo/SKILL.md\""
+    publish_session_record(
+        sandbox,
+        native_transcript(
+            [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call_slow",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "sleep 5 && echo slow", "yield_time_ms": 1000}),
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_skill",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": skill, "workdir": "/workspace"}),
+                },
+                {"type": "function_call_output", "call_id": "call_skill", "output": "Process exited with code 0"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_slow",
+                    "output": "Process running with session ID 3",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_poll",
+                    "name": "write_stdin",
+                    "arguments": '{"session_id":3,"chars":""}',
+                },
+                {"type": "function_call_output", "call_id": "call_poll", "output": "Process exited with code 0"},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
+            ]
+        ),
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert [(item["type"], item.get("call_id")) for item in body["output"]] == [
+        ("function_call", "call_slow"),
+        ("function_call", "call_skill"),
+        ("function_call_output", "call_skill"),
+        ("function_call_output", "call_slow"),
+        ("function_call", "call_poll"),
+        ("function_call_output", "call_poll"),
+        ("message", None),
+    ]
+    assert body["output"][1]["arguments"] == json.dumps({"cmd": skill, "workdir": "/workspace"})
+    assert body["output"][4]["name"] == "write_stdin"
+    # Usage still comes from the CLI's turn.completed.
+    assert body["usage"]["total_tokens"] == 22
+    assert "tool_calls_in_executed_form" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
+
+    trajectory = transcript_to_atif(
+        "task", body["output"], session_id="rollout", agent_name="codex_agent", agent_version="test"
+    )
+    exported = [call for step in trajectory.steps for call in step.tool_calls or []]
+    assert [(call.tool_call_id, call.function_name) for call in exported] == [
+        ("call_slow", "exec_command"),
+        ("call_skill", "exec_command"),
+        ("call_poll", "write_stdin"),
+    ]
+    assert exported[1].arguments == {"cmd": skill, "workdir": "/workspace"}
+    # The parallel pair is one step whose results keep the order they finished in.
+    pair = next(step for step in trajectory.steps if len(step.tool_calls or []) == 2)
+    assert [result.source_call_id for result in pair.observation.results] == ["call_skill", "call_slow"]
+
+
+@pytest.mark.parametrize(
+    ("record", "reason"),
+    [
+        (None, "the Codex session record is unavailable"),
+        (
+            native_transcript([{"type": "function_call_output", "call_id": "orphan", "output": "x"}]),
+            "the result of call orphan matches no open call",
+        ),
+        (native_transcript([{"type": "ghost_snapshot"}]), "unsupported session item 'ghost_snapshot'"),
+        (
+            native_transcript([{"type": "function_call", "call_id": "c1", "name": "", "arguments": "{}"}]),
+            "a function_call record lacks its call_id, name or arguments",
+        ),
+        (
+            native_transcript([{"type": "message", "role": "assistant", "content": 5}]),
+            "a session record has an unexpected shape: TypeError: 'int' object is not iterable",
+        ),
+        # Decoding raises RecursionError; the observation reader that reads the same record must not raise it either.
+        ("[" * 100_000 + "]" * 100_000, "a session record is not JSON"),
+        # With no content, the output model would read this as a copied input message, which the export rejects.
+        (
+            native_transcript([{"type": "message", "role": "assistant", "id": 7, "content": []}]),
+            "a message record has an ID that is not text",
+        ),
+    ],
+    ids=[
+        "missing",
+        "orphan-result",
+        "unsupported-item",
+        "blank-tool-name",
+        "malformed-record",
+        "nested-too-deeply",
+        "message-id-not-text",
+    ],
+)
+def test_session_output_without_a_usable_session_record_keeps_the_cli_events_and_says_so(
+    setup, caplog, record, reason
+):
+    agent, sandbox = setup
+    if record is not None:
+        publish_session_record(sandbox, record)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    call = next(item for item in body["output"] if item["type"] == "function_call")
+    assert (call["call_id"], call["arguments"]) == ("tool-1", '{"cmd": "pwd"}')
+    gaps = [gap for gap in closed["agent_observations"]["gaps"] if gap["code"] == "tool_calls_in_executed_form"]
+    assert [gap["detail"] for gap in gaps] == [reason]
+    # The exported trajectory does not show the fallback, so the server log names it and why.
+    warnings = [
+        entry.getMessage()
+        for entry in caplog.records
+        if entry.name == "responses_api_agents.codex_agent.app" and entry.levelno == logging.WARNING
+    ]
+    assert f"Codex tool calls are kept in the executed form the CLI shows: {reason}" in warnings
+
+
+def test_session_output_leaves_out_records_without_model_output_and_names_unknown_kinds(setup, caplog):
+    """Codex 0.155.1 writes a token_usage_record after each model response: the output is still the model's calls.
+    A record of a kind no checked version writes is left out too, and named in a gap and the server log."""
+    agent, sandbox = setup
+    record = native_transcript(
+        [
+            {"type": "function_call", "call_id": "call_ls", "name": "exec_command", "arguments": '{"cmd":"ls"}'},
+            {"type": "function_call_output", "call_id": "call_ls", "output": "Process exited with code 0"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
+        ]
+    )
+    record += "\n" + "\n".join(
+        json.dumps(line)
+        for line in (
+            {"type": "token_usage_record", "payload": {"response_id": "resp-1", "usage": {"input_tokens": 3}}},
+            {"type": "retained_context", "payload": {}},
+            {"type": "security_risk_score", "payload": {}},
+            {"type": "future_bookkeeping", "payload": {}},
+        )
+    )
+    publish_session_record(sandbox, record)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert [(item["type"], item.get("call_id")) for item in response.json()["output"]] == [
+        ("function_call", "call_ls"),
+        ("function_call_output", "call_ls"),
+        ("message", None),
+    ]
+    gaps = {gap["code"]: gap.get("detail") for gap in closed["agent_observations"]["gaps"]}
+    assert "tool_calls_in_executed_form" not in gaps
+    assert gaps["unknown_session_records_skipped"] == "future_bookkeeping 1"
+    assert "Codex session records of unknown kinds are left out of the output: future_bookkeeping 1" in caplog.text
+
+
+def stopped_batch(*, second: str = "echo fast", finished: str = "echo fast") -> tuple[list[dict], str]:
+    """A run stopped at its time limit during a parallel batch: the first command still runs. The CLI reported the
+    second when it ended; Codex writes a batch's results in call order, so the record has neither result."""
+    slow = "sleep 30 && echo slow"
+    events = [
+        {"type": "turn.started"},
+        *(
+            {
+                "type": "item.started",
+                "item": {"id": key, "type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(command)}"},
+            }
+            for key, command in (("item_0", slow), ("item_1", finished))
+        ),
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "command_execution",
+                "command": f"/bin/bash -lc {shlex.quote(finished)}",
+                "aggregated_output": "fast\n",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+    ]
+    record = native_transcript(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+            {
+                "type": "function_call",
+                "call_id": "call_slow",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": slow}),
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_fast",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": second, "workdir": "/app"}),
+            },
+        ]
+    )
+    return events, record
+
+
+def test_a_stopped_run_keeps_the_cli_result_the_session_record_has_not_written(setup, caplog):
+    agent, sandbox = setup
+    events, record = stopped_batch()
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "incomplete"
+    # The model's calls, in its order; the finished command keeps the result the CLI showed, the running one none.
+    assert [(item["type"], item.get("call_id")) for item in body["output"]] == [
+        ("function_call", "call_slow"),
+        ("function_call", "call_fast"),
+        ("function_call_output", "call_fast"),
+    ]
+    assert body["output"][2]["output"] == "fast\n"
+    assert json.loads(body["output"][1]["arguments"]) == {"cmd": "echo fast", "workdir": "/app"}
+    gaps = {gap["code"]: gap.get("detail") for gap in closed["agent_observations"]["gaps"]}
+    assert gaps["tool_results_from_cli_events"] == "the session record has no result for call_fast"
+    assert "tool_calls_in_executed_form" not in gaps
+    assert "Codex tool results are kept as the CLI events show them" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("second", "finished"),
+    [
+        ("sleep 30 && echo slow", "sleep 30 && echo slow"),  # two calls of one command: either could be the one
+        ("echo fast", "echo other"),  # the command that finished is not the call's
+    ],
+    ids=["same-command-twice", "other-command"],
+)
+def test_a_stopped_run_joins_a_cli_result_to_no_call_it_cannot_prove_is_its(setup, second, finished):
+    agent, sandbox = setup
+    events, record = stopped_batch(second=second, finished=finished)
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    assert [(item["type"], item.get("call_id")) for item in result.json()["output"]] == [
+        ("function_call", "call_slow"),
+        ("function_call", "call_fast"),
+    ]
+    assert "tool_results_from_cli_events" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
+
+
+MCP_CALL = {
+    "type": "function_call",
+    "call_id": "call_mcp",
+    "name": "search_docs",
+    "namespace": "mcp__gym_docs",
+    "arguments": '{"query": "pdf report", "limit": 2}',
+}
+
+
+def stopped_mcp_batch(*, server: str, cli_arguments: dict, calls: list[dict]) -> tuple[list[dict], str]:
+    """A run stopped during a batch of a shell command and a read-only MCP call, which Codex runs at once: the MCP
+    call ended and the CLI reported it, but the record waits for the command, the batch's first call."""
+    slow = "sleep 30 && echo slow"
+    mcp_item = {
+        "id": "item_1",
+        "type": "mcp_tool_call",
+        "server": server,
+        "tool": "search_docs",
+        "arguments": cli_arguments,
+    }
+    events = [
+        {"type": "turn.started"},
+        {
+            "type": "item.started",
+            "item": {"id": "item_0", "type": "command_execution", "command": f"/bin/bash -lc {shlex.quote(slow)}"},
+        },
+        {"type": "item.started", "item": mcp_item | {"result": None, "error": None, "status": "in_progress"}},
+        {
+            "type": "item.completed",
+            "item": mcp_item
+            | {"result": {"content": [{"type": "text", "text": "doc hit"}]}, "error": None, "status": "completed"},
+        },
+    ]
+    record = native_transcript(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+            {
+                "type": "function_call",
+                "call_id": "call_slow",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": slow}),
+            },
+            *calls,
+        ]
+    )
+    return events, record
+
+
+@pytest.mark.parametrize(
+    ("server", "namespace"),
+    [("gym-docs", "mcp__gym_docs"), ("mcp__docs", "mcp__docs")],
+    ids=["hyphen-written-as-underscore", "server-named-with-the-prefix"],
+)
+def test_a_stopped_run_keeps_the_cli_result_of_an_mcp_call_the_session_record_has_not_written(
+    setup, caplog, server, namespace
+):
+    agent, sandbox = setup
+    events, record = stopped_mcp_batch(
+        server=server, cli_arguments={"limit": 2, "query": "pdf report"}, calls=[MCP_CALL | {"namespace": namespace}]
+    )
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    output = result.json()["output"]
+    assert [(item["type"], item.get("call_id")) for item in output] == [
+        ("function_call", "call_slow"),
+        ("function_call", "call_mcp"),
+        ("function_call_output", "call_mcp"),
+    ]
+    # The model's call as it made it, and the MCP tool's text as the CLI showed it.
+    assert (output[1]["namespace"], output[1]["name"], output[1]["arguments"]) == (
+        namespace,
+        "search_docs",
+        MCP_CALL["arguments"],
+    )
+    assert output[2]["output"] == "doc hit"
+    gaps = {gap["code"]: gap.get("detail") for gap in closed["agent_observations"]["gaps"]}
+    assert gaps["tool_results_from_cli_events"] == "the session record has no result for call_mcp"
+    assert "Codex tool results are kept as the CLI events show them" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("server", "cli_arguments", "calls"),
+    [
+        ("gym-docs", {"query": "other"}, [MCP_CALL]),
+        ("other-docs", {"query": "pdf report", "limit": 2}, [MCP_CALL]),
+        ("gym-docs", {"query": "pdf report", "limit": 2}, [MCP_CALL, MCP_CALL | {"call_id": "call_mcp_2"}]),
+        # Codex adds a hash to a namespace only to tell two servers' names apart.
+        ("gym-docs", {"query": "pdf report", "limit": 2}, [MCP_CALL | {"namespace": "mcp__gym_docs_0123456789ab"}]),
+    ],
+    ids=["other-arguments", "other-server", "same-call-twice", "renamed-namespace"],
+)
+def test_a_stopped_run_joins_an_mcp_result_to_no_call_it_cannot_prove_is_its(setup, server, cli_arguments, calls):
+    agent, sandbox = setup
+    events, record = stopped_mcp_batch(server=server, cli_arguments=cli_arguments, calls=calls)
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    publish_session_record(sandbox, record)
+    result, closed, _ = run_codex_transcript(agent, sandbox, events)
+    assert result.status_code == 200, result.text
+    assert [(item["type"], item.get("call_id")) for item in result.json()["output"]] == [
+        ("function_call", "call_slow"),
+        *(("function_call", call["call_id"]) for call in calls),
+    ]
+    assert "tool_results_from_cli_events" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
+
+
+RUNNING_PYTEST = {
+    "id": "item_0",
+    "type": "command_execution",
+    "command": "/bin/bash -lc 'pytest -x'",
+    "status": "in_progress",
+}
+PYTEST_CALL = {
+    "type": "function_call",
+    "call_id": "call_test",
+    "name": "exec_command",
+    "arguments": json.dumps({"cmd": "pytest -x"}),
+}
+
+
+def command_events(item: dict, output: str, *, finished: bool = False) -> list[dict]:
+    """The CLI's events for a command: it started, showed its output so far, and, when ``finished``, ended."""
+    events = [
+        {"type": "item.started", "item": item},
+        {"type": "item.updated", "item": item | {"aggregated_output": output}},
+    ]
+    if finished:
+        ended = item | {"aggregated_output": output, "exit_code": 0, "status": "completed"}
+        events.append({"type": "item.completed", "item": ended})
+    return events
+
+
+@pytest.mark.parametrize(
+    ("calls", "events"),
+    [
+        (
+            [PYTEST_CALL, PYTEST_CALL | {"call_id": "call_again"}],
+            command_events(RUNNING_PYTEST, "collected 42 tests\n"),
+        ),
+        (
+            [PYTEST_CALL],
+            [
+                *command_events(RUNNING_PYTEST, "collected 42 tests\n"),
+                *command_events(RUNNING_PYTEST | {"id": "item_1"}, "collected 7 tests\n"),
+            ],
+        ),
+        (
+            [PYTEST_CALL],
+            [
+                *command_events(RUNNING_PYTEST, "collected 42 tests\n"),
+                *command_events(RUNNING_PYTEST | {"id": "item_1"}, "7 passed\n", finished=True),
+            ],
+        ),
+        (
+            [MCP_CALL],
+            [
+                {
+                    "type": "item.updated",
+                    "item": {
+                        "id": "item_0",
+                        "type": "mcp_tool_call",
+                        "server": "gym-docs",
+                        "tool": "search_docs",
+                        "arguments": {"query": "pdf report", "limit": 2},
+                        "result": {"content": [{"type": "text", "text": "doc hit"}]},
+                        "status": "in_progress",
+                    },
+                }
+            ],
+        ),
+    ],
+    ids=["same-command-twice", "command-running-twice", "command-also-finished", "mcp-call-running"],
+)
+def test_a_stopped_run_joins_output_so_far_to_no_call_it_cannot_prove_is_its(setup, calls, events):
+    """A running command's output so far joins its call only as a finished command's result does: when no other call
+    and no other CLI item, finished or not, has the command. An MCP call that had not ended has no result to join."""
+    agent, sandbox = setup
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
+    user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}
+    publish_session_record(sandbox, native_transcript([user, *calls]))
+    result, closed, _ = run_codex_transcript(agent, sandbox, [{"type": "turn.started"}, *events])
+    assert result.status_code == 200, result.text
+    assert [(item["type"], item.get("call_id")) for item in result.json()["output"]] == [
+        ("function_call", call["call_id"]) for call in calls
+    ]
+    assert "tool_results_from_cli_events" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
+
+
+def test_session_without_tool_calls_has_nothing_to_note_when_the_record_is_missing(setup, caplog):
+    agent, sandbox = setup
+    sandbox.events = "\n".join(
+        json.dumps([float(index), event])
+        for index, event in enumerate(
+            [
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {"id": "msg-1", "type": "agent_message", "text": "Hello"}},
+                {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+            ]
+        )
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert [item["type"] for item in response.json()["output"]] == ["message"]
+    assert "tool_calls_in_executed_form" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
+    assert "executed form" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "statuses,timed_out,returncode,worker_error,extra_error,accepted",
     [
@@ -3886,7 +4449,12 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
         assert body["status"] == "failed"
         assert body["error"] == {"code": "server_error", "message": rejection}
         assert [item["type"] for item in body["output"]] == ["function_call", "function_call_output"]
-        assert body["output"][1]["output"] == "retained"
+        # The call and result are the model's own, from the session record, not the CLI's display of the command.
+        assert (body["output"][0]["call_id"], body["output"][0]["arguments"]) == (
+            "provider-call",
+            '{"cmd":"printf retained"}',
+        )
+        assert body["output"][1]["output"] == native_output
         if usage_source == "native":
             assert body["usage"] == {
                 "input_tokens": 20,

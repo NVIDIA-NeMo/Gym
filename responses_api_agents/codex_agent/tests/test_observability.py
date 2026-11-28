@@ -6,9 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
+from nemo_gym.core import NeMoGymResponseOutputMessage
+from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation, transcript_to_atif
+from responses_api_agents.codex_agent.app import parse_exec_jsonl
 from responses_api_agents.codex_agent.observability import (
+    CodexOutputUnavailable,
     parse_codex_observations,
+    parse_codex_output,
     parse_codex_usage,
     read_codex_observations,
 )
@@ -486,3 +491,500 @@ def test_native_prompt_images_are_preserved() -> None:
     assert observed[1]["image_url"] == content[1]["image_url"]
     assert observed[1]["detail"] == "high"
     assert not bundle.gaps
+
+
+def _session(*payloads: dict, extra: list[dict] | None = None) -> str:
+    """A Codex session record: its header, the given ``response_item`` payloads in order, then ``extra`` records."""
+    records = [
+        {"type": "session_meta", "payload": {"id": "session-1", "cli_version": "0.144.4"}},
+        {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
+        *({"type": "response_item", "payload": payload} for payload in payloads),
+        *(extra or []),
+    ]
+    return "\n".join(json.dumps(record) for record in records)
+
+
+def _call(call_id: str, name: str, arguments: dict | str, **fields: object) -> dict:
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return {"type": "function_call", "call_id": call_id, "name": name, "arguments": text, **fields}
+
+
+def _result(call_id: str, output: object, kind: str = "function_call_output") -> dict:
+    return {"type": kind, "call_id": call_id, "output": output}
+
+
+def _user(text: str) -> dict:
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def _shape(items) -> list[tuple]:
+    return [(item.type, getattr(item, "call_id", None)) for item in items]
+
+
+def test_output_keeps_the_models_command_arguments_and_ids_verbatim() -> None:
+    """The CLI shows `/bin/bash -lc ...` with only the command; the record has what the model sent."""
+    arguments = '{"cmd":"sed -n \'1,120p\' "$SKILLS/demo/SKILL.md"","workdir":"/workspace","yield_time_ms":10000}'
+    transcript = _session(
+        _user("task"),
+        _call("call_9f3", "exec_command", arguments),
+        _result("call_9f3", "Chunk ID: a\nProcess exited with code 0\nOutput:\nskill text"),
+    )
+    call, result = parse_codex_output(transcript).items
+    assert (call.type, call.name, call.call_id) == ("function_call", "exec_command", "call_9f3")
+    assert call.arguments == arguments
+    assert result.output == "Chunk ID: a\nProcess exited with code 0\nOutput:\nskill text"
+
+
+def test_output_keeps_parallel_calls_in_model_order_and_write_stdin() -> None:
+    """Both calls of a parallel pair precede their results, which arrive in completion order; a command that keeps
+    running is polled with write_stdin, which the CLI merges into the first command's result."""
+    transcript = _session(
+        _user("task"),
+        _call("slow", "exec_command", {"cmd": "sleep 5 && echo slow", "yield_time_ms": 1000}),
+        _call("fast", "exec_command", {"cmd": "echo fast"}),
+        _result("fast", "Process exited with code 0\nOutput:\nfast"),
+        _result("slow", "Process running with session ID 7\nOutput:\n"),
+        _call("poll", "write_stdin", {"session_id": 7, "chars": "", "yield_time_ms": 30000}),
+        _result("poll", "Process exited with code 0\nOutput:\nslow"),
+    )
+    items = parse_codex_output(transcript).items
+    assert _shape(items) == [
+        ("function_call", "slow"),
+        ("function_call", "fast"),
+        ("function_call_output", "fast"),
+        ("function_call_output", "slow"),
+        ("function_call", "poll"),
+        ("function_call_output", "poll"),
+    ]
+    assert json.loads(items[0].arguments) == {"cmd": "sleep 5 && echo slow", "yield_time_ms": 1000}
+    assert items[4].name == "write_stdin"
+
+
+def test_output_keeps_each_plan_update_and_mcp_namespace() -> None:
+    transcript = _session(
+        _call("plan-1", "update_plan", {"plan": [{"step": "read", "status": "in_progress"}]}),
+        _result("plan-1", "Plan updated"),
+        _call("mcp-1", "search_docs", {"query": "pdf"}, namespace="mcp__gym_docs__"),
+        _result("mcp-1", "hit"),
+        _call("plan-2", "update_plan", {"plan": [{"step": "read", "status": "completed"}]}),
+        _result("plan-2", "Plan updated"),
+    )
+    items = parse_codex_output(transcript).items
+    assert [item.name for item in items if item.type == "function_call"] == [
+        "update_plan",
+        "search_docs",
+        "update_plan",
+    ]
+    assert items[2].namespace == "mcp__gym_docs__"
+    assert items[0].namespace is None
+
+
+def test_output_keeps_a_free_form_patch_call() -> None:
+    patch = "*** Begin Patch\n*** Add File: notes.txt\n+hello\n*** End Patch"
+    transcript = _session(
+        {"type": "custom_tool_call", "call_id": "patch-1", "name": "apply_patch", "input": patch},
+        _result("patch-1", "Success. Updated the following files:\nA notes.txt\n", "custom_tool_call_output"),
+    )
+    call, result = parse_codex_output(transcript).items
+    assert (call.type, call.name, call.input) == ("custom_tool_call", "apply_patch", patch)
+    assert (result.type, result.call_id, result.output.splitlines()[0]) == (
+        "custom_tool_call_output",
+        "patch-1",
+        "Success. Updated the following files:",
+    )
+
+
+def test_output_reads_a_content_item_result_as_text() -> None:
+    items = [
+        {"type": "input_text", "text": "viewing"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+    ]
+    transcript = _session(_call("view-1", "view_image", {"path": "/workspace/plot.png"}), _result("view-1", items))
+    assert parse_codex_output(transcript).items[1].output == "viewing\n[image]"
+
+
+def test_output_keeps_what_the_model_said_and_not_what_it_was_told() -> None:
+    transcript = _session(
+        _user("task"),
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "instructions"}]},
+        {"type": "reasoning", "summary": [], "encrypted_content": "opaque"},
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "check the file"}]},
+        {"type": "reasoning", "summary": [], "content": [{"type": "text", "text": "then run it"}]},
+        _call("c1", "exec_command", {"cmd": "ls"}),
+        _result("c1", "a"),
+        {
+            "type": "message",
+            "role": "assistant",
+            "id": "msg_served",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "Done."}],
+        },
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Without an ID."}]},
+        extra=[{"type": "event_msg", "payload": {"type": "token_count", "info": None}}],
+    )
+    reasoning, content_reasoning, call, result, answer, anonymous = parse_codex_output(transcript).items
+    assert [item.type for item in (reasoning, content_reasoning, call, result, answer, anonymous)] == [
+        "reasoning",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "message",
+        "message",
+    ]
+    assert reasoning.summary[0].text == "check the file" and reasoning.encrypted_content is None
+    assert content_reasoning.content[0].text == "then run it"
+    assert (answer.id, answer.phase, answer.content[0].text) == ("msg_served", "final_answer", "Done.")
+    assert anonymous.id and anonymous.content[0].text == "Without an ID."
+
+
+@pytest.mark.parametrize(
+    ("action", "arguments"),
+    [
+        (
+            {"type": "search", "query": "Gym", "queries": ["Gym", "NeMo Gym"]},
+            {"action_type": "search", "query": "Gym", "queries": ["Gym", "NeMo Gym"]},
+        ),
+        (
+            {"type": "open_page", "url": "https://example.com"},
+            {"action_type": "open_page", "url": "https://example.com"},
+        ),
+        (
+            {"type": "find_in_page", "url": "https://example.com", "pattern": "Gym"},
+            {"action_type": "find_in_page", "url": "https://example.com"},
+        ),
+        (None, {"action_type": ""}),
+    ],
+    ids=["search", "open-page", "find-in-page", "no-action"],
+)
+def test_output_turns_a_web_search_into_the_call_harbor_exports_with_no_result(action, arguments) -> None:
+    """Harbor's own Codex agent exports a web search as ``web_search_call`` with ``action_type``: a grader reads that
+    name and argument to tell a search from a page open."""
+    transcript = _session({"type": "web_search_call", "id": "ws-1", "status": "completed", "action": action})
+    call, result = parse_codex_output(transcript).items
+    assert (call.name, call.call_id, json.loads(call.arguments)) == ("web_search_call", "ws-1", arguments)
+    assert (result.call_id, result.output) == ("ws-1", "")
+
+
+def test_a_call_without_its_result_stays_open() -> None:
+    """The run was stopped while the tool ran: the record has the call and nothing more."""
+    items = parse_codex_output(_session(_call("long", "exec_command", {"cmd": "sleep 1000"}))).items
+    assert _shape(items) == [("function_call", "long")]
+
+
+@pytest.mark.parametrize(
+    ("transcript", "reason"),
+    [
+        (None, "unavailable"),
+        ("", "no model output"),
+        (_session(_user("task")), "no model output"),
+        ("not json", "not JSON"),
+        ("[]", "not an object"),
+        (json.dumps({"payload": {}}), "a session record has no kind"),
+        (json.dumps({"type": "", "payload": {}}), "a session record has no kind"),
+        (
+            _session(_call("c1", "t", {})) + "\n" + json.dumps({"type": "response_item", "payload": 5}),
+            "no payload object",
+        ),
+        (_session(_call("c1", "t", {})) + "\n" + json.dumps({"type": "response_item"}), "no payload object"),
+        (_session({"type": "ghost_snapshot"}), "unsupported session item 'ghost_snapshot'"),
+        (_session(_call("c1", "t", {}), _call("c1", "t", {})), "call c1 is made more than once"),
+        (_session(_result("c404", "x")), "matches no open call"),
+        (_session(_call("c1", "t", {}), _result("c1", "x"), _result("c1", "y")), "matches no open call"),
+        (_session(_call("c1", "t", {}), _result("c1", [{"type": "input_file"}])), "unsupported content item"),
+        (_session(_call("c1", "t", {}), _result("c1", 7)), "neither text nor content items"),
+        (_session({"type": "function_call", "call_id": "c1", "name": "t"}), "lacks its call_id, name or arguments"),
+        (_session(_call("c1", "", {}), _result("c1", "x")), "lacks its call_id, name or arguments"),
+        (_session(_call("c1", "  ", {})), "lacks its call_id, name or arguments"),
+        (_session(_call(" ", "t", {})), "lacks its call_id, name or arguments"),
+        (
+            _session({"type": "custom_tool_call", "call_id": "c1", "name": "", "input": "text"}),
+            "lacks its call_id, name or input",
+        ),
+        (_session({"type": "message", "role": "assistant", "content": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "reasoning", "summary": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "reasoning", "summary": [], "content": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "web_search_call", "id": "ws-1", "action": "search"}), "action that is not an object"),
+        (json.dumps({"type": ["response_item"], "payload": {}}), "a session record has no kind"),
+        (
+            _session({"type": "message", "role": "assistant", "content": [{"type": "input_image"}]}),
+            "unsupported content part",
+        ),
+        # With no content, a message whose ID is not text would read as a copied input message, which the export
+        # rejects; with content, as no output item at all.
+        (_session({"type": "message", "role": "assistant", "id": 7, "content": []}), "message record has an ID"),
+        (_session({"type": "message", "role": "assistant", "id": ["m"], "content": []}), "message record has an ID"),
+        (_session({"type": "message", "role": "assistant", "id": 0, "content": []}), "message record has an ID"),
+        (
+            _session(
+                {"type": "message", "role": "assistant", "id": 7, "content": [{"type": "output_text", "text": "a"}]}
+            ),
+            "message record has an ID",
+        ),
+        (_session({"type": "reasoning", "id": [], "summary": [{"text": "plan"}]}), "reasoning record has an ID"),
+        (
+            _session(_call("c1", "apply_patch", "p"), {**_result("c1", "ok", "custom_tool_call_output"), "id": 5}),
+            "custom_tool_call_output record has an ID",
+        ),
+        (_session(_call("c1", "t", {})) + "\n" + _session(_call("c2", "t", {})), "several sessions"),
+    ],
+)
+def test_output_is_unavailable_where_the_record_would_misstate_or_break_the_run(transcript, reason) -> None:
+    with pytest.raises(CodexOutputUnavailable, match=reason):
+        parse_codex_output(transcript)
+
+
+def test_a_record_nested_too_deeply_to_decode_is_unavailable() -> None:
+    """The decoder raises RecursionError, not ValueError, for a valid record nested past the recursion limit."""
+    with pytest.raises(CodexOutputUnavailable, match="not JSON"):
+        parse_codex_output("[" * 100_000 + "]" * 100_000)
+
+
+def test_the_observation_reader_marks_a_record_nested_too_deeply_as_unparseable() -> None:
+    """The reader that builds the observation bundle decodes the same record; it must report it, not raise."""
+    nested = "[" * 100_000 + "]" * 100_000
+    transcript = _session(_call("c1", "exec_command", {"cmd": "ls"}), _result("c1", "a"), extra=[]) + "\n" + nested
+    bundle = parse_codex_observations(
+        transcript, "run", returncode=0, timed_out=False, observation_schema_version="2.0"
+    )
+    assert [gap.code for gap in bundle.gaps].count("agent_artifact_record_unparseable") == 1
+    assert [item.call_id for item in bundle.records[0].conversation if item.type == "function_call"] == ["c1"]
+    assert parse_codex_usage(nested) is None
+
+
+# Every kind of record other than session_meta and response_item that Codex 0.144.4, 0.154.0 and 0.155.1 write.
+_NON_OUTPUT_RECORDS = [
+    {"type": "event_msg", "payload": {"type": "token_count", "info": None}},
+    {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
+    {"type": "compacted", "payload": {"message": "summary"}},
+    {"type": "world_state", "payload": {"full": True, "state": {}}},
+    {"type": "inter_agent_communication", "payload": {"author": "/root", "recipient": "/root/a", "content": "go"}},
+    {"type": "inter_agent_communication_metadata", "payload": {"trigger_turn": True}},
+    {"type": "token_usage_record", "payload": {"response_id": "resp-1", "usage": {"input_tokens": 3}}},
+    {"type": "retained_context", "payload": {"entries": []}},
+    {"type": "security_risk_score", "payload": {"score": 0}},
+    {"type": "realtime_item", "payload": {}},
+]
+
+
+def test_records_that_carry_no_model_output_are_skipped_and_counted() -> None:
+    """Codex 0.154.0 and later write a token_usage_record after each model response, among other kinds; the output
+    is built from the response items around them, and each skipped record is counted."""
+    transcript = _session(
+        _call("c1", "exec_command", {"cmd": "ls"}),
+        _result("c1", "a"),
+        extra=[*_NON_OUTPUT_RECORDS, {"type": "token_usage_record", "payload": 5}],
+    )
+    output = parse_codex_output(transcript)
+    assert _shape(output.items) == [("function_call", "c1"), ("function_call_output", "c1")]
+    assert output.skipped_records == {
+        "turn_context": 2,  # one from the session's header
+        "token_usage_record": 2,  # the payload is not read, so its shape does not matter
+        **{
+            record["type"]: 1
+            for record in _NON_OUTPUT_RECORDS
+            if record["type"] not in ("turn_context", "token_usage_record")
+        },
+    }
+    assert output.unknown_records == {}
+
+
+def test_a_record_of_a_kind_no_checked_version_writes_is_skipped_and_named() -> None:
+    """Only response items hold what the model produced, so a record of a kind added by a later Codex is left out
+    rather than discard the record, and named so that a reader of the run can tell."""
+    transcript = _session(
+        _call("c1", "exec_command", {"cmd": "ls"}),
+        _result("c1", "a"),
+        extra=[{"type": "future_bookkeeping", "payload": {"anything": 1}}, {"type": "future_bookkeeping"}],
+    )
+    output = parse_codex_output(transcript)
+    assert _shape(output.items) == [("function_call", "c1"), ("function_call_output", "c1")]
+    assert output.unknown_records == {"future_bookkeeping": 2}
+
+
+# Session files that Codex wrote in a task sandbox, with a hosted model, for one task: read two files, add their
+# numbers with python3, write the sum to a file and show it. Each is trimmed and redacted: Codex's own instructions,
+# the world-state snapshot, encrypted reasoning, the served model's name and response IDs are replaced; every record
+# keeps its kind and place, and the calls, results and messages are as Codex wrote them.
+FIXTURES = Path(__file__).parent / "fixtures"
+_FIXTURE_COMMANDS = [
+    "cat /workspace/data/a.txt",
+    "cat /workspace/data/b.txt",
+    "python3 -c 'print(1234 + 5678)'",
+    "printf '6912' > /workspace/answer.txt",
+    "cat /workspace/answer.txt",
+]
+_FIXTURE_RUNS = {
+    # version: (each command the model ran, in its order; the token_usage_record lines in the file)
+    "0.144.4": (_FIXTURE_COMMANDS, 0),
+    "0.154.0": (_FIXTURE_COMMANDS, 5),
+    "0.155.1": (_FIXTURE_COMMANDS, 5),
+}
+
+
+@pytest.mark.parametrize("version", sorted(_FIXTURE_RUNS))
+def test_a_session_file_of_a_pinned_codex_version_gives_the_models_calls(version) -> None:
+    transcript = (FIXTURES / f"codex_{version}_session.jsonl").read_text()
+    records = [json.loads(line) for line in transcript.splitlines()]
+    assert records[0]["payload"]["cli_version"] == version
+    commands, token_usage_records = _FIXTURE_RUNS[version]
+
+    output = parse_codex_output(transcript)
+
+    written = [
+        (record["payload"]["call_id"], record["payload"]["name"], record["payload"]["arguments"])
+        for record in records
+        if record["type"] == "response_item" and record["payload"]["type"] == "function_call"
+    ]
+    calls = [item for item in output.items if item.type == "function_call"]
+    assert [(call.call_id, call.name, call.arguments) for call in calls] == written
+    assert [json.loads(call.arguments)["cmd"] for call in calls] == commands
+    results = [item for item in output.items if item.type == "function_call_output"]
+    assert sorted(result.call_id for result in results) == sorted(call.call_id for call in calls)
+    assert all("Process exited with code 0" in result.output for result in results)
+    # Every record that is not a response item is left out and counted; none is of a kind the reader does not know.
+    assert output.skipped_records.get("token_usage_record", 0) == token_usage_records
+    assert sum(output.skipped_records.values()) == sum(
+        record["type"] not in ("session_meta", "response_item") for record in records
+    )
+    assert output.unknown_records == {}
+    trajectory = transcript_to_atif(
+        "task",
+        [item.model_dump(mode="json") for item in output.items],
+        session_id="rollout",
+        agent_name="codex_agent",
+        agent_version=version,
+    )
+    assert [call.tool_call_id for step in trajectory.steps for call in step.tool_calls or []] == [
+        call_id for call_id, _, _ in written
+    ]
+
+
+@pytest.mark.parametrize("content", [[], [{"type": "output_text", "text": "Done."}]], ids=["no-content", "text"])
+@pytest.mark.parametrize("fields", [{}, {"id": None}, {"id": ""}], ids=["absent", "null", "empty"])
+def test_an_assistant_message_without_an_id_is_given_one_the_export_accepts(fields, content) -> None:
+    transcript = _session(_user("task"), {"type": "message", "role": "assistant", "content": content, **fields})
+    [message] = parse_codex_output(transcript).items
+    assert isinstance(message, NeMoGymResponseOutputMessage) and message.id == "msg_0"
+    trajectory = transcript_to_atif(
+        "task", [message.model_dump(mode="json")], session_id="s", agent_name="codex_agent", agent_version="test"
+    )
+    assert trajectory.steps[-1].source == "agent"
+
+
+@pytest.mark.parametrize("search_id", [None, "", "  ", ["ws-1"], 7])
+def test_a_web_search_without_a_usable_id_is_given_one_the_export_accepts(search_id) -> None:
+    transcript = _session({"type": "web_search_call", "id": search_id, "action": {"type": "search"}})
+    call, result = parse_codex_output(transcript).items
+    assert call.call_id == result.call_id == "ws_0"
+    transcript_to_atif(
+        "task",
+        [item.model_dump(mode="json") for item in (call, result)],
+        session_id="s",
+        agent_name="codex_agent",
+        agent_version="test",
+    )
+
+
+def _paths(node: object, prefix: tuple = ()):
+    """Every path to a value inside nested dicts and lists, the node itself first."""
+    yield prefix
+    for key, child in node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ():
+        yield from _paths(child, (*prefix, key))
+
+
+def _replaced(node: object, path: tuple, value: object) -> object:
+    if not path:
+        return value
+    copy = dict(node) if isinstance(node, dict) else list(node)
+    copy[path[0]] = _replaced(node[path[0]], path[1:], value)
+    return copy
+
+
+def test_a_record_of_any_shape_is_either_unavailable_or_output_the_export_accepts() -> None:
+    """Replace each value of each record, in a session that holds every kind of item the mapping reads, with a value
+    of another shape. The agent catches only CodexOutputUnavailable, so nothing else may escape; and output that is
+    returned is what the Harbor Environment Server exports, so it must convert, or the server masks the turn."""
+    records = [
+        json.loads(line)
+        for line in _session(
+            _user("task"),
+            {
+                "type": "reasoning",
+                "id": "rs-1",
+                "summary": [{"type": "summary_text", "text": "plan"}],
+                "content": [{"type": "text", "text": "think"}],
+            },
+            _call("c1", "exec_command", {"cmd": "ls"}, id="fc-1", namespace="ns"),
+            _result("c1", "a"),
+            {"type": "custom_tool_call", "id": "ctc-1", "call_id": "c2", "name": "apply_patch", "input": "patch"},
+            _result("c2", [{"type": "input_text", "text": "ok"}], "custom_tool_call_output"),
+            {"type": "web_search_call", "id": "ws-1", "action": {"type": "search"}},
+            # A message with no content: replacing its ID with another shape changes the kind the output model reads.
+            {"type": "message", "role": "assistant", "id": "msg-0", "content": []},
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg-1",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Done."}],
+            },
+        ).split("\n")
+    ]
+    unavailable = exported = 0
+    for index, record in enumerate(records):
+        for path in _paths(record):
+            for value in ([], {}, 5, None, "", " ", ["a"], [[]], {"a": 1}):
+                mutated = [*records[:index], _replaced(record, path, value), *records[index + 1 :]]
+                try:
+                    output = parse_codex_output("\n".join(json.dumps(r) for r in mutated)).items
+                except CodexOutputUnavailable:
+                    unavailable += 1
+                    continue
+                transcript_to_atif(
+                    "task",
+                    [item.model_dump(mode="json") for item in output],
+                    session_id="s",
+                    agent_name="codex_agent",
+                    agent_version="test",
+                )
+                exported += 1
+    assert unavailable > 100 and exported > 100
+
+
+def test_output_joins_the_models_captured_call_where_the_cli_display_cannot() -> None:
+    """Training credits a rollout to the captured model call its last model-authored item names, by the call's ID and
+    content. A run stopped on a tool call matched nothing in the CLI's display: another ID, another command."""
+    arguments = json.dumps({"cmd": "sed -n '1,120p' SKILL.md", "workdir": "/workspace"})
+    captured = TokenEntry(
+        capture_key="rollout",
+        model_call_id="call-1",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3, 4],
+        generation_log_probs=[-0.1, -0.1],
+        output_items=[
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_abc",
+                "name": "exec_command",
+                "arguments": arguments,
+                "status": "completed",
+            }
+        ],
+        token_item_index=0,
+    )
+    stamp_lineage(captured, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stopped_on_the_call = _session(_call("call_abc", "exec_command", arguments))
+    from_record = [item.model_dump(mode="json") for item in parse_codex_output(stopped_on_the_call).items]
+    command = {
+        "id": "item_0",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"sed -n '1,120p' SKILL.md\"",
+        "status": "in_progress",
+    }
+    from_events, _ = parse_exec_jsonl(json.dumps({"type": "item.started", "item": command}), include_partial=True)
+    from_events = [item.model_dump(mode="json") for item in from_events]
+
+    joined = resolve_terminal([captured], {"id": "response", "output": from_record})
+    assert (joined.model_call_id, joined.method) == ("call-1", "item_id")
+    assert resolve_terminal([captured], {"id": "response", "output": from_events}).model_call_id is None

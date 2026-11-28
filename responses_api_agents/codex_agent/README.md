@@ -279,6 +279,66 @@ when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent 
 than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
 container's memory cgroup. The runner records the change in the supervisor's `output.log`.
 
+Sessions build `response.output` from Codex's session record, so it shows the model's own tool calls. `codex exec
+--json` reports each tool as the command Codex executed: `/bin/bash -lc '<cmd>'` with the shell's own quoting, without the
+model's other arguments (`workdir`, `yield_time_ms`), `write_stdin` polls merged into the first command's result, calls
+listed by completion rather than by when the model made them, and display IDs (`item_0`) for call IDs. The record holds
+each `function_call` and `custom_tool_call` as the model sent it, with its `name`, `namespace`, arguments (for
+`exec_command`, the `cmd` and `workdir` as written) and `call_id`, in the model's order, with each result under its call's ID,
+and the assistant messages and reasoning text between them. Results are the text the model read, including Codex's
+`Chunk ID` / `Process exited with code` envelope. Encrypted reasoning is left in the observations.
+
+The Harbor Environment Server exports these items to `/logs/agent/trajectory.json` for a task folder's verifier. For a call
+whose arguments are JSON, the name, arguments, call ID, order and result are those Harbor's own Codex agent exports from the
+same record: an MCP call keeps its bare tool name (the namespace is in `extra.nemo_gym.namespace`), a free-form
+`apply_patch` call (a `custom_tool_call`) has its text as the argument `input`, and a web search is a `web_search_call` call
+with the arguments `action_type` and the action's `query`, `queries` or `url`. The rest of the trajectory differs from
+Harbor's:
+
+- An assistant message is a step of its own, not grouped with the calls of the same model request.
+- Steps carry no timestamps or per-request metrics.
+- Reasoning that has both text and a summary exports the text; Harbor exports the summary.
+- Arguments that are not JSON export as `{}`, with the raw text in `extra.nemo_gym.raw_arguments`; Harbor exports
+  `{"input": <raw text>}`.
+- An image result is `[image]`, not an image part.
+- A web search has an empty result; Harbor's has no content.
+
+Only the record's `response_item` lines hold what the model produced and the results Codex gave it. Lines of every other
+kind are left out: the runtime events, turn settings, compaction summary and world state, inter-agent delivery, and the
+`token_usage_record` (one per model response), `retained_context`, `security_risk_score` and `realtime_item` lines that
+0.154.0 and 0.155.1 also write. A line of a kind none of the checked versions (0.144.4, 0.154.0, 0.155.1) writes is
+left out as well, because Codex adds such kinds between releases; the observations then carry an
+`unknown_session_records_skipped` gap that counts them by kind, and the agent server logs a warning.
+
+`response.output` falls back to the CLI events when the record cannot stand in for them: it is missing or unreadable
+(including a line whose values have a shape Codex does not write, or one nested too deeply to decode), holds a second
+session, a line with no kind, or a `response_item` with no payload or an item type with no mapping, has a call with a
+blank ID or name (the export of the trajectory rejects one), or has a result without an open call or a call ID used
+twice. When that output has tool calls, the observations carry a `tool_calls_in_executed_form` gap naming the reason, and
+the agent server logs a warning with it. The exported trajectory does not mark the fallback. Local `/run` execution
+still builds its output from the CLI events.
+
+Codex starts each call while the model's response streams and runs the calls of a batch at once where the tool
+allows it, but writes their results to the record only after the response ends, in call order; the CLI reports each
+tool when it ends. A run stopped before a result was written can therefore have it in the CLI events but not in the
+record. A call the record leaves without a result then takes the CLI's result for it (a command's output with its exit
+code when not 0, or an MCP tool's text or error) when both show the same call and no other call or CLI item, finished
+or not, matches it:
+- an `exec_command` call whose `cmd` is the command the CLI shows finished;
+- an MCP call whose namespace is `mcp__<server>` and whose name and arguments are the tool and arguments the CLI
+  shows, with each character of the server and tool names other than a letter, digit or `_` written as `_`, as Codex
+  names them for the model.
+
+Display IDs are never matched to calls by position. The observations carry a `tool_results_from_cli_events` gap
+naming those calls. An `apply_patch` or `update_plan` call stays without a result: the CLI shows the first only as the
+paths it changed, which does not identify the call, and the second without a result.
+
+A command the CLI shows still running, under the same rule, takes the output of the CLI's latest `item.updated` for it
+as a result with the status `incomplete`: the output so far, which the model never read. The gap marks its call
+`(partial)`, and the exported trajectory sets the result's `extra.nemo_gym.status` to `incomplete`. A command that showed
+no output stays without a result. Codex 0.144.4, 0.154.0 and 0.155.1 send `item.updated` only for the plan, not for a
+running command or MCP call, so with them a command that had not ended stays without a result, as does an MCP call.
+
 Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; the cumulative totals in Codex's session files supplement CLI totals when a failed turn omits them. A turn stopped at its output or wall-time limit reports unknown usage, because neither total covers every call: Codex records no usage for an output-limited response and writes a call's token count only after the call's tools finish. A run stopped before any model call reports zero. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 
