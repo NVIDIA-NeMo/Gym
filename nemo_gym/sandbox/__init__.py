@@ -153,6 +153,7 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.providers.base import (
         ORPHAN_REAP_TIMEOUT_S,
         PLACEMENT_GROUP_KEY,
+        PRIVILEGED_SETTING,
         sandbox_credentials_rejected,
     )
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
@@ -200,6 +201,7 @@ _PUBLIC_API = {
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
     "NetworkRuleOptions": "config",
+    "PRIVILEGED_SETTING": "providers.base",
     "SandboxAccess": "access",
     "HarnessSandboxConfig": "harness_config",
     "SandboxConfig": "config",

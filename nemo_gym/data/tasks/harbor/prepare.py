@@ -208,6 +208,8 @@ def prepare_target(
     gpu_volume_sources: dict[str, str] | None = None,
     shared_storage: bool | None = None,
     gpu_shared_storage: bool | None = None,
+    allow_privileged: bool | None = None,
+    gpu_allow_privileged: bool | None = None,
     compose_overlay: HarborComposeOverlay | None = None,
     rows_name: str = "tasks.jsonl",
     registry_credentials: Mapping[str, tuple[str, str]] | None = None,
@@ -236,7 +238,10 @@ def prepare_target(
     declares GPUs is checked against ``gpu_volume_sources`` when given, the mapping of the block the server runs
     such tasks on; ``shared_storage`` and ``gpu_shared_storage`` say whether each block's provider has the shared
     storage named volumes and shared logs binds need, so a task that needs it is left out at prepare, naming the
-    setting, when the block has none (``None``: unknown, decided at seed). ``compose_overlay`` is the job-level Compose overlay (the server's ``compose_overlay`` block):
+    setting, when the block has none (``None``: unknown, decided at seed). ``allow_privileged`` and
+    ``gpu_allow_privileged`` are each block's ``allow_privileged`` setting, so a task with a ``privileged: true``
+    service is left out at prepare, naming the setting, when its block does not allow privileged sandboxes or its
+    provider cannot start them (``None``: unknown, decided at seed). ``compose_overlay`` is the job-level Compose overlay (the server's ``compose_overlay`` block):
     its files are merged onto every task's Compose document, a plain image task included, and its images recorded
     with the tasks'. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes it to its
     agent, so two agents prepared with different selections on one taskset keep their own rows. ``registry_credentials``
@@ -418,6 +423,8 @@ def prepare_target(
         shared_storage=shared_storage,
         gpu_shared_storage=gpu_shared_storage,
         overlay=compose_overlay,
+        allow_privileged=allow_privileged,
+        gpu_allow_privileged=gpu_allow_privileged,
     )
     if unresolved:
         for task_id, reason in unresolved.items():

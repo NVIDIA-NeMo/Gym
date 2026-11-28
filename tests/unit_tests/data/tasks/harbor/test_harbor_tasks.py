@@ -4042,6 +4042,47 @@ class TestComposeVolumeSourcesAtPrepare:
         gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
         assert gpu_shared_storage_from_overrides([gpu_block, "++sandbox_gpu.docker.exec.concurrency=4"], None) is True
 
+    def test_allow_privileged_is_read_from_the_blocks_provider(self, tmp_path, sources, monkeypatch):
+        """Prepare reads the block's one provider's ``allow_privileged``, the setting the provider itself reads, without
+        resolving the block's credentials; an absent key is ``False``, only ``true`` allows, a configured value that is
+        not a boolean (``null`` included, which the provider refuses too) is a configuration error naming the key,
+        and an unknown provider stays ``None`` for the seed."""
+        from nemo_gym.cli.eval import (
+            GPU_SANDBOX_PROVIDER_KEY,
+            allow_privileged_from_overrides,
+            gpu_allow_privileged_from_overrides,
+        )
+
+        assert allow_privileged_from_overrides([], None) is None
+        assert allow_privileged_from_overrides([], "opensandbox") is False
+        # The fixture's provider file holds an unresolved credential beside the switch.
+        assert allow_privileged_from_overrides(["++sandbox.opensandbox.allow_privileged=true"], "opensandbox") is True
+        docker = tmp_path / "docker.yaml"
+        docker.write_text("sandbox:\n  docker:\n    allow_privileged: true\n    create: {use_init: true}\n")
+        monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: docker)
+        assert allow_privileged_from_overrides([], "docker") is True
+        assert allow_privileged_from_overrides(["++sandbox.docker.allow_privileged=false"], "docker") is False
+        with pytest.raises(ValueError, match=r"`sandbox\.docker\.allow_privileged` must be true or false; got 'yes'"):
+            allow_privileged_from_overrides(["++sandbox.docker.allow_privileged=yes"], "docker")
+        with pytest.raises(ValueError, match=r"got 'true'"):
+            allow_privileged_from_overrides(["++sandbox.docker.allow_privileged='true'"], "docker")
+        with pytest.raises(ValueError, match=r"`sandbox\.docker\.allow_privileged` must be true or false; got None"):
+            allow_privileged_from_overrides(["++sandbox.docker.allow_privileged=null"], "docker")
+        gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
+        assert gpu_allow_privileged_from_overrides([], "docker") is None
+        assert (
+            gpu_allow_privileged_from_overrides([gpu_block, "++sandbox_gpu.docker.create.use_init=true"], None)
+            is False
+        )
+        assert (
+            gpu_allow_privileged_from_overrides([gpu_block, "++sandbox_gpu.docker.allow_privileged=true"], None)
+            is True
+        )
+        with pytest.raises(
+            ValueError, match=r"`sandbox_gpu\.docker\.allow_privileged` must be true or false; got None"
+        ):
+            gpu_allow_privileged_from_overrides([gpu_block, "++sandbox_gpu.docker.allow_privileged=null"], None)
+
     def test_gpu_volume_sources_come_from_the_gpu_sandbox_provider_block(self, tmp_path, sources):
         # Review: GPU-declaring tasks are seeded from the server's `gpu_sandbox_provider` block, so prepare reads
         # that block's volume_sources too: None without a GPU block, {} for a GPU block without the key.
