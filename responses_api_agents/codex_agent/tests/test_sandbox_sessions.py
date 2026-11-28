@@ -2931,9 +2931,13 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
     processes = []
     try:
         async with asyncio.timeout(5):
-            while not processes_path.exists():
-                await asyncio.sleep(0.01)
-        processes = json.loads(processes_path.read_text())
+            # The child creates the file before it writes the PIDs, so wait for the whole list.
+            while True:
+                try:
+                    processes = json.loads(processes_path.read_text())
+                    break
+                except (FileNotFoundError, json.JSONDecodeError):
+                    await asyncio.sleep(0.01)
         processes.append(json.loads((Path(state.session.session_dir) / "runtime.json").read_text())["pid"])
         await state.close(3)
         assert state.session.closed and state.session.cleanup["cleanup_confirmed"] is True

@@ -98,6 +98,15 @@ def activate(state, code, timeout=0.5):
     )
 
 
+def written_pid(path):
+    """The PID in ``path``, or None until it is written: ``Path.write_text`` creates the file before it writes."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    return int(text) if text else None
+
+
 @pytest.mark.parametrize("detached", [False, True])
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel", "close"])
 @pytest.mark.parametrize("startup_delay", [0, 0.6])
@@ -116,7 +125,8 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
     task = state.task = asyncio.create_task(activate(state, code, timeout=deadline))
     try:
         async with asyncio.timeout(30):
-            while not (workdir / "child.pid").exists():
+            # Wait for the PID, not the file: a harness ended between the two would leave the file empty.
+            while (child_pid := written_pid(workdir / "child.pid")) is None:
                 if task.done():
                     await task
                     pytest.fail("Harness exited before its child was ready")
@@ -138,7 +148,7 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
             assert state.session.cleanup["timed_out"] is True
         # The orphaned tool may linger as a zombie until init reaps it; it can no longer run.
         try:
-            stat = Path(f"/proc/{(workdir / 'child.pid').read_text()}/stat").read_text()
+            stat = Path(f"/proc/{child_pid}/stat").read_text()
         except FileNotFoundError:
             stat = ") X"
         # Natural CLI exit has no stop cutoff; the sandbox owner tears down a detached tool.
@@ -154,9 +164,9 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detac
             if not state.session.closed:
                 await state.close(timeout=CLOSE_TIMEOUT)
         finally:
-            if (workdir / "child.pid").exists():
+            if (pid := written_pid(workdir / "child.pid")) is not None:
                 try:
-                    os.kill(int((workdir / "child.pid").read_text()), signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
 

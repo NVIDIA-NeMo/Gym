@@ -12,6 +12,10 @@ import extension, { registerGymTools } from "../gym_mcp.mjs";
 
 const GYM_MCP = JSON.stringify(new URL("../gym_mcp.mjs", import.meta.url).href);
 
+// The deadline of the test servers' requests, which no test here waits for. A loaded runner can take over a second
+// for a process's first request, even one refused at once, and a shorter deadline turns that into a TimeoutError.
+const SERVER_TIMEOUT = 10000;
+
 // A port that was just released refuses connections (fetch blocks low ports such as 1 outright).
 async function closedPort() {
   const closed = createServer();
@@ -49,7 +53,15 @@ async function fixture(t, handle) {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => { server.closeAllConnections(); server.close(); });
-  return { calls, config: { url: `http://127.0.0.1:${server.address().port}/mcp`, headers: { "X-Session": "one" }, timeout: 1000 } };
+  return { calls, config: { url: `http://127.0.0.1:${server.address().port}/mcp`, headers: { "X-Session": "one" }, timeout: SERVER_TIMEOUT } };
+}
+
+// Registers the fixture's tools, then gives their calls `timeout`. Only the call's deadline is under test: discovery
+// keeps the fixture's, which a loaded runner can need more than 100 ms of. Each call reads the timeout as it starts.
+async function registerWithCallTimeout(pi, config, timeout) {
+  const server = { ...config };
+  await registerGymTools(pi, { tavily: server });
+  server.timeout = timeout;
 }
 
 function agent() {
@@ -116,7 +128,7 @@ test("propagates MCP tool failures into Pi tool errors", async (t) => {
 test("tool calls have a deadline and honor cancellation", async (t) => {
   const f = await fixture(t, (body) => body.method === "tools/call");
   const a = agent();
-  await registerGymTools(a, { tavily: { ...f.config, timeout: 100 } });
+  await registerWithCallTimeout(a, f.config, 100);
   await assert.rejects(a.tools[0].execute("a", {}), (e) => e.name === "TimeoutError");
   await assert.rejects(a.tools[0].execute("b", {}, AbortSignal.abort()), (e) => e.name === "AbortError");
 });
@@ -129,7 +141,7 @@ test("a deadline that ends the response body is reported as a timeout", async (t
     return true;
   });
   const a = agent();
-  await registerGymTools(a, { tavily: { ...f.config, timeout: 100 } });
+  await registerWithCallTimeout(a, f.config, 100);
   await assert.rejects(a.tools[0].execute("a", { query: "x" }), (e) => e.name === "TimeoutError");
 });
 
@@ -221,7 +233,7 @@ test("a failed terminal tool call does not end the run", async (t) => {
 
 test("names the failed server and reports a skipped optional one as an event", async (t) => {
   const port = await closedPort();
-  const unreachable = { url: `http://127.0.0.1:${port}/mcp?key=secret`, headers: {}, timeout: 1000 };
+  const unreachable = { url: `http://127.0.0.1:${port}/mcp?key=secret`, headers: {}, timeout: SERVER_TIMEOUT };
   const cause = `TypeError (ECONNREFUSED) at http://127.0.0.1:${port}`;
   await assert.rejects(registerGymTools(agent(), { gdpval: unreachable }), (error) => error.message === `gdpval: ${cause}`);
   const events = [];
@@ -231,7 +243,8 @@ test("names the failed server and reports a skipped optional one as an event", a
 
 test("a required server failure exits 78 and reports its cause past Pi's redirected stdout", async (t) => {
   const port = await closedPort();
-  const config = serversFile(t, { resources: { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 } });
+  const resources = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: SERVER_TIMEOUT };
+  const config = serversFile(t, { resources });
   // Pi's JSON mode points process.stdout.write and console.log at stderr before it loads extensions.
   const script = `
     process.stdout.write = (chunk) => process.stderr.write(chunk);
@@ -260,7 +273,7 @@ test("the default event writer reaches stdout past Pi's redirect", async () => {
     const { registerGymTools } = await import(${GYM_MCP});
     await registerGymTools(
       { getAllTools: () => [], registerTool: () => {} },
-      { extra: { url: "http://127.0.0.1:${port}/mcp", headers: {}, timeout: 1000, required: false } },
+      { extra: { url: "http://127.0.0.1:${port}/mcp", headers: {}, timeout: ${SERVER_TIMEOUT}, required: false } },
     );
   `;
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20000 });
@@ -277,7 +290,7 @@ test("a configured finish tool must be offered, and by one server only", async (
   );
   assert.deepEqual(a.tools, []);
   const port = await closedPort();
-  const down = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000, required: false, terminal_tools: ["finish"] };
+  const down = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: SERVER_TIMEOUT, required: false, terminal_tools: ["finish"] };
   await assert.rejects(
     registerGymTools(agent(), { tavily: { ...f.config, terminal_tools: ["finish"] }, gdpval: down }, { emit: () => {} }),
     /^Error: No Gym MCP server offers the finish tools finish \(skipped optional servers: gdpval\)$/,

@@ -44,7 +44,6 @@ CALLS = 8
 # An MCP episode also initializes and lists its tools, each a request of its own.
 MCP_EPISODES = int(os.getenv("NEMO_GYM_MULTIWORKER_E2E_MCP_EPISODES", "50"))
 MCP_CALLS = 4
-MAX_MCP_BATCHES = 5
 
 
 class Deployment:
@@ -97,21 +96,25 @@ class Deployment:
         children = psutil.Process(self.proc.pid).children()
         return [child for child in children if "resource_tracker" not in " ".join(child.cmdline())]
 
+    def private_sockets(self) -> list[str]:
+        """The private session sockets that accept connections, one for each live worker."""
+        accepting = []
+        for path in glob.glob(os.path.join(RUNTIME_ROOT, f"ng-{self.proc.pid}-*", "*.sock")):
+            if not re.fullmatch(r"[0-9a-f]{32}\.sock", os.path.basename(path)):
+                continue
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(1)
+                with contextlib.suppress(OSError):
+                    probe.connect(path)
+                    accepting.append(path)
+        return accepting
+
     def wait_for_workers(self, *, exclude: int | None = None, timeout: float = 60) -> None:
         """Wait until every live worker's private session socket accepts connections."""
         deadline = time.time() + timeout
         while True:
             live = [worker for worker in self.workers() if worker.pid != exclude]
-            accepting = 0
-            for path in glob.glob(os.path.join(RUNTIME_ROOT, f"ng-{self.proc.pid}-*", "*.sock")):
-                if not re.fullmatch(r"[0-9a-f]{32}\.sock", os.path.basename(path)):
-                    continue
-                with socket.socket(socket.AF_UNIX) as probe:
-                    probe.settimeout(1)
-                    with contextlib.suppress(OSError):
-                        probe.connect(path)
-                        accepting += 1
-            if len(live) >= WORKERS and accepting >= WORKERS:
+            if len(live) >= WORKERS and len(self.private_sockets()) >= WORKERS:
                 return
             if time.time() > deadline:
                 raise TimeoutError(f"the workers did not start; see {self.log}")
@@ -170,32 +173,39 @@ def test_every_tool_call_runs_on_the_worker_that_runs_its_episode(deployment: De
 def test_every_mcp_request_runs_on_the_worker_that_runs_its_episode(deployment: Deployment) -> None:
     """Initialize, tools/list and tools/call each reach a random worker; each is routed by the token header."""
 
-    async def run_batch(first: int) -> list[dict]:
-        async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as client:
+    sockets = deployment.private_sockets()
+
+    async def run_all() -> list[dict]:
+        # Each episode starts on a chosen worker, through that worker's private socket, so every worker runs
+        # episodes. Through the public port, the first worker to wake can accept a whole burst of /run connections.
+        async with contextlib.AsyncExitStack() as stack:
+            clients = [
+                await stack.enter_async_context(
+                    aiohttp.ClientSession(
+                        connector=aiohttp.UnixConnector(path=path), cookie_jar=aiohttp.DummyCookieJar()
+                    )
+                )
+                for path in sockets
+            ]
 
             async def one(index: int) -> dict:
                 body = _run_body(2 * 10**5 + index, calls=MCP_CALLS, transport="mcp")
-                async with client.post(f"{deployment.url}/run", json=body) as response:
+                async with clients[index % len(clients)].post("http://worker/run", json=body) as response:
                     assert response.status == 200, await response.text()
                     return await response.json()
 
-            return await asyncio.gather(*(one(first + index) for index in range(MCP_EPISODES)))
+            return await asyncio.gather(*(one(index) for index in range(MCP_EPISODES)))
 
-    # The kernel decides which worker accepts each connection, and one worker can accept a whole
-    # batch. Run further batches until the episodes have landed on more than one worker.
-    results: list[dict] = []
-    for batch in range(MAX_MCP_BATCHES):
-        results += [response["result"] for response in asyncio.run(run_batch(batch * MCP_EPISODES))]
-        if len({result["owner_pid"] for result in results}) > 1:
-            break
+    results = [response["result"] for response in asyncio.run(run_all())]
 
     # A tools/list that reached another worker would list nothing.
     assert all(result["listed"] == ["add"] for result in results)
     assert Counter(status for result in results for status in result["statuses"]) == Counter(
-        {200: len(results) * MCP_CALLS}
+        {200: MCP_EPISODES * MCP_CALLS}
     )
     assert all(set(result["ran_on"]) == {result["owner_pid"]} for result in results)
-    assert len({result["owner_pid"] for result in results}) > 1
+    # Every worker runs episodes, so most MCP requests that any one worker accepts belong to another worker.
+    assert len({result["owner_pid"] for result in results}) == WORKERS
 
 
 def test_a_tool_call_for_an_exited_workers_episode_gets_410(deployment: Deployment, tmp_path: Path) -> None:

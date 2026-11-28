@@ -548,7 +548,9 @@ async def test_cancelling_optional_diagnostics_retains_checkpoint_and_cancellati
 @pytest.mark.asyncio
 async def test_execution_failure_retains_checkpoint_despite_slow_optional_log() -> None:
     r, s = runner()
-    r.close_timeout = 0.05
+    # Lifecycle capture and close are not under test, so a loaded runner gets time to spare for them.
+    # The log download below never ends, so a run that finishes at all did not wait for it.
+    r.close_timeout = 5
     s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
     original_error = ConnectionError("provider disconnected")
@@ -567,7 +569,7 @@ async def test_execution_failure_retains_checkpoint_despite_slow_optional_log() 
     s.download = download
     s.exec.side_effect = execute
     with pytest.raises(NOOARunFailure) as caught:
-        await asyncio.wait_for(r.run(payload().request), timeout=0.5)
+        await asyncio.wait_for(r.run(payload().request), timeout=10)
     assert caught.value.__cause__ is original_error
     assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
     assert caught.value.result.episode.response.status == "failed"
