@@ -140,6 +140,33 @@ class HermesSandboxSession(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
+    # Multi-turn continuation: Hermes keeps no session of its own between processes, so the session holds its
+    # conversation (as Hermes' model context had it after the last activation) and the first activation's system
+    # message, and gives both to the next activation's process.
+    conversation: list[dict[str, JsonValue]] | None = None
+    system_message: str | None = None
+    activation_id: int | None = None
+    # Whether the current activation's observations are already in ``observations``.
+    activation_recorded: bool = False
+
+    async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
+        """Rearm the supervised launch for a later activation in a fresh directory of the same sandbox.
+
+        The first activation uses the directory the seed prepared. Files Hermes changed in the sandbox stay; the
+        shell state of the previous activation's process (working directory, environment, background jobs) does not.
+        """
+        self.activation_id = activation_id
+        self.activation_recorded = False
+        if activation_id == 1:
+            return
+        self.runtime_info = None
+        directory = f"{self.session.root_dir}/activation-{activation_id}"
+        await self.session.begin_activation(session_dir=directory, timeout=timeout)
+        result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
+        if result.error_type == "timeout":
+            raise TimeoutError("Hermes activation directory preparation timed out")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot prepare Hermes activation directory: {result.stderr or result.stdout}")
 
     async def install_runtime(self, *, install_timeout: float) -> None:
         """Reuse or install the pinned runtime and stage the Hermes harness files.
