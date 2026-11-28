@@ -1347,14 +1347,27 @@ def test_incomplete_model_response_retains_reasoning_and_reports_usage_gap(setup
 
 
 @pytest.mark.parametrize(
-    "condition", ["completed", "failed-turn", "failed-exit", "in-turn", "other-error", "later-error"]
+    "warning,gap_code",
+    [
+        (
+            "Model metadata for `test-model` not found. Defaulting to fallback metadata; "
+            "this can degrade performance and cause issues.",
+            "model_metadata_fallback",
+        ),
+        (
+            "`[features].multi_agent` is deprecated. It still controls the V1 fallback. `[agents].enabled = false` "
+            "disables subagent tools even when the model selects a subagent version, unless `[features].multi_agent_v2` "
+            "is enabled.",
+            "config_key_deprecated",
+        ),
+    ],
+    ids=["model-metadata", "multi-agent-deprecation"],
 )
-def test_startup_model_metadata_advisory_requires_successful_turn(setup, condition) -> None:
+@pytest.mark.parametrize(
+    "condition", ["completed", "failed-turn", "failed-exit", "in-turn", "other-error", "later-error", "changed-text"]
+)
+def test_startup_advisory_requires_successful_turn(setup, condition, warning, gap_code) -> None:
     agent, sandbox = setup
-    warning = (
-        "Model metadata for `test-model` not found. Defaulting to fallback metadata; "
-        "this can degrade performance and cause issues."
-    )
     diagnostic = {
         "type": "item.completed",
         "item": {"id": "startup", "type": "error", "message": warning},
@@ -1366,6 +1379,8 @@ def test_startup_model_metadata_advisory_requires_successful_turn(setup, conditi
         sandbox.result["return_code"] = 1
     elif condition == "other-error":
         diagnostic["item"]["message"] = "Failed to initialize model client"
+    elif condition == "changed-text":
+        diagnostic["item"]["message"] += " The key is ignored."
     prefix = [started, diagnostic] if condition == "in-turn" else [diagnostic, started]
     if condition == "later-error":
         prefix.append(
@@ -1375,12 +1390,12 @@ def test_startup_model_metadata_advisory_requires_successful_turn(setup, conditi
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == (200 if condition in ("completed", "timed-out") else 502), response.text
+        assert response.status_code == (200 if condition == "completed" else 502), response.text
         body = response.json()
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
         observations = closed.json()["agent_observations"]
-        warnings = [gap for gap in observations["gaps"] if gap["code"] == "model_metadata_fallback"]
+        warnings = [gap for gap in observations["gaps"] if gap["code"] == gap_code]
         if condition == "completed":
             assert body["status"] == "completed"
             assert body["error"] is None
