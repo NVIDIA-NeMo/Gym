@@ -184,7 +184,7 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.tool_telemetry import record_tool_telemetry
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -199,6 +199,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_run_summary,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
+from nemo_gym.telemetry.run_context import JobRunContext, RunContext, run_context_from_config
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.trajectory.trajectory_format import project_result_v1
@@ -229,7 +230,7 @@ from nemo_gym.utils.tqdm import tqdm
 
 
 if TYPE_CHECKING:
-    from opentelemetry.trace import SpanContext
+    from opentelemetry.trace import Span, SpanContext
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -2684,6 +2685,19 @@ _OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
 )
 
 
+@dataclass
+class _ExportedJob:
+    """The ``gym.job`` span of a run whose traces are exported, owned or embedded, and the run context of the rows
+    it dispatches, which collection sets once it reads the config and the span gets when it closes."""
+
+    span: "Span"
+    run_context: Optional[JobRunContext] = None
+
+
+#: The current run's exported ``gym.job``. None while traces are not exported.
+_EXPORTED_JOB: ContextVar[Optional[_ExportedJob]] = ContextVar("nemo_gym_exported_job", default=None)
+
+
 def _current_span_is_valid() -> bool:
     try:
         from opentelemetry import trace as otel_trace
@@ -2704,7 +2718,9 @@ def _span_task_id(row: Mapping[str, Any]) -> Optional[str]:
 
 
 @contextmanager
-def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: str) -> Iterator["SpanContext"]:
+def _dispatch_span(
+    row: Mapping[str, Any], dispatch_name: str, *, server_name: str, run_context: Optional[RunContext] = None
+) -> Iterator["SpanContext"]:
     """One rollout's dispatch as the root of its own trace, linked to the run's `job` span.
 
     The `/run` call made inside carries this span as `traceparent`, so the agent's
@@ -2715,8 +2731,9 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
     `dispatch_name` is the value the rollout counters record under the same key, so spans
     and metrics join on it; `server_name` is the server the call goes to, which differs for
     a row routed by agent. Only a job the driver opened as its own root is split; under an
-    embedder's trace the dispatch keeps nesting (see `linked_root_span`). Gate on the
-    `rollout` group and the trace exporter before calling.
+    embedder's trace the dispatch keeps nesting (see `linked_root_span`). `run_context` adds
+    the served model, benchmark and attempt, since the trace cannot inherit them from
+    `gym.job`. Gate on the `rollout` group and the trace exporter before calling.
 
     Yields the span's context, which the driver keeps to attach `gym.rollout.health` later.
     """
@@ -2739,6 +2756,8 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
     repeat = row.get(ROLLOUT_INDEX_KEY_NAME)
     if isinstance(repeat, int) and not isinstance(repeat, bool):
         attributes[ROLLOUT_REPEAT_ATTRIBUTE] = repeat
+    if run_context is not None:
+        attributes |= run_context.dispatch_attributes(row)
     with linked_root_span("gym.rollout.dispatch", split_from=_OWNED_JOB_SPAN_CONTEXT.get(), **attributes) as span:
         yield span.get_span_context()
 
@@ -4449,10 +4468,15 @@ executions → not run again (left to recovery)
             with managed_span(GymSpanGroup.JOB, "gym.job") as job:
                 owned = job.get_span_context() if job is not None and not embedded else None
                 token = _OWNED_JOB_SPAN_CONTEXT.set(owned)
+                exported = _ExportedJob(job) if job is not None and is_trace_exporter_active() else None
+                job_token = _EXPORTED_JOB.set(exported)
                 try:
                     return await self._run_from_config(config)
                 finally:
+                    _EXPORTED_JOB.reset(job_token)
                     _OWNED_JOB_SPAN_CONTEXT.reset(token)
+                    if exported is not None and exported.run_context is not None:
+                        safe_set_span_attributes(exported.span, exported.run_context.attributes())
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         # Choose the target before locking, including fresh runs. Replacing an
@@ -4599,6 +4623,23 @@ executions → not run again (left to recovery)
         )
         results = store.selected("success") if config.retain_results_in_memory else []
         rows = store.inputs_for(results)
+        exported_job = _EXPORTED_JOB.get()
+        # One run context for `gym.job` and every dispatch. The running servers' config names the datasets, as it
+        # resolves the rows' task sources; the collector's own names the split, since with --no-serve the servers
+        # were started with a config of their own.
+        run_context = (
+            run_context_from_config(identity_client.global_config_dict, collector_config=get_global_config_dict())
+            if exported_job is not None or (is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active())
+            else None
+        )
+        record_dispatches = store.record_dispatches
+        if exported_job is not None:
+            # `gym.job` names what the job dispatched: a row the dispatch budget drained is never reserved.
+            job_run_context = exported_job.run_context = JobRunContext(run_context)
+
+            def record_dispatches(batch: List[Dict]) -> None:
+                store.record_dispatches(batch)
+                job_run_context.add(batch)
 
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
@@ -4924,13 +4965,14 @@ executions → not run again (left to recovery)
                 _connect_grace_s=config.dispatch_connect_grace_s,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
-                on_dispatch_batch=store.record_dispatches,
+                on_dispatch_batch=record_dispatches,
                 max_resident_tasks=config.max_resident_rollout_tasks,
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
                 dispatch_reservation_interval_s=config.dispatch_reservation_interval_s,
                 latency_tracker=latency_tracker,
+                run_context=run_context,
                 **({"run_timing": run_timing} if run_timing is not None else {}),
             )
             if hasattr(dispatches, "aclose"):
@@ -6106,9 +6148,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
         _connect_grace_s: Optional[float] = None,
+        run_context: Optional[RunContext] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        ``run_context`` is the run context collection already read for ``gym.job``; without it, the dispatch spans
+        read it from the head server's config.
 
         ``record_unrouted_failures`` returns a failed `/run` that ``route_failures_to_sidecar`` would route as a
         failure row whose ``run_error`` holds the error, so the collection writer can keep evidence of it before it
@@ -6165,6 +6211,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # `is not None`, not truthiness: 0.0 is a real budget that is already
         # spent, and must drain rather than disable the check.
         deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
+        # Read once per call, and only when dispatch spans are exported.
+        if run_context is None and is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
+            run_context = run_context_from_config(server_client.global_config_dict)
 
         def drained_result() -> Optional[Dict[str, Any]]:
             # Checked after a row acquires its slot, and again when its delayed reservation is due.
@@ -6235,7 +6284,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
                     dispatch_span = (
-                        _dispatch_span(row, self._dispatch_name(row), server_name=server_name)
+                        _dispatch_span(row, self._dispatch_name(row), server_name=server_name, run_context=run_context)
                         if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
                         else nullcontext()
                     )
