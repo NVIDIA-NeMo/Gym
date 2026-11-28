@@ -77,6 +77,9 @@ SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif",
 # Like LiteLLM, tunnel opaque Responses reasoning through Anthropic clients, but use a Gym-owned marker.
 _RESPONSES_REASONING_CARRIER_PREFIX = "nemo_gym_responses_reasoning:"
 
+# The event with which Anthropic's Messages API holds a stream open. It carries no part of the message.
+ANTHROPIC_PING_SSE = 'event: ping\ndata: {"type": "ping"}\n\n'
+
 
 class AnthropicConverter:
     ############################################################################
@@ -311,12 +314,14 @@ class AnthropicConverter:
     # Ingress: Anthropic Messages request  ->  NeMo Gym Responses
     ############################################################################
     def anthropic_request_to_responses(
-        self, anthropic_body: MessageCreateParams
+        self, anthropic_body: MessageCreateParams, *, forward_reasoning_effort: bool = False
     ) -> NeMoGymResponseCreateParamsNonStreaming:
         """Inverse of ``responses_to_anthropic`` (the request direction).
 
         Parses an inbound Anthropic Messages request into Responses create params so it can be
-        forwarded to a downstream Gym model server's ``/v1/responses``.
+        forwarded to a downstream Gym model server's ``/v1/responses``. With ``forward_reasoning_effort``,
+        the effort of ``output_config`` becomes the Responses ``reasoning.effort``; without it, the effort
+        is dropped.
 
         ``anthropic_body`` is hinted with the Anthropic SDK's native ``MessageCreateParams``
         (a TypedDict union, so it accepts ``stream: true``). It's a type hint only — at runtime
@@ -337,6 +342,9 @@ class AnthropicConverter:
             params["temperature"] = anthropic_body["temperature"]
         if anthropic_body.get("top_p") is not None:
             params["top_p"] = anthropic_body["top_p"]
+        effort = (anthropic_body.get("output_config") or {}).get("effort")
+        if forward_reasoning_effort and effort is not None:
+            params["reasoning"] = {"effort": effort}
 
         tools = self._anthropic_tools_to_responses(anthropic_body.get("tools"))
         if tools:
@@ -678,6 +686,10 @@ class AnthropicConverter:
         if block_type == "tool_use":
             return [{"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}))}]
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
+
+    def anthropic_error_to_sse(self, error_type: str, message: str) -> str:
+        """The ``error`` event with which a Messages stream ends when it cannot deliver its message."""
+        return self._sse_event("error", {"type": "error", "error": {"type": error_type, "message": message}})
 
     def _sse_event(self, event_type: str, data: Dict[str, Any]) -> str:
         return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"

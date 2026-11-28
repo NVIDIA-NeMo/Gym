@@ -381,7 +381,8 @@ container runs it, for benchmarks that grade such a harness.
   claude-code agent pipes it, instead of as an argument. It then never appears on a command line that an
   agent's `pkill -f <word from its task>` could match.
 - `reasoning_effort`: passed to `--effort` (`low`, `medium`, `high`, `xhigh` or `max`), as Harbor passes
-  its reasoning effort.
+  its reasoning effort. Claude Code states the effort in each model request. A Gym model server passes it on
+  to its backend only with `forward_anthropic_reasoning_effort: true`, and drops it otherwise.
 - `max_output_tokens`: the per-call output cap, as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (null keeps the CLI's
   default).
 - `extra_env`: further client environment, e.g. `{API_TIMEOUT_MS: "3600000", CLAUDE_CODE_AUTO_COMPACT_WINDOW:

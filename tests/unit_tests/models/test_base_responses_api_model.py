@@ -1227,6 +1227,36 @@ def test_responses_lifecycle_events_do_not_count_toward_time_to_first_token(tmp_
     assert call.latency_ttft_ms >= 200
 
 
+def test_messages_ping_events_do_not_count_toward_time_to_first_token(tmp_path):
+    """Ping events (``stream_keepalive_s``) open a Messages stream long before the first event of its message."""
+    import asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    from nemo_gym.models.anthropic_converter import ANTHROPIC_PING_SSE
+
+    app = FastAPI()
+
+    @app.post("/v1/messages")
+    async def _stream(body: dict = Body()) -> StreamingResponse:
+        async def gen():
+            yield ANTHROPIC_PING_SSE
+            yield ANTHROPIC_PING_SSE
+            await asyncio.sleep(0.2)
+            yield _sse("message_start", {"type": "message_start", "message": {"id": "msg_1", "role": "assistant"}})
+            yield _sse("message_stop", {"type": "message_stop"})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    _install_capture(app, tmp_path)
+
+    assert TestClient(app).post("/ng-rollout/keepalive/v1/messages", json={"stream": True}).status_code == 200
+
+    [call] = read_model_call_records(CaptureStore(tmp_path), "keepalive")
+    assert call.error_category is None
+    assert call.latency_ttft_ms >= 200
+
+
 def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
     response, so token stats / tool calls / reasoning are captured like a non-streamed call."""
