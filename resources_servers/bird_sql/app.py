@@ -15,6 +15,10 @@ gold query's result set. The gold SQL is never transpiled.
 ``setup_bird_postgres.py``); the model's query runs in a read-only transaction with a server-side timeout, on one of
 ``max_concurrency`` pooled connections.
 
+``dialect: snowflake`` runs the model's Snowflake SQL, by default on a local, read-only stand-in (fakesnow, which runs
+Snowflake SQL on DuckDB; see ``setup_bird_snowflake.py``) after a static check for what Snowflake would refuse but
+DuckDB accepts, such as identifiers in the wrong case. ``snowflake_engine: snowflake`` points it at a real account.
+
 Only the model's query is scored. When the verifier itself cannot measure it (the
 database is missing or corrupt, the gold query cannot run, the executor crashes)
 the row keeps the model's answer, is masked and names ``failure_kind``
@@ -56,6 +60,7 @@ from resources_servers.bird_sql.eval_utils import (
     SparkUnavailableError,
     execute_and_compare,
     execute_and_compare_postgres,
+    execute_and_compare_snowflake,
     execute_and_compare_spark,
 )
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bird_train
@@ -145,9 +150,9 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "bird_sql"
     bird_sql_dir: str = "resources_servers/bird_sql/.bird_sql"
-    dialect: Literal["sqlite", "spark", "postgres"] = "sqlite"
+    dialect: Literal["sqlite", "spark", "postgres", "snowflake"] = "sqlite"
     # Which BIRD split's databases to verify against. ``train`` uses a different db_id set than dev, so pair it with
-    # its own ``spark_warehouse_dir`` when ``dialect`` is ``spark``.
+    # its own ``spark_warehouse_dir`` when ``dialect`` is ``spark`` (``snowflake_db_dir`` for ``snowflake``).
     split: Literal["dev", "train"] = "dev"
     spark_warehouse_dir: str = "resources_servers/bird_sql/.bird_sql/spark_warehouse"
     # ``dialect: postgres``: the grader connects with ``postgres_dsn`` (a read-only role). With ``postgres_admin_dsn``
@@ -156,6 +161,12 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     # ``max_concurrency`` connections, so the server needs ``max_connections`` above that times the processes.
     postgres_dsn: str = "postgresql://bird_reader@127.0.0.1:5432/bird"  # password via the DSN or PGPASSWORD
     postgres_admin_dsn: Optional[str] = None
+    # ``dialect: snowflake``: ``fakesnow`` is a local stand-in, built in ``snowflake_db_dir`` on first start (no
+    # account). ``snowflake`` is a real account, already loaded, reached through ``snowflake_connection_name`` in the
+    # connector's ``connections.toml`` (``None``: its default connection); see the README for its calibration.
+    snowflake_engine: Literal["fakesnow", "snowflake"] = "fakesnow"
+    snowflake_db_dir: str = "resources_servers/bird_sql/.bird_sql/snowflake"
+    snowflake_connection_name: Optional[str] = None
     max_concurrency: int = 32
     sql_execution_timeout_s: float = 30.0
 
@@ -236,6 +247,18 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             else:
                 check_bird_postgres(self._databases_dir, self.config.postgres_dsn)
             self._postgres = PostgresPool(self.config.postgres_dsn, self.config.max_concurrency)
+        elif self.config.dialect == "snowflake":
+            # Imported here so the default SQLite path needs neither fakesnow nor pandas.
+            from resources_servers.bird_sql import setup_bird_snowflake
+
+            if self.config.snowflake_engine == "snowflake":
+                self._snowflake = setup_bird_snowflake.check_bird_snowflake_account(
+                    self._databases_dir, self.config.snowflake_connection_name, self.config.sql_execution_timeout_s
+                )
+            else:
+                self._snowflake = setup_bird_snowflake.ensure_bird_snowflake(
+                    self._databases_dir, self._resolve_dir(self.config.snowflake_db_dir)
+                )
 
     @staticmethod
     def _resolve_dir(path: str) -> Path:
@@ -326,6 +349,16 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 match, _gold, _pred, err = await execute_and_compare_postgres(
                     db_path=db_path,
                     pool=self._postgres,
+                    db_id=body.db_id,
+                    gold_sql=body.gt_sql,
+                    pred_sql=extracted_sql,
+                    semaphore=self._semaphore,
+                    timeout_s=self.config.sql_execution_timeout_s,
+                )
+            elif self.config.dialect == "snowflake":
+                match, _gold, _pred, err = await execute_and_compare_snowflake(
+                    db_path=db_path,
+                    snowflake=self._snowflake,
                     db_id=body.db_id,
                     gold_sql=body.gt_sql,
                     pred_sql=extracted_sql,
