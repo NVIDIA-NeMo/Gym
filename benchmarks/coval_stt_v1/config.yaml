@@ -1,0 +1,31 @@
+config_paths:
+- resources_servers/audio_eval/configs/audio_eval.yaml
+
+coval_stt_v1_resources_server:
+  _inherit_from: audio_eval
+  resources_servers:
+    audio_eval:
+      profile_contracts: benchmarks/coval_stt_v1/profiles.json
+
+coval_stt_v1_simple_agent:
+  _inherit_from: audio_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: coval_stt_v1_resources_server
+      datasets:
+      - name: coval_stt_v1
+        type: benchmark
+        jsonl_fpath: benchmarks/coval_stt_v1/data/coval_stt_v1_benchmark.jsonl
+        prepare_script: benchmarks/coval_stt_v1/prepare.py
+        license: Creative Commons Attribution 4.0 International
+
+coval_stt_v1_environment_server:
+  _inherit_from: audio_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: coval_stt_v1_simple_agent
+      resources_server:
+        type: resources_servers
+        name: coval_stt_v1_resources_server

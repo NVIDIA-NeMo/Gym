@@ -1,0 +1,15 @@
+{
+  "profiles": {
+    "coval-stt-v1": {
+      "prompt_override": {
+        "system_prompt": "",
+        "user_prompt": "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only."
+      },
+      "request": "greedy",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=nemo_skills.dataset.coval-stt-v1.scorer::CovalSTTV1Evaluator ++eval_config.cleanup_generation_loops=true",
+        "METRICS_TYPE": "nemo_skills.dataset.coval-stt-v1.scorer::CovalSTTV1Metrics"
+      }
+    }
+  }
+}
