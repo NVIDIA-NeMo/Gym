@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.artifacts.exporters import exporter_extras
+from nemo_gym.artifacts.run_files import ARTIFACTS_DIRNAME
 from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.data.gitlab_utils import gitlab_storage_extras
 from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
@@ -86,13 +87,7 @@ from nemo_gym.orchestration.executors.slurm.resume_script import (
 )
 from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args, render_target_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
-from nemo_gym.orchestration.jobs import (
-    ARTIFACTS_DIRNAME,
-    EVAL_SUCCEEDED_FILENAME,
-    LOGS_DIRNAME,
-    ROLLOUTS_FILENAME,
-    LogSource,
-)
+from nemo_gym.orchestration.jobs import EVAL_SUCCEEDED_FILENAME, LOGS_DIRNAME, ROLLOUTS_FILENAME, LogSource
 
 
 _SCRIPT_TEMPLATE = """\

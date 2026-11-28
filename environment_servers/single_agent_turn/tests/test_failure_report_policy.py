@@ -253,6 +253,61 @@ async def test_report_without_selected_failure_follows_outcome_policy():
     assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}
 
 
+async def test_a_failed_reply_without_an_outcome_is_verified_as_before_and_recorded_as_scored_despite_failure():
+    from nemo_gym.core import RequestFailureLog
+
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    response.update(status="failed", error={"code": "server_error", "message": "harness exited with status 3"})
+    client.responses[2] = _Response(response)
+
+    with RequestFailureLog.capture() as log:
+        result = await environment.run_request(_request())
+
+    # The reply is verified and scored exactly as it was before the event was recorded.
+    assert result.failure is None and result.result is not None
+    assert any(path == "/verify" for _, path, _ in client.calls)
+    recorded = [event for event in log.report.events.values() if event.operation == "scored_despite_failure"]
+    assert [(event.boundary.value, event.failure_kind, event.failure_reason, event.stage) for event in recorded] == [
+        ("agent", "agent_run_error", "harness exited with status 3", "agent")
+    ]
+    assert log.report.failure_id is None  # it is not the rollout's own failure
+
+
+async def test_a_failed_reply_with_a_classified_outcome_is_not_recorded_as_scored_despite_failure():
+    from nemo_gym.core import RequestFailureLog
+
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        error={"code": "server_error", "message": "scripted bad request"},
+        metadata={
+            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                failure_kind="model_request_error", status_code=400
+            ).model_dump_json()
+        },
+        failure_report={"failure_id": None, "events": {}},
+    )
+    client.responses[2] = _Response(response)
+
+    with RequestFailureLog.capture() as log:
+        await environment.run_request(_request())
+
+    assert all(event.operation != "scored_despite_failure" for event in log.report.events.values())
+
+
+async def test_a_completed_reply_is_not_recorded_as_scored_despite_failure():
+    from nemo_gym.core import RequestFailureLog
+
+    environment, _ = _environment_server()
+
+    with RequestFailureLog.capture() as log:
+        await environment.run_request(_request())
+
+    assert all(event.operation != "scored_despite_failure" for event in log.report.events.values())
+
+
 @pytest.mark.parametrize("final_on_model_timeout", [False, True])
 async def test_queued_timeout_stays_retryable_under_the_default_policy(final_on_model_timeout):
     environment, client = _environment_server()
@@ -502,3 +557,101 @@ async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
         assert partial.failure_report["events"][failure.event_id]["failure_kind"] == PROVIDER_OOM_KILLED
         saved = SandboxObservation.model_validate_json(partial.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert saved.failure_id == failure.event_id
+
+
+async def test_the_scored_despite_failure_event_survives_a_return_stage_checkpoint(monkeypatch):
+    from nemo_gym.core import SAVED_FAILURE_REPORT_KEY, RequestFailureLog
+
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    response.update(status="failed", error={"code": "server_error", "message": "harness exited with status 3"})
+    client.responses[2] = _Response(response)
+    boundaries = []
+
+    async def record_boundary(self, request, state):
+        boundaries.append(state() if callable(state) else state)
+
+    monkeypatch.setattr(type(environment), "checkpoint_boundary", record_boundary)
+
+    with RequestFailureLog.capture() as log:
+        await environment.run_request(_request())
+
+    (returning,) = [state for state in boundaries if state["next"] == "return"]
+    (original_id,) = [i for i, e in log.report.events.items() if e.operation == "scored_despite_failure"]
+    # The saved report is beside the result, not in it, and holds the event under its id.
+    assert SAVED_FAILURE_REPORT_KEY not in returning["result"]
+    assert list(returning[SAVED_FAILURE_REPORT_KEY]["events"]) == [original_id]
+    # A boundary before the failure was observed carries no report; the verify boundary follows it.
+    assert all(
+        SAVED_FAILURE_REPORT_KEY not in state for state in boundaries if state["next"] not in ("verify", "return")
+    )
+    (verifying,) = [state for state in boundaries if state["next"] == "verify"]
+    assert list(verifying[SAVED_FAILURE_REPORT_KEY]["events"]) == [original_id]
+
+    # A replacement restored at the return stage observes the same event, once, and selects no failure.
+    environment, client = _environment_server()
+    monkeypatch.setattr(type(environment), "checkpoint_continuation", lambda self, request: dict(returning))
+    with RequestFailureLog.capture() as restored:
+        await environment.run_request(_request())
+
+    assert [(i, e.failure_kind) for i, e in restored.report.events.items()] == [(original_id, "agent_run_error")]
+    assert restored.report.failure_id is None
+
+
+@pytest.mark.parametrize("classified", [True, False], ids=["agent_limit_only", "plus_unclassified_failed_reply"])
+@pytest.mark.parametrize(("stage", "first_reply"), [("close_agent", 3), ("verify", 4)])
+async def test_the_agents_event_survives_a_checkpoint_before_the_agent_is_closed_or_verified(
+    monkeypatch, stage, first_reply, classified
+):
+    from nemo_gym.core import SAVED_FAILURE_REPORT_KEY, RequestFailureLog, observe_scored_despite_failure
+    from tests.helpers.single_agent_turn import _Client
+
+    class HeaderClient(_Client):
+        """The HTTP client merges the events a reply's header carries into the request; this does as the agent replies."""
+
+        async def post(self, server_name, url_path, **kwargs):
+            reply = await super().post(server_name, url_path, **kwargs)
+            if url_path.endswith("/v1/responses"):  # the agent's run: its reply carries the event of a step cap
+                observe_scored_despite_failure(
+                    boundary="agent", failure_kind="agent_limit", failure_reason="cap", stage="agent"
+                )
+            return reply
+
+    reply = _agent_response().model_dump(mode="json")
+    if not classified:
+        reply.update(status="failed", error={"code": "server_error", "message": "harness exited with status 3"})
+
+    def scripted():
+        environment, client = _environment_server(client_type=HeaderClient)
+        client.responses[2] = _Response(reply)
+        return environment, client
+
+    environment, client = scripted()
+    boundaries = []
+
+    async def record_boundary(self, request, state):
+        boundaries.append(state() if callable(state) else state)
+
+    monkeypatch.setattr(type(environment), "checkpoint_boundary", record_boundary)
+    with RequestFailureLog.capture() as uninterrupted:
+        original = await environment.run_request(_request())
+    expected_kinds = sorted(event.failure_kind for event in uninterrupted.report.events.values())
+    assert expected_kinds == (["agent_limit"] if classified else ["agent_limit", "agent_run_error"])
+
+    (parked,) = [state for state in boundaries if state["next"] == stage]
+    saved = parked[SAVED_FAILURE_REPORT_KEY]["events"]
+    # The unclassified failed reply's own event is observed just before the verify boundary, not the close boundary.
+    assert sorted(event["failure_kind"] for event in saved.values()) == (
+        expected_kinds if stage == "verify" else ["agent_limit"]
+    )
+
+    # A replacement restored at that boundary reports the same events, once each, and selects no failure.
+    environment, client = scripted()
+    client.responses = client.responses[first_reply:]
+    monkeypatch.setattr(type(environment), "checkpoint_continuation", lambda self, request: dict(parked))
+    with RequestFailureLog.capture() as restored:
+        replacement = await environment.run_request(_request())
+
+    assert sorted(event.failure_kind for event in restored.report.events.values()) == expected_kinds
+    assert set(saved) <= set(restored.report.events) and restored.report.failure_id is None
+    assert replacement.result.reward == original.result.reward

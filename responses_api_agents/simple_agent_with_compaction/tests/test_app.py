@@ -337,3 +337,36 @@ async def test_equal_step_and_call_budgets_finish_and_verify():
     assert (await run_agent(agent)).reward == 0.75
     assert sum(call["url_path"].endswith("/v1/responses") for call in calls) == 2
     assert calls[-1]["url_path"] == "/verify"
+
+
+async def test_a_run_ended_by_max_steps_is_recorded_as_scored_despite_failure(monkeypatch):
+    import responses_api_agents.simple_agent_with_compaction.app as agent_module
+
+    recorded = []
+    monkeypatch.setattr(agent_module, "observe_scored_despite_failure", lambda **kwargs: recorded.append(kwargs))
+    agent, calls = make_agent(
+        responses=[
+            answer(1, output=[tool_call()]),
+            answer(2, output=[tool_call() | {"id": "function-2", "call_id": "tool-2"}]),
+        ],
+        config={"max_steps": 2, "context_history": {"max_model_calls": 2}},
+    )
+
+    assert (await run_agent(agent)).reward == 0.75  # the reward and verification are as before
+    assert calls[-1]["url_path"] == "/verify"
+    assert [(call["failure_kind"], call["stage"]) for call in recorded] == [("agent_limit", "agent")]
+    assert "max_steps (2)" in recorded[0]["failure_reason"]
+
+
+async def test_a_run_that_finishes_before_max_steps_is_not_recorded(monkeypatch):
+    import responses_api_agents.simple_agent_with_compaction.app as agent_module
+
+    recorded = []
+    monkeypatch.setattr(agent_module, "observe_scored_despite_failure", lambda **kwargs: recorded.append(kwargs))
+    agent, _ = make_agent(
+        responses=[answer(1, output=[tool_call()]), answer(2)],
+        config={"max_steps": 2, "context_history": {"max_model_calls": 2}},
+    )
+
+    assert (await run_agent(agent)).reward == 0.75
+    assert recorded == []

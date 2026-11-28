@@ -20,11 +20,14 @@ from nemo_gym.config import (
     ResourcesServerRef,
 )
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
+    observe_scored_despite_failure,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -140,6 +143,15 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                         )
                     ]
                 client.append_observation(observations)
+        else:
+            # The reward and the response sent to verification are unchanged; the cap is recorded as a limit that
+            # ended the run, so the rollout is not mistaken for one that finished.
+            observe_scored_despite_failure(
+                boundary=FailureBoundary.AGENT,
+                failure_kind=AGENT_LIMIT,
+                failure_reason=f"The run reached max_steps ({self.config.max_steps}) with tool calls still pending",
+                stage="agent",
+            )
         # ID still identifies the last selected action while output accumulates the
         # ordinary semantic conversation for verification.
         client.finish(model_response)

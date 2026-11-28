@@ -26,8 +26,24 @@ from typing import Any, Dict
 
 import httpx
 
+from nemo_gym.core import VERIFIER_ERROR, FailureBoundary, observe_scored_despite_failure
+
 
 LOG = logging.getLogger(__name__)
+
+
+def _record_sandbox_failure(reason: str) -> None:
+    """Record that the sandbox did not answer, for the request being served.
+
+    The error result the caller gets is unchanged and is scored as before. A compile that the sandbox itself reports as
+    timed out comes back as a normal result; only a failure to get any answer is recorded here.
+    """
+    observe_scored_despite_failure(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind=VERIFIER_ERROR,
+        failure_reason=f"The Lean4 sandbox did not answer: {reason}",
+        stage="verification",
+    )
 
 
 class Lean4SandboxClient:
@@ -102,20 +118,24 @@ class Lean4SandboxClient:
 
             if response.status_code == 502:
                 LOG.warning("Sandbox returned 502 error")
+                _record_sandbox_failure("HTTP 502")
                 return {"process_status": "error", "stdout": "", "stderr": "Sandbox 502 error"}
 
             return response.json()
 
         except httpx.TimeoutException:
             LOG.warning("Sandbox request timed out after %.1f seconds", timeout)
+            _record_sandbox_failure(f"no reply within {timeout + 5.0:.1f} s")
             return {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
 
         except httpx.HTTPError as e:
             LOG.error("HTTP error communicating with sandbox: %s", e)
+            _record_sandbox_failure(f"{type(e).__name__}: {e}")
             return {"process_status": "error", "stdout": "", "stderr": str(e)}
 
         except json.JSONDecodeError as e:
             LOG.error("Failed to parse sandbox response: %s", e)
+            _record_sandbox_failure("the reply was not valid JSON")
             return {"process_status": "error", "stdout": "", "stderr": "Invalid JSON response"}
 
     async def health_check(self, timeout: float = 5.0) -> bool:

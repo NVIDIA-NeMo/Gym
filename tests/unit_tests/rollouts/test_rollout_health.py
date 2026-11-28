@@ -268,6 +268,21 @@ def test_task_no_successful_model_calls_remains_turn_bound(tmp_path: Path) -> No
     assert "task_no_successful_model_calls" in result.summary["tasks"]["8"]["flags"]
 
 
+def _scored_despite_failure_events(*kinds: str) -> dict:
+    """Saved failure events as a server leaves them where it carried on past a failure, one per kind."""
+    return {
+        f"event-{index}": {
+            "event_id": f"event-{index}",
+            "boundary": "resources_server",
+            "failure_kind": kind,
+            "failure_reason": f"{kind} reason",
+            "operation": "scored_despite_failure",
+            "stage": "verification",
+        }
+        for index, kind in enumerate(kinds)
+    }
+
+
 def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Path) -> None:
     rows = [
         (_record(0, 0, include_turn=False, include_response_output=False), [_call()]),
@@ -296,6 +311,9 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
         {"invocation_id": "root", "tool_call_id": "t1", "output": "ripgrep execution failed: x", "tool_name": "grep"}
     ]
     rows.append((failed_tool, [_call()]))
+    scored_despite_failure = _record(10, 0)
+    scored_despite_failure["_ng_failure_events"] = _scored_despite_failure_events("judge_failed")
+    rows.append((scored_despite_failure, [_call()]))
     rows.append(deepcopy(rows[0]))
     rollout_path = _write_fixture(tmp_path, rows)
 
@@ -1521,6 +1539,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
         "rollout_token_count_mismatch",
         "model_call_runaway_generation",
         "rollout_tool_call_failed",
+        "rollout_scored_despite_failure",
     }
 
     # A malformed line must not be grouped with a valid rollout whose numeric
@@ -4463,3 +4482,64 @@ def test_interrupted_tool_label_preserves_failure_marker_health(tmp_path, status
     )
     assert len(findings) == 1
     assert findings[0].detail["count"] == 1
+
+
+class TestScoredDespiteFailureCheck:
+    """`rollout_scored_despite_failure` counts only the events a server recorded while carrying on past a failure."""
+
+    def _findings(self, tmp_path: Path, events) -> list:
+        record = _record(0, 0)
+        if events is not None:
+            record["_ng_failure_events"] = events
+        result = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1)
+        return [
+            finding for finding in result.rollouts[0].findings if finding.check == "rollout_scored_despite_failure"
+        ]
+
+    def test_a_recorded_failure_that_was_carried_past_is_a_finding_with_its_detail(self, tmp_path: Path) -> None:
+        findings = self._findings(
+            tmp_path, _scored_despite_failure_events("judge_failed", "judge_failed", "agent_limit")
+        )
+
+        assert len(findings) == 1
+        assert findings[0].detail["count"] == 3
+        assert findings[0].detail["failure_kinds"] == {"agent_limit": 1, "judge_failed": 2}
+        assert findings[0].detail["first_failure_reason"] == "judge_failed reason"
+
+    def test_the_rollout_is_unhealthy_though_its_reward_stands(self, tmp_path: Path) -> None:
+        record = _record(0, 0)
+        record["_ng_failure_events"] = _scored_despite_failure_events("judge_failed")
+        result = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1)
+
+        assert result.rollouts[0].verdict == "unhealthy"
+
+    def test_the_attempts_of_a_model_call_that_a_retry_recovered_are_not_counted(self, tmp_path: Path) -> None:
+        recovered_attempt = {
+            "attempt-1": {
+                "event_id": "attempt-1",
+                "boundary": "model",
+                "failure_kind": "model_request_error",
+                "failure_reason": "HTTP 503 from the model server",
+                "operation": "model_request",
+            }
+        }
+
+        assert self._findings(tmp_path, recovered_attempt) == []
+
+    def test_a_row_without_failure_events_has_no_finding(self, tmp_path: Path) -> None:
+        assert self._findings(tmp_path, None) == []
+
+    @pytest.mark.parametrize("events", ["not a mapping", {"a": "not an event"}, {}])
+    def test_a_malformed_events_field_is_ignored_rather_than_raised(self, tmp_path: Path, events) -> None:
+        assert self._findings(tmp_path, events) == []
+
+    def test_the_check_can_be_ignored_like_any_other(self, tmp_path: Path) -> None:
+        record = _record(0, 0)
+        record["_ng_failure_events"] = _scored_despite_failure_events("judge_failed")
+        result = run_health_checks(
+            _write_fixture(tmp_path, [(record, [_call()])]),
+            workers=1,
+            ignored_checks=("rollout_scored_despite_failure",),
+        )
+
+        assert all(finding.check != "rollout_scored_despite_failure" for finding in result.rollouts[0].findings)

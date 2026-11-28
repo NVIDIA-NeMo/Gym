@@ -135,6 +135,60 @@ def test_the_header_codec_omits_an_oversized_report_and_keeps_the_flag_upward() 
     assert FailureHeader.decode({FailureHeader.NAME: "not json"}) == FailureReport(omitted=True)
 
 
+def _oversized_events(count: int = 4) -> dict[str, FailureEvent]:
+    events: dict[str, FailureEvent] = {}
+    for _ in range(count):
+        event = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="x" * 2000)
+        events[event.event_id] = event
+    return events
+
+
+def _scored_despite_failure(reason: str = "the judge fell back to a default reward") -> FailureEvent:
+    return FailureEvent(
+        failure_kind="verifier_error",
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        operation="scored_despite_failure",
+        failure_reason=reason,
+        exception_type="RuntimeError",
+        cause_id=None,
+    )
+
+
+def test_an_oversized_report_keeps_its_scored_despite_failure_event_beside_the_omitted_flag() -> None:
+    marker = _scored_despite_failure("y" * 1500)
+    events = _oversized_events() | {marker.event_id: marker}
+
+    sent = FailureHeader.encode(FailureReport(events=events))
+
+    assert len(sent[FailureHeader.NAME]) <= FailureHeader.MAX_BYTES
+    decoded = FailureHeader.decode(sent)
+    # The other events are omitted, as before; the marker travels, trimmed, so the health check still sees it.
+    assert decoded.omitted and list(decoded.events) == [marker.event_id]
+    kept = decoded.events[marker.event_id]
+    assert (kept.operation, kept.failure_kind) == ("scored_despite_failure", "verifier_error")
+    assert 0 < len(kept.failure_reason) <= 200
+    # It keeps going upward with the flag, and the same stream encoding carries it.
+    assert FailureReport().merged(decoded).omitted and marker.event_id in FailureReport().merged(decoded).events
+    assert FailureHeader.decode_stream_event(
+        {FailureHeader.STREAM_FIELD: FailureHeader.stream_value(FailureReport(events=events))}
+    ).events.keys() == {marker.event_id}
+
+
+def test_an_oversized_report_without_a_marker_is_still_omitted_alone() -> None:
+    sent = FailureHeader.encode(FailureReport(events=_oversized_events()))
+    assert FailureHeader.decode(sent) == FailureReport(omitted=True)
+
+
+def test_markers_that_do_not_fit_even_trimmed_fall_back_to_the_omitted_flag() -> None:
+    markers = [_scored_despite_failure(f"{i}" * 200) for i in range(40)]
+    events = _oversized_events() | {marker.event_id: marker for marker in markers}
+
+    sent = FailureHeader.encode(FailureReport(events=events))
+
+    assert len(sent[FailureHeader.NAME]) <= FailureHeader.MAX_BYTES
+    assert FailureHeader.decode(sent) == FailureReport(omitted=True)
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -538,3 +592,56 @@ def test_a_full_request_log_says_once_that_it_drops_events(caplog) -> None:
             log.add(failure_report_for(_model()))
     assert log.dropped_events == 3 and log.report.omitted
     assert sum("later events are dropped" in record.getMessage() for record in caplog.records) == 1
+
+
+class TestSavedAndDiscardedScoredDespiteFailures:
+    @staticmethod
+    def _observe(reason: str = "cap") -> None:
+        from nemo_gym.core.failure_transport import observe_scored_despite_failure
+
+        observe_scored_despite_failure(boundary="agent", failure_kind="agent_limit", failure_reason=reason)
+
+    def test_saved_events_are_restored_once_under_their_ids_and_select_no_failure(self) -> None:
+        from nemo_gym.core.failure_transport import (
+            SAVED_FAILURE_REPORT_KEY,
+            RequestFailureLog,
+            restore_saved_failure_report,
+            with_saved_failure_report,
+        )
+
+        with RequestFailureLog.capture() as original:
+            self._observe()
+            saved = with_saved_failure_report({"reward": 1.0})
+        (event_id,) = original.report.events
+
+        assert saved["reward"] == 1.0 and list(saved[SAVED_FAILURE_REPORT_KEY]["events"]) == [event_id]
+        with RequestFailureLog.capture() as replay:
+            for _ in range(2):  # replaying twice adds the event once
+                payload = restore_saved_failure_report(dict(saved))
+        assert payload == {"reward": 1.0}
+        assert list(replay.report.events) == [event_id] and replay.report.failure_id is None
+
+    def test_a_result_without_observed_events_is_saved_unchanged(self) -> None:
+        from nemo_gym.core.failure_transport import (
+            RequestFailureLog,
+            restore_saved_failure_report,
+            with_saved_failure_report,
+        )
+
+        assert with_saved_failure_report({"reward": 1.0}) == {"reward": 1.0}  # outside a request
+        with RequestFailureLog.capture():
+            assert with_saved_failure_report({"reward": 1.0}) == {"reward": 1.0}
+            assert restore_saved_failure_report({"reward": 1.0}) == {"reward": 1.0}
+
+    def test_discarding_keeps_only_the_events_since_the_snapshot_as_diagnostics(self) -> None:
+        from nemo_gym.core.failure_transport import RequestFailureLog
+
+        with RequestFailureLog.capture() as log:
+            self._observe("earlier")
+            known = set(log.report.events)
+            self._observe("discarded attempt")
+            log.discard_scored_despite_failures(known)
+
+        by_reason = {e.failure_reason: e.operation for e in log.report.events.values()}
+        assert by_reason == {"earlier": "scored_despite_failure", "discarded attempt": "discarded_attempt"}
+        assert log.report.failure_id is None

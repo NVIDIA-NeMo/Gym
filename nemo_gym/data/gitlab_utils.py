@@ -120,6 +120,8 @@ def download_jsonl_dataset(
         download_link,
         headers={"Authorization": f"Bearer {MLFLOW_TRACKING_TOKEN.get()}"},
     )
+    # An error page is not the dataset: fail here, before anything is written, instead of saving it as the output.
+    response.raise_for_status()
     # Relative outputs such as `data/x.jsonl` only exist in the Gym root; create the directory like the HF download.
     output_fpath = Path(config.output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)

@@ -17,7 +17,7 @@ Flow for one request a Gym server serves:
 import json
 import logging
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -25,9 +25,9 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.core.failure_kinds import is_namespaced, is_registered
-from nemo_gym.core.failure_records import FailureReport
-from nemo_gym.core.typed_exceptions import failure_report_for
+from nemo_gym.core.failure_kinds import FailureStage, is_namespaced, is_registered
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
 
 LOGGER = logging.getLogger(__name__)
@@ -38,11 +38,13 @@ class FailureHeader:
 
     aiohttp's client rejects a reply whose header line (name and value) is over 8190 bytes, and the caller then
     sees an unreadable error instead of the real status and body. A report whose JSON is over ``MAX_BYTES`` is
-    therefore not sent: the header says ``{"omitted": true}``, and every hop above keeps that flag.
+    therefore not sent: the header says ``{"omitted": true}``, and every hop above keeps that flag. The
+    scored-despite-failure events of that report still travel, trimmed, beside the flag when they fit.
     """
 
     NAME: ClassVar[str] = "X-NG-Failure-Report"
     MAX_BYTES: ClassVar[int] = 4096
+    _COMPACT_REASON_CHARS: ClassVar[int] = 200
     # A stream's headers are sent before its backend finishes, so a streamed reply carries its report as this field of
     # its terminal event instead, with the same bound and the same omitted flag.
     STREAM_FIELD: ClassVar[str] = "nemo_gym_failure_report"
@@ -55,8 +57,36 @@ class FailureHeader:
         value = json.dumps(report.model_dump(mode="json"), ensure_ascii=True, separators=(",", ":"))
         if len(value) > cls.MAX_BYTES:
             LOGGER.warning("Failure report of %d bytes not sent; %d events omitted", len(value), len(report.events))
-            value = json.dumps({"omitted": True})
+            value = cls._compact_value(report) or json.dumps({"omitted": True})
         return {cls.NAME: value}
+
+    @classmethod
+    def _compact_value(cls, report: FailureReport) -> str | None:
+        """What an oversized report keeps: its scored-despite-failure events, trimmed, beside ``omitted``.
+
+        Those events say the rollout was scored from a degraded path, so losing them with the rest would hide it from
+        the health check. Their reasons are cut and their details and causes dropped; ``None`` when there are none or
+        even these do not fit, and the report is then sent as ``{"omitted": true}`` alone.
+        """
+        kept = {
+            event_id: event.model_copy(
+                update={
+                    "failure_reason": event.failure_reason[: cls._COMPACT_REASON_CHARS],
+                    "exception_type": None,
+                    "details": None,
+                    "foreign_error": None,
+                    "cause_id": None,
+                }
+            )
+            for event_id, event in report.events.items()
+            if event.operation == SCORED_DESPITE_FAILURE_OPERATION
+        }
+        if not kept:
+            return None
+        value = json.dumps(
+            FailureReport(events=kept, omitted=True).model_dump(mode="json"), ensure_ascii=True, separators=(",", ":")
+        )
+        return value if len(value) <= cls.MAX_BYTES else None
 
     @classmethod
     def stream_value(cls, report: FailureReport) -> dict[str, Any] | None:
@@ -211,6 +241,28 @@ class RequestFailureLog:
             failure_id=None, events=new | kept, omitted=self.report.omitted or omitted
         )
 
+    def discard_scored_despite_failures(self, known_event_ids: Collection[str]) -> None:
+        """Keep the scored-despite-failure events observed since ``known_event_ids`` as ordinary diagnostics.
+
+        A caller that retries an attempt whose result it throws away calls this before the next attempt: what the
+        discarded attempt swallowed no longer describes the result that will be scored, so it must not mark that
+        result. The events stay in the report, with the operation ``DISCARDED_ATTEMPT_OPERATION``.
+        """
+        if not any(
+            event.operation == SCORED_DESPITE_FAILURE_OPERATION and key not in known_event_ids
+            for key, event in self.report.events.items()
+        ):
+            return
+        events = {
+            key: event.model_copy(update={"operation": DISCARDED_ATTEMPT_OPERATION})
+            if event.operation == SCORED_DESPITE_FAILURE_OPERATION and key not in known_event_ids
+            else event
+            for key, event in self.report.events.items()
+        }
+        self.report = FailureReport.model_construct(
+            failure_id=self.report.failure_id, events=events, omitted=self.report.omitted
+        )
+
     def reply_report(self, error: BaseException | None) -> FailureReport:
         """The report for this request's reply: its own failure (``error``, ``None`` on success) and the log."""
         return failure_report_for(error).merged(self.report)
@@ -257,6 +309,70 @@ def observe_failure(error: BaseException) -> None:
     log = RequestFailureLog.current()
     if log is not None:
         log.add(failure_report_for(error))
+
+
+SCORED_DESPITE_FAILURE_OPERATION = "scored_despite_failure"
+"""The ``operation`` of an event that ``observe_scored_despite_failure`` records, so a reader can pick these out."""
+
+
+DISCARDED_ATTEMPT_OPERATION = "discarded_attempt"
+"""The ``operation`` a scored-despite-failure event takes once the attempt that swallowed it was discarded."""
+
+
+def observe_scored_despite_failure(
+    *,
+    boundary: FailureBoundary | str,
+    failure_kind: str,
+    failure_reason: str,
+    stage: FailureStage | None = None,
+) -> None:
+    """Record a failure the code carried on past, for the request being served.
+
+    A server calls this where it swallows a failure and goes on to return a normal result: a harness that crashed and
+    is scored zero, a judge that was unreachable and fell back to a default reward, a step limit that ended the run.
+    The outcome is unchanged. The event travels with the reply and is saved beside the row (``_ng_failure_events``),
+    where the ``rollout_scored_despite_failure`` health check counts it, so such a rollout is no longer
+    indistinguishable from one that was graded normally. It is not the rollout's own failure: no ``failure_id`` is set.
+    """
+    observe_failure(
+        NgFailureEvent(
+            boundary=boundary,
+            failure_kind=failure_kind,
+            failure_reason=failure_reason[:2000],
+            operation=SCORED_DESPITE_FAILURE_OPERATION,
+            stage=stage,
+        )
+    )
+
+
+SAVED_FAILURE_REPORT_KEY = "ng_saved_failure_report"
+"""The key under which a server persists the request's observed failure report beside a result it will replay."""
+
+
+def with_saved_failure_report(payload: dict[str, Any]) -> dict[str, Any]:
+    """``payload`` plus the current request's observed failure events, for a server that persists a result.
+
+    A result served again from disk (a cache hit, a restored checkpoint) did not run again, so the events observed when
+    it ran are saved with it and handed back by ``restore_saved_failure_report``. Nothing is added when none were
+    observed, so a result without failures is saved as before.
+    """
+    log = RequestFailureLog.current()
+    if log is None or not (log.report.events or log.report.omitted):
+        return payload
+    return {**payload, SAVED_FAILURE_REPORT_KEY: log.report.model_dump(mode="json")}
+
+
+def restore_saved_failure_report(payload: dict[str, Any]) -> dict[str, Any]:
+    """Observe the failure events saved with ``payload`` in the current request, and return it without them.
+
+    The events keep their ids, so replaying one result any number of times adds each event once. No ``failure_id`` is
+    selected: the events are diagnostics, as when they were first observed.
+    """
+    saved = payload.pop(SAVED_FAILURE_REPORT_KEY, None)
+    log = RequestFailureLog.current()
+    if saved is not None and log is not None:
+        log.add_saved(saved)
+    return payload
 
 
 class StreamFailureReportReader:

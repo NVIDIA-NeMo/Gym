@@ -67,13 +67,18 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
+    AGENT_RUN_ERROR,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     observe_failure,
+    observe_scored_despite_failure,
+    restore_saved_failure_report,
+    with_saved_failure_report,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -825,7 +830,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
                     with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "r") as f:
                         print(f"Skipping {instance_id} because it already exists")
-                        verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
+                        # The events observed when it ran are restored, so a cached crash is still recorded.
+                        saved = restore_saved_failure_report(json.loads(f.read()))
+                        verify_response = MiniSWEAgentVerifyResponse.model_validate(saved)
                     return verify_response
 
             env_vars = environ.copy()
@@ -879,6 +886,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
             except Exception as e:
                 print(f"Error running swegym: {e}")
+                # The reward stays 0; the rollout is recorded as scored despite the failed run.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=f"The swegym run failed and the rollout was scored 0: {type(e).__name__}: {e}",
+                    stage="agent",
+                )
                 result = None
                 messages = []
                 responses = []
@@ -908,7 +922,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             output_path.mkdir(parents=True, exist_ok=True)
 
             with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
-                json.dump(verify_response.model_dump(), f)
+                json.dump(with_saved_failure_report(verify_response.model_dump()), f)
 
             return verify_response
 

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from code_extraction import preprocess_code_completion
 from setup_bcb_venv import ensure_bcb_venv
 
+from nemo_gym.core import VERIFIER_ERROR, FailureBoundary, observe_scored_despite_failure
 from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     highest_k_metrics,
@@ -157,11 +158,39 @@ class BigCodeBenchResourcesServer(SimpleResourcesServer):
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            # The runner itself did not finish, which says nothing about the solution. The result below is scored as
+            # before; the rollout is recorded as scored despite the harness failure.
+            observe_scored_despite_failure(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=f"The bigcodebench runner did not finish within {self.config.subprocess_timeout} s",
+                stage="verification",
+            )
             return {"status": "timeout", "details": {"reason": "outer_subprocess_timeout"}}
 
         try:
-            return json.loads(stdout.decode("utf-8", errors="replace"))
+            result = json.loads(stdout.decode("utf-8", errors="replace"))
+            if isinstance(result, dict) and result.get("status") == "error":
+                # The runner's own error protocol (for example a failed bigcodebench import): the solution was never
+                # graded. A graded outcome (pass, fail, the solution's timeout) returns unchanged.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason="The bigcodebench runner returned an error: "
+                    + str(result.get("details") or {})[:500],
+                    stage="verification",
+                )
+            return result
         except json.JSONDecodeError:
+            # The runner crashed or printed something else, so the solution was never graded. The result below is
+            # scored as before; the rollout is recorded as scored despite the harness failure.
+            observe_scored_despite_failure(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason="The bigcodebench runner did not print a JSON result: "
+                + stderr.decode("utf-8", errors="replace")[:500],
+                stage="verification",
+            )
             return {
                 "status": "error",
                 "details": {

@@ -24,6 +24,7 @@ exercised without any live server.
 from typing import Any, Callable
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 from pytest import fixture, mark, raises
 from tenacity import RetryError, wait_none
 
@@ -33,6 +34,7 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
+    RequestFailureLog,
 )
 from responses_api_agents.toolsandbox_agent.app import (
     ToolSandboxAgent,
@@ -278,6 +280,83 @@ class TestApp:
         expected_usage = usage(2118, 1424, cached=400, reasoning=1200)
         expected_usage["input_tokens_details"]["cache_write_tokens"] = None
         assert response.usage.model_dump() == expected_usage
+
+    async def test_a_failed_model_call_on_a_later_turn_ends_the_run_and_is_recorded_as_scored_despite_failure(
+        self, agent_config: ToolSandboxAgentConfig
+    ) -> None:
+        class _RejectedResp(_FakeResp):
+            def raise_for_status(self) -> None:
+                raise aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=500, message="boom")
+
+        model_calls = []
+
+        async def post(*, server_name: str, url_path: str, json: Any = None, cookies: Any = None) -> _FakeResp:
+            if url_path == "/seed_session":
+                return _FakeResp(_seed_payload())
+            if url_path == "/v1/responses":
+                model_calls.append(1)
+                # The first turn completes with a tool call; the second call is rejected.
+                return _FakeResp(_function_call_response()) if len(model_calls) == 1 else _RejectedResp({})
+            if url_path == "/step":
+                return _FakeResp(_step_payload(done=False))
+            return _FakeResp({"message": "closed", "success": True})
+
+        agent = self._make_agent(agent_config, post)
+
+        with RequestFailureLog.capture() as log:
+            response = await agent.responses(self._run_request())
+
+        # The run ends after one completed turn and is returned as it stands, as before.
+        assert len(model_calls) == 2
+        assert len(self._calls_to(agent, "/step")) == 1
+        assert response.env_id == "env-1"
+        (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+            "agent",
+            "agent_run_error",
+            "agent",
+        )
+        assert "failed model call" in recorded.failure_reason
+        assert log.report.failure_id is None
+
+    async def test_an_invalid_model_response_on_a_later_turn_ends_the_run_and_is_recorded(
+        self, agent_config: ToolSandboxAgentConfig
+    ) -> None:
+        post = _post_router(
+            {
+                "/seed_session": [_seed_payload()],
+                "/v1/responses": [_function_call_response(), {"not": "a response"}],
+                "/step": [_step_payload(done=False)],
+                "/close": [{"message": "closed", "success": True}],
+            }
+        )
+        agent = self._make_agent(agent_config, post)
+
+        with RequestFailureLog.capture() as log:
+            response = await agent.responses(self._run_request())
+
+        assert len(self._calls_to(agent, "/step")) == 1
+        assert response.env_id == "env-1"
+        (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+        assert "invalid model response" in recorded.failure_reason
+
+    async def test_a_normal_run_is_not_recorded_as_scored_despite_failure(
+        self, agent_config: ToolSandboxAgentConfig
+    ) -> None:
+        post = _post_router(
+            {
+                "/seed_session": [_seed_payload()],
+                "/v1/responses": [_text_response("Here is my answer.")],
+                "/step": [_step_payload(done=True)],
+                "/close": [{"message": "closed", "success": True}],
+            }
+        )
+        agent = self._make_agent(agent_config, post)
+
+        with RequestFailureLog.capture() as log:
+            await agent.responses(self._run_request())
+
+        assert log.report.events == {}
 
     async def test_responses_no_actionable_output_breaks(self, agent_config: ToolSandboxAgentConfig) -> None:
         post = _post_router(

@@ -22,6 +22,7 @@ import wandb.util
 from omegaconf import DictConfig, OmegaConf
 from wandb import Run, Table
 
+from nemo_gym.artifacts.exporters import run_failed
 from nemo_gym.artifacts.exporters.base import BaseExporter
 from nemo_gym.artifacts.exporters.wandb_config import WandbExportConfig
 from nemo_gym.config.config_types import RunExportConfig, WANDBConfig
@@ -68,7 +69,12 @@ class WandbExporter(BaseExporter):
     def teardown(self) -> None:
         self._flush_pending_config()
         if self.run is not None:
-            self.run.finish()
+            # As the MLflow run is marked FAILED: a run whose metrics or rollouts did not all reach W&B, or whose
+            # evaluation failed, is not shown as finished normally.
+            if run_failed() or self._delivery_failed:
+                self.run.finish(exit_code=1)
+            else:
+                self.run.finish()
             self.run = None
 
     def _close_reopened(self) -> None:

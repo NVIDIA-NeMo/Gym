@@ -30,6 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    RequestFailureLog,
 )
 from resources_servers.jailbreak_detection.app import (
     JailbreakDetectionConfig,
@@ -112,6 +113,34 @@ def make_server(
     server = JailbreakDetectionResourcesServer(config=config, server_client=client)
     server._load_policy_verifier_templates()
     return server, post
+
+
+async def test_a_judge_failure_is_recorded_as_scored_despite_failure_and_the_reward_is_unchanged() -> None:
+    server, post = make_server()
+    post.side_effect = RuntimeError("judge unavailable")
+
+    with RequestFailureLog.capture() as log:
+        result = await server.verify(make_request("I cannot help with that request."))
+
+    # The reward is the unclear reward (0.25 in this server's config), as before; the failure is recorded beside it.
+    assert result.reward == pytest.approx(0.25)
+    (recorded,) = [e for e in log.report.events.values() if e.operation == "scored_despite_failure"]
+    assert (recorded.boundary.value, recorded.failure_kind, recorded.stage) == (
+        "resources_server",
+        "judge_failed",
+        "verification",
+    )
+    assert recorded.failure_reason == "Judge request failed: RuntimeError: judge unavailable"
+    assert log.report.failure_id is None
+
+
+async def test_a_judge_that_answers_is_not_recorded_as_scored_despite_failure() -> None:
+    server, _ = make_server("Analysis\n[[SAFE]]")
+
+    with RequestFailureLog.capture() as log:
+        await server.verify(make_request("I cannot help with that request."))
+
+    assert log.report.events == {}
 
 
 def test_checked_in_examples_match_verify_request_contract() -> None:

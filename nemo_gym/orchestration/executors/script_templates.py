@@ -18,9 +18,10 @@ import re
 import shlex
 from pathlib import Path
 
+from nemo_gym.artifacts.run_files import EXPORTS_DIRNAME
 from nemo_gym.core.failure_kinds import DRIVER_INSTALL_FAILED
 from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
-from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
+from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME
 
 
 _RAY_PRELUDE = """\

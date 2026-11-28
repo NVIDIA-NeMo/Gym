@@ -31,6 +31,7 @@ from typing import Any
 import yaml
 
 from nemo_gym import __version__
+from nemo_gym.artifacts.run_files import ARTIFACTS_DIRNAME
 from nemo_gym.eval.recovery.evidence import (
     CollectedEvidence,
 )
@@ -86,7 +87,6 @@ from nemo_gym.orchestration.executors.slurm_status import (
     render_status_script,
 )
 from nemo_gym.orchestration.jobs import (
-    ARTIFACTS_DIRNAME,
     LOGS_DIRNAME,
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,

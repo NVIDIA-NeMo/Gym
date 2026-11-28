@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from nemo_gym.core.failure_transport import SCORED_DESPITE_FAILURE_OPERATION
 from nemo_gym.rollouts.health.types import (
     ROLLOUT_INDEX_KEY,
     TASK_INDEX_KEY,
@@ -95,6 +96,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY}),
+    ),
+    CheckSpec(
+        id="rollout_scored_despite_failure",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=frozenset({CheckInput.RECORD}),
     ),
     CheckSpec(
         id="task_consistently_unhealthy",
@@ -1002,6 +1009,40 @@ def _rollout_tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int
     ]
 
 
+def _rollout_scored_despite_failure(record: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+    """One finding per rollout whose saved failure events include one a server recorded while carrying on.
+
+    A server records such an event where it swallows a failure and returns a normal result (see
+    ``observe_scored_despite_failure``), so the rollout was scored from a degraded path: a harness that crashed and
+    scores zero, a judge that fell back to a default reward, a step limit that ended the run. Other saved events, such
+    as the attempts of a model call that a retry recovered, are not counted here."""
+    events = record.get("_ng_failure_events")
+    if not isinstance(events, dict):
+        return []
+    marked = [
+        event
+        for event in events.values()
+        if isinstance(event, dict) and event.get("operation") == SCORED_DESPITE_FAILURE_OPERATION
+    ]
+    if not marked:
+        return []
+    by_kind: dict[str, int] = defaultdict(int)
+    for event in marked:
+        by_kind[str(event.get("failure_kind"))] += 1
+    return [
+        Finding(
+            check="rollout_scored_despite_failure",
+            subject=subject,
+            detail={
+                "reason": "the rollout was scored although a server recorded a failure it carried on past",
+                "count": len(marked),
+                "failure_kinds": dict(sorted(by_kind.items())),
+                "first_failure_reason": str(marked[0].get("failure_reason") or "")[:200],
+            },
+        )
+    ]
+
+
 _ROLLOUT_CHECKS: dict[
     str,
     Callable[
@@ -1038,5 +1079,8 @@ _ROLLOUT_CHECKS: dict[
     ),
     "rollout_tool_call_failed": lambda record, trajectory, bindings, subject: _rollout_tool_call_failed(
         trajectory, subject
+    ),
+    "rollout_scored_despite_failure": lambda record, trajectory, bindings, subject: _rollout_scored_despite_failure(
+        record, subject
     ),
 }

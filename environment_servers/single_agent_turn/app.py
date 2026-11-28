@@ -41,8 +41,10 @@ from nemo_gym.config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    SAVED_FAILURE_REPORT_KEY,
     FailureBoundary,
     FailureReport,
     FailureReportRow,
@@ -52,7 +54,10 @@ from nemo_gym.core import (
     NgFailureEvent,
     RequestFailureLog,
     model_sampling_path_segment,
+    observe_scored_despite_failure,
     rebuild_failure,
+    restore_saved_failure_report,
+    with_saved_failure_report,
 )
 from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
@@ -272,6 +277,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             SingleAgentTurnResult.model_validate(continuation["result"]) if continuation.get("result") else None
         )
 
+        # A verify boundary is written after the unclassified-failure event below is observed, so a continuation
+        # that saved a report already holds it.
+        saved_before_verify = stage == "verify" and SAVED_FAILURE_REPORT_KEY in continuation
+        if stage in ("close_agent", "verify", "return"):
+            # The diagnostics observed before this boundary (the agent's own, carried by its reply) were not
+            # observed by this replacement request. Their events keep their ids, so a replay adds each once, and
+            # no failure is selected. An event raised after the boundary is raised again by the step that raises it.
+            restore_saved_failure_report(dict(continuation))
+
         # Register cleanup before seeding so a lost seed reply cannot hide the caller-assigned session ID.
         # Final cleanup runs after run() returns, outside the episode deadline.
         resources_cleanup = cleanup.register_cleanup(
@@ -342,7 +356,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "next": "close_agent",
                     "handles": handles.model_dump(),
                     "response": agent_response.model_dump(mode="json"),
-                },
+                }
+                | with_saved_failure_report({}),
             )
             # Closing returns the agent's observations and final resources cookies exactly once,
             # so a checkpoint waits for it and records them.
@@ -369,6 +384,20 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if stage == "verify":
             action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
             cause = self._agent_failure(agent_response)
+            if (
+                agent_response.status == "failed"
+                and AGENT_OUTCOME_METADATA_KEY not in (agent_response.metadata or {})
+                and not saved_before_verify
+            ):
+                # An agent that reports failure without a classified outcome is verified like any other reply. The
+                # rollout is recorded as scored despite that failure, so it is not mistaken for a normal run.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=(agent_response.error.message if agent_response.error else None)
+                    or "The agent reported failure without a classified outcome",
+                    stage="agent",
+                )
             if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
                 extra = agent_response.model_extra or {}
                 report = extra.get("failure_report")
@@ -417,7 +446,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "response": agent_response.model_dump(mode="json"),
                     "observations": dumped_observations(),
                     "trajectory": dumped_trajectory(),
-                },
+                }
+                | with_saved_failure_report({}),
             )
             skipped_reward = self._skipped_verification_reward()
             if skipped_reward is None:
@@ -436,13 +466,17 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         # and park before the final cleanup, so a replacement restored here does not end before resume.
         await self.checkpoint_boundary(
             request,
-            lambda: {
-                "next": "return",
-                "handles": handles.model_dump(),
-                "result": verification.model_dump(mode="json"),
-                "observations": dumped_observations(),
-                "trajectory": dumped_trajectory(),
-            },
+            lambda: (
+                {
+                    "next": "return",
+                    "handles": handles.model_dump(),
+                    "result": verification.model_dump(mode="json"),
+                    "observations": dumped_observations(),
+                    "trajectory": dumped_trajectory(),
+                }
+                # Kept outside the result, which collection rejects reserved diagnostic keys in.
+                | with_saved_failure_report({})
+            ),
         )
 
         # Keep one bounded retry in final unwind without erasing a completed verdict.

@@ -38,8 +38,13 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    observe_scored_despite_failure,
+    restore_saved_failure_report,
+    with_saved_failure_report,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
@@ -863,7 +868,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
                     with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "r") as f:
                         print(f"Skipping {instance_id} because it already exists")
-                        verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
+                        # The events observed when it ran are restored, so a cached crash is still recorded.
+                        saved = restore_saved_failure_report(json.loads(f.read()))
+                        verify_response = MiniSWEAgentVerifyResponse.model_validate(saved)
                     return verify_response
 
             #### RUN MINI-SWE-AGENT #####
@@ -907,6 +914,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             except Exception as e:
                 error_info = {"error": str(e), "traceback": traceback.format_exc()}
                 print(f"Error running mini-swe-agent: {e}\n{error_info['traceback']}", flush=True)
+                # The reward stays 0; the rollout is recorded as scored despite the failed run.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=f"The mini-swe-agent run failed and the rollout was scored 0: {type(e).__name__}: {e}",
+                    stage="agent",
+                )
                 result = {"eval_report": error_info}
                 input_messages = []
                 response_output = []
@@ -935,7 +949,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             output_path.mkdir(parents=True, exist_ok=True)
 
             with open(f"{output_file_dir}/{instance_id}/{instance_id}.json", "w") as f:
-                json.dump(verify_response.model_dump(), f)
+                json.dump(with_saved_failure_report(verify_response.model_dump()), f)
 
             return verify_response
 

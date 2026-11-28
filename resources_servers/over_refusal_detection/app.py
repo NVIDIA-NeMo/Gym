@@ -55,9 +55,12 @@ from util import (
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    observe_scored_despite_failure,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -366,6 +369,14 @@ Output your answer in this format:
             error=error,
         )
         if judge_response is None:
+            # The judge did not answer, and the verdict falls back to `reward_if_unclear`. The reward is unchanged;
+            # the rollout is recorded as scored despite a judge failure.
+            observe_scored_despite_failure(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=JUDGE_FAILED,
+                failure_reason=error or "The judge returned no response",
+                stage="verification",
+            )
             return None, eval_record
 
         # Parse judge verdict from the response

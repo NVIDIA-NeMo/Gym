@@ -37,8 +37,11 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    observe_scored_despite_failure,
 )
 from nemo_gym.server_runtime import (
     BaseRunRequest,
@@ -313,6 +316,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 # Trajectories can be many MB; parse off the event loop.
                 trial_result, trajectory, agent_error_flags = await asyncio.to_thread(_read_trial_files)
 
+                # A harness that catches its own crash lets the trial go on to the verifier. The reward is the
+                # verifier's, as before; the crash is recorded so the rollout is not mistaken for a clean run.
+                agent_run_error = agent_error_flags.get("agent_run_error")
+                if agent_run_error and not agent_error_flags.get("context_length_exceeded"):
+                    observe_scored_despite_failure(
+                        boundary=FailureBoundary.AGENT,
+                        failure_kind=AGENT_RUN_ERROR,
+                        failure_reason=f"The agent harness crashed and the rollout was scored: {agent_run_error}",
+                        stage="agent",
+                    )
+
                 # Extract reward from verifier result
                 verifier_result = trial_result.get("verifier_result")
                 reward = HarborAgentUtils.extract_reward(verifier_result)
@@ -329,6 +343,13 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
             except Exception as e:
                 print(f"Error running Harbor job: {e}")
+                # The reward stays 0; the rollout is recorded as scored despite the failed Harbor job.
+                observe_scored_despite_failure(
+                    boundary=FailureBoundary.AGENT,
+                    failure_kind=AGENT_RUN_ERROR,
+                    failure_reason=f"The Harbor job failed and the rollout was scored 0: {type(e).__name__}: {e}",
+                    stage="agent",
+                )
                 trial_result = None
                 trajectory = None
                 agent_error_flags = {}
