@@ -206,6 +206,7 @@ class TestStartStop:
 
         assert len(provider.exec_calls) == 1
         assert provider.exec_calls[0]["command"] == "mkdir -p /logs/agent /logs/verifier"
+        assert provider.exec_calls[0]["cwd"] == "/"
 
     @pytest.mark.asyncio
     async def test_start_passes_provider_options_through(self, tmp_path):

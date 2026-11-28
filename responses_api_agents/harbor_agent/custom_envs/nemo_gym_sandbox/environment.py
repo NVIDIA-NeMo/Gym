@@ -259,7 +259,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             # Bind mounts in Harbor's Docker backend, so they must be created
             # here for the agent and verifier to have somewhere to write.
             log_dirs = f"{EnvironmentPaths.agent_dir} {EnvironmentPaths.verifier_dir}"
-            result = await sandbox.exec(f"mkdir -p {log_dirs}", timeout_s=60)
+            # A fresh task image may not have the configured working directory yet.
+            result = await sandbox.exec(f"mkdir -p {log_dirs}", cwd="/", timeout_s=60)
             if result.error_type is not None or result.return_code != 0:
                 raise RuntimeError(
                     "Failed to create log directories in sandbox: "
