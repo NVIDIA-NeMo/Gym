@@ -984,13 +984,22 @@ class NeMoGymNamespaceToolParam(NamespaceToolParam, total=False):
     tools: Required[List[NamespaceToolParamTool]]
 
 
+class NeMoGymWebSearchToolParam(WebSearchToolParam, total=False):
+    # Options the Codex CLI (0.144.4 to 0.155.1) sends to the Responses API that openai==2.45.0 does not type:
+    # external_web_access is false for cached results and true for live fetches, indexed_web_access limits live
+    # fetches to indexed pages, and search_content_types names the result kinds the model accepts (text, image).
+    external_web_access: bool
+    indexed_web_access: bool
+    search_content_types: List[str]
+
+
 # Same members in the same order as openai.types.responses.ToolParam, so union validation is unchanged.
 NeMoGymToolParam: TypeAlias = Union[
     FunctionToolParam,
     NeMoGymFileSearchToolParam,
     ComputerToolParam,
     ComputerUsePreviewToolParam,
-    WebSearchToolParam,
+    NeMoGymWebSearchToolParam,
     Mcp,
     NeMoGymCodeInterpreterToolParam,
     ProgrammaticToolCalling,

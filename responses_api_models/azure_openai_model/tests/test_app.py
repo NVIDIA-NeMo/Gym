@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncAzureOpenAI
@@ -214,3 +217,110 @@ class TestApp:
         )
         assert response.status_code == 200
         assert expected_response.model_dump() == response.json()
+
+
+class TestQueuedRequests:
+    """Requests that wait for the concurrency permit while a streaming keepalive interval elapses."""
+
+    def _setup(self) -> tuple[AzureOpenAIModelServer, asyncio.Event, dict]:
+        config = AzureOpenAIModelServerConfig(
+            host="0.0.0.0",
+            port=8081,
+            openai_base_url="https://prod.api.nvidia.com/llm/v1/azure",
+            openai_api_key="dummy_key",  # pragma: allowlist secret
+            openai_model="dummy_model",
+            default_query={"api-version": "dummy_version"},
+            num_concurrent_requests=1,
+            stream_keepalive_s=0.02,
+            entrypoint="",
+            name="",
+        )
+        server = AzureOpenAIModelServer(
+            config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={})
+        )
+        release = asyncio.Event()
+        calls = {"started": 0, "in_flight": 0, "max_in_flight": 0}
+
+        async def create(**kwargs):
+            calls["started"] += 1
+            calls["in_flight"] += 1
+            calls["max_in_flight"] = max(calls["max_in_flight"], calls["in_flight"])
+            try:
+                await release.wait()
+                return NeMoGymChatCompletion(
+                    id="chatcmpl-queued",
+                    created=FIXED_TIME,
+                    model="dummy_model",
+                    object="chat.completion",
+                    choices=[
+                        NeMoGymChoice(
+                            index=0,
+                            finish_reason="stop",
+                            message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                        )
+                    ],
+                )
+            finally:
+                calls["in_flight"] -= 1
+
+        server._client = MagicMock(spec=AsyncAzureOpenAI)
+        server._client.chat.completions.create = AsyncMock(side_effect=create)
+        return server, release, calls
+
+    @staticmethod
+    async def _wait_for_first_call(calls: dict) -> None:
+        async with asyncio.timeout(5):
+            while calls["started"] == 0:
+                await asyncio.sleep(0.005)
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [None, {"type": "file_search"}, {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "file_search"}]}],
+        ids=["tools", "tool_choice", "allowed_tools"],
+    )
+    async def test_hosted_tool_request_is_refused_with_422_while_the_permit_is_held(
+        self, tool_choice: dict | None
+    ) -> None:
+        server, release, calls = self._setup()
+        body = {"input": "q", "stream": True, "tools": [{"type": "file_search", "vector_store_ids": ["vs_1"]}]}
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
+        transport = httpx.ASGITransport(app=server.setup_webserver())
+        async with httpx.AsyncClient(transport=transport, base_url="http://azure") as client:
+            holder = asyncio.create_task(client.post("/v1/responses", json={"input": "hello"}))
+            await self._wait_for_first_call(calls)
+
+            refused = await asyncio.wait_for(client.post("/v1/responses", json=body), timeout=5)
+
+            assert refused.status_code == 422
+            assert "file_search" in refused.json()["detail"]
+            assert not holder.done(), "the refusal came before the held call was released"
+            release.set()
+            assert (await holder).status_code == 200
+        assert calls["started"] == 1, "the refused request never reached the backend"
+
+    async def test_function_tool_request_waits_with_keepalives_and_completes_after_release(self) -> None:
+        server, release, calls = self._setup()
+        body = {
+            "input": "q",
+            "stream": True,
+            "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object", "properties": {}}}],
+        }
+        transport = httpx.ASGITransport(app=server.setup_webserver())
+        async with httpx.AsyncClient(transport=transport, base_url="http://azure") as client:
+            holder = asyncio.create_task(client.post("/v1/responses", json={"input": "hello"}))
+            await self._wait_for_first_call(calls)
+            queued = asyncio.create_task(client.post("/v1/responses", json=body))
+            await asyncio.sleep(0.2)
+            assert not queued.done(), "the request waits for the permit"
+            assert calls["started"] == 1
+            release.set()
+            first, streamed = await asyncio.wait_for(asyncio.gather(holder, queued), timeout=5)
+
+        assert first.status_code == 200
+        assert streamed.status_code == 200
+        events = [json.loads(line[6:]) for line in streamed.text.splitlines() if line.startswith("data: ")]
+        assert events[0]["type"] == "response.created"
+        assert events[1]["type"] == "response.in_progress", "keepalives opened the stream while it waited"
+        assert events[-1]["type"] == "response.completed"
+        assert calls == {"started": 2, "in_flight": 0, "max_in_flight": 1}
