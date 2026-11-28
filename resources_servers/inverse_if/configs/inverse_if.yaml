@@ -8,8 +8,10 @@
 # number of tasks (~2 %) that are missing one or both.
 #
 # LLM Judge Configuration:
-#   The judge uses a separate model server ("judge_model") from the policy
-#   model.  This allows using a stronger or different model for evaluation.
+#   The judge is the policy model server ("policy_model"), which is what the
+#   README start commands define.  To grade with a stronger or different
+#   model, define a "judge_model" server (example at the bottom of this file)
+#   and point judge_model_server at it.
 # ============================================================================
 
 # ============================================================================
@@ -20,10 +22,10 @@ inverse_if:
     inverse_if:
       entrypoint: app.py
 
-      # Judge model reference — uses a dedicated judge model server.
+      # Judge model reference — the policy model also judges by default.
       judge_model_server:
         type: responses_api_models
-        name: judge_model
+        name: policy_model
 
       # Parameters for judge requests
       judge_responses_create_params:
@@ -123,8 +125,12 @@ inverse_if_simple_agent:
           jsonl_fpath: resources_servers/inverse_if/data/inverse_if.jsonl
 
 # ============================================================================
-# Judge Model Server Configuration
+# Separate Judge Model Server (example)
 # ============================================================================
+# To judge with a different endpoint or model, define judge_model (for example
+# in your own config) and start with
+#   ++inverse_if.resources_servers.inverse_if.judge_model_server.name=judge_model
+#
 # judge_model:
 #   responses_api_models:
 #     vllm_model:

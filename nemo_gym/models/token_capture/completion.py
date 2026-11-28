@@ -6,11 +6,37 @@
 from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.models.anthropic_converter import AnthropicConverter
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
 from nemo_gym.models.token_capture.records import response_to_output_items, strip_token_fields
 from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.models.token_capture.staging.records import CompletionStatus, OutputValidationItem
+
+
+def completion_replay_items(response: dict[str, Any]) -> list[dict]:
+    """Return the served completion as the request items its echo converts to at ingress.
+
+    Messages ingress uses the shared Anthropic converter, so the served assistant
+    turn goes through the same converter. Messages clients drop blank text blocks
+    when they echo history (the Messages API rejects them), so they are left out;
+    an all-blank turn is kept as served. Other dialects use their token-free served
+    items. Replay digests match the next request's prefix when the client echoes
+    the served turn, apart from fields ignored by the converter.
+    """
+    if response.get("type") == "message" and response.get("role") == "assistant":
+        content = response.get("content") or []
+        echoed = [block for block in content if block.get("type") != "text" or block.get("text", "").strip()]
+        params = AnthropicConverter().anthropic_request_to_responses(
+            {
+                "model": response.get("model", ""),
+                "max_tokens": 1,
+                "messages": [{"role": "assistant", "content": echoed or content}],
+            }
+        )
+        assert isinstance(params.input, list)
+        return [item.model_dump(mode="json") for item in params.input]
+    return strip_token_fields(response_to_output_items(response))[0]
 
 
 def completion_items(response: dict[str, Any]) -> list[dict]:
@@ -28,6 +54,15 @@ def completion_items(response: dict[str, Any]) -> list[dict]:
                     item.pop("id", None)
                 items.append(item)
         return strip_token_fields(items)[0]
+    if response.get("type") == "message" and response.get("role") == "assistant":
+        # Describe a Messages turn by the items its echo converts to, so served tool-call ids and
+        # per-item fingerprints match the Responses items a harness returns. Detectors read text parts.
+        return [
+            {**item, "content": [{"type": "output_text", "text": item["content"]}]}
+            if item.get("type") == "message" and isinstance(item.get("content"), str)
+            else item
+            for item in completion_replay_items(response)
+        ]
     return strip_token_fields(response_to_output_items(response))[0]
 
 
@@ -73,8 +108,16 @@ def output_validation_item(item: dict[str, Any]) -> OutputValidationItem:
 
 
 def output_item_fingerprint(item: dict[str, Any]) -> str:
-    """Reuse dialect-neutral visible fingerprints and exact reasoning evidence."""
-    if item.get("type") == "reasoning":
+    """Reuse dialect-neutral visible fingerprints and exact evidence for reasoning and custom tool calls.
+
+    A custom tool call's ``input`` is free-form text in which whitespace and JSON formatting carry meaning,
+    so its evidence is the replay digest. That digest hashes every field of the item except ``id``,
+    ``status``, the token fields and null fields. A ``namespace`` or a ``caller`` field therefore counts:
+    ``{namespace: "functions", name: "exec"}`` and ``{name: "functions__exec"}`` differ for a custom tool
+    call, where the fingerprint of a function call joins them. Each such difference refuses a match and
+    none accepts a false one.
+    """
+    if item.get("type") in ("reasoning", "custom_tool_call"):
         return replay_context([item]).items[0].digest
     result = assistant_fingerprint([item])
     if not result:

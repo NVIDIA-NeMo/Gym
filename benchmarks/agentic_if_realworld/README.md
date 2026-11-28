@@ -92,9 +92,12 @@ Advance only after incomplete delivery. Keep the first complete answer regardles
 of its grade. Judge recovery never regenerates that answer. Two HTTP 2xx judge
 deliveries are allowed across resumes, with bounded transport retries and the
 existing timeouts. Malformed reviews consume that budget; failed connections and
-non-2xx judge responses do not. Those infrastructure failures stop the run so the
-operator can fix the service or credentials and explicitly resume the saved
-answer. Received non-2xx headers allow this recovery even if the error body is
+non-2xx judge responses do not. HTTP 401 or 403 stops admission until an operator fixes the judge credentials.
+Other retryable judge transport failures defer only the affected
+task: `/verify` answers 503 with the judge's HTTP status, the other tasks keep
+running, their rows are published, and the run then fails so a resume judges the
+saved answer again. An auto-resume job chain does that resume itself, one infra
+retry per follow-up job. Received non-2xx headers allow this recovery even if the error body is
 truncated. Interrupted 2xx bodies and requests without a known delivery outcome
 still require reconciliation. After two delivered reviews, unresolved scoring
 stays unscored. Judge endpoint, model and credential presence are checked before
@@ -112,8 +115,8 @@ endpoint that honors vLLM chat-template kwargs; an endpoint accepting the JSON
 alone does not establish that it applied maximum effort.
 
 Every run fingerprints model settings, source bytes and dependencies. Resume
-requires matching settings and rejects ambiguous in-flight receipts. A rejected
-resume preserves the saved output and reports. Use a new run directory for changed
+requires matching settings and rejects ambiguous in-flight receipts. A resume that
+stops before reaching every task preserves the saved output and reports. Use a new run directory for changed
 settings. Historical grades and recovery waves
 remain historical; this adaptive protocol does not reproduce them.
 The runtime identity records the running Gym revision and hashes its agent/core

@@ -70,6 +70,7 @@ from nemo_gym.server_runtime._checkpoint.errors import (
 )
 from nemo_gym.server_runtime._checkpoint.steps import Boundary, EpisodeSteps, StepType
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+from nemo_gym.utils.deadlines import monotonic_timeout
 
 
 BoundarySnapshot = Callable[[], dict[str, JsonValue]]
@@ -242,12 +243,12 @@ class Activation:
 
         The slot is released however the body or the wait ends, including a retire or close while the activation
         is parked after taking it.
-        ``deadline``, a loop time, bounds the wait for the slot: past it, ``TimeoutError`` is raised.
+        ``deadline``, a ``time.monotonic()`` time, bounds the wait for the slot: past it, ``TimeoutError`` is raised.
         """
         acquired = False
         try:
             async with self.queued():
-                async with asyncio.timeout_at(deadline):
+                async with monotonic_timeout(deadline):
                     await semaphore.acquire()
                     acquired = True
             yield

@@ -320,3 +320,9 @@ async def test_the_exported_verifier_fixture_passes() -> None:
         "empty response skips the judge": (0.0,),
         "missing expected answer": (),
     }
+
+
+def test_a_null_input_images_field_is_accepted_by_verify() -> None:
+    # The seed reads null as no images, so /verify must accept the same row after the agent ran.
+    body = request("done")
+    assert VisualCodingOpenCodeVerifyRequest(**{**body.model_dump(), "input_images": None}).input_images is None

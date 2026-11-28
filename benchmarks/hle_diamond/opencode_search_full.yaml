@@ -1,6 +1,7 @@
 # Deprecated: opencode_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
-# migration. Agent sessions accept prompt images, but no session preset covers the image questions yet;
-# opencode_search.yaml runs opencode_agent on the 728 text-only questions.
+# migration. opencode_search.yaml runs opencode_agent on the 728 text-only questions, and
+# opencode_hle_tools_full.yaml is the agent-session preset over all 1000 questions (upstream's tools, not Tavily's,
+# on the reference image).
 # OpenCode preset with Tavily search on all 1000 HLE-Diamond questions, image questions included:
 # opencode_full.yaml's sandboxed agent and dataset with opencode_search_legacy_agent.yaml's tools, note
 # and network policy. Declares no dataset of its own, so like the other search presets it is selectable with

@@ -14,6 +14,7 @@ web_agent:
         name: policy_model
       max_steps: 15
       policy_protocol: nano_omni_toolcall
+      nano_omni_stop_at_step_budget: false
       max_parse_retries: 2
       nano_omni_max_computer_actions: 20
       nano_omni_parse_retry_feedback: false

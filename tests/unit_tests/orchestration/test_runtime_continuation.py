@@ -358,3 +358,54 @@ def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
     )
     # The whole installer error still reaches the job log.
     assert "No solution found when resolving dependencies" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "driver,marker_job,kind,inventory,retries_used,continues",
+    [
+        ("agentic", "100", "judge_failed", True, 0, True),
+        ("agentic", "100", "judge_failed", True, 3, False),
+        ("agentic", "100", "judge_failed", False, 0, False),
+        ("agentic", "99", "judge_failed", True, 0, False),
+        ("agentic", "100", "other_error", True, 0, False),
+        ("agentic", None, None, True, 0, False),
+        ("missing_driver:run", "100", "judge_failed", True, 0, False),
+        ("null", "100", "judge_failed", True, 0, False),
+        ("${oc.env:DRIVER}", "100", "judge_failed", True, 0, False),
+        ("[unclosed", "100", "judge_failed", True, 0, False),
+        (None, "100", "judge_failed", True, 0, False),
+    ],
+)
+def test_custom_driver_requires_deferred_judge_from_previous_job(
+    tmp_path, driver, marker_job, kind, inventory, retries_used, continues
+):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    if inventory:
+        (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
+    if driver == "agentic":
+        driver = "benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection"
+    if driver is not None:
+        (artifacts / "rollouts_resolved_config.yaml").write_text(f"rollout_collection_driver: {driver}\n")
+    if marker_job:
+        (tmp_path / f".gym_driver_failure.{marker_job}").write_text(kind + "\n")
+    if retries_used:
+        (tmp_path / ".gym_infra_retries").write_text(f"{retries_used}\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="1:0")
+    assert ("REACHED_WORK" in result.stdout) is continues, result.stdout + result.stderr
+    if continues:
+        assert "resumes from its own journal" in result.stdout
+        assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
+    elif retries_used:
+        assert "Infra retry limit (3) reached" in (tmp_path / ".gym_chain_incomplete").read_text()
+    else:
+        assert "no rollout store manifest" in (tmp_path / ".gym_chain_incomplete").read_text()
+
+
+def test_custom_driver_run_stops_when_its_driver_found_nothing_eligible(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_resolved_config.yaml").write_text("rollout_collection_driver: benchmarks.x.d:run\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="76:0")
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / ".gym_infra_retries").exists()

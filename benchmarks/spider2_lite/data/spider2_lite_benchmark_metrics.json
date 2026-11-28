@@ -5,6 +5,8 @@
     "prepare_script": "benchmarks/spider2_lite/prepare.py",
     "prompt_config": null,
     "num_repeats": 16,
+    "prepare_project": null,
+    "prepare_dependencies": [],
     "Number of examples": 2160,
     "Number of tools": {
         "Total # non-null values": 0,
@@ -15,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 2160,
-        "Average": 465.01,
-        "Min": 179.0,
-        "Max": 1120.0,
-        "Standard deviation": 271.8
+        "Average": 357.41,
+        "Min": 162.0,
+        "Max": 919.0,
+        "Standard deviation": 133.48
     },
     "Number of turns": {
         "Total # non-null values": 2160,

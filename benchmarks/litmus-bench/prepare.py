@@ -123,6 +123,7 @@ def _render_rows(dataset: Iterable[Mapping[str, Any]], *, expected_rows: int) ->
         # Collation assigns the configured agent. Preserve prompts, numeric
         # precision, extraction regexes, match rules, licenses, and provenance.
         row.pop("agent_ref", None)
+        row["task_id"] = uuid
         rendered.append(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
     if len(rendered) != expected_rows:
         raise ValueError(f"Litmus-Bench held-out data has {len(rendered)} rows; expected {expected_rows}")
@@ -152,7 +153,7 @@ def _selected_families(subset: str | None) -> dict[str, int]:
 
 
 def _source_fingerprint(subset: str | None) -> str:
-    source = [HF_DATASET, RELEASE_FILE, _selected_families(subset)]
+    source = [HF_DATASET, RELEASE_FILE, _selected_families(subset), "task_id=metadata.uuid"]
     return hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest()
 
 

@@ -22,7 +22,7 @@ from typing import Any
 from nemo_gym.package_info import __version__
 
 
-E2B_SDK_CONSTRAINT = "e2b>=2.46.0,<3.0.0"
+E2B_SDK_CONSTRAINT = "e2b>=2.46.0,<2.51.0"
 _INTEGRATION = f"nemo-gym/{__version__}"
 _CONFIGURED_SDK_MODULES: dict[int, Any] = {}
 _CONFIGURE_LOCK = threading.Lock()

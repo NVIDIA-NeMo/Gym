@@ -3,6 +3,7 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/nvarc/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
@@ -16,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 2467.4,
-        "Min": 644.0,
-        "Max": 5763.0,
-        "Standard deviation": 1849.19
+        "Average": 178.2,
+        "Min": 61.0,
+        "Max": 352.0,
+        "Standard deviation": 158.67
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -35,16 +36,31 @@
         "Max": 0.0,
         "Standard deviation": 0.0
     },
-    "agent_mode": {
+    "problem_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "variant": {
         "unique_count": 2,
         "total_count": 5
+    },
+    "difficulty": {
+        "Total # non-null values": 5,
+        "Average": 0.736,
+        "Min": 0.333,
+        "Max": 0.932,
+        "Standard deviation": 0.237
     },
     "difficulty_bucket": {
         "unique_count": 2,
         "total_count": 5
     },
-    "task_id": {
-        "unique_count": 5,
+    "agent_mode": {
+        "unique_count": 2,
         "total_count": 5
     }
 }

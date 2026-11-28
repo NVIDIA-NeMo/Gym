@@ -598,7 +598,7 @@ async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
     release = asyncio.Event()
     cut_short = []
 
-    async def slow_stop():
+    async def slow_stop(**_):
         try:
             await release.wait()
         except asyncio.CancelledError:
@@ -615,7 +615,7 @@ async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
     release.set()
     await server.close_resources_session(close())
     # The retried close joined the stop that was still running instead of starting another.
-    sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once_with(timeout_s=None)  # the wait bounds the caller, never the stop
     assert not cut_short
     assert "attempt" in server._fences and not server._session_id_to_sandbox
 
@@ -626,7 +626,7 @@ async def test_failed_seed_cleanup_is_bounded_and_keeps_the_sandbox_for_close(se
     sandbox = FakeSandbox(exec=AsyncMock(side_effect=OSError("exec stream lost")))
     release = asyncio.Event()
 
-    async def stop():
+    async def stop(**_):
         if sandbox.stop.await_count == 1:
             if stop_failure == "slow":
                 await release.wait()
@@ -678,7 +678,11 @@ async def test_shutdown_stops_every_environment_server_sandbox_even_when_one_sto
     failing, slow, cookie_sandbox = sandboxes
     release = asyncio.Event()
     failing.stop.side_effect = OSError("provider unavailable")
-    slow.stop.side_effect = release.wait
+
+    async def slow_stop(**_):
+        await release.wait()
+
+    slow.stop.side_effect = slow_stop
 
     started = monotonic()
     with caplog.at_level(logging.ERROR, logger=scale_swe_app.__name__):
@@ -841,7 +845,7 @@ async def test_slow_verifier_stop_is_left_to_close_never_cut_short(server, gradi
     release = asyncio.Event()
     cut_short = []
 
-    async def slow_stop():
+    async def slow_stop(**_):
         try:
             await release.wait()
         except asyncio.CancelledError:

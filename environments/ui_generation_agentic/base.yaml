@@ -1,0 +1,13 @@
+# ui_generation_agentic, harness-neutral: the resources server config (with its synthetic example set) and the routing
+# for the runner's own task set. Run it through a harness composition (opencode.yaml, claude_code.yaml, hermes.yaml,
+# codex.yaml), which sets the agent.
+#
+# No task data ships with this environment. Prepare your tasks with prepare.py, keep them outside the repository, and
+# add them as a `train` dataset with taskset "ui_generation_agentic:train" through a config overlay that replaces the
+# datasets list (resources_servers/ui_generation_agentic/README.md, "Run").
+config_paths:
+  - resources_servers/ui_generation_agentic/configs/ui_generation_agentic.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  "ui_generation_agentic:train": ui_generation_agentic_environment_server

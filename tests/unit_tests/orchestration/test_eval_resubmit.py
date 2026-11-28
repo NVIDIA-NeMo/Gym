@@ -26,9 +26,10 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
-from nemo_gym.cli.main import COMMANDS, _eval_resubmit
+from nemo_gym.cli.main import COMMANDS, _eval_resubmit, _job_resubmit
 from nemo_gym.orchestration.api import SAVED_CONFIG, ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
+from nemo_gym.orchestration.executors.capabilities import Resubmittable
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.otel import render_collector_config
@@ -40,12 +41,13 @@ from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
+    LogSource,
     SubmissionRecord,
     load_submission_record,
     local_index_dir,
     restore_index_entry,
 )
-from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
+from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, inspect_recovery, recover, resubmit
 from tests.helpers.recovery_store_runs import provider_failures_jsonl
 
 
@@ -74,7 +76,13 @@ def _local_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
 
-def _staged_run(tmp_path: Path, *, executor: str = "slurm", config: SubmitConfig | None = None) -> Path:
+def _staged_run(
+    tmp_path: Path,
+    *,
+    executor: str = "slurm",
+    config: SubmitConfig | None = None,
+    log_sources: list[LogSource] | None = None,
+) -> Path:
     """A submitted run as `persist()` leaves it: local index, manifest and resolved config."""
     run_dir = tmp_path / "gym-job-x"
     job_dir = run_dir / "gsm8k"
@@ -89,7 +97,7 @@ def _staged_run(tmp_path: Path, *, executor: str = "slurm", config: SubmitConfig
         executor=executor,
         submitted_by="me",
         benchmarks=[
-            BenchmarkJob(benchmark="gsm8k", job_dir=str(job_dir), job_id="100"),
+            BenchmarkJob(benchmark="gsm8k", job_dir=str(job_dir), job_id="100", log_sources=log_sources or []),
             BenchmarkJob(benchmark="mmlu", job_dir=str(run_dir / "mmlu"), job_id="101"),
         ],
     )
@@ -169,6 +177,17 @@ def test_resubmit_queues_job_sh_from_its_job_dir_and_records_the_new_id(tmp_path
         assert [(b.benchmark, b.job_id) for b in record.benchmarks] == [("gsm8k", "4242"), ("mmlu", "101")]
 
 
+def test_resubmit_keeps_the_log_sources_planned_at_submit(tmp_path: Path, slurm_bin: Path) -> None:
+    sources = [LogSource(name="driver", kind="driver", location="logs/driver-{job_id}.log")]
+    job_dir = _staged_run(tmp_path, log_sources=sources)
+
+    job = resubmit(*_handle(job_dir))
+
+    assert job.job_id == "4242"
+    assert job.log_sources == sources
+    assert _record(job_dir).benchmark_job("gsm8k").log_sources == sources
+
+
 def test_the_record_is_found_by_its_id_and_benchmark_through_the_local_index(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
     # The run dir is not on this machine (a remote cluster): only the local index knows the submission.
@@ -191,16 +210,88 @@ def test_the_cli_takes_a_gym_job_id_and_a_benchmark(
     assert "Slurm" not in COMMANDS["eval resubmit"].summary
 
 
+def _cli_args(job_dir: Path) -> argparse.Namespace:
+    return argparse.Namespace(gym_job_id=job_dir.parent.name, benchmark="gsm8k")
+
+
+def test_gym_job_resubmit_takes_an_id_and_a_benchmark_and_prints_the_new_job_id(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path)
+
+    _job_resubmit(_cli_args(job_dir), [])
+
+    assert capsys.readouterr().out == "4242\n"
+    assert "Slurm" not in COMMANDS["job resubmit"].summary
+
+
+def _option_flags(command: str) -> set[str]:
+    parser = argparse.ArgumentParser()
+    for flag in COMMANDS[command].flags:
+        flag.register(parser)
+    return {option for action in parser._actions for option in action.option_strings} - {"-h", "--help"}
+
+
+def test_gym_job_resubmit_offers_no_recovery_options_and_gym_eval_resubmit_still_does() -> None:
+    assert _option_flags("job resubmit") == set()
+    assert {"--recover", "--inspect", "--repin", "--max-walltime"} <= _option_flags("eval resubmit")
+
+
+def test_gym_job_resubmit_says_in_its_summary_that_it_is_plain_and_where_recovery_is() -> None:
+    summary = COMMANDS["job resubmit"].summary
+
+    assert "no recovery" in summary and "gym eval resubmit --recover" in summary
+    assert len(summary) <= 96, "a summary is one line of the command listing"
+
+
+@pytest.mark.parametrize("entry_point", [resubmit, recover, inspect_recovery])
+def test_the_entry_points_behind_both_resubmit_commands_warn_that_they_are_experimental(
+    entry_point, capsys: pytest.CaptureFixture
+) -> None:
+    with pytest.raises(ValueError):
+        entry_point("gym-job-unknown", "gsm8k")
+
+    assert "is experimental" in capsys.readouterr().err
+
+
+def test_gym_job_resubmit_refuses_a_stray_override_and_lets_the_verbose_one_through(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path)
+
+    _job_resubmit(_cli_args(job_dir), ["+verbose=true"])
+    assert capsys.readouterr().out == "4242\n"
+
+    args = _cli_args(job_dir)
+    args._parser = argparse.ArgumentParser()
+    with pytest.raises(SystemExit):
+        _job_resubmit(args, ["foo=bar"])
+    assert "job resubmit does not accept Hydra overrides" in capsys.readouterr().err
+
+
+def test_gym_job_resubmit_says_when_the_executor_cannot_resubmit(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path, executor=KubernetesExecutor.name)
+
+    with pytest.raises(SystemExit) as stopped:
+        _job_resubmit(_cli_args(job_dir), [])
+
+    assert stopped.value.code == 1
+    assert "kubernetes executor does not support resubmit" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(("executor", "supported"), [(SlurmExecutor, True), (KubernetesExecutor, False)])
 def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, executor: type, supported: bool) -> None:
     job_dir = _staged_run(tmp_path, executor=executor.name)
 
+    assert issubclass(executor, Resubmittable) is supported
     if supported:
         assert resubmit(*_handle(job_dir)).job_id == "4242"
     else:
-        with pytest.raises(UnsupportedOperationError, match="Kubernetes executor does not support resubmit"):
+        with pytest.raises(UnsupportedOperationError, match="kubernetes executor does not support resubmit"):
             resubmit(*_handle(job_dir))
-    assert "resubmit" in BaseExecutor.__abstractmethods__
+    assert BaseExecutor.__abstractmethods__ == {"run"}
     assert set(_EXECUTORS_BY_NAME) == {"slurm", "kubernetes"}
 
 

@@ -56,8 +56,8 @@ are added, so these refusals count toward the refusal rate.
 
 **Effect on scores.** OpenBookQA and MMSU (`mcq`) and AdvBench (`refusal`) can
 score higher than the public evaluator gives for the same responses. Every other
-subset scores the same. Our reported VoiceBench numbers use these extensions.
-Compare them with published VoiceBench results with this difference in mind.
+subset scores the same. Scores from this evaluator use these extensions, so compare
+them with published VoiceBench results with this difference in mind.
 
 ## Preserved source behavior
 

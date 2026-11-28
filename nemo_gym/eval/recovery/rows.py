@@ -477,6 +477,10 @@ def decide_recovery(
             state = _judge_state(last, policy)
             quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
             policy_stopped |= state == IdentityState.TERMINAL and not quota_wait
+            if state == IdentityState.JUDGE_RECOVERABLE and "stage_index" in last:
+                # `reverify --judge-failed-only` refuses multi-stage rows (it would lose stage identity and the adaptive
+                # references), so a resume of the multi-stage collection dispatches that row again under the attempt cap.
+                state = IdentityState.RETRYABLE if spent < cap else IdentityState.EXHAUSTED
         elif is_answered_agent_deadline(last, classification=policy.classification):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
             # Collection's metrics score it only when its producer marked it a counted zero.
@@ -765,7 +769,10 @@ def decide_recovery(
     reverify_first = sorted(by_state.get(IdentityState.JUDGE_RECOVERABLE.value, []))
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
         return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON, accounting_unknown="budget")
-    segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
+    # A scheduler cut that left never-started work is a planned segment, whatever else the resumed run retries: the
+    # retryable rows ride along and each spends its own attempt cap. Without untouched work a cut only retries
+    # failed attempts, which still consume an infra retry.
+    segment = planned_missing_continuation and bool(managed_selection) and bool(counts.get(IdentityState.MISSING))
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         # A chain stops once less than a minute of its walltime remains, so name that budget too when it is spent.
         walltime_spent = (

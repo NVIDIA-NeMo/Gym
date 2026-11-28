@@ -104,6 +104,12 @@ def classify_opencode_run(
 
 def opencode_error_event(stdout: str) -> str | None:
     """Return the first explicit OpenCode error event, which an interrupted checkpoint must not hide."""
+    error = opencode_error_event_error(stdout)
+    return None if error is None else json.dumps(error)[:ERROR_EVENT_CHARS]
+
+
+def opencode_error_event_error(stdout: str) -> Any:
+    """Return the error object of the first explicit OpenCode error event (the event itself if it has none)."""
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -111,5 +117,5 @@ def opencode_error_event(stdout: str) -> str | None:
             continue
         if isinstance(event, dict) and event.get("type") == "error":
             # The event names the failing boundary, for example an APIError with the provider's status.
-            return json.dumps(event.get("error") or event)[:ERROR_EVENT_CHARS]
+            return event.get("error") or event
     return None

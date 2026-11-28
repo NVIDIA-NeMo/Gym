@@ -8,6 +8,8 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
     "markdown-it-py>=3,<4",
+    # Frozen tool simulation uses the pinned search binary in this Resources component.
+    "ripgrep-bin==15.2.0",
 ]
 
 [tool.uv]

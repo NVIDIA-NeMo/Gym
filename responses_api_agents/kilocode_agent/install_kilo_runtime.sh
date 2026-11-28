@@ -65,7 +65,7 @@ curl -fsSL --retry 3 "${node_dist}/${archive}" -o "$archive"
 curl -fsSL --retry 3 "${node_dist}/SHASUMS256.txt" -o SHASUMS256.txt
 awk -v archive="$archive" '$2 == archive' SHASUMS256.txt | sha256sum -c -
 mkdir -p node
-tar -xzf "$archive" --strip-components=1 -C node
+tar --no-same-owner -xzf "$archive" --strip-components=1 -C node
 if [ "$platform" = linux-x64-musl ] && ! "$runtime/node/bin/node" --version; then
   # Old Alpine's C++ runtime lacks symbols required by Node 22. Only the private
   # Node binary sees this pinned library; task libraries and LD_LIBRARY_PATH stay intact.

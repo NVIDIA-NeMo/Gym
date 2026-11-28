@@ -27,14 +27,16 @@ import signal
 import socket
 import tempfile
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -42,7 +44,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +66,16 @@ APPTAINER_FATAL_RETURN_CODE = 255
 # count together with apptainer's exit code.
 APPTAINER_FATAL_LINE = re.compile(r"^FATAL\s*:\s", re.MULTILINE)
 APPTAINER_ERROR_LINE = re.compile(r"^ERROR\s*:\s", re.MULTILINE)
+# The FATAL line of ``apptainer exec`` when it cannot start the program it was given: the program is not found
+# (a shell's exit status 127), or it is found and cannot be executed (126).
+APPTAINER_PROGRAM_NOT_FOUND_LINE = re.compile(
+    r'^FATAL\s*:\s+(?:".*": executable file not found in \$PATH|stat .+: (?:no such file or directory|not a directory))$',
+    re.MULTILINE,
+)
+APPTAINER_PROGRAM_NOT_EXECUTABLE_LINE = re.compile(
+    r"^FATAL\s*:\s+(?:permission denied|is a directory|stat .+: permission denied|exec .+ failed: .+)$",
+    re.MULTILINE,
+)
 APPTAINER_RUNTIME_ERROR_MARKERS = ("no instance found", "instance not found")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -224,6 +238,20 @@ def _is_runtime_failure(stderr: str, return_code: int | None = None) -> bool:
     return return_code == APPTAINER_FATAL_RETURN_CODE and APPTAINER_ERROR_LINE.search(stderr) is not None
 
 
+def _unstartable_program_return_code(stderr: str, return_code: int) -> int | None:
+    """A shell's exit status for a program ``apptainer exec`` could not start: 127 not found, 126 not executable.
+
+    None when apptainer failed for another reason, such as a missing instance or working directory.
+    """
+    if return_code != APPTAINER_FATAL_RETURN_CODE:
+        return None
+    if APPTAINER_PROGRAM_NOT_FOUND_LINE.search(stderr):
+        return 127
+    if APPTAINER_PROGRAM_NOT_EXECUTABLE_LINE.search(stderr):
+        return 126
+    return None
+
+
 def _is_missing_instance(stderr: str) -> bool:
     low = stderr.lower()
     return any(marker in low for marker in APPTAINER_MISSING_INSTANCE_MARKERS)
@@ -298,6 +326,8 @@ def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None
 class ApptainerProvider:
     """Sandbox provider backed by the local Apptainer CLI."""
 
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="same_host")
+
     name = "apptainer"
 
     def __init__(
@@ -357,6 +387,9 @@ class ApptainerProvider:
                 )
                 try:
                     await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+                except asyncio.CancelledError:
+                    await kill_cancelled_command(proc)
+                    raise
                 except asyncio.TimeoutError as e:
                     # Graceful timeout: SIGTERM the process group first and give it a short grace period
                     # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
@@ -396,6 +429,9 @@ class ApptainerProvider:
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
                 # Graceful timeout: SIGTERM the process group first and give it a short grace period
                 # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
@@ -472,6 +508,14 @@ class ApptainerProvider:
         for bind in extra_binds:
             argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
+        if any(arg in {"--contain", "--containall", "-c", "-C"} for arg in start_args) and not any(
+            arg in {"--workdir", "-W"} or arg.startswith("--workdir=") for arg in start_args
+        ):
+            # Containment must not move large compiler temporaries into Apptainer's small
+            # session tmpfs. Keep /tmp, /var/tmp, and home private and disk-backed instead.
+            private_workdir = staging_dir / ".apptainer-workdir"
+            private_workdir.mkdir(mode=0o700)
+            start_args += ["--workdir", str(private_workdir)]
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
@@ -627,10 +671,14 @@ class ApptainerProvider:
             raise RuntimeError(f"Apptainer instance {name} is not running")
         return handle
 
+    def exec_takes_argv(self) -> bool:
+        """``apptainer exec`` runs an argument list as the program's argv (``SupportsSandboxExecArgv``)."""
+        return True
+
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -638,12 +686,16 @@ class ApptainerProvider:
         user: str | int | None = None,
         stdin: bytes | None = None,
     ) -> SandboxExecResult:
-        """Run a command inside the instance.
+        """Run a command inside the instance: shell text under ``sh -c``, an argument list without a shell.
+
+        An argument list whose program apptainer cannot start is a command failure with a shell's exit status:
+        127 when the program is not found, 126 when it cannot be executed.
 
         Maps the neutral ``user`` parameter onto apptainer:
         - None            -> run as the default (launching) user.
         - "root" / 0      -> add --fakeroot (root inside the container).
-        - other user/uid  -> --fakeroot + wrap in ``su`` to switch to that user.
+        - other user/uid  -> --fakeroot + wrap in ``su`` to switch to that user. ``su`` runs a shell, so an
+                             argument list raises ``SandboxExecArgvUnsupportedError`` for such a user.
 
         ``stdin``, when given, is piped to the command's standard input. This is an
         apptainer-provider extension to the base protocol, useful for feeding large
@@ -665,9 +717,18 @@ class ApptainerProvider:
             if self._exec_config.fakeroot_for_root:
                 flags.append("--fakeroot")
         elif user is not None:
+            if not isinstance(command, str):
+                raise SandboxExecArgvUnsupportedError(
+                    "The apptainer sandbox provider switches to a user other than root only through su, which runs "
+                    "a shell; run an argument list as the default user or as root"
+                )
             # Need root inside the container to switch users, then su to the target.
             flags.append("--fakeroot")
             effective_command = f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(str(user))}"
+        if isinstance(effective_command, str):
+            process_argv = ["sh", "-c", effective_command]
+        else:
+            process_argv = list(effective_command)
 
         flags += list(self._exec_config.extra_exec_args)
 
@@ -677,7 +738,7 @@ class ApptainerProvider:
             with _private_env_file(inst.staging_dir, env_file_content) as env_file:
                 if env_file is not None:
                     flags += ["--no-eval", "--env-file", str(env_file)]
-                argv = [self._binary, "exec", *flags, f"instance://{inst.name}", "sh", "-c", effective_command]
+                argv = [self._binary, "exec", *flags, f"instance://{inst.name}", *process_argv]
                 code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
         except TimeoutError as e:
             return SandboxExecResult(
@@ -688,6 +749,11 @@ class ApptainerProvider:
             )
 
         if code != 0 and _is_runtime_failure(err, code):
+            # An argument list names the caller's program, so apptainer failing to start it is a command failure.
+            # For shell text the program is ``sh``: an image without one stays a sandbox failure.
+            program_code = None if isinstance(command, str) else _unstartable_program_return_code(err, code)
+            if program_code is not None:
+                return SandboxExecResult(stdout=out, stderr=err, return_code=program_code, error_type=None)
             return SandboxExecResult(
                 stdout=out,
                 stderr=err,
@@ -806,7 +872,7 @@ class ApptainerProvider:
 
         # Always best-effort remove the host staging dir, even if stop failed.
         try:
-            shutil.rmtree(inst.staging_dir, ignore_errors=False)
+            _remove_writable_tree(inst.staging_dir)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
 

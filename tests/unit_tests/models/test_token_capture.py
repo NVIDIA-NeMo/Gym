@@ -47,13 +47,14 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
 )
 from nemo_gym.models.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     SimpleResponsesAPIModel,
     _request_messages,
 )
-from nemo_gym.models.model_call_capture import CaptureStore
+from nemo_gym.models.model_call_capture import CaptureStore, _reconstruct_streamed_response
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.external_capture import TOKEN_FIELDS
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
@@ -101,6 +102,10 @@ from nemo_gym.models.token_capture.sink import (
 )
 from nemo_gym.models.token_capture.store import TokenCaptureStore, make_token_store
 from nemo_gym.rollouts.model_calls import read_model_call_records
+
+
+# An unnamed agent on a model server without a configured name: the lineage scope of these tests' calls.
+UNNAMED_IDENTITY = CallIdentity()
 
 
 _ASSISTANT_TURN = {
@@ -2366,7 +2371,9 @@ async def test_file_lineage_resolves_across_independent_worker_instances(tmp_pat
     response = [{"role": "assistant", "content": "hi"}]
     _put_shared_file_entry(str(tmp_path), "shared-rollout", "call-1")
 
-    parent = await reader.resolve("shared-rollout", request + response + [{"role": "user", "content": "next"}])
+    parent = await reader.resolve(
+        "shared-rollout", request + response + [{"role": "user", "content": "next"}], identity=UNNAMED_IDENTITY
+    )
 
     assert parent.status == ParentResolutionStatus.RESOLVED
     assert parent.match is not None
@@ -2379,7 +2386,7 @@ async def test_file_lineage_batch_loads_and_flattens_a_delta_chain(tmp_path):
     resolver = FileLineageStore(tmp_path)
 
     with patch.object(resolver, "_load_entries", wraps=resolver._load_entries) as load_entries:
-        resolution = await resolver.resolve("delta-chain", request)
+        resolution = await resolver.resolve("delta-chain", request, identity=UNNAMED_IDENTITY)
 
     assert resolution.status == ParentResolutionStatus.RESOLVED
     assert resolution.match is not None
@@ -2392,7 +2399,9 @@ async def test_file_lineage_batch_loads_and_flattens_a_delta_chain(tmp_path):
 async def test_file_lineage_reuses_the_latest_materialized_parent(tmp_path):
     request, expected_tokens = _put_shared_file_delta_chain(str(tmp_path), depth=100)
     resolver = FileLineageStore(tmp_path)
-    assert (await resolver.resolve("delta-chain", request)).status == ParentResolutionStatus.RESOLVED
+    assert (
+        await resolver.resolve("delta-chain", request, identity=UNNAMED_IDENTITY)
+    ).status == ParentResolutionStatus.RESOLVED
 
     output = [{"role": "assistant", "content": "answer-100"}]
     expected_tokens.extend([110, 200])
@@ -2419,7 +2428,7 @@ async def test_file_lineage_reuses_the_latest_materialized_parent(tmp_path):
     request.append({"role": "user", "content": "continue-100"})
 
     with patch.object(resolver, "_load_entries", wraps=resolver._load_entries) as load_entries:
-        resolution = await resolver.resolve("delta-chain", request)
+        resolution = await resolver.resolve("delta-chain", request, identity=UNNAMED_IDENTITY)
 
     assert resolution.match is not None
     assert resolution.match.cumulative_token_ids == tuple(expected_tokens)
@@ -2436,18 +2445,18 @@ async def test_file_lineage_cache_is_lru_and_keeps_nodes_metadata_only(tmp_path)
     for rollout_id in ("r-a", "r-b", "r-c"):
         _put_shared_file_entry(str(tmp_path), rollout_id, f"{rollout_id}-c1")
 
-    await resolver.resolve("r-a", continuation)
-    await resolver.resolve("r-b", continuation)
-    await resolver.resolve("r-a", continuation)
-    await resolver.resolve("r-c", continuation)
+    await resolver.resolve("r-a", continuation, identity=UNNAMED_IDENTITY)
+    await resolver.resolve("r-b", continuation, identity=UNNAMED_IDENTITY)
+    await resolver.resolve("r-a", continuation, identity=UNNAMED_IDENTITY)
+    await resolver.resolve("r-c", continuation, identity=UNNAMED_IDENTITY)
 
     assert "r-a" in resolver._cache
     assert "r-b" not in resolver._cache
-    node = resolver._cache["r-a"][2].by_call_id["r-a-c1"]
+    node = resolver._cache["r-a"][2][(None, None)].by_call_id["r-a-c1"]
     assert node.cum_tokens is None
     assert node.entry_offset >= 0
 
-    cold = await resolver.resolve("r-b", continuation)
+    cold = await resolver.resolve("r-b", continuation, identity=UNNAMED_IDENTITY)
     assert cold.status == ParentResolutionStatus.RESOLVED
     assert cold.match is not None
     assert cold.match.cumulative_token_ids == (1, 2, 3)
@@ -2462,7 +2471,9 @@ async def test_file_lineage_materialized_cache_has_a_global_token_bound(tmp_path
     ]
     for rollout_id in ("r-a", "r-b"):
         _put_shared_file_entry(str(tmp_path), rollout_id, f"{rollout_id}-c1")
-        assert (await resolver.resolve(rollout_id, continuation)).status == ParentResolutionStatus.RESOLVED
+        assert (
+            await resolver.resolve(rollout_id, continuation, identity=UNNAMED_IDENTITY)
+        ).status == ParentResolutionStatus.RESOLVED
 
     assert "r-a" not in resolver._materialized
     assert resolver._materialized["r-b"][1] == (1, 2, 3)
@@ -2515,6 +2526,7 @@ async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
             {"role": "assistant", "content": "hi"},
             {"role": "user", "content": "next"},
         ],
+        identity=UNNAMED_IDENTITY,
     )
     assert parent.status == ParentResolutionStatus.RESOLVED
     assert parent.match is not None and parent.match.model_call_id == "child-process-call"
@@ -2535,6 +2547,9 @@ async def test_failed_token_commit_never_becomes_resolver_visible(tmp_path, monk
     stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
     stamp_continuation(entry, request)
 
+    # The model server registers the call's intent before dispatch. It is what shows the resolver that this
+    # lineage scope has called, so the next request is not taken for its first.
+    await token_store.begin_call(entry.capture_key, entry.model_call_id, identity=UNNAMED_IDENTITY)
     monkeypatch.setattr(token_store, "append", MagicMock(side_effect=RuntimeError("write failed")))
     with pytest.raises(RuntimeError, match="write failed"):
         await token_store.put(entry)
@@ -2542,6 +2557,7 @@ async def test_failed_token_commit_never_becomes_resolver_visible(tmp_path, monk
     resolution = await resolver.resolve(
         entry.capture_key,
         request + entry.output_items + [{"role": "user", "content": "next"}],
+        identity=UNNAMED_IDENTITY,
     )
     assert resolution.status == ParentResolutionStatus.UNRESOLVED
 
@@ -2554,7 +2570,9 @@ async def test_retirement_invalidates_warm_worker_indexes(tmp_path):
         {"role": "assistant", "content": "hi"},
         {"role": "user", "content": "next"},
     ]
-    assert (await resolver.resolve("retired-rollout", continuation)).status == ParentResolutionStatus.RESOLVED
+    assert (
+        await resolver.resolve("retired-rollout", continuation, identity=UNNAMED_IDENTITY)
+    ).status == ParentResolutionStatus.RESOLVED
 
     token_store = TokenCaptureStore(tmp_path)
     lock_inode = token_store.lock_path_for("retired-rollout").stat().st_ino
@@ -2565,7 +2583,9 @@ async def test_retirement_invalidates_warm_worker_indexes(tmp_path):
         version=snapshot.version,
     )
 
-    assert (await resolver.resolve("retired-rollout", continuation)).status == ParentResolutionStatus.UNRESOLVED
+    assert (
+        await resolver.resolve("retired-rollout", continuation, identity=UNNAMED_IDENTITY)
+    ).status == ParentResolutionStatus.UNRESOLVED
     assert token_store.lock_path_for("retired-rollout").stat().st_ino == lock_inode
     with pytest.raises(RuntimeError, match="retired"):
         _put_shared_file_entry(str(tmp_path), "retired-rollout", "late-call")
@@ -2591,6 +2611,43 @@ def test_served_calls_link_to_their_parent(tmp_path):
     assert len(entries) == 2
     assert entries[1].parent_call_id == entries[0].model_call_id
     assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+
+
+class _BlankTextToolModel(_CapturingModel):
+    """Serve whitespace text before a tool call, as a policy can between its reasoning and the call."""
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        response = _training_response(" \n")
+        call = NeMoGymResponseFunctionToolCall(
+            type="function_call", id="call-1", call_id="call-1", name="check", arguments="{}", status="completed"
+        )
+        return response.model_copy(update={"output": [*response.output, call]})
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_messages_echo_with_blank_text_links_to_its_parent(tmp_path, stream):
+    """Serve blank text as generated, so an unchanged Messages echo matches ordinary capture."""
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_BlankTextToolModel).setup_webserver())
+    path = "/ng-rollout/blank0/training-token-capture/v1/messages"
+    first = [{"role": "user", "content": "task"}]
+    response = client.post(path, json={"messages": first, "stream": stream, **_MSG_ARGS})
+    served = _reconstruct_streamed_response(response.content, "messages") if stream else response.json()
+    assert [block["type"] for block in served["content"]] == ["text", "tool_use"]
+    result = {"type": "tool_result", "tool_use_id": "call-1", "content": "ok"}
+    second = first + [{"role": "assistant", "content": served["content"]}, {"role": "user", "content": [result]}]
+    client.post(path, json={"messages": second, "stream": stream, **_MSG_ARGS})
+
+    entries = TokenCaptureStore(tmp_path).read_entries("blank0")
+    assert len(entries) == 2
+    assert entries[0].prompt_token_ids == PTOKS
+    assert entries[0].generation_token_ids == GTOKS
+    assert entries[0].generation_log_probs == LPS
+    assert entries[0].token_item_index == 0
+    assert entries[0].output_items[0]["content"][0]["text"] == " \n"
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+    assert entries[1].parent_call_id == entries[0].model_call_id
 
 
 def test_separate_model_worker_instances_share_committed_lineage(tmp_path):
@@ -2652,7 +2709,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
 
 async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
     class _FailingResolver:
-        async def resolve(self, rollout_id, request_items):
+        async def resolve(self, rollout_id, request_items, *, identity=None):
             raise RuntimeError("resolver unavailable")
 
         def is_process_shared(self):
@@ -2932,7 +2989,7 @@ class _ConfiguredLineage:
     def __init__(self, namespace: str = "") -> None:
         self.namespace = namespace
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]):
+    async def resolve(self, rollout_id: str, request_items: list[dict], *, identity=None):
         return LineageResolution(ParentResolutionStatus.ROOT)
 
     def is_process_shared(self) -> bool:

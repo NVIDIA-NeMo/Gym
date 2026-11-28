@@ -79,7 +79,12 @@ def score_group(correct: Sequence[bool], *, group_type: GroupType, group_structu
 def validate_metric_cohort(
     task_ids: Collection[str], *, groups: Collection[QuestionGroup], task_levels: Mapping[str, int]
 ) -> dict[str, int]:
-    """Validate a complete group partition and optional complete per-task level map."""
+    """Validate a complete group partition and optional complete per-task level map; return each task's level.
+
+    As in the official scorer, question accuracy goes by each question's own level and a group's score by its
+    level, the level of its last question: the questions of one group may have different levels. Without a
+    per-task map, each question takes its group's level.
+    """
     expected = set(task_ids)
     levels = dict(task_levels)
     if levels and set(levels) != expected:
@@ -99,9 +104,9 @@ def validate_metric_cohort(
             grouped_levels[task_id] = group.level
     if groups and set(grouped_levels) != expected:
         raise ValueError("Groups must partition every frozen task into complete four-question groups")
-    if levels and grouped_levels and levels != grouped_levels:
-        raise ValueError("Task and group levels disagree")
-    return grouped_levels or levels
+    if levels and any(levels[group.task_ids[-1]] != group.level for group in groups):
+        raise ValueError("A group's level must be the level of its last question")
+    return levels or grouped_levels
 
 
 @dataclass(frozen=True, slots=True)

@@ -44,9 +44,9 @@ def stopped(monkeypatch) -> list[AsyncSandbox]:
     stopped: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopped.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return stopped
@@ -272,10 +272,10 @@ async def test_retire_releases_the_lent_sandbox_without_close_s_fence(root, imag
     recorded_stop = AsyncSandbox.stop
     failures = [RuntimeError("stop failed")]
 
-    async def stop_failing_once(self: AsyncSandbox) -> None:
+    async def stop_failing_once(self: AsyncSandbox, **kwargs: object) -> None:
         if failures:
             raise failures.pop()
-        await recorded_stop(self)
+        await recorded_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop_failing_once)
 

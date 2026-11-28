@@ -75,7 +75,8 @@ else:
         middleware({"type": "http", "method": "POST", "path": "/run", "client": ("test", 1)}, queue.get, send)
     )
     for _ in range(200):
-        started = list((tmp_path / "episodes").glob("*/started"))
+        # The worker creates `started` before it writes its PID; cancelling in between leaves the file empty.
+        started = [path for path in (tmp_path / "episodes").glob("*/started") if path.read_text()]
         if started:
             break
         await asyncio.sleep(0.01)

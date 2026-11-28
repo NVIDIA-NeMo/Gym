@@ -71,6 +71,14 @@ def timeout_handler_factory(debug: bool):
     return timeout_handler
 
 
+def _start_timer(seconds: float) -> None:
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
+def _cancel_timer() -> None:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+
+
 # used to capture stdout as a list
 # from https://stackoverflow.com/a/16571630/6416660
 # alternative use redirect_stdout() from contextlib
@@ -232,8 +240,8 @@ def get_function(compiled_sol, fn_name: str):  # type: ignore
         return
 
 
-def compile_code(code: str, timeout: int):
-    signal.alarm(timeout)
+def compile_code(code: str, timeout: float):
+    _start_timer(timeout)
     try:
         tmp_sol = ModuleType("tmp_sol", "")
         exec(code, tmp_sol.__dict__)
@@ -249,7 +257,7 @@ def compile_code(code: str, timeout: int):
 
         assert compiled_sol is not None
     finally:
-        signal.alarm(0)
+        _cancel_timer()
 
     return compiled_sol
 
@@ -329,11 +337,19 @@ def values_are_close(expected, predicted) -> bool:
         return False
 
 
-def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: str, timeout: int):
+def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: str, timeout: float):
     # call-based clean up logic
     # need to wrap in try-catch logic after to catch the correct errors, but for now this is fine.
     code = import_string + "\n\n" + code
-    compiled_sol = compile_code(code, timeout)
+    try:
+        compiled_sol = compile_code(code, timeout)
+    except TimeoutException as e:
+        return [-3], {
+            "error": repr(e),
+            "error_code": -3,
+            "error_message": "Time Limit Exceeded",
+            "stage": "compilation",
+        }
 
     if compiled_sol is None:
         return
@@ -350,14 +366,14 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
     total_execution = 0
     all_results = []
     for idx, (gt_inp, gt_out) in enumerate(zip(all_inputs, all_outputs)):
-        signal.alarm(timeout)
+        _start_timer(timeout)
         faulthandler.enable()
         try:
             # can lock here so time is useful
             start = time.time()
             prediction = method(*gt_inp)
             total_execution += time.time() - start
-            signal.alarm(0)
+            _cancel_timer()
 
             # don't penalize model if it produces tuples instead of lists
             # ground truth sequences are not tuples
@@ -393,13 +409,14 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
                     "error_message": "Wrong Answer",
                 }
         except Exception as e:
-            signal.alarm(0)
-            if "timeoutexception" in repr(e).lower():
+            _cancel_timer()
+            if isinstance(e, TimeoutException):
                 all_results.append(-3)
                 return all_results, {
                     "error": repr(e),
                     "error_code": -3,
                     "error_message": "Time Limit Exceeded",
+                    "stage": "test",
                     "inputs": truncatefn(gt_inp),
                     "expected": truncatefn(gt_out),
                 }
@@ -415,7 +432,7 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
                 }
 
         finally:
-            signal.alarm(0)
+            _cancel_timer()
             faulthandler.disable()
 
     return all_results, {"execution time": total_execution}
@@ -425,7 +442,7 @@ def grade_stdio(
     code: str,
     all_inputs: list,
     all_outputs: list,
-    timeout: int,
+    timeout: float,
 ):
     ## runtime doesn't interact well with __name__ == '__main__'
     code = clean_if_name(code)
@@ -433,7 +450,15 @@ def grade_stdio(
     ## we wrap the given code inside another function
     code = make_function(code)
 
-    compiled_sol = compile_code(code, timeout)
+    try:
+        compiled_sol = compile_code(code, timeout)
+    except TimeoutException as e:
+        return [-3], {
+            "error": repr(e),
+            "error_code": -3,
+            "error_message": "Time Limit Exceeded",
+            "stage": "compilation",
+        }
     if compiled_sol is None:
         return
 
@@ -445,25 +470,26 @@ def grade_stdio(
     all_results = []
     total_execution_time = 0
     for idx, (gt_inp, gt_out) in enumerate(zip(all_inputs, all_outputs)):
-        signal.alarm(timeout)
+        _start_timer(timeout)
         faulthandler.enable()
 
-        signal.alarm(timeout)
+        _start_timer(timeout)
         with Capturing() as captured_output:
             try:
                 start = time.time()
                 call_method(method, gt_inp)
                 total_execution_time += time.time() - start
                 # reset the alarm
-                signal.alarm(0)
+                _cancel_timer()
             except Exception as e:
-                signal.alarm(0)
-                if "timeoutexception" in repr(e).lower():
+                _cancel_timer()
+                if isinstance(e, TimeoutException):
                     all_results.append(-3)
                     return all_results, {
                         "error": repr(e),
                         "error_code": -3,
                         "error_message": "Time Limit Exceeded",
+                        "stage": "test",
                         "inputs": truncatefn(gt_inp),
                         "expected": truncatefn(gt_out),
                     }
@@ -479,7 +505,7 @@ def grade_stdio(
                     }
 
             finally:
-                signal.alarm(0)
+                _cancel_timer()
                 faulthandler.disable()
 
         prediction = captured_output[0]
@@ -588,7 +614,7 @@ def run_test(in_outs, test=None, debug=False, timeout=6):
             print(f"loading test code = {datetime.now().time()}")
 
         if which_type == CODE_TYPE.call_based:
-            signal.alarm(timeout)
+            _start_timer(timeout)
             try:
                 results, metadata = grade_call_based(
                     code=test,
@@ -598,18 +624,25 @@ def run_test(in_outs, test=None, debug=False, timeout=6):
                     timeout=timeout,
                 )
                 return results, metadata
+            except TimeoutException as e:
+                return [-3], {
+                    "error": repr(e),
+                    "error_code": -3,
+                    "error_message": "Time Limit Exceeded",
+                    "stage": "preparation",
+                }
             except Exception as e:
                 return [-4], {
                     "error_code": -4,
                     "error_message": f"Error during testing: {e}",
                 }
             finally:
-                signal.alarm(0)
+                _cancel_timer()
         elif which_type == CODE_TYPE.standard_input:
             # sol
             # if code has if __name__ == "__main__": then remove it
 
-            signal.alarm(timeout)
+            _start_timer(timeout)
             try:
                 results, metadata = grade_stdio(
                     code=test,
@@ -618,13 +651,20 @@ def run_test(in_outs, test=None, debug=False, timeout=6):
                     timeout=timeout,
                 )
                 return results, metadata
+            except TimeoutException as e:
+                return [-3], {
+                    "error": repr(e),
+                    "error_code": -3,
+                    "error_message": "Time Limit Exceeded",
+                    "stage": "preparation",
+                }
             except Exception as e:
                 return [-4], {
                     "error_code": -4,
                     "error_message": f"Error during testing: {e}",
                 }
             finally:
-                signal.alarm(0)
+                _cancel_timer()
 
 
 def _set_resource_limit(resource_type: str, target_soft_limit):

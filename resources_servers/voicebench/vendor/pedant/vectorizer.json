@@ -1,0 +1,1 @@
+{"analyzer":"word","binary":false,"decode_error":"strict","encoding":"utf-8","input":"content","lowercase":true,"ngram_range":[1,1],"norm":"l2","smooth_idf":true,"stop_words":null,"strip_accents":null,"sublinear_tf":false,"token_pattern":"(?u)\\b\\w\\w+\\b","use_idf":true}

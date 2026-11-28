@@ -1,0 +1,12 @@
+{
+  "notices": [
+    {
+      "properties": [
+        {"type": "domain", "value": "huggingface.co"},
+        {"type": "domain", "value": "hf.co"},
+        {"type": "domain", "value": "cogym.saltlab.stanford.edu"},
+        {"type": "domain", "value": "open-space.cloud"}
+      ]
+    }
+  ]
+}

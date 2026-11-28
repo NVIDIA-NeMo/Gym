@@ -37,6 +37,11 @@ from nemo_gym.models.token_capture.builder import (
     project_main_chain_response,
     run_builder,
 )
+from nemo_gym.models.token_capture.lineage_scope import (
+    by_agent_instance,
+    entries_by_lineage_scope,
+    primary_agent_instance,
+)
 from nemo_gym.models.token_capture.protocols import TokenCaptureSnapshot, TokenSource
 from nemo_gym.models.token_capture.records import EngineRefusalRecord, TokenEntry
 from nemo_gym.models.token_capture.store import TokenCaptureStore
@@ -88,6 +93,22 @@ def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Pa
         TokenCaptureStore(directory).delete_now(rollout_ids)
 
 
+def _attribute_terminal(
+    rollout_id: str,
+    entries: list[TokenEntry],
+    verified_response: dict | None,
+    explicit_terminal_call_id: str | None,
+    declared_response_id: str | None,
+) -> TerminalAttribution:
+    try:
+        return resolve_terminal(
+            entries, verified_response, explicit_terminal_call_id, declared_response_id=declared_response_id
+        )
+    except Exception:
+        logger.warning("Terminal attribution failed for rollout %s.", rollout_id, exc_info=True)
+        return TerminalAttribution(None, reason="attribution_error")
+
+
 def _assemble(
     rollout_id: str,
     entries: list[TokenEntry],
@@ -98,18 +119,21 @@ def _assemble(
     explicit_terminal_call_id: str | None = None,
     declared_response_id: str | None = None,
     engine_refusals: tuple[EngineRefusalRecord, ...] = (),
+    terminal_attribution: TerminalAttribution | None = None,
 ) -> dict:
     # Attribute the verified terminal before building.
     # ``verified_response`` is the scored response from the /run result.
     # Attribution anchors chain selection; its absence falls back to the
     # strict single-chain policy. It must never fail a build.
-    try:
-        attribution = resolve_terminal(
-            entries, verified_response, explicit_terminal_call_id, declared_response_id=declared_response_id
+    # ``terminal_attribution`` is an attribution the caller already resolved over a wider set of calls
+    # than ``entries``; it may name a call outside ``entries``, which then delivers nothing here.
+    attribution = (
+        terminal_attribution
+        if terminal_attribution is not None
+        else _attribute_terminal(
+            rollout_id, entries, verified_response, explicit_terminal_call_id, declared_response_id
         )
-    except Exception:
-        logger.warning("Terminal attribution failed for rollout %s.", rollout_id, exc_info=True)
-        attribution = TerminalAttribution(None, reason="attribution_error")
+    )
 
     # Mask a malformed rollout instead of failing the caller.
     # The contiguity check and projection can raise.
@@ -242,6 +266,144 @@ def _copy_engine_refusals(built: dict, snapshot: TokenCaptureSnapshot) -> None:
     ]
 
 
+# The build key holding one build per named agent instance, when the episode names agent instances.
+AGENT_INSTANCE_BUILDS_KEY = "agent_instances"
+
+
+def _assemble_agent_instance(
+    rollout_id: str,
+    scopes: list[list[TokenEntry]],
+    builder: str,
+    model: str,
+    *,
+    verified_response: dict | None,
+    explicit_terminal_call_id: str | None,
+    declared_response_id: str | None,
+    engine_refusals: tuple[EngineRefusalRecord, ...],
+) -> dict:
+    """Build one agent instance's trajectory from its lineage scopes, one per model server it called.
+
+    Each lineage scope is built on its own, so no chain crosses model servers. An agent instance on several
+    model servers delivers the lineage scope whose chain reached its attributed terminal call; without one,
+    no lineage scope can be chosen and the build is masked.
+
+    The terminal call is attributed once, over all the agent instance's calls. Attributing per lineage scope
+    would let a scope whose call merely shares the scored response's text claim it, beside the scope whose
+    call the response id names.
+    """
+    attribution = None
+    if len(scopes) > 1:
+        attribution = _attribute_terminal(
+            rollout_id,
+            [entry for entries in scopes for entry in entries],
+            verified_response,
+            explicit_terminal_call_id,
+            declared_response_id,
+        )
+    builds = [
+        _assemble(
+            rollout_id,
+            entries,
+            builder,
+            model,
+            verified_response=verified_response,
+            explicit_terminal_call_id=explicit_terminal_call_id,
+            declared_response_id=declared_response_id,
+            engine_refusals=engine_refusals,
+            terminal_attribution=attribution,
+        )
+        for entries in scopes
+    ]
+    if not builds:
+        # Every call of this agent instance was lost, so there is nothing to build.
+        return _failed_build(rollout_id, builder, "capture contains no token records")
+    if len(builds) == 1:
+        return builds[0]
+    delivered = [
+        build
+        for build in builds
+        if ((build.get("metrics") or {}).get("terminal_attribution") or {}).get("chain") == "delivered"
+    ]
+    built = delivered[0] if len(delivered) == 1 else builds[0]
+    built.setdefault("metrics", {})["model_servers"] = len(builds)
+    if len(delivered) != 1:
+        built["mask_sample"] = True
+    return built
+
+
+def _build_snapshot(
+    rollout_id: str,
+    snapshot: TokenCaptureSnapshot,
+    builder: str,
+    model: str,
+    *,
+    verified_response: dict | None,
+    explicit_terminal_call_id: str | None,
+    declared_response_id: str | None,
+    mask_incomplete_when_attributed: bool,
+) -> dict:
+    """Build every captured agent instance of a frozen snapshot.
+
+    Lineage, retry grouping and terminal selection run within one lineage scope (an agent instance on one
+    model server). The returned build is the primary agent instance's (``lineage_scope.primary_agent_instance``):
+    the scored response and the declared terminal belong to it. When the episode names agent instances,
+    ``AGENT_INSTANCE_BUILDS_KEY`` maps every named agent instance to its own build, attributed without
+    a scored response.
+
+    An agent instance's build is masked by its own lost calls or by an episode-wide mark, never by
+    another agent instance's.
+    """
+    if not snapshot.entries:
+        built = _failed_build(rollout_id, builder, "capture contains no token records")
+        _apply_snapshot_outcome(built, snapshot, None, always=mask_incomplete_when_attributed)
+        return built
+    agents = by_agent_instance(entries_by_lineage_scope(snapshot.entries).items(), key=lambda item: item[0])
+    # An agent instance that lost every call has no entry. It still takes part in choosing the primary and gets
+    # a failed build, so another agent instance's chain is never delivered in its place.
+    for lost in sorted(snapshot.incomplete_agent_instances, key=lambda name: name or ""):
+        agents.setdefault(lost, [])
+    try:
+        primary: str | None = primary_agent_instance(agents)
+        has_primary = True
+    except LookupError:
+        primary, has_primary = None, False
+    builds: dict[str | None, dict] = {}
+    for agent_instance, scopes in agents.items():
+        is_primary = has_primary and agent_instance == primary
+        built = _assemble_agent_instance(
+            rollout_id,
+            [entries for _, entries in scopes],
+            builder,
+            model,
+            verified_response=verified_response if is_primary else None,
+            explicit_terminal_call_id=explicit_terminal_call_id if is_primary else None,
+            declared_response_id=declared_response_id if is_primary else None,
+            engine_refusals=snapshot.engine_refusals,
+        )
+        _apply_snapshot_outcome(built, snapshot, agent_instance, always=mask_incomplete_when_attributed)
+        builds[agent_instance] = built
+    if has_primary:
+        top = dict(builds[primary])
+    else:
+        top = _failed_build(rollout_id, builder, "no primary agent instance captured", n_calls=len(snapshot.entries))
+        _apply_snapshot_outcome(top, snapshot, None, always=mask_incomplete_when_attributed)
+    named = {name: build for name, build in builds.items() if name is not None}
+    if named:
+        top[AGENT_INSTANCE_BUILDS_KEY] = named
+    return top
+
+
+def _apply_snapshot_outcome(
+    built: dict, snapshot: TokenCaptureSnapshot, agent_instance: str | None, *, always: bool
+) -> None:
+    """Copy refusals and apply the snapshot's incompleteness that belongs to ``agent_instance``."""
+    _copy_engine_refusals(built, snapshot)
+    if snapshot.incomplete_for(agent_instance):
+        built.setdefault("metrics", {})["capture_incomplete"] = True
+        if _incomplete_masks(built, always=always):
+            built["mask_sample"] = True
+
+
 def mask_incomplete_when_attributed_from_config(global_config_dict) -> bool:
     """Return the ``token_id_capture.mask_incomplete_when_attributed`` setting.
 
@@ -280,23 +442,16 @@ def trajectories_for_rollout(
         except Exception as error:
             logger.warning("Could not freeze token capture for rollout %s.", rollout_id, exc_info=True)
             return _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}")
-        if not snapshot.entries:
-            built = _failed_build(rollout_id, builder, "capture contains no token records")
-        else:
-            built = _assemble(
-                rollout_id,
-                list(snapshot.entries),
-                builder,
-                model,
-                verified_response=verified_response,
-                explicit_terminal_call_id=explicit_terminal_call_id,
-                engine_refusals=snapshot.engine_refusals,
-            )
-        _copy_engine_refusals(built, snapshot)
-        if snapshot.incomplete:
-            built.setdefault("metrics", {})["capture_incomplete"] = True
-            if _incomplete_masks(built, always=mask_incomplete_when_attributed):
-                built["mask_sample"] = True
+        built = _build_snapshot(
+            rollout_id,
+            snapshot,
+            builder,
+            model,
+            verified_response=verified_response,
+            explicit_terminal_call_id=explicit_terminal_call_id,
+            declared_response_id=None,
+            mask_incomplete_when_attributed=mask_incomplete_when_attributed,
+        )
         built["_capture_snapshot"] = {
             "snapshot_id": snapshot.snapshot_id,
             "version": snapshot.version,
@@ -333,28 +488,18 @@ async def trajectories_from_source(
     except Exception as error:
         logger.warning("Could not freeze token capture for rollout %s.", rollout_id, exc_info=True)
         return _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}")
-    if not snapshot.entries:
-        built = _failed_build(rollout_id, builder, "capture contains no token records")
-    else:
-        entries = list(snapshot.entries)
-        refusals = snapshot.engine_refusals
-        built = await asyncio.to_thread(
-            lambda: _assemble(
-                rollout_id,
-                entries,
-                builder,
-                model,
-                verified_response=verified_response,
-                explicit_terminal_call_id=explicit_terminal_call_id,
-                declared_response_id=declared_response_id,
-                engine_refusals=refusals,
-            )
+    built = await asyncio.to_thread(
+        lambda: _build_snapshot(
+            rollout_id,
+            snapshot,
+            builder,
+            model,
+            verified_response=verified_response,
+            explicit_terminal_call_id=explicit_terminal_call_id,
+            declared_response_id=declared_response_id,
+            mask_incomplete_when_attributed=mask_incomplete_when_attributed,
         )
-    _copy_engine_refusals(built, snapshot)
-    if snapshot.incomplete:
-        built.setdefault("metrics", {})["capture_incomplete"] = True
-        if _incomplete_masks(built, always=mask_incomplete_when_attributed):
-            built["mask_sample"] = True
+    )
     built["_capture_snapshot"] = {
         "snapshot_id": snapshot.snapshot_id,
         "version": snapshot.version,

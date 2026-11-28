@@ -30,7 +30,7 @@ from types import FrameType
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
-from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, exit_cleanly_on_job_error
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.utils.text import did_you_mean
 from nemo_gym.utils.text import hydra_quote as _hydra_quote
@@ -498,7 +498,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
     from nemo_gym.config.config_types import ConfigError
     from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-    from nemo_gym.orchestration.submit import submit
+    from nemo_gym.orchestration.submit import is_inspectable, submit
 
     _reject_scratch_namespace_additions(overrides)
     config_path = Path(args.config).resolve()
@@ -586,6 +586,9 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
                     f"[green]submitted[/green] {benchmark.benchmark} → {executor_label} "
                     f"[bold]{benchmark.job_id}[/bold]"
                 )
+        if any(benchmark.job_id for benchmark in record.benchmarks) and is_inspectable(record):
+            # Plain print: rich would wrap a long id at 80 columns when stdout is not a terminal.
+            print("\n".join(_next_steps(record.gym_job_id)))
 
     if record.failed:
         names = ", ".join(b.benchmark for b in record.failed)
@@ -602,12 +605,29 @@ def _raise_keyboard_interrupt_on_sigterm() -> None:
     signal.signal(signal.SIGTERM, _on_sigterm)
 
 
+def _next_steps(gym_job_id: str) -> list[str]:
+    """What to type after a submit: the id the other `gym job` commands take, and where to find them."""
+    return [
+        f"Submission: {gym_job_id}",
+        f"Check on it: gym job status {gym_job_id}",
+        "All job commands: gym job --help",
+    ]
+
+
+def _queue_again(args: argparse.Namespace) -> None:
+    """Queue one benchmark of a submitted run again and print the new job id: the plain resubmit that
+    `gym job resubmit` and `gym eval resubmit` share."""
+    from nemo_gym.orchestration.submit import resubmit
+
+    print(resubmit(args.gym_job_id, args.benchmark).job_id)
+
+
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
     from nemo_gym.eval.recovery.gate import operator_verdict_line
     from nemo_gym.orchestration.executors.slurm.reader import RemoteReaderInterrupted
-    from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
+    from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover
 
     _raise_keyboard_interrupt_on_sigterm()
 
@@ -790,7 +810,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             if not outcome.ok or gate_not_accepted:
                 sys.exit(1)
             return
-        print(resubmit(args.gym_job_id, args.benchmark).job_id)
+        _queue_again(args)
     except RemoteReaderInterrupted as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(128 + (signal.SIGTERM if "SIGTERM" in str(error) else signal.SIGINT))
@@ -823,6 +843,102 @@ def _eval_prepare(args: argparse.Namespace, overrides: list[str]) -> None:
         prepare_harbor_benchmark(args, overrides, benchmark)
         return
     dispatch("nemo_gym.cli.eval:prepare_benchmark", overrides)
+
+
+# `gym job` commands print JSON themselves, so they do not take the shared flag that also translates to a
+# Hydra override.
+JOB_JSON = Flag(
+    register=lambda p: p.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Output as machine-readable JSON."
+    ),
+)
+
+
+def _reject_overrides(args: argparse.Namespace, overrides: list[str], command: str) -> None:
+    # `-v` reaches every command as a `+verbose=true` override; anything else is a stray Hydra override.
+    if [override for override in overrides if override != "+verbose=true"]:
+        args._parser.error(f"{command} does not accept Hydra overrides")
+
+
+def _split_names(value: str | None) -> list[str] | None:
+    names = [name.strip() for name in value.split(",") if name.strip()] if value else []
+    return names or None
+
+
+def _add_limit_or_all(parser: argparse.ArgumentParser) -> None:
+    how_many = parser.add_mutually_exclusive_group()
+    how_many.add_argument(
+        "--limit", type=int, default=10, metavar="N", help="With no ids, show the newest N submissions (default 10)."
+    )
+    how_many.add_argument("--all", action="store_true", help="With no ids, show every submission.")
+
+
+def _job_list(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job list")
+    from nemo_gym.orchestration import job_commands
+
+    job_commands.list_command(limit=args.limit, as_json=getattr(args, "json", False))
+
+
+@exit_cleanly_on_job_error
+def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job status")
+    from nemo_gym.orchestration import job_commands
+
+    job_commands.status_command(
+        args.gym_job_ids,
+        benchmarks=_split_names(args.benchmark),
+        limit=None if args.all else args.limit,
+        as_json=getattr(args, "json", False),
+    )
+
+
+@exit_cleanly_on_job_error
+def _job_cancel(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job cancel")
+    if args.all and args.benchmark:
+        args._parser.error("give a benchmark or --all, not both")
+    if not args.all and not args.benchmark:
+        args._parser.error("give a benchmark, or --all to cancel every benchmark of the submission")
+    if args.confirm is not None and not args.all:
+        args._parser.error("--confirm only applies to --all")
+    from nemo_gym.orchestration import job_commands
+
+    code = job_commands.cancel_command(
+        args.gym_job_id,
+        args.benchmark,
+        everything=args.all,
+        confirm=args.confirm,
+        as_json=getattr(args, "json", False),
+    )
+    if code:
+        sys.exit(code)
+
+
+@exit_cleanly_on_job_error
+def _job_logs(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job logs")
+    from nemo_gym.orchestration import job_commands
+
+    job_commands.logs_command(
+        args.gym_job_id, args.benchmark, source=args.source, instance=args.instance, tail=args.tail
+    )
+
+
+@exit_cleanly_on_job_error
+def _job_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job resubmit")
+    _queue_again(args)
+
+
+@exit_cleanly_on_job_error
+def _job_info(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job info")
+    from nemo_gym.orchestration import job_commands
+
+    job_commands.info_command(
+        args.gym_job_id, benchmark=args.benchmark, show_config=args.config, as_json=getattr(args, "json", False)
+    )
 
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -940,6 +1056,20 @@ def _eval_status(args: argparse.Namespace, overrides: list[str]) -> None:
     try:
         eval_status(args.run, json_output=args.json, job_artifact_dirs=benchmark_artifact_dirs)
     except (OSError, ValueError) as exc:
+        args._parser.error(str(exc))
+
+
+def _eval_lustre_stats(args: argparse.Namespace, overrides: list[str]) -> None:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if args.json:
+        expected_overrides.append("+json=true")
+    if overrides != expected_overrides:
+        args._parser.error("lustre-stats does not accept Hydra overrides")
+    from nemo_gym.orchestration.executors.slurm.lustre_md_stats import print_lustre_md_stats
+
+    try:
+        print_lustre_md_stats(Path(args.target), json_output=args.json)
+    except OSError as exc:
         args._parser.error(str(exc))
 
 
@@ -1112,6 +1242,7 @@ GROUPS = {
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
+    "job": "Look at, stop and read the logs of the runs `gym eval submit` queued.",
     "dev": "Contributor helpers.",
 }
 
@@ -1630,6 +1761,11 @@ COMMANDS = {
         target=_eval_status,
         summary="Show saved progress for a run directory or Gym job ID.",
         flags=(Flag(register=lambda p: p.add_argument("run", metavar="RUN_DIR_OR_JOB_ID")), JSON),
+    ),
+    "eval lustre-stats": Command(
+        target=_eval_lustre_stats,
+        summary="Summarize the Lustre metadata requests a submitted Slurm job made, per phase (lustre_md_stats).",
+        flags=(Flag(register=lambda p: p.add_argument("target", metavar="BENCHMARK_DIR_OR_TSV")), JSON),
     ),
     "eval health-check": Command(
         target=_eval_health_check,
@@ -2238,6 +2374,137 @@ COMMANDS = {
                 "Report artifacts to write (default: both).",
                 choices=("md", "json", "both"),
             ),
+        ),
+    ),
+    "job list": Command(
+        target=_job_list,
+        summary="List the submissions in this machine's job index (offline).",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--limit", type=int, metavar="N", help="Show only the newest N submissions."
+                ),
+            ),
+            JOB_JSON,
+        ),
+    ),
+    "job status": Command(
+        target=_job_status,
+        summary="Show what is happening to submitted runs; the only job command that asks the scheduler.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_ids",
+                    nargs="*",
+                    metavar="ID",
+                    help="Submission ids, as printed by `gym eval submit`. With none, the newest submissions.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--benchmark",
+                    metavar="NAME[,NAME...]",
+                    help="Only these benchmarks. With ids, a submission that lacks one is an error; "
+                    "without ids, only submissions that have all of them are shown.",
+                ),
+            ),
+            Flag(register=lambda p: _add_limit_or_all(p)),
+            JOB_JSON,
+        ),
+    ),
+    "job info": Command(
+        target=_job_info,
+        summary="Describe one submission and where its parts are.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "benchmark", nargs="?", metavar="BENCHMARK", help="Describe only this benchmark."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--config", action="store_true", help="Also print the resolved config the run was submitted with."
+                ),
+            ),
+            JOB_JSON,
+        ),
+    ),
+    "job cancel": Command(
+        target=_job_cancel,
+        summary="Stop a benchmark of a submitted run, or every benchmark of it with --all.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "benchmark", nargs="?", metavar="BENCHMARK", help="The benchmark to stop."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--all",
+                    action="store_true",
+                    help="Stop every live benchmark of the submission. Its id has to be typed to confirm.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--confirm",
+                    metavar="ID",
+                    help="With --all, the submission's id, so there is no prompt. There is no --yes.",
+                ),
+            ),
+            JOB_JSON,
+        ),
+    ),
+    "job logs": Command(
+        target=_job_logs,
+        summary="Print one of a benchmark's logs.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to read.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--source",
+                    default="driver",
+                    metavar="NAME",
+                    help="Which log: the driver (default) or a service. `gym job info` lists them.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--instance", metavar="ID", help="Which instance, for a service that runs several."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--tail", type=int, metavar="N", help="Print only the last N lines (a log can be large)."
+                ),
+            ),
+        ),
+    ),
+    "job resubmit": Command(
+        target=_job_resubmit,
+        summary="Plain resubmit of one benchmark, no recovery; for a decision use `gym eval resubmit --recover`.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),

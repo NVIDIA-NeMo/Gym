@@ -94,6 +94,7 @@ def test_prepare_downloads_release_and_preserves_scoring_and_provenance(monkeypa
     for source, result in zip(rows, prepared):
         expected = deepcopy(source)
         expected.pop("agent_ref")
+        expected["task_id"] = source["metadata"]["uuid"]
         assert result == expected
     assert prepared[0]["expected_answer"] == 1.9231974
     assert "match" not in prepared[1]
@@ -297,6 +298,7 @@ def test_subset_filters_by_family_and_preserves_rows_without_match(monkeypatch, 
         output = prepare_module.prepare(subset=subset)
         expected = deepcopy(source)
         expected.pop("agent_ref")
+        expected["task_id"] = source["metadata"]["uuid"]
         assert json.loads(output.read_text()) == expected
         assert prepare_module.is_prepared_data_current(output)
 

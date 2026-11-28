@@ -64,6 +64,14 @@ from nemo_gym.models.token_capture.fingerprint import (
 from nemo_gym.models.token_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
+from nemo_gym.models.token_capture.lineage_scope import (
+    LineageScopeKey,
+    entry_lineage_scope,
+    inherited_identity_columns,
+    lineage_scope_key,
+    row_lineage_scope,
+    same_agent_other_server,
+)
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     LineageMatch,
@@ -156,9 +164,7 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
     records = []
     failures = []
     # A failure row written without an identity inherits it from its call's intent row.
-    intent_identity = {
-        row["model_call_id"]: CallIdentity.from_columns(row).columns() for row in rows if row.get("intent")
-    }
+    identities = {id(row): columns for row, columns in zip(rows, inherited_identity_columns(rows))}
     refused = {row["model_call_id"] for row in rows if row.get("refused_before_generation")}
     completed = {row["model_call_id"] for row in rows if row.get("staging_key")} | refused
     attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
@@ -168,9 +174,7 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
     for row in rows:
         if row.get("intent"):
             continue
-        identity = CallIdentity.from_columns(row).columns()
-        if "agent_instance" not in identity:
-            identity = {**intent_identity.get(row.get("model_call_id"), {}), **identity}
+        identity = identities[id(row)]
         if row.get("failure_reason") is not None:
             failures.append(
                 ManifestFailure(
@@ -242,6 +246,15 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
         pending_call_ids=pending,
     )
     return manifest.model_dump(mode="json")
+
+
+def _rows_of_lineage_scope(rows: list[dict], scope: LineageScopeKey) -> list[dict]:
+    """The rows of the calls of one lineage scope, with failure rows inheriting their intent's identity."""
+    return [
+        row
+        for row, columns in zip(rows, inherited_identity_columns(rows))
+        if "model_call_id" in row and row_lineage_scope(columns) == scope
+    ]
 
 
 def _intent_row(model_call_id: str, identity: CallIdentity | None) -> dict:
@@ -496,12 +509,40 @@ class RolloutLineage:
         self._index_tool_call_turn(call_id, list((messages or [])[node.context_len :]))
 
 
+MODEL_SERVER_CHANGED_REASON = "model_server_changed"
+# The root reason of a request that carries model turns when its lineage scope has made no call: the turns are
+# input the caller supplied, such as another agent instance's transcript, not this lineage scope's earlier output.
+FIRST_CALL_REASON = "first_call"
+
+
+def resolve_within_lineage_scope(
+    lineages: Mapping[LineageScopeKey, RolloutLineage], scope: LineageScopeKey, request_items: list[dict]
+) -> tuple[ParentResolutionStatus, LineageNode | None, str]:
+    """Resolve a request's parent among its own lineage scope's calls only.
+
+    A request whose only match was served by another model server for the same agent instance is a root
+    with reason ``model_server_changed``: its context is the other server's output, which this server's
+    tokens cannot continue.
+    """
+    lineage = lineages.get(scope) or RolloutLineage()
+    status, node, reason = lineage.resolve_node(request_items)
+    if status == ParentResolutionStatus.UNRESOLVED and reason == "no_match":
+        for other, other_lineage in lineages.items():
+            if same_agent_other_server(scope, other) and (
+                other_lineage.resolve_node(request_items)[0] == ParentResolutionStatus.RESOLVED
+            ):
+                return ParentResolutionStatus.ROOT, None, MODEL_SERVER_CHANGED_REASON
+    return status, node, reason
+
+
 class LineageIndex:
     """Bound worker-local lineage by rollout and cumulative token counts.
 
     This index backs the single-worker fallback.
     Shared stores provide cross-worker visibility.
-    Eviction removes the oldest rollout.
+    Each rollout keeps one ``RolloutLineage`` per lineage scope (agent instance and model server), so parent search
+    never crosses agent instances; the lineage scopes of a rollout count once against ``max_rollouts``.
+    Eviction removes the oldest rollout with all its lineage scopes.
     An evicted parent leaves later continuations unresolved and the builder masks them.
     The only live rollout is never evicted.
     """
@@ -509,15 +550,19 @@ class LineageIndex:
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
         self._max_rollouts = max_rollouts
         self._max_tokens = max_tokens
-        self._rollouts: dict[str, RolloutLineage] = {}
+        self._rollouts: dict[str, dict[LineageScopeKey, RolloutLineage]] = {}
 
-    def for_rollout(self, rollout_id: str) -> RolloutLineage:
-        lineage = self._rollouts.get(rollout_id)
-        if lineage is None:
-            lineage = RolloutLineage()
-            self._rollouts[rollout_id] = lineage
+    def for_rollout(self, rollout_id: str, scope: LineageScopeKey = (None, None)) -> RolloutLineage:
+        return self.lineage_scopes(rollout_id).setdefault(scope, RolloutLineage())
+
+    def lineage_scopes(self, rollout_id: str) -> dict[LineageScopeKey, RolloutLineage]:
+        """Every lineage scope's lineage of one rollout, creating the rollout if needed."""
+        scopes = self._rollouts.get(rollout_id)
+        if scopes is None:
+            scopes = {}
+            self._rollouts[rollout_id] = scopes
         self._evict()
-        return lineage
+        return scopes
 
     def _evict(self) -> None:
         # Check after every access because existing rollouts can grow.
@@ -530,7 +575,7 @@ class LineageIndex:
 
     @property
     def total_tokens(self) -> int:
-        return sum(lineage.total_tokens for lineage in self._rollouts.values())
+        return sum(lineage.total_tokens for scopes in self._rollouts.values() for lineage in scopes.values())
 
     def drop(self, rollout_id: str) -> None:
         """Release a rollout's lineage early.
@@ -553,6 +598,9 @@ class InMemoryLineageStore:
     Production wiring uses ``FileLineageStore`` when a token store exists.
     Its index is memory-only.
     Eviction or restart leaves affected continuations unresolved.
+    It cannot tell an evicted rollout from a lineage scope that never called, so it does not root a
+    lineage scope's first call with ``first_call``: a request that carries model turns it cannot match
+    stays unresolved.
     That failure mode is safe but can mask otherwise usable rollouts.
     Multi-worker deployments require a shared ``LineageResolver``.
     The resolution index evicts rollouts under memory bounds, so this store
@@ -568,12 +616,19 @@ class InMemoryLineageStore:
         self._retired: set[str] = set()
         self._started: set[str] = set()
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        return self.index.for_rollout(rollout_id).resolve(request_items)
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, identity: CallIdentity
+    ) -> LineageResolution:
+        scope = lineage_scope_key(identity)
+        scopes = self.index.lineage_scopes(rollout_id)
+        status, node, reason = resolve_within_lineage_scope(scopes, scope, request_items)
+        if status == ParentResolutionStatus.RESOLVED:
+            return self.index.for_rollout(rollout_id, scope).resolve(request_items)
+        return LineageResolution(status, reason=reason)
 
     async def put(self, entry: TokenEntry) -> None:
         """Publish one committed entry to the worker-local index."""
-        self.index.for_rollout(entry.capture_key).add_entry(entry)
+        self.index.for_rollout(entry.capture_key, entry_lineage_scope(entry)).add_entry(entry)
 
     def is_process_shared(self) -> bool:
         return False
@@ -625,7 +680,7 @@ class InMemoryLineageStore:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
             return
         if record.fingerprint_version == FINGERPRINT_VERSION:
-            self.index.for_rollout(commit.capture_key).record(
+            self.index.for_rollout(commit.capture_key, row_lineage_scope(row)).record(
                 record.model_call_id,
                 list(commit.request_items) + list(commit.response_items),
                 [],
@@ -654,12 +709,13 @@ class InMemoryLineageStore:
             raise RolloutRetiredError(f"rollout {capture_key} is retired")
         return _manifest_from_rows(capture_key, list(self._ledgers.get(capture_key) or []))
 
-    async def has_rows(self, rollout_id: str) -> bool:
-        if self._ledgers.get(rollout_id):
+    async def has_rows(self, rollout_id: str, *, identity: CallIdentity) -> bool:
+        scope = lineage_scope_key(identity)
+        if _rows_of_lineage_scope(self._ledgers.get(rollout_id) or [], scope):
             return True
         if rollout_id in self._retired:
             raise RolloutRetiredError(f"rollout {rollout_id} is retired")
-        return bool(self.index.for_rollout(rollout_id).by_call_id)
+        return bool(self.index.lineage_scopes(rollout_id).get(scope, RolloutLineage()).by_call_id)
 
     async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.models.token_capture.store import validate_capture_keys
@@ -738,8 +794,9 @@ class IncrementalLineageStore:
             raise ValueError("max_cached_rollouts must be positive")
         if max_cached_tokens < 1:
             raise ValueError("max_cached_tokens must be positive")
-        # (cursor, refs, lineage): lineage stays at index 2 for diagnostics/tooling.
-        self._cache: dict[str, tuple[Any, dict[str, Any], RolloutLineage]] = {}
+        # (cursor, refs, lineages): one lineage per lineage scope (agent instance, model server), at index 2 for
+        # diagnostics/tooling. A rollout's lineage scopes share one cache row, so they count once against the bound.
+        self._cache: dict[str, tuple[Any, dict[str, Any], dict[LineageScopeKey, RolloutLineage]]] = {}
         self._max_cached_rollouts = max_cached_rollouts
         # Keep only the latest materialized parent for each rollout.
         # The global token bound avoids recreating full-record memory growth.
@@ -774,7 +831,9 @@ class IncrementalLineageStore:
     def _rollout_lock(self, rollout_id: str):
         return self._rollout_locks[hash(rollout_id) % len(self._rollout_locks)]
 
-    def _cache_put(self, rollout_id: str, value: tuple[Any, dict[str, Any], RolloutLineage]) -> None:
+    def _cache_put(
+        self, rollout_id: str, value: tuple[Any, dict[str, Any], dict[LineageScopeKey, RolloutLineage]]
+    ) -> None:
         """Insert or touch a cache row with LRU semantics.
 
         Reinsert a touched row so dictionary order tracks recency.
@@ -810,21 +869,23 @@ class IncrementalLineageStore:
                 evicted = self._materialized.pop(oldest)
                 self._materialized_tokens -= len(evicted[1])
 
-    def _refresh(self, rollout_id: str) -> tuple[dict[str, Any], RolloutLineage]:
+    def _refresh(self, rollout_id: str) -> tuple[dict[str, Any], dict[LineageScopeKey, RolloutLineage]]:
         with self._cache_guard:
             cached = self._cache.get(rollout_id)
-        cursor, refs, lineage = cached if cached is not None else (None, {}, RolloutLineage())
+        cursor, refs, lineages = cached if cached is not None else (None, {}, {})
         try:
             items, cursor = self._fetch_new_entries(rollout_id, cursor)
         except IncrementalLineageStore.CursorReset:
-            refs, lineage = {}, RolloutLineage()
+            refs, lineages = {}, {}
             items, cursor = self._fetch_new_entries(rollout_id, None)
         for entry, ref in items:
             refs[entry.model_call_id] = ref
             # Metadata-only: tokens stay in the backend behind ``ref``.
-            lineage.add_entry(entry, store_tokens=False, entry_offset=ref if isinstance(ref, int) else -1)
-        self._cache_put(rollout_id, (cursor, refs, lineage))
-        return refs, lineage
+            lineages.setdefault(entry_lineage_scope(entry), RolloutLineage()).add_entry(
+                entry, store_tokens=False, entry_offset=ref if isinstance(ref, int) else -1
+            )
+        self._cache_put(rollout_id, (cursor, refs, lineages))
+        return refs, lineages
 
     def _materialize(
         self, rollout_id: str, node: LineageNode, refs: dict[str, Any], lineage: RolloutLineage
@@ -883,15 +944,24 @@ class IncrementalLineageStore:
         self._remember_materialized(rollout_id, node.call_id, materialized)
         return materialized
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        return await asyncio.to_thread(self._resolve, rollout_id, request_items)
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, identity: CallIdentity
+    ) -> LineageResolution:
+        return await asyncio.to_thread(self._resolve, rollout_id, request_items, lineage_scope_key(identity))
 
-    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    def _resolve(self, rollout_id: str, request_items: list[dict], scope: LineageScopeKey) -> LineageResolution:
+        return self._resolve_entries(rollout_id, request_items, scope)[0]
+
+    def _resolve_entries(
+        self, rollout_id: str, request_items: list[dict], scope: LineageScopeKey
+    ) -> tuple[LineageResolution, bool]:
+        """Resolve among the lineage scope's committed entries; also return whether the lineage scope has any."""
         with self._rollout_lock(rollout_id), self._read_locked(rollout_id):
-            refs, lineage = self._refresh(rollout_id)
-            status, node, reason = lineage.resolve_node(request_items)
+            refs, lineages = self._refresh(rollout_id)
+            status, node, reason = resolve_within_lineage_scope(lineages, scope, request_items)
             if status != ParentResolutionStatus.RESOLVED:
-                return LineageResolution(status, reason=reason)
+                return LineageResolution(status, reason=reason), scope in lineages
+            lineage = lineages[scope]
             tokens = (
                 node.cum_tokens if node.cum_tokens is not None else self._materialize(rollout_id, node, refs, lineage)
             )
@@ -903,7 +973,7 @@ class IncrementalLineageStore:
                     cumulative_token_ids=tuple(tokens),
                     digest=node.digest,
                 ),
-            )
+            ), True
 
     def is_process_shared(self) -> bool:
         return True
@@ -1021,10 +1091,10 @@ class FileLineageStore(IncrementalLineageStore):
         return self._ledger_root / f"{validate_rollout_id(rollout_id)}{_STARTED_SUFFIX}"
 
     def _is_retired(self, rollout_id: str) -> bool:
-        # Call with the rollout's lock held, only when its ledger is empty or missing. ``retire`` writes every
-        # marker before it removes any ledger, so a rollout whose ledger still has rows was not retired when
-        # the ledger was read, or its retire failed partway and will be retried. Skipping the check
-        # otherwise saves a metadata lookup on every captured call.
+        # Call with the rollout's lock held, only when its ledger is empty or missing, or when the calling
+        # lineage scope has no row in it. ``retire`` writes every marker before it removes any ledger, so a rollout
+        # whose ledger still has rows was not retired when the ledger was read, or its retire is partway.
+        # Skipping the check otherwise saves a metadata lookup on every captured call.
         return self._retired_path(rollout_id).exists()
 
     def _locked(self, rollout_id: str):
@@ -1034,11 +1104,15 @@ class FileLineageStore(IncrementalLineageStore):
         return self._store._locked(rollout_id)
 
     def _ledger_cache_pop(self, rollout_id: str) -> None:
-        # Forget a rollout's cached rows. Every removal goes through here, so that a cache that also tracks
-        # its size (NVIDIA-NeMo/Gym#4268) stays consistent. Different rollouts are removed concurrently from
-        # worker threads, so the dictionary needs the guard.
+        # Forget a rollout's cached rows and every lineage scope's cached lineage. Every removal goes through here, so
+        # that a cache that also tracks its size (NVIDIA-NeMo/Gym#4268) stays consistent. Different rollouts are
+        # removed concurrently from worker threads, so the dictionaries need the guard.
         with self._cache_guard:
             self._ledger_cache.pop(rollout_id, None)
+            self._cache.pop(rollout_id, None)
+            materialized = self._materialized.pop(rollout_id, None)
+            if materialized is not None:
+                self._materialized_tokens -= len(materialized[1])
 
     def _read(self, rollout_id: str) -> list[dict]:
         path = self._ledger_path(rollout_id)
@@ -1089,27 +1163,50 @@ class FileLineageStore(IncrementalLineageStore):
         records.append(record)
         self._ledger_cache[rollout_id] = (inode, offset, records)
 
-    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        resolution = super()._resolve(rollout_id, request_items)
-        if resolution.status != ParentResolutionStatus.UNRESOLVED or resolution.reason != "no_match":
+    def _resolve(self, rollout_id: str, request_items: list[dict], scope: LineageScopeKey) -> LineageResolution:
+        no_match = (ParentResolutionStatus.UNRESOLVED, "no_match")
+        resolution, scope_has_entries = self._resolve_entries(rollout_id, request_items, scope)
+        if (resolution.status, resolution.reason) != no_match:
             return resolution
-        return self._resolve_row(rollout_id, request_items)
+        resolution, scope_has_rows = self._resolve_row(rollout_id, request_items, scope)
+        if (resolution.status, resolution.reason) != no_match or scope_has_entries or scope_has_rows:
+            return resolution
+        # A dispatched call leaves an intent in the token store, so a lineage scope with one has called before,
+        # even when that call's entry was lost.
+        intents = self._store._call_lines(self._store.intents_path_for(rollout_id))
+        if any(row_lineage_scope(intent) == scope for intent in intents):
+            return resolution
+        # Nothing records a call of this lineage scope, so the model turns in the request are input.
+        return LineageResolution(ParentResolutionStatus.ROOT, reason=FIRST_CALL_REASON)
 
-    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    def _resolve_row(
+        self, rollout_id: str, request_items: list[dict], scope: LineageScopeKey
+    ) -> tuple[LineageResolution, bool]:
         """Apply the shared matcher to versioned, token-free custody metadata.
+
+        Also return whether the lineage scope may have called before: it has a ledger row, or the capture key
+        is retired, in which case its rows and entries are gone and their absence shows nothing.
 
         Older ledgers lack ``tool_call_turn_fingerprint`` and remain strict-only:
         custody rows have no output items from which to reconstruct a safe key.
         ``_read`` refreshes appended rows, including their new optional column.
         """
         with self._locked(rollout_id):
+            rows = self._read(rollout_id)
             records = {
                 str(record["model_call_id"]): record
-                for record in self._read(rollout_id)
+                for record in rows
                 if record.get("fingerprint") and record.get("fingerprint_version") == FINGERPRINT_VERSION
             }
-        lineage = RolloutLineage()
+            scope_has_rows = (
+                bool(_rows_of_lineage_scope(rows, scope))
+                or self._is_retired(rollout_id)
+                or bool(self._store._read_state(rollout_id).get("retired", False))
+            )
+        # Every model server of an episode writes this one ledger, so match only the request's own lineage scope.
+        lineages: dict[LineageScopeKey, RolloutLineage] = {}
         for call_id, record in records.items():
+            lineage = lineages.setdefault(row_lineage_scope(record), RolloutLineage())
             lineage.by_call_id[call_id] = LineageNode(
                 call_id=call_id,
                 cum_tokens=None,
@@ -1121,11 +1218,11 @@ class FileLineageStore(IncrementalLineageStore):
             lineage.by_fingerprint.setdefault(record["fingerprint"], []).append(call_id)
             if key := record.get("tool_call_turn_fingerprint"):
                 lineage.by_tool_call_turn.setdefault(key, []).append(call_id)
-        status, node, reason = lineage.resolve_node(request_items)
+        status, node, reason = resolve_within_lineage_scope(lineages, scope, request_items)
         if status != ParentResolutionStatus.RESOLVED:
-            return LineageResolution(status, reason=reason)
+            return LineageResolution(status, reason=reason), scope_has_rows
         record = records[node.call_id]
-        return LineageResolution(
+        resolution = LineageResolution(
             status,
             reason=reason,
             match=LineageMatch(
@@ -1138,6 +1235,7 @@ class FileLineageStore(IncrementalLineageStore):
                 chain_hash=str(record.get("chain_hash") or ""),
             ),
         )
+        return resolution, True
 
     async def begin_call(self, rollout_id: str, model_call_id: str, *, identity: CallIdentity | None = None) -> None:
         """Register one unique call before dispatch; independent calls may overlap."""
@@ -1255,13 +1353,15 @@ class FileLineageStore(IncrementalLineageStore):
                 raise RolloutRetiredError(f"rollout {capture_key} is retired")
         return _manifest_from_rows(capture_key, rows)
 
-    async def has_rows(self, rollout_id: str) -> bool:
-        return await asyncio.to_thread(self._has_rows, rollout_id)
+    async def has_rows(self, rollout_id: str, *, identity: CallIdentity) -> bool:
+        return await asyncio.to_thread(self._has_rows, rollout_id, lineage_scope_key(identity))
 
-    def _has_rows(self, rollout_id: str) -> bool:
+    def _has_rows(self, rollout_id: str, scope: LineageScopeKey) -> bool:
         with self._locked(rollout_id):
-            if self._read(rollout_id):
+            if _rows_of_lineage_scope(self._read(rollout_id), scope):
                 return True
+            # ``retire`` writes the marker before it removes the ledger, so another lineage scope's rows may still be
+            # here: a first call of this lineage scope must not be admitted onto a retired capture key.
             if self._is_retired(rollout_id):
                 raise RolloutRetiredError(f"rollout {rollout_id} is retired")
             return False
@@ -1369,6 +1469,31 @@ class FileLineageStore(IncrementalLineageStore):
         """Return every ledger row of ``rollout_id`` in commit order, for a checkpoint."""
         with self._locked(rollout_id):
             return list(self._read(rollout_id))
+
+    def delete_calls(self, rollout_id: str, model_call_ids: Sequence[str]) -> int:
+        """Delete every row of these calls from a live ledger and return how many rows were deleted.
+
+        Any row with one of these call IDs goes: intent, failure or committed. A checkpoint uses this for calls
+        that ended while admission was closed, before their response started; they leave an intent row and
+        sometimes a failure row (``UNCOMMITTED_CALL_REASON``). The file is rewritten atomically under the rollout's
+        lock; other rows keep their order.
+        """
+        drop = set(model_call_ids)
+        with self._locked(rollout_id):
+            rows = list(self._read(rollout_id))
+            kept = [row for row in rows if row.get("model_call_id") not in drop]
+            if len(kept) == len(rows):
+                return 0
+            path = self._ledger_path(rollout_id)
+            payload = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in kept)
+            temporary = path.with_name(f".{path.name}.delete-calls")
+            with temporary.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            self._ledger_cache_pop(rollout_id)
+            return len(rows) - len(kept)
 
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
         """Install checkpointed rows as the complete ledger of ``rollout_id``; see ``import_rows_many``."""

@@ -8,3 +8,5 @@ data/*.csv
 # Keep the required example fixtures (data/*.json metrics are not ignored above)
 !data/example.jsonl
 !data/example_rollouts.jsonl
+!data/frontier_finance_example.jsonl
+!data/frontier_finance_example_rollouts.jsonl
