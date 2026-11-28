@@ -419,7 +419,11 @@ def _parse_codex_transcript(
     """Parse one session's transcript, using the caller's final outcome and gaps when supplied.
 
     Written for and tested with the transcript format of Codex 0.144.4 (`TESTED_CODEX_VERSION`, the
-    `codex_version` that `configs/codex_agent.yaml` pins). Recheck it when that pin changes.
+    `codex_version` that `configs/codex_agent.yaml` pins). Recheck it when that pin changes. Calls and results are
+    read from `response_item` records only; every other kind is skipped, as for the output, so the kinds Codex 0.154.0
+    and 0.155.1 add (`_NON_OUTPUT_RECORDS`) keep the tool history complete, and a kind none of the checked versions
+    writes is named in an `unknown_session_records_skipped` gap. A record that is not a JSON object, has no kind, or is
+    a `response_item` that is not a Responses item is unparseable.
 
     Schema 2.0 keeps one attempt per persisted call record. A request keeps its native call ID
     unless an earlier record used it; a reuse, or a result that no call can own, gets an ID derived
@@ -453,15 +457,20 @@ def _parse_codex_transcript(
         return candidate
 
     # A record that could not be read may have been a tool call, unless it is a native event (token usage, a patch
-    # outcome): then the tool history read is not complete, and its timing is unknown.
+    # outcome): then the tool history read is not complete, and its timing is unknown. A record of any kind other than
+    # `response_item` holds no call or result, so skipping one, of a known kind or not, leaves the history complete.
     tool_history_complete = True
+    unknown_records: Counter[str] = Counter()
     for index, line in enumerate(lines):
         native_event = False
         try:
             event = _decode(line)
             if not isinstance(event, dict):
                 raise ValueError("expected a Codex CLI session record")
-            if event.get("type") == "event_msg":
+            record_kind = event.get("type")
+            if not isinstance(record_kind, str) or not record_kind:
+                raise ValueError("a Codex session record has no kind")
+            if record_kind == "event_msg":
                 native_event = True
                 payload = event.get("payload") or {}
                 if not isinstance(payload, dict):
@@ -471,7 +480,7 @@ def _parse_codex_transcript(
                 if payload.get("type") == "patch_apply_end" and type(payload.get("success")) is bool:
                     patch_outcomes.setdefault(payload["call_id"], []).append(payload["success"])
                 continue
-            if event.get("type") == "compacted":
+            if record_kind == "compacted":
                 native_event = True
                 message = event["payload"]["message"]
                 if not isinstance(message, str) or not message.startswith(_COMPACTION_PREFIX):
@@ -486,9 +495,9 @@ def _parse_codex_transcript(
                     )
                 )
                 continue
-            if event.get("type") != "response_item":
-                if event.get("type") not in {"session_meta", "turn_context", "compacted", "world_state"}:
-                    raise ValueError("unsupported Codex session record type")
+            if record_kind != "response_item":
+                if record_kind != "session_meta" and record_kind not in _NON_OUTPUT_RECORDS:
+                    unknown_records[record_kind] += 1
                 continue
             item = dict(event["payload"])
             item.pop("internal_chat_message_metadata_passthrough", None)
@@ -600,6 +609,10 @@ def _parse_codex_transcript(
         transcript_tools, transcript_gaps = _transcript_tools(attempts, invocation_id, agent_instance, clock_domain)
         tools = {tool.span_id: tool for tool in transcript_tools}
         gaps.extend(transcript_gaps)
+    if unknown_records:
+        detail = ", ".join(f"{kind} {count}" for kind, count in sorted(unknown_records.items()))
+        gaps.append(ObservationGap(code=_UNKNOWN_RECORDS_GAP, invocation_id=invocation_id, detail=detail))
+        LOG.warning("Codex session records of unknown kinds are left out: %s", detail)
     if not tool_history_complete:
         gaps.append(ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id))
     if transcript is None:
@@ -632,7 +645,10 @@ class CodexOutputUnavailable(ValueError):
 # (RolloutItem in codex-rs/history, checked for 0.144.4, 0.154.0 and 0.155.1). Every other kind is Codex's own
 # bookkeeping, and these are the kinds those versions write: runtime events, turn settings, the compaction summary
 # and world state (the observation bundle keeps those), inter-agent delivery, and, added after 0.144.4, per-response
-# token usage, retained context, security risk scores and realtime facts.
+# token usage, retained context, security risk scores and realtime facts. The output (`parse_codex_output`) and the
+# observations (`_parse_codex_transcript`) are both read from `response_item` records alone and skip every other kind;
+# the observations name each skipped record of a kind not listed here, by kind and count, in an
+# `unknown_session_records_skipped` gap.
 _NON_OUTPUT_RECORDS = frozenset(
     {
         "event_msg",
@@ -647,6 +663,7 @@ _NON_OUTPUT_RECORDS = frozenset(
         "realtime_item",
     }
 )
+_UNKNOWN_RECORDS_GAP = "unknown_session_records_skipped"
 _TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
 _IMAGE_PART_TYPES = frozenset({"input_image", "image"})
 
@@ -822,12 +839,6 @@ class CodexSessionOutput:
     # Every record of a kind other than session_meta and response_item, counted by kind.
     skipped_records: dict[str, int]
 
-    @property
-    def unknown_records(self) -> dict[str, int]:
-        """The skipped records of kinds the checked Codex versions do not write: most likely the bookkeeping of a later
-        Codex version, but nothing shows that they carry no model output."""
-        return {kind: count for kind, count in self.skipped_records.items() if kind not in _NON_OUTPUT_RECORDS}
-
 
 def parse_codex_output(transcript: str | None) -> CodexSessionOutput:
     """The model's own output from a Codex session record, in the order the model produced it.
@@ -844,11 +855,11 @@ def parse_codex_output(transcript: str | None) -> CodexSessionOutput:
     agent exports it, and an empty result.
 
     Only ``response_item`` records hold the model's items and the results Codex gave it. A record of any other kind
-    is left out and counted (``skipped_records``), whether or not it is a kind the checked versions write
-    (``unknown_records``): Codex adds such kinds between releases (four between 0.144.4 and 0.154.0), and rejecting
-    one would discard a record that is complete. A ``response_item`` is different: it is a model item or a tool
-    result, so one this cannot map, or a malformed one, makes the whole record unavailable rather than leave out a
-    call or a result.
+    is left out and counted (``skipped_records``), whether or not it is a kind the checked versions write (the
+    observations name one that is not): Codex adds such kinds between releases (four between 0.144.4 and 0.154.0),
+    and rejecting one would discard a record that is complete. A ``response_item`` is different: it is a model item
+    or a tool result, so one this cannot map, or a malformed one, makes the whole record unavailable rather than leave
+    out a call or a result.
 
     Raises :class:`CodexOutputUnavailable`, and nothing else, when the record is missing, holds no model output, cannot
     be read or has a shape this does not expect, holds a session other than the first or an item type with no mapping,

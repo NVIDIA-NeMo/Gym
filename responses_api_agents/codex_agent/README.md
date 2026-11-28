@@ -309,6 +309,10 @@ kind are left out: the runtime events, turn settings, compaction summary and wor
 0.154.0 and 0.155.1 also write. A line of a kind none of the checked versions (0.144.4, 0.154.0, 0.155.1) writes is
 left out as well, because Codex adds such kinds between releases; the observations then carry an
 `unknown_session_records_skipped` gap that counts them by kind, and the agent server logs a warning.
+The observations' tool calls and their timing, in sessions and local `/run` execution alike, are read from the same
+`response_item` lines and leave out the same other lines, so a 0.154.0 or 0.155.1 record keeps its tool timing. A line
+that is not a JSON object, has no kind, or is a `response_item` that is not a Responses item could have held a call: the
+observations then carry an `agent_artifact_record_unparseable` gap for it and a `tool_timing_unavailable` gap.
 
 `response.output` falls back to the CLI events when the record cannot stand in for them: it is missing or unreadable
 (including a line whose values have a shape Codex does not write, or one nested too deeply to decode), holds a second

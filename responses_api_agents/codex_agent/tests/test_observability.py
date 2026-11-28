@@ -11,6 +11,7 @@ from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, re
 from nemo_gym.trajectory import AgentInvocation, ToolCallObservation, transcript_to_atif
 from responses_api_agents.codex_agent.app import parse_exec_jsonl
 from responses_api_agents.codex_agent.observability import (
+    _COMPACTION_PREFIX,
     CodexOutputUnavailable,
     parse_codex_observations,
     parse_codex_output,
@@ -180,14 +181,18 @@ def test_changed_usage_schema_does_not_fall_back_to_stale_totals(info, caplog) -
     assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable"]
 
 
-def test_unrecognized_transcript_record_reports_gap() -> None:
+def test_unrecognized_transcript_record_kind_is_named_in_a_gap() -> None:
+    """Calls are read from response items only, so a record of another kind is skipped, but named by its kind: a
+    renamed response item would otherwise hide every call without a trace."""
     bundle = parse_codex_observations(
         json.dumps({"type": "renamed_response_item", "payload": {}}),
         "invocation",
         returncode=1,
         timed_out=False,
     )
-    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable", "tool_timing_unavailable"]
+    assert [(gap.code, gap.invocation_id, gap.detail) for gap in bundle.gaps] == [
+        ("unknown_session_records_skipped", "invocation", "renamed_response_item 1")
+    ]
 
 
 def test_unreadable_records_report_the_tool_timing_gap_once() -> None:
@@ -785,7 +790,6 @@ def test_records_that_carry_no_model_output_are_skipped_and_counted() -> None:
             if record["type"] not in ("turn_context", "token_usage_record")
         },
     }
-    assert output.unknown_records == {}
 
 
 def test_a_record_of_a_kind_no_checked_version_writes_is_skipped_and_named() -> None:
@@ -798,7 +802,7 @@ def test_a_record_of_a_kind_no_checked_version_writes_is_skipped_and_named() -> 
     )
     output = parse_codex_output(transcript)
     assert _shape(output.items) == [("function_call", "c1"), ("function_call_output", "c1")]
-    assert output.unknown_records == {"future_bookkeeping": 2}
+    assert output.skipped_records == {"turn_context": 1, "future_bookkeeping": 2}
 
 
 # Session files that Codex wrote in a task sandbox, with a hosted model, for one task: read two files, add their
@@ -841,12 +845,11 @@ def test_a_session_file_of_a_pinned_codex_version_gives_the_models_calls(version
     results = [item for item in output.items if item.type == "function_call_output"]
     assert sorted(result.call_id for result in results) == sorted(call.call_id for call in calls)
     assert all("Process exited with code 0" in result.output for result in results)
-    # Every record that is not a response item is left out and counted; none is of a kind the reader does not know.
+    # Every record that is not a response item is left out and counted.
     assert output.skipped_records.get("token_usage_record", 0) == token_usage_records
     assert sum(output.skipped_records.values()) == sum(
         record["type"] not in ("session_meta", "response_item") for record in records
     )
-    assert output.unknown_records == {}
     trajectory = transcript_to_atif(
         "task",
         [item.model_dump(mode="json") for item in output.items],
@@ -857,6 +860,134 @@ def test_a_session_file_of_a_pinned_codex_version_gives_the_models_calls(version
     assert [call.tool_call_id for step in trajectory.steps for call in step.tool_calls or []] == [
         call_id for call_id, _, _ in written
     ]
+
+
+def _observe(transcript: str, schema: str):
+    """The observation bundle the agent builds from a session record (schema 2.0), or the schema 1.0 one."""
+    return parse_codex_observations(
+        transcript,
+        "run",
+        returncode=0,
+        timed_out=False,
+        clock_domain="codex-wall:test",
+        agent_instance="codex-agent:test",
+        observation_schema_version=schema,
+    )
+
+
+def _tool_durations(bundle, schema: str) -> list[float | None]:
+    """Each tool's measured duration in milliseconds, None where it has none."""
+    tools = [record for record in bundle.records if isinstance(record, ToolCallObservation)]
+    if schema == "1.0":
+        return [tool.duration_ms for tool in tools]
+    return [tool.timings[0].duration_ms if tool.timings else None for tool in tools]
+
+
+@pytest.mark.parametrize("schema", ["1.0", "2.0"])
+@pytest.mark.parametrize("version", sorted(_FIXTURE_RUNS))
+def test_the_observation_reader_times_each_call_of_a_pinned_codex_version(version, schema) -> None:
+    """Codex 0.154.0 and 0.155.1 write a token_usage_record after each model response. The observation reader skips it
+    as the output does: it finds the output's calls and results, each call with its duration, and reports no record
+    it could not read and no tool timing gap."""
+    transcript = (FIXTURES / f"codex_{version}_session.jsonl").read_text()
+    output = parse_codex_output(transcript).items
+
+    bundle = _observe(transcript, schema)
+
+    assert bundle.gaps == []
+    invocation, *tools = bundle.records
+    calls = [item for item in output if item.type == "function_call"]
+    assert [(tool.tool_call_id, tool.tool_name, tool.status) for tool in tools] == [
+        (call.call_id, call.name, "completed") for call in calls
+    ]
+    assert len(tools) == len(_FIXTURE_COMMANDS)
+    assert all(duration is not None and duration > 0 for duration in _tool_durations(bundle, schema))
+    tool_items = ("function_call", "function_call_output")
+    assert _shape(item for item in invocation.conversation if item.type in tool_items) == _shape(
+        item for item in output if item.type in tool_items
+    )
+
+
+def _timed_session(*records: dict) -> str:
+    """A Codex session record: its header, then ``records``, each stamped one second after the one before."""
+    header = {"type": "session_meta", "payload": {"id": "session-1", "source": "exec", "cli_version": "0.155.1"}}
+    return "\n".join(
+        json.dumps({"timestamp": f"2026-11-27T10:00:{index:02d}Z", **record})
+        for index, record in enumerate([header, *records])
+    )
+
+
+def _timed_call_around(*records: dict) -> str:
+    """One shell command's call and result, with ``records`` between them."""
+    return _timed_session(
+        {"type": "response_item", "payload": _call("c1", "exec_command", {"cmd": "ls"})},
+        *records,
+        {"type": "response_item", "payload": _result("c1", "Process exited with code 0\nOutput:\na")},
+    )
+
+
+@pytest.mark.parametrize("schema", ["1.0", "2.0"])
+def test_the_observation_reader_skips_every_kind_the_checked_versions_write_without_a_gap(schema) -> None:
+    """Each kind the output leaves out holds no call or result, so the reader skips it too: the call keeps its timing.
+    A token_usage_record's payload is not read, so its shape does not matter."""
+    summary = {"type": "compacted", "payload": {"message": f"{_COMPACTION_PREFIX}summary"}}
+    records = [summary if record["type"] == "compacted" else record for record in _NON_OUTPUT_RECORDS]
+    transcript = _timed_call_around(*records, {"type": "token_usage_record", "payload": 5})
+
+    bundle = _observe(transcript, schema)
+
+    assert bundle.gaps == []
+    assert _tool_durations(bundle, schema) == [(len(records) + 2) * 1000]
+
+
+@pytest.mark.parametrize("schema", ["1.0", "2.0"])
+def test_the_observation_reader_names_records_of_unknown_kinds_and_keeps_the_tool_timing(schema, caplog) -> None:
+    """A kind none of the checked versions writes is skipped like the others, and named, by kind and count, in the
+    same gap the output's records of unknown kinds are reported by, and in the server log."""
+    transcript = _timed_call_around(
+        {"type": "future_bookkeeping", "payload": {"anything": 1}},
+        {"type": "another_kind"},
+        {"type": "future_bookkeeping"},
+    )
+
+    bundle = _observe(transcript, schema)
+
+    assert [(gap.code, gap.invocation_id, gap.detail) for gap in bundle.gaps] == [
+        ("unknown_session_records_skipped", "run", "another_kind 1, future_bookkeeping 2")
+    ]
+    assert _tool_durations(bundle, schema) == [4000]
+    assert "Codex session records of unknown kinds are left out: another_kind 1, future_bookkeeping 2" in caplog.text
+
+
+@pytest.mark.parametrize("schema", ["1.0", "2.0"])
+@pytest.mark.parametrize(
+    "line",
+    [
+        "not json",
+        "[1, 2]",
+        '{"payload": {}}',
+        '{"type": "", "payload": {}}',
+        '{"type": 5, "payload": {}}',
+        '{"type": "response_item"}',
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": "2026-11-27T10:00:01Z",
+                "payload": {"type": "function_call", "name": "exec_command"},
+            }
+        ),
+    ],
+    ids=["not-json", "not-an-object", "no-kind", "empty-kind", "kind-not-text", "no-payload", "invalid-item"],
+)
+def test_a_malformed_record_is_still_unparseable_and_leaves_the_tool_history_incomplete(line, schema) -> None:
+    """A record the reader cannot read may have been a call, so the tool history it read is not complete."""
+    call, result = _timed_call_around().splitlines()[1:]
+    transcript = "\n".join([_timed_session(), call, line, result])
+
+    bundle = _observe(transcript, schema)
+
+    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable", "tool_timing_unavailable"]
+    assert len(_tool_durations(bundle, schema)) == 1
 
 
 @pytest.mark.parametrize("content", [[], [{"type": "output_text", "text": "Done."}]], ids=["no-content", "text"])

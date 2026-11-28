@@ -3975,7 +3975,12 @@ def test_session_output_leaves_out_records_without_model_output_and_names_unknow
         [
             {"type": "function_call", "call_id": "call_ls", "name": "exec_command", "arguments": '{"cmd":"ls"}'},
             {"type": "function_call_output", "call_id": "call_ls", "output": "Process exited with code 0"},
-            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Done"}],
+            },
         ]
     )
     record += "\n" + "\n".join(
@@ -3998,10 +4003,15 @@ def test_session_output_leaves_out_records_without_model_output_and_names_unknow
         ("function_call_output", "call_ls"),
         ("message", None),
     ]
-    gaps = {gap["code"]: gap.get("detail") for gap in closed["agent_observations"]["gaps"]}
-    assert "tool_calls_in_executed_form" not in gaps
-    assert gaps["unknown_session_records_skipped"] == "future_bookkeeping 1"
-    assert "Codex session records of unknown kinds are left out of the output: future_bookkeeping 1" in caplog.text
+    gaps = [(gap["code"], gap.get("detail")) for gap in closed["agent_observations"]["gaps"]]
+    codes = [code for code, _ in gaps]
+    assert "tool_calls_in_executed_form" not in codes
+    # The observations skip the same records, so the call keeps its timing; the unknown kind is named once.
+    assert "agent_artifact_record_unparseable" not in codes and "tool_timing_unavailable" not in codes
+    assert [gap for gap in gaps if gap[0] == "unknown_session_records_skipped"] == [
+        ("unknown_session_records_skipped", "future_bookkeeping 1")
+    ]
+    assert "Codex session records of unknown kinds are left out: future_bookkeeping 1" in caplog.text
 
 
 def stopped_batch(*, second: str = "echo fast", finished: str = "echo fast") -> tuple[list[dict], str]:
