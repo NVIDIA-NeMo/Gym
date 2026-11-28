@@ -613,7 +613,7 @@ def test_notify_failure_ref_check_allows_only_main_and_release_branches(
 
 def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> None:
     expected_action = (
-        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@7c09a9e67a5cd4f2e73803114195d6705738d6c1"
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@f47f58bcf571d7dee8678e0fc5f6eec7800dadd4"
     )
     ref_scripts = []
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
