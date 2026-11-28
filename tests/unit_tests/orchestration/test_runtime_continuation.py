@@ -369,7 +369,7 @@ def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
         ("agentic", "99", "judge_failed", True, 0, False),
         ("agentic", "100", "other_error", True, 0, False),
         ("agentic", None, None, True, 0, False),
-        ("missing_driver:run", "100", "judge_failed", True, 0, False),
+        ("other.custom_driver:run", "100", "judge_failed", True, 0, True),
         ("null", "100", "judge_failed", True, 0, False),
         ("${oc.env:DRIVER}", "100", "judge_failed", True, 0, False),
         ("[unclosed", "100", "judge_failed", True, 0, False),
@@ -389,6 +389,7 @@ def test_custom_driver_requires_deferred_judge_from_previous_job(
         (artifacts / "rollouts_resolved_config.yaml").write_text(f"rollout_collection_driver: {driver}\n")
     if marker_job:
         (tmp_path / f".gym_driver_failure.{marker_job}").write_text(kind + "\n")
+        (tmp_path / f".gym_driver_failure.{marker_job}.journal").write_text(kind + "\n")
     if retries_used:
         (tmp_path / ".gym_infra_retries").write_text(f"{retries_used}\n")
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="1:0")
@@ -409,3 +410,94 @@ def test_custom_driver_run_stops_when_its_driver_found_nothing_eligible(tmp_path
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="76:0")
     assert "REACHED_WORK" not in result.stdout
     assert not (tmp_path / ".gym_infra_retries").exists()
+
+
+@pytest.mark.parametrize(
+    "driver,walltime,state,policy,expected,reason",
+    [
+        (
+            "benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection",
+            61,
+            "ok",
+            None,
+            "stop",
+            "accumulated walltime",
+        ),
+        ("other.custom_driver:run", 10, "ok", None, "retry", "resumes from its own journal"),
+        ("other.custom_driver:run", 10, "malformed", None, "stop", "accumulated walltime"),
+        (
+            "other.custom_driver:run",
+            10,
+            "ok",
+            '{"by_status_code": {"503": "fail"}}',
+            "stop",
+            "no HTTP status for status-specific recovery policy",
+        ),
+        (
+            "other.custom_driver:run",
+            10,
+            "ok",
+            '{"by_failure_kind": {"judge_failed": "fail"}}',
+            "stop",
+            "policy stops judge_failed",
+        ),
+    ],
+)
+def test_journal_driver_continuation_obeys_walltime_and_outcome_policy(
+    tmp_path, monkeypatch, capsys, driver, walltime, state, policy, expected, reason
+):
+    from types import SimpleNamespace
+
+    from nemo_gym.eval.recovery.continuation import continuation_admission
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_resolved_config.yaml").write_text(f"rollout_collection_driver: {driver}\n")
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
+    (tmp_path / ".gym_driver_failure.100").write_text("judge_failed\n")
+    (tmp_path / ".gym_driver_failure.100.journal").write_text("judge_failed\n")
+    collected = {
+        "materialized": [],
+        "results": [],
+        "failures": [],
+        "managed_store": False,
+        "walltime_used_s": walltime,
+        "walltime_state": state,
+    }
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps(collected)))
+    assert continuation_admission(str(tmp_path), 3, 60, "1:0", "100", "FAILED", policy) == expected
+    assert reason in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("journal_kind", [None, "other_error", ""])
+def test_custom_judge_failure_without_explicit_journal_opt_in_stops(tmp_path, journal_kind):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_resolved_config.yaml").write_text("rollout_collection_driver: other.custom_driver:run\n")
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
+    (tmp_path / ".gym_driver_failure.100").write_text("judge_failed\n")
+    if journal_kind is not None:
+        (tmp_path / ".gym_driver_failure.100.journal").write_text(journal_kind + "\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="1:0")
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / ".gym_infra_retries").exists()
+
+
+def test_only_an_explicit_journal_error_records_resumption_opt_in(tmp_path, monkeypatch):
+    from nemo_gym.eval.recovery.markers import record_failure_kind
+
+    marker = tmp_path / ".gym_driver_failure.100"
+    monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(marker))
+
+    class JudgeError(Exception):
+        failure_kind = "judge_failed"
+
+    class JournalError(JudgeError):
+        resumable_journal = True
+
+    record_failure_kind(JournalError())
+    journal = marker.with_name(marker.name + ".journal")
+    assert marker.read_text().strip() == journal.read_text().strip() == "judge_failed"
+    record_failure_kind(JudgeError())
+    assert marker.read_text().strip() == "judge_failed"
+    assert not journal.exists()

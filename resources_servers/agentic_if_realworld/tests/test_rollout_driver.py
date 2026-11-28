@@ -157,27 +157,26 @@ def test_deferred_transport_failure_lets_every_other_task_run_and_publish(tmp_pa
 def test_verify_failure_admission(tmp_path, monkeypatch, status):
     from unittest.mock import AsyncMock
 
-    from aiohttp import ClientResponseError
-
     from nemo_gym.cli.utils import exit_cleanly_on_config_error
-    from nemo_gym.client import http_client
     from responses_api_agents.simple_agent.tests.test_app import _mock_response
 
-    async def unavailable(response):
-        error = ClientResponseError(request_info=None, history=(), status=status)
-        error.response_content = b'{"detail": "Judge transport failed (http_status=500, reason=HTTP_500)"}'
-        raise error
-
-    monkeypatch.setattr(http_client, "raise_for_status", unavailable)
-    post = AsyncMock(return_value=_mock_response(status=status))
+    kind = "provider_credentials_rejected" if status in (401, 403) else "judge_failed"
+    response = _mock_response(
+        {
+            "failure_kind": kind,
+            "failure_reason": "Judge credentials rejected"
+            if status in (401, 403)
+            else "Judge transport failed http_status=500",
+        }
+    )
+    post = AsyncMock(return_value=response)
     seen = {}
 
     marker = tmp_path / ".gym_driver_failure.100"
     monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(marker))
     run = exit_cleanly_on_config_error(collect)
     if status in (401, 403):
-        from nemo_gym.core import NgFailureEvent
-        from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+        from nemo_gym.core import PROVIDER_CREDENTIALS_REJECTED, NgFailureEvent
 
         with pytest.raises(NgFailureEvent, match="Judge credentials rejected") as caught:
             run(tmp_path, monkeypatch, seen, parallel=1, client=SimpleNamespace(post=post))
@@ -185,10 +184,11 @@ def test_verify_failure_admission(tmp_path, monkeypatch, status):
         assert marker.read_text().strip() == PROVIDER_CREDENTIALS_REJECTED
         assert post.await_count == 1
         return
-    with pytest.raises(rollout_driver.DeferredJudgeError, match="503 for task-0: .*http_status=500") as caught:
+    with pytest.raises(rollout_driver.DeferredJudgeError, match="http_status=500") as caught:
         run(tmp_path, monkeypatch, seen, parallel=1, client=SimpleNamespace(post=post))
     # Every task still reached its own /verify after task-0's judge was unavailable.
     assert marker.read_text().strip() == caught.value.failure_kind == "judge_failed"
+    assert marker.with_name(marker.name + ".journal").read_text().strip() == "judge_failed"
     assert post.await_count == len(TASKS)
 
 
@@ -236,3 +236,31 @@ def test_invalid_judge_config_fails_before_policy_dispatch(tmp_path, monkeypatch
         collect(tmp_path, monkeypatch, seen, parallel=1, judge_override=judge_override)
     assert seen["started"] == []
     assert not (tmp_path / "receipts").exists()
+
+
+def test_untyped_verify_503_is_not_a_deferred_judge_failure(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from aiohttp import ClientResponseError
+
+    from responses_api_agents.simple_agent.tests.test_app import _mock_response
+
+    response = _mock_response(status=503)
+    response.raise_for_status.side_effect = ClientResponseError(
+        request_info=SimpleNamespace(
+            url="https://resources.example.invalid/verify",
+            real_url="https://resources.example.invalid/verify",
+            method="POST",
+            headers={},
+        ),
+        history=(),
+        status=503,
+        message="Service Unavailable",
+        headers={},
+    )
+    post = AsyncMock(return_value=response)
+    with pytest.raises(ClientResponseError) as raised:
+        collect(tmp_path, monkeypatch, {}, parallel=1, client=SimpleNamespace(post=post))
+    assert raised.value.status == 503
+    assert post.await_count == 1
+    response.release.assert_called_once()

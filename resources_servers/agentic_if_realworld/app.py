@@ -6,11 +6,13 @@ import os
 from pathlib import Path
 from typing import ClassVar, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core import PROVIDER_CREDENTIALS_REJECTED
 from nemo_gym.server_runtime import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import judge_call_failed, judge_provider_stopped
 from resources_servers.agentic_if_realworld.benchmark.core import (
     DEFAULT_JUDGE_MODEL,
     judge,
@@ -87,9 +89,18 @@ class ResourcesServer(SimpleResourcesServer):
             return await verifier.verify(body)
         except RetryableTransportError as error:
             if error.http_status in (401, 403):
-                raise HTTPException(status_code=error.http_status, detail=str(error)) from error
-            # 503 tells the driver this task alone waits for a resume; other verify errors stay 500.
-            raise HTTPException(status_code=503, detail=str(error)) from error
+                raise judge_provider_stopped(
+                    str(error), failure_kind=PROVIDER_CREDENTIALS_REJECTED, operation="/verify"
+                ) from error
+            if error.terminal:
+                # Deterministic requests need correction, not another automatic allocation.
+                raise
+            status = error.http_status
+            raise judge_call_failed(
+                str(error),
+                operation="/verify",
+                http_status=status if status is not None and 100 <= status <= 599 else None,
+            ) from error
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Keep the frozen full-cohort denominator for native, reverify and reaggregate runs."""
