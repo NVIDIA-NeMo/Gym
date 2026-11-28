@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Build context: repository root. No agent is installed in this image.
+FROM python:3.13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir PyYAML==6.0.3 pytest==8.4.2
+RUN git clone --depth 1 --branch v2.0.0 https://github.com/pinchbench/skill /opt/pinchbench-skill \
+    && test "$(git -C /opt/pinchbench-skill rev-parse HEAD)" = 47efe9bf5e14ae52dd9764c5e831317442b054a5
+COPY responses_api_agents/pinchbench/setup_scripts/nvidia-pinchbench.patch /tmp/gym.patch
+RUN git -C /opt/pinchbench-skill apply /tmp/gym.patch
+COPY environment_servers/pinchbench/worker.py /opt/pinchbench-worker.py

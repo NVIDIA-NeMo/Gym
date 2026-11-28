@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+environment_server_routes:
+  pinchbench: pinchbench_environment_server
+
+pinchbench_environment_server:
+  environment_servers:
+    pinchbench:
+      entrypoint: app.py
+      agent_server: {type: responses_api_agents, name: openclaw_agent}
+      sandbox_provider: sandbox
+      agent_image: ${oc.env:PINCHBENCH_AGENT_IMAGE,node:22-bookworm}
+      fws_image: ${oc.env:PINCHBENCH_FWS_IMAGE,pinchbench-fws:v2.0.0}
+      verifier_image: ${oc.env:PINCHBENCH_VERIFIER_IMAGE,pinchbench-verifier:v2.0.0}
+      judge_model: ${oc.env:PINCHBENCH_JUDGE_MODEL,null}
+      judge_base_url: ${oc.env:PINCHBENCH_JUDGE_BASE_URL,null}
+      judge_api_key: ${oc.env:PINCHBENCH_JUDGE_API_KEY,null}
+      max_concurrent_episodes: 2
+      queue_timeout_seconds: 7200
+      default_episode_timeout_seconds: 7200
+      cleanup_timeout_seconds: 180
