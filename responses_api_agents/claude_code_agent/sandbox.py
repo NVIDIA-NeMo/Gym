@@ -8,6 +8,7 @@ import json
 import logging
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
@@ -108,6 +109,11 @@ def parse_artifact_observations(
     return observations
 
 
+# The longest the optional copy of the transcripts may take, and the part of the capture budget kept free after it.
+_COPY_TIMEOUT_S = 120.0
+_COPY_RESERVE_S = 1.0
+
+
 @dataclass
 class ClaudeCodeSandboxSession(AgentSessionState):
     """Adapter state and capture hooks; SandboxSession owns supervision and release."""
@@ -117,6 +123,9 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     sandbox_id: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    logs_dir: str | None = None
+    # The time SandboxSession allows artifact capture (its close timeout), so the optional copy fits inside it.
+    capture_budget_s: float | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     stderr: str = ""
@@ -141,6 +150,8 @@ class ClaudeCodeSandboxSession(AgentSessionState):
 
     async def close(self, timeout: float) -> None:
         """Join captured-artifact parsing before returning observations, within a bound."""
+        if self.capture_budget_s is None:
+            self.capture_budget_s = timeout
         await self.session.close(timeout=timeout)
         # Captured artifacts are parsed by the activation after execute() returns.
         # Cancelling that step would discard evidence that close has already retained.
@@ -166,6 +177,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float
     ) -> ClaudeCodeArtifacts:
         """Execute through the common lifecycle, retaining artifacts on failure."""
+        self.capture_budget_s = close_timeout
         artifacts = await self.session.execute(
             stage_activation=lambda: self.stage_activation(payload),
             collect=self.collect_artifacts,
@@ -205,8 +217,32 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
+    async def copy_session_transcripts(self, deadline: float | None = None) -> None:
+        """Copy Claude Code's transcripts (CLAUDE_CONFIG_DIR/projects) to logs_dir/sessions/projects by
+        ``deadline`` (``time.monotonic()``); never fails collection."""
+        if not self.logs_dir:
+            return
+        budget = _COPY_TIMEOUT_S if deadline is None else min(_COPY_TIMEOUT_S, deadline - time.monotonic())
+        if budget <= 0:
+            LOG.warning("Claude Code transcripts not copied: no capture time left")
+            return
+        projects = f"{self.session.session_dir}/config/projects"
+        target = f"{self.logs_dir}/sessions/projects"
+        command = (
+            f"if [ -d {quote(projects)} ]; then mkdir -p {quote(target)} && "
+            f"cp -R {quote(projects)}/. {quote(target)}/; fi"
+        )
+        try:
+            async with asyncio.timeout(budget):
+                result = await self.session.sandbox.exec(command, cwd="/", timeout_s=budget)
+            if result.return_code != 0 or result.error_type:
+                LOG.warning("Claude Code transcripts not copied: %s", result.stderr or result.stdout)
+        except Exception:
+            LOG.exception("Claude Code transcripts not copied")
+
     async def collect_artifacts(self) -> ClaudeCodeArtifacts:
         """Copy dedicated stdout and transcripts after confirmed harness termination."""
+        started = time.monotonic()
         try:
             self.stderr = (await self.read_text("stderr.log"))[-16000:]
         except Exception:
@@ -236,4 +272,10 @@ class ClaudeCodeSandboxSession(AgentSessionState):
                 transcripts = await asyncio.to_thread(local.read_bytes)
         except Exception:
             LOG.warning("Could not collect Claude native transcripts", exc_info=True)
+        # The optional copy goes last and ends before the capture budget does, so a slow copy cannot cost the events
+        # or the transcripts.
+        if self.capture_budget_s is not None:
+            await self.copy_session_transcripts(deadline=started + self.capture_budget_s - _COPY_RESERVE_S)
+        else:
+            await self.copy_session_transcripts()
         return ClaudeCodeArtifacts(events=events, transcripts=transcripts)

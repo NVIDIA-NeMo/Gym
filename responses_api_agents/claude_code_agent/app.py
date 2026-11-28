@@ -201,6 +201,23 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Further Claude Code client environment, e.g. {API_TIMEOUT_MS: "3600000"}. The variables the agent
     # sets itself (endpoint, credentials, model, CLAUDE_CONFIG_DIR, the output cap) are rejected.
     extra_env: dict[str, str] = Field(default_factory=dict)
+    # Sandbox sessions: copy Claude Code's transcripts (CLAUDE_CONFIG_DIR/projects, one JSONL file for each session
+    # and for each subagent, with per-call token counts and timestamps) into <sandbox_logs_dir>/sessions/projects
+    # after Claude Code stops, before the session directory is removed. Point it at a directory the resources
+    # server collects, such as /logs/agent for Harbor-format tasks.
+    sandbox_logs_dir: str | None = None
+
+    @field_validator("sandbox_logs_dir")
+    @classmethod
+    def _absolute_logs_dir(cls, value: str | None) -> str | None:
+        """Accept an absolute sandbox directory other than ``/`` without a ``..`` part, and return it without a
+        trailing slash."""
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if not path.is_absolute() or ".." in path.parts or path == PurePosixPath("/"):
+            raise ValueError("sandbox_logs_dir must be an absolute sandbox directory other than /")
+        return str(path)
 
     @field_validator("extra_env", mode="before")
     @classmethod
@@ -761,6 +778,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 harness="Claude Code",
                 owns_sandbox=owns_sandbox,
             ),
+            logs_dir=self.config.sandbox_logs_dir,
         )
         try:
             dependencies = self.config.harbor_system_dependencies

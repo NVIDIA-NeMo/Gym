@@ -387,6 +387,10 @@ container runs it, for benchmarks that grade such a harness.
 - `extra_env`: further client environment, e.g. `{API_TIMEOUT_MS: "3600000", CLAUDE_CODE_AUTO_COMPACT_WINDOW:
   "1000000"}`. The variables the agent sets itself (endpoint, credentials, model, `CLAUDE_CONFIG_DIR`, the
   output cap) are rejected.
+- `sandbox_logs_dir` (sandbox sessions): after Claude Code stops, copy its transcripts
+  (`CLAUDE_CONFIG_DIR/projects`: one JSONL file for each session and for each subagent, with per-call token
+  counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions/projects`
+  before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied).
 - `allow_root_workdir` (sandbox sessions): accept a task working directory of `/` (images without a
   `WORKDIR`); the runtime and session files stay under `/tmp`, as a harness's own files do there.
 - `harbor_system_dependencies` (sandbox sessions): before installing Claude Code, run Harbor 0.24's
