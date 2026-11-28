@@ -74,3 +74,52 @@ def test_standalone_runner_loads_shared_helper_without_gym_on_path(tmp_path):
     assert completed.returncode == 2
     assert "usage: sandbox_runner.py" in completed.stderr
     assert "ImportError" not in completed.stderr
+
+
+class _ReplayAgent:
+    """The Hermes agent surface configure_model_calls wraps, replaying one assistant turn with reasoning."""
+
+    api_mode = "chat_completions"
+    max_tokens = None
+
+    def __init__(self, assistant_turn: dict):
+        self.assistant_turn = assistant_turn
+
+    def _build_api_kwargs(self, api_messages, tools_for_api=None):
+        return {"model": "policy", "messages": [dict(message) for message in api_messages]}
+
+    def _build_assistant_message(self, assistant_message, finish_reason):
+        return {"role": "assistant", "content": ""}
+
+    def _handle_max_iterations(self, messages, api_call_count):
+        return ""
+
+    def _get_transport(self, api_mode=None):
+        return None
+
+
+@pytest.mark.parametrize("preserve_history", [False, True])
+@pytest.mark.parametrize(
+    ("turn", "expected_reasoning"),
+    [
+        ({"reasoning": "think", "reasoning_content": "think"}, {"reasoning_content": "think"}),
+        ({"reasoning": "think", "reasoning_content": " "}, {"reasoning_content": "think"}),
+        ({"reasoning_content": "think"}, {"reasoning_content": "think"}),
+        ({"reasoning": "think"}, {"reasoning": "think"}),
+    ],
+)
+def test_replayed_assistant_turn_carries_one_reasoning_field(preserve_history, turn, expected_reasoning):
+    """A replayed turn names its reasoning once: a body with both fields is rejected by servers that read them
+    as one field."""
+    from responses_api_agents.hermes_agent.model_kwargs import configure_model_calls
+
+    assistant = {"role": "assistant", "content": None, "tool_calls": [{"id": "t", "type": "function"}], **turn}
+    messages = [{"role": "user", "content": "q"}, assistant, {"role": "tool", "tool_call_id": "t", "content": "1"}]
+    agent = _ReplayAgent(assistant)
+    configure_model_calls(agent, preserve_reasoning_history=preserve_history)
+    sent = agent._build_api_kwargs(messages)["messages"]
+    replayed = sent[1]
+    assert {key: replayed[key] for key in ("reasoning", "reasoning_content") if key in replayed} == expected_reasoning
+    assert replayed["tool_calls"] == assistant["tool_calls"]
+    assert sent[0] == messages[0] and sent[2] == messages[2]
+    assert messages[1] == assistant  # Hermes's own history is left as it was
