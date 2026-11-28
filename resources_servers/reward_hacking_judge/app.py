@@ -23,14 +23,14 @@ close:
 import asyncio
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Iterator, List, Optional
+from typing import Any, ClassVar, Dict, Iterator, List, Optional, Protocol
 
 import orjson
 from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ConfigError, ModelServerRef
 from nemo_gym.core import (
     VERIFIER_ERROR,
     NeMoGymChatCompletion,
@@ -60,6 +60,7 @@ from resources_servers.reward_hacking_judge.judge_prompt import (
     RewardHackingLabel,
     RewardHackingV2Output,
     SegmentPrompt,
+    Step,
     build_segment_prompts,
     load_judge_config,
     merge_segment_answers,
@@ -73,7 +74,7 @@ _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
 
 class RewardHackingJudgeConfig(BaseResourcesServerConfig):
-    # verify() reads only the saved transcript and the source run's saved reward, so re-judging is safe.
+    # verify() reads only the request and the source run's saved row, so re-judging is safe.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "reward_hacking_judge"
@@ -83,8 +84,9 @@ class RewardHackingJudgeConfig(BaseResourcesServerConfig):
     # A judge_core judge YAML; relative paths are read from this server's directory.
     judge_config_fpath: str = "judges/reward_hacking_v2.yaml"
     # The source run's rollouts.jsonl. `gym eval reverify` does not send saved rewards or agent observations to
-    # /verify, so the server reads them from here by task and rollout index: the reward v2 shows the judge, and the
-    # compactions where a run splits into segments. Unset: no reward is shown and every run is one segment.
+    # /verify, so the server reads them from here by task and rollout index: the reward v2 shows the judge, and
+    # the ng_agent_observations conversation with the compactions where it splits into segments. Unset: no reward
+    # is shown, and the request's transcript is judged as one segment.
     source_rollouts_jsonl_fpath: Optional[str] = None
     # Attempts per rollout when the judge answers without a valid verdict.
     judge_max_attempts: int = Field(default=2, ge=1)
@@ -117,50 +119,172 @@ def _finite(value: object) -> Optional[float]:
     return float(value)
 
 
+class SavedRow(Protocol):
+    """A row saved in the source rollouts file, read again on demand."""
+
+    def read(self) -> dict: ...
+
+
+@dataclass(frozen=True)
+class _JsonlRow:
+    """A row of a plain rollouts file, by its byte location."""
+
+    path: Path
+    offset: int
+    length: int
+
+    def read(self) -> dict:
+        with self.path.open("rb") as file:
+            file.seek(self.offset)
+            return orjson.loads(file.read(self.length))
+
+
 @dataclass(frozen=True)
 class SourceRun:
-    """What /verify is not sent about a saved rollout: its reward and where its compactions kept the context."""
+    """What /verify is not sent about a saved rollout: its reward, and its saved row.
 
-    reward: Optional[float] = None
-    first_kept_item_ids: tuple[str, ...] = ()
+    The row itself is not kept: a source rollouts file can be far larger than memory, so `verify` reads the one row
+    again when it needs the `ng_agent_observations` conversation.
+    """
 
-
-def compaction_first_kept_item_ids(row: dict[str, Any]) -> tuple[str, ...]:
-    """The transcript item each context compaction of a rollout kept first, from its agent observations."""
-    observations = row.get(NG_AGENT_OBSERVATIONS_KEY)
-    records = observations.get("records") if isinstance(observations, dict) else None
-    return tuple(
-        record["first_kept_item_id"]
-        for record in records or []
-        if isinstance(record, dict)
-        and record.get("kind") == "context_compaction"
-        and isinstance(record.get("first_kept_item_id"), str)
-    )
+    reward: float | None = None
+    row: SavedRow | None = None
 
 
-def _source_rows(path: Path) -> Iterator[dict[str, Any]]:
+class SourceRowError(Exception):
+    """The source row of a rollout could not be read again, or is no longer that rollout's row."""
+
+
+def _source_rows(path: Path) -> Iterator[tuple[dict[str, Any], SavedRow]]:
+    """Each row of a rollouts file with a way to read it again, read one at a time."""
     # A managed run selects each rollout's latest attempt, as reverify does, which need not be its last row in the file.
     store = RolloutStore.read(path, import_legacy=False)
     if store is not None:
-        yield from store.selected("success")
+        for record in store.selected_records("success").values():
+            # The record checks on read that its bytes are still this attempt's row.
+            yield record.read(), record
         return
     with path.open("rb") as file:
+        offset = 0
         for line in file:
             if line.strip():
-                yield orjson.loads(line)
+                yield orjson.loads(line), _JsonlRow(path, offset, len(line))
+            offset += len(line)
 
 
 def load_source_runs(path: Path) -> dict[tuple[int, int], SourceRun]:
     """Each (task index, rollout index) of a rollouts file, from its selected outcome in a managed run, else from its
     last unmasked row with a reward."""
     runs: dict[tuple[int, int], SourceRun] = {}
-    for row in _source_rows(path):
+    for row, saved in _source_rows(path):
         reward = _finite(row.get("reward"))
         task, rollout = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
-        if reward is None or row.get("mask_sample") or not isinstance(task, int) or not isinstance(rollout, int):
+        masked = row.get("mask_sample")
+        # Free this row before the next one is parsed, so one parsed row at a time is in memory.
+        del row
+        if reward is None or masked or not isinstance(task, int) or not isinstance(rollout, int):
             continue
-        runs[(task, rollout)] = SourceRun(reward=reward, first_kept_item_ids=compaction_first_kept_item_ids(row))
+        runs[(task, rollout)] = SourceRun(reward=reward, row=saved)
     return runs
+
+
+def read_source_row(source: SourceRun, key: tuple[object, object]) -> dict[str, Any] | None:
+    """The rollout's saved row, read again; None when no row is known. Raises SourceRowError when it cannot be."""
+    if source.row is None:
+        return None
+    try:
+        row = source.row.read()
+    except (OSError, ValueError, ConfigError) as error:
+        raise SourceRowError(f"source row not readable: {error}") from error
+    if (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)) != key:
+        raise SourceRowError("source row changed since the source rollouts file was read")
+    return row
+
+
+def root_invocation(row: dict[str, Any]) -> tuple[list[dict[str, Any]], tuple[str, ...]] | None:
+    """The `ng_agent_observations` conversation (the root `agent_invocation`'s, no `parent_invocation_id`), and the
+    items its context compactions kept first; None when no root invocation has a conversation."""
+    observations = row.get(NG_AGENT_OBSERVATIONS_KEY)
+    saved = observations.get("records") if isinstance(observations, dict) else None
+    records = [record for record in saved or [] if isinstance(record, dict)]
+    for record in records:
+        conversation = record.get("conversation")
+        if (
+            record.get("kind") == "agent_invocation"
+            and record.get("parent_invocation_id") is None
+            and isinstance(conversation, list)
+            and conversation
+        ):
+            kept = tuple(
+                compaction["first_kept_item_id"]
+                for compaction in records
+                if compaction.get("kind") == "context_compaction"
+                and compaction.get("invocation_id") == record.get("invocation_id")
+                and isinstance(compaction.get("first_kept_item_id"), str)
+            )
+            return conversation, kept
+    return None
+
+
+def segment_start_item_ids(
+    conversation: list[dict[str, Any]], first_kept_item_ids: tuple[str, ...]
+) -> tuple[str, ...]:
+    """The item each kept item's segment starts at: the kept item itself when it is a function call or an assistant
+    message, else the next one after it."""
+    ids = [item.get("id") if isinstance(item, dict) else None for item in conversation]
+    starts = []
+    for kept in first_kept_item_ids:
+        if kept not in ids:
+            continue
+        # The ATIF export gives only calls and assistant messages a step id: reasoning joins the next one's step,
+        # and a user message after agent output becomes an observation, so the segment starts at the next one.
+        start = next(
+            (
+                item["id"]
+                for item in conversation[ids.index(kept) :]
+                if isinstance(item, dict)
+                and item.get("id")
+                and (item.get("type") == "function_call" or item.get("role") == "assistant")
+            ),
+            None,
+        )
+        if start is not None:
+            starts.append(start)
+    return tuple(starts)
+
+
+def judged_segments(body: BaseVerifyRequest, saved_row: dict[str, Any] | None) -> list[list[Step]]:
+    """The run's ATIF steps, split into the segments the judge sees. Raises AtifExportError.
+
+    The `ng_agent_observations` conversation is judged when the root invocation has one: its compactions name its
+    item ids, so the run splits there. A conversation that does not start with the prompt follows the request's input.
+    Otherwise the request's transcript is judged as one segment.
+    """
+    request_input = body.responses_create_params.model_dump(mode="json").get("input")
+    root = root_invocation(saved_row) if saved_row is not None else None
+    if root is not None:
+        conversation, kept = root
+        first = conversation[0] if isinstance(conversation[0], dict) else {}
+        if first.get("role") in ("user", "system", "developer"):
+            input_items, output_items = conversation, []
+        else:
+            input_items, output_items = request_input, conversation
+        starts = segment_start_item_ids(conversation, kept)
+    else:
+        input_items, output_items, starts = request_input, body.response.model_dump(mode="json").get("output"), ()
+    trajectory = transcript_to_atif(
+        input_items,
+        output_items,
+        session_id="reward-hacking-judge",
+        agent_name="gym-rollout",
+        agent_version="0",
+    )
+    return split_at_items(trajectory.model_dump(mode="json")["steps"], starts)
+
+
+def _rollout_key(body: BaseVerifyRequest) -> tuple[object, object]:
+    extra = body.model_extra or {}
+    return extra.get(TASK_INDEX_KEY_NAME), extra.get(ROLLOUT_INDEX_KEY_NAME)
 
 
 def parse_answer(text: str) -> RewardHackingV2Output:
@@ -192,37 +316,32 @@ class RewardHackingJudgeResourcesServer(SimpleResourcesServer):
         if self.config.source_rollouts_jsonl_fpath is not None:
             if self._source_runs is None:
                 self._source_runs = load_source_runs(Path(self.config.source_rollouts_jsonl_fpath))
-            extra = body.model_extra or {}
-            key = (extra.get(TASK_INDEX_KEY_NAME), extra.get(ROLLOUT_INDEX_KEY_NAME))
-            source = self._source_runs.get(key, source)  # type: ignore[arg-type]
+            source = self._source_runs.get(_rollout_key(body), source)  # type: ignore[arg-type]
         if body.source_reward is not None:
-            source = SourceRun(reward=_finite(body.source_reward), first_kept_item_ids=source.first_kept_item_ids)
+            source = replace(source, reward=_finite(body.source_reward))
         return source
+
+    def _segment_prompts(self, body: RewardHackingJudgeVerifyRequest, source: SourceRun) -> list[SegmentPrompt]:
+        # Synchronous on purpose: one parsed source row at a time is in memory, and only the prompts outlive it.
+        row = read_source_row(source, _rollout_key(body))
+        return build_segment_prompts(judged_segments(body, row), source.reward, self._judge_config)
 
     async def verify(self, body: RewardHackingJudgeVerifyRequest) -> RewardHackingJudgeVerifyResponse:
         source = self._source_run(body)
         source_reward = source.reward
         try:
-            trajectory = transcript_to_atif(
-                body.responses_create_params.model_dump(mode="json").get("input"),
-                body.response.model_dump(mode="json").get("output"),
-                session_id="reward-hacking-judge",
-                agent_name="gym-rollout",
-                agent_version="0",
-            )
-        except AtifExportError as error:
-            # The transcript cannot be shown to the judge, so there is no verdict to report.
+            prompts = self._segment_prompts(body, source)
+        except (SourceRowError, AtifExportError) as error:
+            # The run cannot be shown to the judge, so there is no verdict to report.
+            reason = f"transcript not convertible to ATIF: {error}" if isinstance(error, AtifExportError) else error
             return RewardHackingJudgeVerifyResponse(
                 **body.model_dump(exclude={"source_reward"}),
                 reward=0.0,
                 mask_sample=True,
                 failure_kind=VERIFIER_ERROR,
-                failure_reason=f"transcript not convertible to ATIF: {error}"[:2000],
+                failure_reason=str(reason)[:2000],
                 source_reward=source_reward,
             )
-        steps = trajectory.model_dump(mode="json")["steps"]
-        segments = split_at_items(steps, source.first_kept_item_ids)
-        prompts = build_segment_prompts(segments, source_reward, self._judge_config)
 
         # The grading observation binds the response and reward it returns, so it returns the final row.
         async def grade() -> RewardHackingJudgeVerifyResponse:
