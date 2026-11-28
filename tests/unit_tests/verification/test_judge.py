@@ -137,6 +137,33 @@ class TestJudgeFailsafe:
         assert "_ng_failure_terminal" not in data
 
     @pytest.mark.asyncio
+    async def test_placeholder_reward_is_the_callers(self) -> None:
+        async def verify(body):
+            raise JudgeError("judge 503")
+
+        data = orjson.loads((await judge_failsafe(verify, placeholder_reward=3.0)(_Req(response={}))).body)
+        assert (data["reward"], data["mask_sample"], data["_ng_failure_class"]) == (3.0, True, "judge_failed")
+
+    @pytest.mark.asyncio
+    async def test_unparseable_judge_error_keeps_its_kind_on_the_sidecar_row(self) -> None:
+        async def verify(body):
+            raise JudgeError("no verdict in 3 attempts", failure_kind="judge_unparseable")
+
+        data = orjson.loads((await judge_failsafe(verify)(_Req(response={"final": "answer"}))).body)
+        # The kind is the parser's; the routing class stays judge_failed, so --judge-failed-only re-judges it.
+        assert (data["failure_kind"], data["_ng_failure_class"], data["mask_sample"]) == (
+            "judge_unparseable",
+            "judge_failed",
+            True,
+        )
+        assert data["_ng_failure_judge_error"] == "no verdict in 3 attempts"
+        assert data["_ng_failure_events"][data["_ng_failure_id"]]["failure_kind"] == "judge_unparseable"
+
+    def test_judge_error_refuses_a_kind_no_parser_owns(self) -> None:
+        with pytest.raises(ValueError, match="not a parser judge failure kind"):
+            JudgeError("quota", failure_kind="provider_quota_exhausted")
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("instance_config", [None, "invalid", {"task": "keep", "mask_sample": False}])
     async def test_mask_contract_overrides_request_defaults_without_mutation(self, instance_config) -> None:
         async def verify(body):
@@ -235,6 +262,27 @@ def test_judge_selector_does_not_swallow_other_canonical_failures():
     ]:
         event = NgFailureEvent(boundary=boundary, failure_kind=kind, failure_reason="not a judge call")
         assert not is_judge_failure(event)
+
+
+@pytest.mark.asyncio
+async def test_a_judge_unparseable_event_is_a_judge_failure_and_keeps_its_kind():
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.verification.judge import is_judge_failure
+
+    event = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_unparseable", failure_reason="no verdict"
+    )
+
+    async def verify(body):
+        raise event
+
+    assert is_judge_failure(event)
+    data = orjson.loads((await judge_failsafe(verify)(_Req(response={"final": "answer"}))).body)
+    assert (data["failure_kind"], data["_ng_failure_class"], data["mask_sample"]) == (
+        "judge_unparseable",
+        "judge_failed",
+        True,
+    )
 
 
 @pytest.mark.asyncio

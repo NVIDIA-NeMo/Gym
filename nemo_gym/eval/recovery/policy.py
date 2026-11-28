@@ -33,6 +33,7 @@ from nemo_gym.core.failure_kinds import (
     EPISODE_FAILED,
     HARNESS_TERMINATION_UNCONFIRMED,
     JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -67,6 +68,8 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
     by_failure_kind: dict[str, OutcomeAction] = Field(
         default_factory=lambda: {
             JUDGE_FAILED: OutcomeAction.VERIFY,
+            # A judge that answered without a verdict is graded again from the saved answer, as a failed judge is.
+            JUDGE_UNPARSEABLE: OutcomeAction.VERIFY,
             COLLECTION_DISPATCH_FAILED: OutcomeAction.RETRY,
             HARNESS_TERMINATION_UNCONFIRMED: OutcomeAction.RETRY,
         }
